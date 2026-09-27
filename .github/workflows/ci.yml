@@ -44,7 +44,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
-      # DuckDB; FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
+      # DuckDB, and blocks/tests/engine_compat.rs reads real output with it;
+      # FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
           DUCKDB_VERSION: v1.1.1
@@ -57,6 +58,23 @@ jobs:
           "$RUNNER_TEMP/duckdb/duckdb" -version
           echo "FIREPARQ_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
           echo "FIREPARQ_REQUIRE_DUCKDB=1" >> "$GITHUB_ENV"
+
+      # blocks/tests/engine_compat.rs also reads real output with Polars, pinned
+      # with hashes in blocks/tests/engines/requirements.txt;
+      # FIREPARQ_REQUIRE_POLARS makes a missing interpreter fail instead of skip.
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Polars
+        run: |
+          python -m venv "$RUNNER_TEMP/polars"
+          "$RUNNER_TEMP/polars/bin/pip" install --only-binary=:all: --require-hashes \
+            -r blocks/tests/engines/requirements.txt
+          "$RUNNER_TEMP/polars/bin/python" -c "import polars; print(polars.__version__)"
+          echo "FIREPARQ_POLARS_PYTHON=$RUNNER_TEMP/polars/bin/python" >> "$GITHUB_ENV"
+          echo "FIREPARQ_REQUIRE_POLARS=1" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |

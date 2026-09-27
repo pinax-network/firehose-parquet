@@ -109,7 +109,7 @@ fn compatibility_cursor() -> CursorState {
 #[test]
 fn reads_parquet58_values_and_writes_them_without_schema_changes() {
     use arrow::compute::concat_batches;
-    use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+    use firehose_parquet::config::{BlockMetadata, Compression};
     use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -138,7 +138,7 @@ fn reads_parquet58_values_and_writes_them_without_schema_changes() {
         Compression::Zstd,
     ] {
         let output = tempfile::tempdir().unwrap();
-        let mut writer = ParquetTableWriter::new(output.path(), Partition::None, compression);
+        let mut writer = ParquetTableWriter::new(output.path(), compression);
         let (path, _) = writer
             .write_batch(
                 "types",

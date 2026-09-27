@@ -12,16 +12,16 @@ fn frontier(policy: RoutingPolicy) -> AcceptedFrontier {
 
 #[test]
 fn later_acceptance_never_crosses_an_unresolved_received_event() {
-    let mut frontier = frontier(RoutingPolicy::DirectV1);
+    let mut frontier = frontier(RoutingPolicy::GenesisLookaheadV1);
     assert_eq!(frontier.receive(event(100, 1)).unwrap(), 1);
     assert_eq!(frontier.receive(event(101, 1)).unwrap(), 2);
     frontier
-        .accept(2, routing(RoutingPolicy::DirectV1))
+        .accept(2, routing(RoutingPolicy::GenesisLookaheadV1))
         .unwrap();
     assert!(frontier.snapshot().unwrap().is_none());
     assert_eq!(frontier.unresolved_events(), 2);
     frontier
-        .accept(1, routing(RoutingPolicy::DirectV1))
+        .accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
         .unwrap();
     let prefix = frontier.snapshot().unwrap().unwrap();
     assert_eq!((prefix.first_ordinal, prefix.last_ordinal), (1, 2));
@@ -31,22 +31,26 @@ fn later_acceptance_never_crosses_an_unresolved_received_event() {
 
 #[test]
 fn ordered_digest_is_independent_of_out_of_order_acceptance_completion() {
-    let mut one = frontier(RoutingPolicy::DirectV1);
-    let mut two = frontier(RoutingPolicy::DirectV1);
+    let mut one = frontier(RoutingPolicy::GenesisLookaheadV1);
+    let mut two = frontier(RoutingPolicy::GenesisLookaheadV1);
     for tracker in [&mut one, &mut two] {
         tracker.receive(event(100, 1)).unwrap();
         tracker.receive(event(100, 2)).unwrap();
     }
-    one.accept(1, routing(RoutingPolicy::DirectV1)).unwrap();
-    one.accept(2, routing(RoutingPolicy::DirectV1)).unwrap();
-    two.accept(2, routing(RoutingPolicy::DirectV1)).unwrap();
-    two.accept(1, routing(RoutingPolicy::DirectV1)).unwrap();
+    one.accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
+    one.accept(2, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
+    two.accept(2, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
+    two.accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
     assert!(one.snapshot().unwrap() == two.snapshot().unwrap());
 }
 
 #[test]
 fn nonmonotonic_heights_fork_steps_and_zero_rows_still_advance_ordinals() {
-    let mut tracker = frontier(RoutingPolicy::DirectV1);
+    let mut tracker = frontier(RoutingPolicy::GenesisLookaheadV1);
     let mut previous = None;
     for (index, (height, step)) in [(101, 1), (101, 2), (100, 1), (100, 3)]
         .into_iter()
@@ -55,7 +59,7 @@ fn nonmonotonic_heights_fork_steps_and_zero_rows_still_advance_ordinals() {
         let ordinal = tracker.receive(event(height, step)).unwrap();
         // There is intentionally no row count: accepted filtered/empty events are real progress.
         tracker
-            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
         let prefix = tracker.snapshot().unwrap().unwrap();
         assert_eq!(prefix.last_ordinal, index as u64 + 1);
@@ -248,14 +252,22 @@ fn resumed_lookahead_provenance_must_match_the_actual_next_source_event() {
 
 #[test]
 fn acknowledgement_rejects_stale_prefix_and_duplicate_or_unknown_acceptance() {
-    let mut tracker = frontier(RoutingPolicy::DirectV1);
-    assert!(tracker.accept(1, routing(RoutingPolicy::DirectV1)).is_err());
+    let mut tracker = frontier(RoutingPolicy::GenesisLookaheadV1);
+    assert!(tracker
+        .accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
+        .is_err());
     tracker.receive(event(100, 1)).unwrap();
-    tracker.accept(1, routing(RoutingPolicy::DirectV1)).unwrap();
+    tracker
+        .accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
     let old = tracker.snapshot().unwrap().unwrap();
-    assert!(tracker.accept(1, routing(RoutingPolicy::DirectV1)).is_err());
+    assert!(tracker
+        .accept(1, routing(RoutingPolicy::GenesisLookaheadV1))
+        .is_err());
     tracker.receive(event(101, 1)).unwrap();
-    tracker.accept(2, routing(RoutingPolicy::DirectV1)).unwrap();
+    tracker
+        .accept(2, routing(RoutingPolicy::GenesisLookaheadV1))
+        .unwrap();
     assert!(tracker.acknowledge(&old).is_err());
     let current = tracker.snapshot().unwrap().unwrap();
     tracker.acknowledge(&current).unwrap();
@@ -264,7 +276,7 @@ fn acknowledgement_rejects_stale_prefix_and_duplicate_or_unknown_acceptance() {
 
 #[test]
 fn bounded_unresolved_queue_and_ordinal_overflow_fail_closed() {
-    let mut tracker = frontier(RoutingPolicy::DirectV1);
+    let mut tracker = frontier(RoutingPolicy::GenesisLookaheadV1);
     tracker.assigned_ordinal = u64::MAX;
     assert!(tracker.receive(event(100, 1)).is_err());
     tracker.assigned_ordinal = 0;

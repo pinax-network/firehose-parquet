@@ -41,7 +41,7 @@ An explicit `--chain` or `--table` that differs from what the files say is an er
 
 Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (anything under `_fireparq/`, the legacy root names `cursor.parquet`, `partitions.parquet` and `merkle_roots.parquet`, anything under `verify_runs/`, and the dot-prefixed control state) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name.
 
-An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge`, `rollup` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/_fireparq/merkle_roots.parquet`, or outside the table directories.
+An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/_fireparq/merkle_roots.parquet`, or outside the table directories.
 
 ## Artifact Families
 
@@ -72,7 +72,7 @@ Schema (one row per `network`/`chain`/`table`/`partition`, all columns non-null 
 | `network` | Registry key: the report's `network` (`firehose-parquet.chain_name`, else the chain root directory name); empty when unknown |
 | `chain` | Registry key: chain family (`firehose-parquet.block_type`, or `--chain`) |
 | `table` | Registry key: table directory name (or `--table`) |
-| `partition` | Registry key: Hive partition path such as `year=2024/month=01/day=01`, or `unpartitioned` |
+| `partition` | Registry key: the Hive partition path, `date=YYYY-MM-DD` for `build` output (for example `date=2024-01-01`), or `unpartitioned` for files outside a partition directory. It is not part of the root: `merkle_v2` hashes rows only (#652) |
 | `algorithm` | Hash strategy used for the root (`keccak256` or `sha256`) |
 | `merkle_version` | Merkle construction used for the root (currently `merkle_v2`); see `docs/verifiability-hash-strategy.md` |
 | `merkle_root` | Lowercase hex partition root |
@@ -159,28 +159,24 @@ Partitions holding rows after the frontier are always open. The other rules depe
 
 - A stream that has not reached its requested stop block can grow. So can a protected stream that did: a later, longer `build` request extends it, appending to its last partition. (The completed stop stays recorded while the frontier moves past it, and the stream counts as unfinished again.) A legacy stream that reached its stop cannot grow, because the current `build` refuses to append to legacy data.
 - While the stream can grow, these partitions are also open:
-  - the partition holding the last block at or before the frontier. The next blocks can land in it, and a running transaction may already have published a later partition's part but not yet this one's. After a completed request, a `block_range` partition that ends at or before the stop block is complete and is recorded; a time partition, an unpartitioned table, or a block range that extends past the stop stays open;
+  - the partition holding the last block at or before the frontier. The next blocks can land in it, and a running transaction may already have published a later partition's part but not yet this one's. After a completed request this `date=` partition stays open too, because a later, longer request appends to it;
   - every partition of a reversible stream (`--final-blocks-only=false`), because a reorg can append rows for earlier blocks;
   - every partition without `block_num` values, because it cannot be placed relative to the frontier.
 - Before the first committed block, every partition is open.
 
-So the last partition of a completed protected build is recorded only when the stop block falls on a `block_range` boundary. Otherwise it is verified after the stream moves past it.
+So the last `date=` partition of a completed protected build is verified only after the stream moves past it, for example after the next daily run.
 
-Every earlier partition is closed: `build` appends blocks in order, and time partitions follow block timestamps. This assumes block timestamps never decrease. On a chain where they can (Bitcoin block times can be earlier than their parent's), a block can land in a partition `verify` already treated as closed. When that happens during the run, the run fails (see below); afterwards, the next run reports a mismatch for that partition.
+Every earlier partition is closed: `build` appends blocks in order, and `date=` partitions follow block timestamps. This assumes block timestamps never decrease. On a chain where they can (Bitcoin block times can be earlier than their parent's), a block can land in a partition `verify` already treated as closed. When that happens during the run, the run fails (see below); afterwards, the next run reports a mismatch for that partition.
 
 A partition is keyed by the `k=v` directories directly above its files, wherever the scan starts, so verifying a partition directory or a single file records the same key as verifying the whole table. The open rules then apply to the partitions read: the newest of them can be reported `open` even if later partitions exist.
 
 ### Concurrency and Atomic Writes
 
-`verify` only reads table data. It takes no dataset ownership, so it runs while `build`, `merge`, `rollup`, `truncate` or `partitions build` owns the dataset, and it never recovers or deletes anything. Its roots stay sound because:
+`verify` only reads table data. It takes no dataset ownership, so it runs while `build`, `merge`, `truncate` or `partitions build` owns the dataset, and it never recovers or deletes anything. Its roots stay sound because:
 
 - **Open partitions come from the writer frontier.** It is read before the scanned listing, and every row at or below it was published before it was recorded, so a closed partition's files are all in that listing (see [Open Partitions](#open-partitions)).
 - **Closed partitions must not change while they are read.** `verify` records the identity of every file it reads (local: device, inode, size and modification time of the handle it read; S3: the listed ETag, size and last-modified time, and version when the listing has one), and S3 reads are pinned to the listed ETag with `If-Match`. On a store whose listings omit ETags, reads are not pinned and identity rests on size and last-modified time. After the scan, `verify` lists the table again. If any partition it would compare or record gained, lost or replaced a file, or had a listed file that was removed or replaced before it could be read, the run fails with `the data changed while verify was reading it: ...` before anything is compared or written. Re-run it once the other command is done. Changes in open partitions are expected and ignored, including an uncommitted part that a restarted `build` rolls back. A change after this check is an ordinary later change, which the next run compares.
-- **An unfinished merge or rollup is refused.** Both write their outputs before deleting their sources, so while a journal exists a partition may hold rows twice or miss some. A merge journal (`_fireparq_merge.json`) sits in the partition it merges. A rollup journal (`_fireparq_rollup.json`) sits in its coarser target partition and claims the finer source partitions below it. `verify` looks for both kinds below the verified path, and in the Hive partition directories above it (and, for a single file, in its own directory). It then fails before reading any row, whatever the checks, and does not finish or roll back either command:
-  - `cannot verify ...: it has an unfinished merge ...`: wait for the running merge to end, or run `fireparq recovery recover <path>` to complete or roll back an interrupted one;
-  - `cannot verify ...: it has an unfinished rollup ...`: wait for the running rollup to end, or re-run the same `fireparq rollup` command (same source, output and `--partition`), which finishes or rolls back its interrupted run.
-
-  Then re-run `verify`.
+- **An unfinished merge is refused.** Merge writes its outputs before deleting its sources, so while a journal exists a partition may hold rows twice or miss some. A merge journal (`_fireparq_merge.json`) sits in the `date=` partition it merges. `verify` looks for journals below the verified path (and, for a single file, in its own directory). It then fails before reading any row, whatever the checks, and does not finish or roll back the merge: `cannot verify ...: it has an unfinished merge ...`. Wait for the running merge to end, or run `fireparq recovery recover <path>` to complete or roll back an interrupted one, then re-run `verify`.
 - **Registry writes are atomic or conditional**, so two `verify` runs never lose each other's rows:
   - **Local.** `verify` takes an exclusive lock on `merkle_roots.parquet.lock`, re-reads the registry, applies its changes, and replaces the file atomically. It writes a unique temporary file in the same directory, fsyncs it, renames it over the registry, and fsyncs the directory. A crash leaves the old or the new registry, never a partial one. Only this lock file is taken, never the dataset's directory ownership, so `verify` writes while `build` runs.
   - **S3.** `verify` makes one conditional put: `If-Match` on the ETag (and version) it read before comparing, or `If-None-Match: *` when it creates the registry. The mutation client has no transport retries. A conflict (another run wrote in between), a store without conditional writes, an object without a usable version, or any other error fails the run. There is no retry and no unconditional fallback; re-run `verify` to compare against the new registry. The write does not take the bucket-wide dataset owner, so it does not wait for or block `build`. A put whose response was lost may still land later, but only if the registry is still unchanged, and then it holds exactly the rows the run computed.
@@ -229,7 +225,7 @@ On S3, every network shared one registry object with colliding keys, so each net
 
 1. Keep a copy of the old registry. On S3 it may hold rows from several networks mixed together, so treat it as a record, not as a baseline.
 2. Run `fireparq verify <chain_root>/<table> --update-registry` for each table of each network, against trusted data. This creates `<chain_root>/_fireparq/merkle_roots.parquet`. Old registries from v0.7.x and earlier hold `merkle_v1` roots, which have to be rebuilt anyway (see above).
-3. Delete the old file. Locally, remove the whole `<chain_root>/evm/` directory. Other commands such as `rollup` would otherwise see `evm/` as a table directory.
+3. Delete the old file. Locally, remove the whole `<chain_root>/evm/` directory. Other commands such as `merge` would otherwise see `evm/` as a table directory.
 4. Run `verify` again. It should report only matches and no warnings.
 
 To keep using a registry at a custom location, pass `--registry-path` explicitly. No warning is shown then.

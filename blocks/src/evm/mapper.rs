@@ -3286,7 +3286,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_calls_call_type_round_trips_through_parquet_writer() {
-        use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+        use firehose_parquet::config::{BlockMetadata, Compression};
         use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3313,8 +3313,7 @@ pub(crate) mod tests {
         ));
 
         let result = (|| -> anyhow::Result<()> {
-            let mut writer =
-                ParquetTableWriter::new(&temp_dir, Partition::None, Compression::Snappy);
+            let mut writer = ParquetTableWriter::new(&temp_dir, Compression::Snappy);
             let (path, _) = writer.write_batch(
                 "calls",
                 calls_batch,
@@ -4407,7 +4406,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_blob_hashes_binary_encoding_round_trips_through_parquet() {
-        use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+        use firehose_parquet::config::{BlockMetadata, Compression};
         use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
 
         let block = make_post_prague_block();
@@ -4431,8 +4430,7 @@ pub(crate) mod tests {
                 .as_nanos()
         ));
         let result = (|| -> anyhow::Result<Vec<RecordBatch>> {
-            let mut writer =
-                ParquetTableWriter::new(&temp_dir, Partition::None, Compression::Snappy);
+            let mut writer = ParquetTableWriter::new(&temp_dir, Compression::Snappy);
             let (path, _) = writer.write_batch(
                 "transactions",
                 &batches["transactions"],

@@ -10,10 +10,9 @@ use crate::ingest::observe;
 use crate::ingest::state::AuthorityState;
 use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::merge_journal::JOURNAL_FILE;
-use crate::rollup::ROLLUP_JOURNAL_FILE;
 
 /// Journals of the maintenance commands whose interrupted runs verify refuses.
-const JOURNALS: &[&str] = &[JOURNAL_FILE, ROLLUP_JOURNAL_FILE];
+const JOURNALS: &[&str] = &[JOURNAL_FILE];
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
@@ -573,8 +572,8 @@ pub fn verify_parquet(
 ///   that `build` may still write are `open`, never compared or recorded;
 /// - every other partition must still hold exactly the files that were read
 ///   (same paths, sizes and versions) before any root is compared or written,
-///   so a concurrent merge, rollup or truncate makes the run fail instead;
-/// - an unfinished merge or rollup journal makes the run fail before
+///   so a concurrent merge or truncate makes the run fail instead;
+/// - an unfinished merge journal makes the run fail before
 ///   anything is read;
 /// - registry writes are atomic (local lock file and rename) or conditional
 ///   (S3 `If-Match` / `If-None-Match`).
@@ -595,7 +594,6 @@ enum DataSource {
 struct Listing {
     files: Vec<ListedFile>,
     merge_journals: Vec<String>,
-    rollup_journals: Vec<String>,
 }
 
 struct ListedFile {
@@ -899,13 +897,11 @@ fn remote_identity(path: &str, object: &object_store::ObjectMeta) -> FileIdentit
     }
 }
 
-/// Refuses to read a table while a merge or rollup journal claims any of its
-/// files.
+/// Refuses to read a table while a merge journal claims any of its files.
 ///
-/// Both commands write their outputs before they delete their sources, so a
-/// running or interrupted one can leave rows twice or not at all. `verify`
-/// reads data only: it does not finish or roll back either, and it does not
-/// guess. Each points to its own recovery.
+/// Merge writes its outputs before it deletes its sources, so a running or
+/// interrupted one can leave rows twice or not at all. `verify` reads data
+/// only: it does not finish or roll back a merge, and it does not guess.
 fn refuse_unfinished_maintenance(path: &str, listing: &Listing) -> Result<()> {
     let journals = |list: &[String]| {
         let first = list.first()?;
@@ -921,47 +917,18 @@ fn refuse_unfinished_maintenance(path: &str, listing: &Listing) -> Result<()> {
             "cannot verify {path}: it has an unfinished merge ({journals}). A merge is running there or was interrupted, so a partition may hold rows twice or miss some. verify reads data only and never recovers it: wait for the merge to finish, or run `fireparq recovery recover {path}` to complete or roll back an interrupted merge, then re-run verify"
         ));
     }
-    if let Some(journals) = journals(&listing.rollup_journals) {
-        tracing::warn!(%journals, "verify refused a table with an unfinished rollup");
-        return Err(anyhow!(
-            "cannot verify {path}: it has an unfinished rollup ({journals}). A rollup is running there or was interrupted, so a partition may hold rows twice or miss some. verify reads data only and never recovers it: wait for the rollup to finish, or re-run the same `fireparq rollup` command (same source, output and --partition) to finish or roll back the interrupted rollup, then re-run verify"
-        ));
-    }
     Ok(())
 }
 
-/// Directories above a verified path whose journals claim its files: the
-/// verified file's own directory (`include_dir`), then every Hive partition
-/// (`k=v`) directory above. A rollup journal sits in its coarser target
-/// partition and claims the finer source partitions below it.
-fn journal_ancestors(dir: &str, include_dir: bool) -> Vec<String> {
-    let trimmed = dir.trim_end_matches('/');
-    let mut dirs = Vec::new();
-    if include_dir {
-        dirs.push(trimmed.to_string());
-    }
-    let mut current = trimmed;
-    while let Some((parent, _)) = current.rsplit_once('/') {
-        let name = parent.rsplit('/').next().unwrap_or_default();
-        if !name.contains('=') {
-            break;
-        }
-        dirs.push(parent.to_string());
-        current = parent;
-    }
-    dirs
-}
-
-/// Sorts found journals into merge and rollup journals.
-fn sort_journals(found: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
-    let (mut merge, mut rollup): (Vec<String>, Vec<String>) = found
+/// The found merge journals, sorted and deduplicated.
+fn sort_journals(found: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut merge: Vec<String> = found
         .into_iter()
-        .partition(|journal| journal.rsplit('/').next() == Some(JOURNAL_FILE));
+        .filter(|journal| journal.rsplit('/').next() == Some(JOURNAL_FILE))
+        .collect();
     merge.sort();
     merge.dedup();
-    rollup.sort();
-    rollup.dedup();
-    (merge, rollup)
+    merge
 }
 
 #[cfg(test)]
@@ -1136,7 +1103,7 @@ fn ensure_unchanged(
         };
         tracing::warn!(%partition, %detail, "table data changed while verify read it");
         return Err(anyhow!(
-            "the data changed while verify was reading it: in partition {partition}, {detail}. Another command (for example merge, rollup or truncate) modified the table, so the results may not match any complete state; nothing was compared or written. Re-run verify"
+            "the data changed while verify was reading it: in partition {partition}, {detail}. Another command (for example merge or truncate) modified the table, so the results may not match any complete state; nothing was compared or written. Re-run verify"
         ));
     }
     Ok(())
@@ -1988,7 +1955,7 @@ fn registry_inside_table_warning(registry: &str, target: &Target) -> Option<Stri
     let name = registry_norm.rsplit('/').next().unwrap_or_default();
     (inside && !is_reserved_artifact_path(name)).then(|| {
         format!(
-            "the registry {registry_norm} is inside the table directory {table_dir}; verify skips it, but other commands (merge, rollup, validate) read it as table data. Keep the registry at {} or outside the table directories",
+            "the registry {registry_norm} is inside the table directory {table_dir}; verify skips it, but other commands (merge, validate) read it as table data. Keep the registry at {} or outside the table directories",
             DatasetArtifact::MerkleRoots.path_in(&target.chain_root)
         )
     })
@@ -2014,10 +1981,11 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
         }
         pathbuf.parent().unwrap_or(Path::new("/")).to_path_buf()
     };
-    // Journals above it that claim its files.
-    for dir in journal_ancestors(&base.to_string_lossy(), !is_dir) {
+    // A single file is claimed by a merge journal in its own partition
+    // directory, which the walk below `base` never lists.
+    if !is_dir {
         for name in JOURNALS {
-            let journal = Path::new(&dir).join(name);
+            let journal = base.join(name);
             if journal.is_file() {
                 journals.push(journal);
             }
@@ -2036,7 +2004,7 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
     if files.is_empty() {
         return Err(anyhow!("no parquet files found in {}", path));
     }
-    let (merge_journals, rollup_journals) = sort_journals(
+    let merge_journals = sort_journals(
         journals
             .iter()
             .map(|journal| journal.to_string_lossy().into_owned()),
@@ -2052,7 +2020,6 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
             })
             .collect(),
         merge_journals,
-        rollup_journals,
     })
 }
 
@@ -2093,23 +2060,9 @@ fn list_verify_objects(
     if objects.is_empty() {
         return Err(anyhow!("no parquet files found in {}", path));
     }
-    // Journals above the verified prefix that claim its objects. (Listings
-    // are by path segment, so the prefix is always a directory.)
-    for dir in journal_ancestors(prefix, false) {
-        for name in JOURNALS {
-            let key = if dir.is_empty() {
-                name.to_string()
-            } else {
-                format!("{dir}/{name}")
-            };
-            match block_on_async(store.head(&object_store::path::Path::from(key.as_str()))) {
-                Ok(_) => journals.push(format!("s3://{bucket}/{key}")),
-                Err(object_store::Error::NotFound { .. }) => {}
-                Err(err) => return Err(anyhow!("checking s3://{bucket}/{key}: {err}")),
-            }
-        }
-    }
-    let (merge_journals, rollup_journals) = sort_journals(journals);
+    // Listings are by path segment, so the prefix is always a directory and
+    // lists the merge journal of every partition it holds.
+    let merge_journals = sort_journals(journals);
 
     Ok(Listing {
         files: objects
@@ -2124,7 +2077,6 @@ fn list_verify_objects(
             })
             .collect(),
         merge_journals,
-        rollup_journals,
     })
 }
 
@@ -3434,9 +3386,8 @@ fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
 /// transaction may already have published a later partition's part but not
 /// yet this one's. A stream can grow while it has not reached its stop block,
 /// and, for a protected dataset, after it did, because a later, longer
-/// request extends it; then only a `block_range` partition that ends at or
-/// before the stop is complete. Earlier partitions cannot receive rows,
-/// provided block timestamps (and so time partitions) never decrease. A
+/// request extends it. Earlier partitions cannot receive rows, provided block
+/// timestamps (and so date partitions) never decrease. A
 /// growing reversible stream can append rows for earlier blocks on a reorg,
 /// and a partition without `block_num` values cannot be placed, so those are
 /// open too.
@@ -3513,19 +3464,14 @@ fn open_partitions(
             .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
         if let (true, Some((partition, block))) = (may_grow, last_committed) {
             let reason = match finished_at {
-                None => Some(format!(
+                None => format!(
                     "open: holds block {block}, the last one at or before block {frontier} where {source} is, and the unfinished stream can append to it"
-                )),
-                // A block range ending at or before the stop cannot receive
-                // a block of a longer request.
-                Some(stop) if block_range_end(partition).is_some_and(|end| end <= *stop) => None,
-                Some(stop) => Some(format!(
+                ),
+                Some(stop) => format!(
                     "open: holds block {block}, the last block of the completed request (stop block {stop}); a later, longer `fireparq build` request appends to it"
-                )),
+                ),
             };
-            if let Some(reason) = reason {
-                open.entry(partition.clone()).or_insert(reason);
-            }
+            open.entry(partition.clone()).or_insert(reason);
         }
     }
     open.retain(|partition, _| scan.partition_roots.contains_key(partition));
@@ -3546,16 +3492,6 @@ fn open_partitions(
         ));
     }
     open
-}
-
-/// The exclusive end block of a `block_range=<start>-<end>` partition.
-fn block_range_end(partition: &str) -> Option<u64> {
-    partition
-        .strip_prefix("block_range=")?
-        .split_once('-')?
-        .1
-        .parse()
-        .ok()
 }
 
 fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Result<()> {
@@ -3938,8 +3874,7 @@ mod tests {
 
     #[test]
     fn file_layout_splits_chain_root_and_table_per_network() {
-        let layout =
-            file_layout("/out/mainnet/blocks/year=2025/month=12/date=13/part-a-000001.parquet");
+        let layout = file_layout("/out/mainnet/blocks/date=2025-12-13/part-a-000001.parquet");
         assert_eq!(
             layout,
             FileLayout {
@@ -3949,7 +3884,7 @@ mod tests {
             }
         );
         assert_eq!(
-            file_layout("/out/sepolia/blocks/year=2025/part-a-000001.parquet").chain_root,
+            file_layout("/out/sepolia/blocks/date=2025-12-13/part-a-000001.parquet").chain_root,
             "/out/sepolia"
         );
         // Unpartitioned table: files sit directly in the table directory.
@@ -3985,7 +3920,7 @@ mod tests {
     /// the network comes from file metadata.
     #[test]
     fn file_layout_of_a_root_written_without_a_chain_directory() {
-        let bucket = "s3://ethereum-mainnet/blocks/year=2023/month=11/day=14/part-v1-a.parquet";
+        let bucket = "s3://ethereum-mainnet/blocks/date=2023-11-14/part-v1-a.parquet";
         let layout = file_layout(bucket);
         assert_eq!(
             layout,
@@ -4006,10 +3941,10 @@ mod tests {
             ),
             "s3://ethereum-mainnet/_fireparq/verify_runs/run/report.json"
         );
-        let prefix = file_layout("s3://bucket/v1/logs/block_range=100-200/part-v1-a.parquet");
+        let prefix = file_layout("s3://bucket/v1/logs/date=2023-11-14/part-v1-a.parquet");
         assert_eq!(prefix.chain_root, "s3://bucket/v1");
         assert_eq!(prefix.table, Some("logs".to_string()));
-        let local = file_layout("/data/ethereum-mainnet/blocks/day=14/part-v1-a.parquet");
+        let local = file_layout("/data/ethereum-mainnet/blocks/date=2023-11-14/part-v1-a.parquet");
         assert_eq!(local.chain_root, "/data/ethereum-mainnet");
         assert_eq!(local.table, Some("blocks".to_string()));
 
@@ -4026,7 +3961,7 @@ mod tests {
         // Other tables of the same root are a different verify run.
         assert!(resolver
             .observe(
-                "s3://ethereum-mainnet/logs/year=2023/month=11/day=14/part-v1-a.parquet",
+                "s3://ethereum-mainnet/logs/date=2023-11-14/part-v1-a.parquet",
                 &footer
             )
             .is_err());
@@ -4035,7 +3970,8 @@ mod tests {
     #[test]
     fn file_layout_matches_path_components_not_substrings() {
         // The old substring match cut paths at the first "/blocks".
-        let layout = file_layout("/data/blocks-archive/mainnet/transactions/date=1/x.parquet");
+        let layout =
+            file_layout("/data/blocks-archive/mainnet/transactions/date=2024-01-01/x.parquet");
         assert_eq!(layout.chain_root, "/data/blocks-archive/mainnet");
         assert_eq!(layout.table, Some("transactions".to_string()));
         assert_eq!(
@@ -4846,7 +4782,11 @@ mod tests {
             .map(|i| {
                 let path = path.clone();
                 std::thread::spawn(move || {
-                    let change = fill(registry_row("mainnet", &format!("day={i}"), "aa"));
+                    let change = fill(registry_row(
+                        "mainnet",
+                        &format!("date=2024-01-{:02}", i + 1),
+                        "aa",
+                    ));
                     commit_registry_local(&path, &[change]).unwrap();
                 })
             })
@@ -4857,11 +4797,18 @@ mod tests {
         assert_eq!(load_registry(&path_str, None).unwrap().rows.len(), 8);
 
         // Replaying a change another run already applied is a no-op.
-        commit_registry_local(&path, &[fill(registry_row("mainnet", "day=0", "aa"))]).unwrap();
+        commit_registry_local(
+            &path,
+            &[fill(registry_row("mainnet", "date=2024-01-01", "aa"))],
+        )
+        .unwrap();
         // A different root for a row that appeared meanwhile is a conflict.
-        let err = commit_registry_local(&path, &[fill(registry_row("mainnet", "day=0", "bb"))])
-            .unwrap_err()
-            .to_string();
+        let err = commit_registry_local(
+            &path,
+            &[fill(registry_row("mainnet", "date=2024-01-01", "bb"))],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("changed while verify was running"), "{err}");
 
         // Writes are atomic: only the registry and its lock file remain.
@@ -4884,18 +4831,18 @@ mod tests {
         // A stale absent snapshot cannot overwrite a newly created registry.
         let empty = load_registry_from_store(&store, &location).unwrap();
         assert!(!empty.exists);
-        let first = fill(registry_row("mainnet", "day=1", "aa"));
+        let first = fill(registry_row("mainnet", "date=2024-01-02", "aa"));
         commit_registry_to_store(&store, &location, &empty, &[first]).unwrap();
-        let second = fill(registry_row("mainnet", "day=2", "bb"));
+        let second = fill(registry_row("mainnet", "date=2024-01-03", "bb"));
         assert!(commit_registry_to_store(&store, &location, &empty, &[second]).is_err());
         assert_eq!(rows(&store).len(), 1);
 
         // Same with an existing object: the second write's ETag is stale.
         let stale = load_registry_from_store(&store, &location).unwrap();
         assert!(stale.e_tag.is_some());
-        let third = fill(registry_row("mainnet", "day=3", "cc"));
+        let third = fill(registry_row("mainnet", "date=2024-01-04", "cc"));
         commit_registry_to_store(&store, &location, &stale, &[third]).unwrap();
-        let fourth = fill(registry_row("mainnet", "day=4", "dd"));
+        let fourth = fill(registry_row("mainnet", "date=2024-01-05", "dd"));
         assert!(commit_registry_to_store(&store, &location, &stale, &[fourth.clone()]).is_err());
         assert_eq!(rows(&store).len(), 2);
 
@@ -4911,7 +4858,7 @@ mod tests {
         assert_eq!(rows(&store).len(), 2);
 
         // A conflicting root is reported instead of overwriting the other run.
-        let change = fill(registry_row("mainnet", "day=1", "ff"));
+        let change = fill(registry_row("mainnet", "date=2024-01-02", "ff"));
         let err = commit_registry_to_store(&store, &location, &stale, &[change])
             .unwrap_err()
             .to_string();

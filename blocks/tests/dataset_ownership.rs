@@ -189,14 +189,6 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
         ],
         vec!["merge", root_str],
         vec!["truncate", root_str, "--yes"],
-        vec![
-            "rollup",
-            root_str,
-            "--output",
-            rolled.to_str().unwrap(),
-            "--partition",
-            "date",
-        ],
     ] {
         assert_ownership_conflict(run(temp.path(), &args).await);
         assert_eq!(

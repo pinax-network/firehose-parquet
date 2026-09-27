@@ -124,23 +124,16 @@ mod legacy {
         encoding: Option<&EncodeBytes>,
         endpoint: &str,
         compression: Compression,
-        partition: &firehose_parquet::config::Partition,
         endpoint_info: &Option<EndpointInfo>,
         extended: bool,
         final_blocks_only: bool,
         include_failed_transactions: bool,
     ) -> ParquetFileMetadata {
+        // Every table is partitioned by date (#652).
         let mut meta = ParquetFileMetadata::new();
         add_common_file_metadata(&mut meta, block_type, encoding, endpoint, endpoint_info);
         meta.add("firehose-parquet.compression", compression.to_string());
-        meta.add("firehose-parquet.partition", partition.to_string());
-        meta.add(
-            "firehose-parquet.block_range_size",
-            match partition {
-                firehose_parquet::config::Partition::BlockRange { size, .. } => size.to_string(),
-                _ => "0".to_string(),
-            },
-        );
+        meta.add("firehose-parquet.partition", "date");
         add_cursor_compatibility_metadata(
             &mut meta,
             extended,
@@ -203,11 +196,9 @@ mod legacy {
         block_type == "solana"
     }
 
-    pub(crate) fn use_last_known_timestamp_partition_routing(
-        block_type: &str,
-        partition: &Partition,
-    ) -> bool {
-        block_type_has_nullable_timestamps(block_type) && partition_requires_timestamp(partition)
+    /// Every table is partitioned by date (#652), so only the family decides.
+    pub(crate) fn use_last_known_timestamp_partition_routing(block_type: &str) -> bool {
+        block_type_has_nullable_timestamps(block_type)
     }
 
     pub(crate) fn protected_block_family(label: &str) -> Result<BlockFamily> {
@@ -580,7 +571,6 @@ mod legacy_inline {
         exclude_failed: bool,
         cursor_override: bool,
         dry_run: bool,
-        partition: &Partition,
     ) -> SetupDecisions {
         let mut extended = !without_extended;
         let solana_chain =
@@ -630,7 +620,7 @@ mod legacy_inline {
             include_failed_transactions,
             initial_bytes_encoding,
             use_synthetic_partition_routing: legacy::use_last_known_timestamp_partition_routing(
-                block_type, partition,
+                block_type,
             ),
         }
     }
@@ -778,18 +768,6 @@ fn cursor_corpus() -> Vec<Option<CursorState>> {
     cursors
 }
 
-fn partitions() -> [Partition; 4] {
-    [
-        Partition::None,
-        Partition::Date,
-        Partition::Second,
-        Partition::BlockRange {
-            size: 100,
-            start_block: Some(0),
-        },
-    ]
-}
-
 #[test]
 fn pre_stream_setup_decisions_match_legacy_string_resolution() {
     let endpoints = endpoint_corpus();
@@ -807,7 +785,6 @@ fn pre_stream_setup_decisions_match_legacy_string_resolution() {
                     let exclude_failed = bits & 4 != 0;
                     let cursor_override = bits & 8 != 0;
                     let dry_run = bits & 16 != 0;
-                    let partition = &partitions()[usize::from(bits) % 4];
                     let context = format!(
                         "{label} {endpoint_info:?} {:?} bits={bits:05b}",
                         cursor_state.map(|state| &state.file_metadata.entries)
@@ -821,7 +798,6 @@ fn pre_stream_setup_decisions_match_legacy_string_resolution() {
                         exclude_failed,
                         cursor_override,
                         dry_run,
-                        partition,
                     );
                     assert_eq!(
                         features.vote_transactions, expected.solana_chain,
@@ -890,7 +866,7 @@ fn pre_stream_setup_decisions_match_legacy_string_resolution() {
                     );
                     assert_eq!(
                         requested.is_some_and(|kind| {
-                            use_last_known_timestamp_partition_routing(kind, partition)
+                            use_last_known_timestamp_partition_routing(kind)
                         }),
                         expected.use_synthetic_partition_routing,
                         "{context}"
@@ -1076,7 +1052,6 @@ fn table_and_cursor_file_metadata_match_legacy() {
                         flags & 4 != 0,
                         flags & 8 != 0,
                     );
-                    let partition = &partitions()[usize::from(flags) % 4];
                     if let Some(kind) = requested {
                         let mut current = build_file_metadata(
                             kind,
@@ -1112,7 +1087,6 @@ fn table_and_cursor_file_metadata_match_legacy() {
                             cursor_encoding,
                             "https://example.com:443",
                             Compression::Zstd,
-                            partition,
                             endpoint_info,
                             extended,
                             flags & 2 != 0,
@@ -1123,7 +1097,6 @@ fn table_and_cursor_file_metadata_match_legacy() {
                             cursor_encoding,
                             "https://example.com:443",
                             Compression::Zstd,
-                            partition,
                             endpoint_info,
                             extended,
                             flags & 2 != 0,

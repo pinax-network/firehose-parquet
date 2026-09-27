@@ -1013,7 +1013,7 @@ fn checked_block_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Compression, Partition};
+    use crate::config::Compression;
     use std::path::PathBuf;
     use tokio::net::TcpListener;
 
@@ -1219,7 +1219,6 @@ mod tests {
             stop_block: None,
             cursor_path: None,
             output: PathBuf::from("/tmp/output"),
-            partition: Partition::None,
             flush_rows: None,
             flush_blocks: None,
             flush_bytes: 0,

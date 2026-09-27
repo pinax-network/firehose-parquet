@@ -59,7 +59,7 @@ fn local_fixture() -> (tempfile::TempDir, DatasetOwnership, AuthorityState, Path
         None,
     )
     .unwrap();
-    let mut desc = descriptor(RoutingPolicy::DirectV1);
+    let mut desc = descriptor(RoutingPolicy::GenesisLookaheadV1);
     desc.mirror = MirrorBinding::Local {
         absolute_path: path.to_string_lossy().into_owned(),
     };
@@ -415,7 +415,7 @@ async fn alias_ancestry_is_synced_and_retarget_or_leaf_symlink_is_rejected() {
         None,
     )
     .unwrap();
-    let mut desc = descriptor(RoutingPolicy::DirectV1);
+    let mut desc = descriptor(RoutingPolicy::GenesisLookaheadV1);
     desc.mirror = MirrorBinding::Local {
         absolute_path: path.to_string_lossy().into_owned(),
     };
@@ -572,7 +572,7 @@ async fn remote_fixture() -> (Arc<RemoteStore>, DatasetOwnership, AuthorityState
         .unwrap();
     let ownership = DatasetOwnership::from_remote_for_test("cursor-bucket", owner);
     let service = Digest::hash("service", &"fixture").unwrap();
-    let mut desc = descriptor(RoutingPolicy::DirectV1);
+    let mut desc = descriptor(RoutingPolicy::GenesisLookaheadV1);
     desc.mirror = MirrorBinding::S3 {
         service: service.clone(),
         bucket: "cursor-bucket".into(),
@@ -1099,7 +1099,7 @@ async fn default_mirror_creates_the_shared_artifact_directory() {
             None,
         )
         .unwrap();
-        let mut desc = descriptor(RoutingPolicy::DirectV1);
+        let mut desc = descriptor(RoutingPolicy::GenesisLookaheadV1);
         desc.mirror = crate::ingest::binding::resolve_mirror_binding(
             root.to_str().unwrap(),
             Some(relative),

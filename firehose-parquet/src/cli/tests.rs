@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{Compression, Partition};
+use crate::config::Compression;
 use clap::{CommandFactory, Parser};
 use serial_test::serial;
 
@@ -205,7 +205,7 @@ fn final_blocks_only_accepts_explicit_values_and_preserves_bare_flag() {
         (vec!["test-cli", "--final-blocks-only=false"], false),
     ] {
         let mut args = args;
-        args.extend(["--endpoint", "http://localhost:9000", "--partition", "none"]);
+        args.extend(["--endpoint", "http://localhost:9000"]);
         let parsed = try_parse(&args).unwrap();
         assert_eq!(parsed.common.final_blocks_only, expected);
         assert_eq!(
@@ -257,13 +257,7 @@ fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
     let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
     let _window = EnvVarGuard::set("GRPC_WINDOW_BYTES", "16777216");
     let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "134217728");
-    let parsed = parse(&[
-        "test-cli",
-        "--endpoint",
-        "http://localhost",
-        "--partition",
-        "none",
-    ]);
+    let parsed = parse(&["test-cli", "--endpoint", "http://localhost"]);
     let default = build_config(&parsed.common).unwrap();
     assert_eq!(default.grpc, crate::config::GrpcConfig::default());
     for args in [
@@ -271,8 +265,6 @@ fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
             "test-cli",
             "--endpoint",
             "http://localhost",
-            "--partition",
-            "none",
             "--grpc-adaptive-window=false",
             "--grpc-max-message-bytes",
             "268435456",
@@ -553,8 +545,6 @@ fn test_defaults() {
         Some("http://localhost:9000")
     );
     assert_eq!(cli.common.output, PathBuf::from("."));
-    assert_eq!(cli.common.partition, "none");
-    assert_eq!(cli.common.block_range_size, 10000);
     assert!(cli.common.flush_rows.is_none());
     assert!(cli.common.flush_blocks.is_none());
     assert_eq!(cli.common.flush_bytes, DEFAULT_FLUSH_BYTES);
@@ -605,10 +595,6 @@ fn test_all_flags() {
         "cursor-mainnet-date.parquet",
         "--output",
         "/tmp/out",
-        "--partition",
-        "date",
-        "--block-range-size",
-        "5000",
         "--flush-rows",
         "10000",
         "--flush-blocks",
@@ -641,8 +627,6 @@ fn test_all_flags() {
         PathBuf::from("cursor-mainnet-date.parquet")
     );
     assert_eq!(cli.common.output, PathBuf::from("/tmp/out"));
-    assert_eq!(cli.common.partition, "date");
-    assert_eq!(cli.common.block_range_size, 5000);
     assert_eq!(cli.common.flush_rows, Some(10000));
     assert_eq!(cli.common.flush_blocks, Some(250));
     assert_eq!(cli.common.flush_bytes, 1000000);
@@ -690,32 +674,13 @@ fn test_parse_compression() {
 }
 
 #[test]
-#[serial]
-fn test_parse_partition() {
-    assert_eq!(parse_partition("none", 10000).unwrap(), Partition::None);
-    assert_eq!(parse_partition("date", 10000).unwrap(), Partition::Date);
-    assert_eq!(parse_partition("hour", 10000).unwrap(), Partition::Hour);
-    assert_eq!(parse_partition("minute", 10000).unwrap(), Partition::Minute);
-    assert_eq!(parse_partition("second", 10000).unwrap(), Partition::Second);
-    assert_eq!(
-        parse_partition("block_range", 5000).unwrap(),
-        Partition::block_range(5000)
-    );
-    assert_eq!(
-        parse_partition("BLOCK_RANGE", 20000).unwrap(),
-        Partition::block_range(20000)
-    );
-    assert!(parse_partition("unknown", 10000).is_err());
-}
-
-#[test]
-fn test_detect_partition_accepts_exclusive_block_range_label() {
+fn test_detect_partition_reads_the_date_directory() {
     assert_eq!(
         detect_partition(
-            "/tmp/output/blocks/block_range=390500000-390600000/part-000001.parquet",
+            "/tmp/output/blocks/date=2026-01-15/part-000001.parquet",
             "/tmp/output"
         ),
-        "block_range=390500000-390600000"
+        "date=2026-01-15"
     );
 }
 
@@ -730,14 +695,11 @@ fn test_build_config() {
         "100",
         "--compression",
         "gzip",
-        "--partition",
-        "date",
     ]);
     let config = build_config(&cli.common).expect("build_config should succeed");
     assert_eq!(config.endpoint, "https://example.com:443");
     assert_eq!(config.start_block, Some(100));
     assert_eq!(config.compression, Compression::Gzip);
-    assert_eq!(config.partition, Partition::Date);
     assert!(config.flush_rows.is_none());
     assert!(config.flush_blocks.is_none());
     assert!(config.final_blocks_only);
@@ -756,20 +718,32 @@ fn assert_rejected_value(args: &[&str], flag: &str) {
     assert!(error.to_string().contains(flag), "{error}");
 }
 
+/// `build` writes every table as `<table>/date=YYYY-MM-DD/` (#652): the
+/// `--partition` output flag, `--block-range-size` and `PARTITION` are gone.
 #[test]
 #[serial]
-fn test_block_range_size_zero_is_rejected() {
-    assert_rejected_value(
-        &[
-            "test-cli",
-            "--partition",
-            "block_range",
-            "--block-range-size",
-            "0",
-        ],
-        "--block-range-size",
-    );
-    assert!(parse_partition("block_range", 0).is_err());
+fn build_has_no_partition_mode() {
+    for args in [
+        &["test-cli", "--partition", "date"][..],
+        &["test-cli", "--partition", "block_range"],
+        &["test-cli", "--block-range-size", "1000"],
+    ] {
+        let error = try_parse(args).expect_err("output partition flags are removed");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
+    }
+    let _partition = EnvVarGuard::set("PARTITION", "hour");
+    let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
+    let config = build_config(&cli.common).expect("PARTITION is not read");
+    assert!(config.to_string().contains("partition          date"));
+    let cli = TestCli::command();
+    let build = cli.find_subcommand("build").expect("build subcommand");
+    assert!(build
+        .get_arguments()
+        .all(|arg| arg.get_id() != "partition" && arg.get_id() != "block_range_size"));
 }
 
 #[test]
@@ -1616,14 +1590,6 @@ fn test_merge_help_aligns_flush_controls_with_build() {
 
     assert!(build_help.contains(&default_flush_bytes));
     assert!(merge_help.contains(&default_flush_bytes));
-    let rollup_help = cmd
-        .get_subcommands()
-        .find(|command| command.get_name() == "rollup")
-        .unwrap()
-        .clone()
-        .render_long_help()
-        .to_string();
-    assert!(rollup_help.contains(&default_flush_bytes));
     assert_eq!(Config::default().flush_bytes, DEFAULT_FLUSH_BYTES);
     assert_eq!(
         Config::default().flush_memory_bytes,
@@ -2200,19 +2166,6 @@ fn test_destructive_commands_do_not_fall_back_to_configured_s3_bucket() {
     .map(|_| ())
     .expect_err("merge must not resolve to S3");
     assert_refused("merge", merge_err);
-
-    let rollup_err = crate::rollup::run_rollup(&crate::rollup::RollupConfig {
-        source: "./mainnet/blocks/".to_string(),
-        output: "./mainnet/blocks/".to_string(),
-        target: crate::rollup::RollupTarget::Date,
-        compression: crate::config::Compression::Zstd,
-        flush_bytes: 1024,
-        delete_source: true,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .expect_err("rollup must not resolve to S3");
-    assert_refused("rollup", rollup_err);
 }
 
 #[test]
@@ -2247,18 +2200,6 @@ fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket()
     })
     .expect("merge should stay local when the directory exists");
     assert_eq!(merge_result.files_read, 0);
-
-    crate::rollup::run_rollup(&crate::rollup::RollupConfig {
-        source: "./mainnet/blocks/".to_string(),
-        output: "./mainnet/blocks/".to_string(),
-        target: crate::rollup::RollupTarget::Date,
-        compression: crate::config::Compression::Zstd,
-        flush_bytes: 1024,
-        delete_source: true,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .expect("rollup should stay local when the directory exists");
 
     let validate_result = validate_parquet(
         "./mainnet/blocks/",
@@ -2301,29 +2242,14 @@ fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket()
     assert_eq!(rows.len(), 1);
 }
 
+/// `rollup` is removed (#652): with one `date` partition key there is no
+/// coarser layout to roll up into.
 #[test]
-fn test_rollup_subcommand_partition_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "rollup",
-        "./output/blocks/",
-        "--partition",
-        "hour",
-        "--delete-source",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Rollup {
-            source,
-            partition,
-            delete_source,
-            ..
-        } => {
-            assert_eq!(source, "./output/blocks/");
-            assert_eq!(partition, "hour");
-            assert!(delete_source);
-        }
-        _ => panic!("expected rollup subcommand"),
-    }
+fn rollup_subcommand_is_removed() {
+    let error = try_parse(&["test-cli", "rollup", "./output/blocks/"])
+        .expect_err("rollup is not a subcommand");
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    assert!(TestCli::command().find_subcommand("rollup").is_none());
 }
 
 #[test]
@@ -4465,7 +4391,7 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         // Legacy root artifacts of a release before v1.0.0.
         "partitions.parquet",
         "cursor.parquet",
-        "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
+        "blocks/date=2023-11-14/part-v1-a.parquet",
         "blocks-archive/part-v1-b.parquet",
         ".fireparq-ingest/state.json",
         ".fireparq-ingest/hidden.parquet",
@@ -4499,7 +4425,7 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         .iter()
         .map(|object| scan_s3_display_key(object.location.as_ref(), "blocks", exact))
         .collect();
-    assert_eq!(keys, ["year=2023/month=11/day=14/part-v1-a.parquet"]);
+    assert_eq!(keys, ["date=2023-11-14/part-v1-a.parquet"]);
 
     let keys = |prefix: &str| -> Vec<String> {
         block_on_async(collect_scan_s3_parquet_objects(&store, prefix))
@@ -4514,7 +4440,7 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         keys(""),
         [
             "blocks-archive/part-v1-b.parquet",
-            "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
+            "blocks/date=2023-11-14/part-v1-a.parquet",
         ]
     );
     // Asking for the artifact directory itself lists its files.
@@ -4543,7 +4469,7 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
         "cursor.parquet",
         "merkle_roots.parquet",
         ".fireparq-ingest/hidden.parquet",
-        "blocks/day=14/part-v1-a.parquet",
+        "blocks/date=2024-01-14/part-v1-a.parquet",
     ];
     for file in files {
         let path = root.join(file);
@@ -4571,7 +4497,7 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
         found.sort();
         found
     };
-    assert_eq!(walk(&root), ["blocks/day=14/part-v1-a.parquet"]);
+    assert_eq!(walk(&root), ["blocks/date=2024-01-14/part-v1-a.parquet"]);
     assert_eq!(
         walk(&root.join("_fireparq")),
         [

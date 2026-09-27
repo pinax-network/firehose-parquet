@@ -32,12 +32,13 @@ the upgrade guide.
 - **Data-integrity hardening.** `build` commits every table of a flush in one
   transaction. The authoritative checkpoint is stored under
   `<output>/.fireparq-ingest/`, and `_fireparq/cursor.parquet` is now an
-  optional mirror. `merge` and `rollup` use per-partition journals and recover from
+  optional mirror. `merge` uses per-partition journals and recovers from
   crashes. Every mutating command takes dataset ownership, which
   `fireparq recovery` can inspect.
 - **One consistent schema across chains.** Canonical `timestamp` is
-  `Timestamp(Millisecond, UTC)` on every table, and day directories are now
-  `day=DD`. Most chains gain columns and tables, for example EVM withdrawals,
+  `Timestamp(Millisecond, UTC)` on every table, and every table is partitioned
+  by UTC day as `<table>/date=YYYY-MM-DD/`, the same type and value as its
+  `date` column. Most chains gain columns and tables, for example EVM withdrawals,
   access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
   Beacon Electra requests and Tron contracts. See the
   [schema reference](docs/schemas/README.md).
@@ -62,7 +63,7 @@ the upgrade guide.
 - **Performance.** Identifier columns are encoded once per block without
   per-value allocations, and EVM decimals are written directly into Arrow.
   Each `build` flush encodes and publishes its tables concurrently within
-  explicit bounds. `verify` and `rollup` stream with bounded memory. File sizes
+  explicit bounds. `verify` streams with bounded memory. File sizes
   follow an adaptive compressed-size target. Firehose receive windows are 16 MiB
   and accept zstd replies.
 - **Existing datasets must be rebuilt into a new output root.** v1.0.0 does not
@@ -74,14 +75,14 @@ the upgrade guide.
 
 - **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
-- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is `Timestamp(Millisecond, UTC)` (Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark, Trino and ClickHouse read it as a timestamp) and keeps sub-second block times where Firehose provides them; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is `Timestamp(Millisecond, UTC)` (Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark, Trino and ClickHouse read it as a timestamp) and keeps sub-second block times where Firehose provides them; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only to route rows to a `date=` partition. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; restarts from the authoritative output checkpoint
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
-- **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
+- **Date partitions** — every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`, read by DuckDB and Polars as the table's `date` column ([engine compatibility](#engine-compatibility))
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
@@ -127,7 +128,6 @@ cargo build --release --workspace
   --start-block 200000000 \
   --stop-block 200001000 \
   --output './output/{chain}' \
-  --partition date \
   --compression zstd
 
 # Or use an explicit endpoint directly
@@ -136,7 +136,6 @@ cargo build --release --workspace
   --start-block 200000000 \
   --stop-block 200001000 \
   --output './output/{chain}' \
-  --partition date \
   --compression zstd
 
 # Disable Solana vote transactions explicitly
@@ -163,8 +162,7 @@ cargo build --release --workspace
   --network mainnet \
   --start-block 20000000 \
   --stop-block 20001000 \
-  --output 's3://my-bucket/v1/{chain}' \
-  --partition date
+  --output 's3://my-bucket/v1/{chain}'
 
 # One bucket per network: the dataset is the bucket root
 # (s3://ethereum-mainnet/blocks/..., see single-network buckets)
@@ -172,8 +170,7 @@ cargo build --release --workspace
   --network mainnet \
   --start-block 20000000 \
   --stop-block 20001000 \
-  --output s3://ethereum-mainnet \
-  --partition date
+  --output s3://ethereum-mainnet
 
 # Stream Antelope blocks
 ./target/release/fireparq build \
@@ -187,8 +184,7 @@ cargo build --release --workspace
 ./target/release/fireparq build \
   --network solana-mainnet-beta \
   --start-block 250000000 \
-  --output './output/{chain}' \
-  --partition date
+  --output './output/{chain}'
 
 # Start live mode from the endpoint's first streamable block
 ./target/release/fireparq build \
@@ -273,8 +269,7 @@ docker run --rm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
-  --output /output \
-  --partition date
+  --output /output
 ```
 
 ## Cursor & Resume
@@ -476,8 +471,9 @@ endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingest
 
 ### Parameter Validation on Resume
 
-Protected output binds the original start and block-range anchor, chain and mapper
-family, exact table schemas and mapper epoch, identifier encoding, partitioning,
+Protected output binds the original start, chain and mapper family, exact table
+schemas and mapper epoch (which fixes the `date=YYYY-MM-DD` layout), identifier
+encoding,
 effective feature flags, output storage identity and mirror location. A mismatch
 stops before Blocks. Compression and flush thresholds may change without changing
 logical rows. Endpoint aliases do not relax storage-service binding.
@@ -517,7 +513,7 @@ Mutating commands hold common ownership over output, source and external cursor
 or artifact locations. Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
 there is one owner per bucket, and a second writing command on any prefix of it
-fails with `bucket ownership is held`, so run `merge`, `rollup` or `truncate`
+fails with `bucket ownership is held`, so run `merge` or `truncate`
 only when no `build` is writing to that bucket. It requires conditional-write
 support plus access to reserved control keys. Unresolved remote errors retain
 ownership without an expiry or automatic takeover, and the next run fails until
@@ -527,16 +523,15 @@ pending: the next `build` recovers that transaction before streaming. It keeps
 ownership after an uncertain request (timeout, lost acknowledgement, connection
 reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
 panic, and its error then says why and prints the exact `recovery status` and
-`recovery release` commands. `merge`, `rollup`, `truncate`, `partitions build`
+`recovery release` commands. `merge`, `truncate`, `partitions build`
 and `recovery` keep S3 ownership after any error and log the same guidance.
 `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
 
-Protected datasets allow guarded lossless merge and copy-only rollup into a
-separate unprotected output. Truncate, in-place rollup and source-deleting rollup
-are refused because they cannot reconcile the ingestion checkpoint. Maintenance
+Protected datasets allow guarded lossless merge. Truncate is refused because it
+cannot reconcile the ingestion checkpoint. Maintenance
 selected at a table/partition or parent root discovers every affected protected
 dataset and its external mirror before recovery or data reads.
 
@@ -609,7 +604,7 @@ flushes the remaining buffers and saves the final cursor.
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
 under the subcommands `partitions`, `scan`, `inspect`, `validate`, `verify`,
-`rollup`, `merge`, `truncate`, `recovery` and `completions`. The global flags
+`merge`, `truncate`, `recovery` and `completions`. The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
 
@@ -625,7 +620,7 @@ recovery knobs to dedicated advanced sections.
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
 | Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
-| Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](#output-directory-layout)); `--partition <PARTITION>` (default `none`), `--compression <COMPRESSION>` (default `zstd`) |
+| Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](#output-directory-layout)); every table is written as `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
 | Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
@@ -801,10 +796,10 @@ bucket). Query them with the [two-bucket union](#two-bucket-union).
 | Setting | Final writer (source of truth) | Live writer (chain head) |
 |---|---|---|
 | `FINAL_BLOCKS_ONLY` | `true` (the default) | `false` |
-| `PARTITION` | `date` | `hour` |
+| Partitions | `<table>/date=YYYY-MM-DD/` | `<table>/date=YYYY-MM-DD/` |
 | Range | Bounded daily runs: the same `START_BLOCK` on every run, `STOP_BLOCK` at the first block of the next UTC day | Live: no `STOP_BLOCK` |
 | Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` and/or `FLUSH_BLOCKS` |
-| After each run | `merge`, then `verify` | Nothing: no `merge`, `rollup` or `truncate` |
+| After each run | `merge`, then `verify` | Nothing: no `merge` or `truncate` |
 | Retention | Kept | S3 lifecycle expiration, for example after 2 days (48 hours), on table prefixes only |
 | `verify` | Yes | Not applicable |
 
@@ -820,14 +815,14 @@ partitions, then `verify` records their roots (the newest day stays `open` until
 the next run moves the frontier past it). A run that stops early only leaves
 more parts to merge the next day.
 
-**Live writer.** One unbounded `build` with `FINAL_BLOCKS_ONLY=false` and
-`PARTITION=hour`. For the first run, set `START_BLOCK` at or below the final
+**Live writer.** One unbounded `build` with `FINAL_BLOCKS_ONLY=false`. For the
+first run, set `START_BLOCK` at or below the final
 dataset's frontier so the union has no gap; later runs resume from authority.
 Rows reach the bucket at the next flush: `FLUSH_INTERVAL_SECS=N` flushes when a
 block arrives at least N seconds after the previous flush, `FLUSH_BLOCKS=K`
-after K blocks, whichever comes first (hour boundaries and the size triggers,
+after K blocks, whichever comes first (day boundaries and the size triggers,
 `FLUSH_BYTES` and `FLUSH_MEMORY_BYTES`, also flush). Lower values mean fresher
-data and more objects. Do not run `merge`, `rollup` or `truncate` on the live
+data and more objects. Do not run `merge` or `truncate` on the live
 bucket: they need its owner, which the running `build` holds, and the live
 parts are expired rather than compacted.
 
@@ -836,7 +831,7 @@ in it.
 
 - Live: about (flushes per day) × (tables with rows). Flushes per day are the
   larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
-  per day / `FLUSH_BLOCKS`, plus 24 hour boundaries and any size-triggered
+  per day / `FLUSH_BLOCKS`, plus the day boundary and any size-triggered
   flushes. Ethereum (7,200 blocks a day) with
   `FLUSH_INTERVAL_SECS=60` makes about 1,460 flushes a day: with 15 tables with
   rows, about 22,000 objects a day. `FLUSH_BLOCKS=1` instead makes about 108,000.
@@ -865,9 +860,8 @@ must never match control state:
   probes;
 - `_fireparq/`, which holds the cursor mirror, the partition index, the Merkle
   registry and verify reports;
-- `merge` and `rollup` journals (`_fireparq_merge.json`, `_fireparq_rollup.json`),
-  which live inside table directories. Never run those commands on a bucket
-  with an expiration rule.
+- `merge` journals (`_fireparq_merge.json`), which live inside table
+  directories. Never run `merge` on a bucket with an expiration rule.
 
 If bucket versioning is enabled, an expiration only adds a delete marker: add a
 noncurrent-version expiration (and expired delete marker cleanup) to reclaim the
@@ -983,7 +977,7 @@ only needed for custom deployment environments:
 Each `build` mapper flush commits its nonempty tables together before advancing
 output authority and the cursor mirror. `--flush-bytes` is a **target compressed
 size for the largest table's file**, defaulting to 32 MiB in Config and the
-`build`, `merge`, and `rollup` commands. Build starts with a conservative
+`build` and `merge` commands. Build starts with a conservative
 calibration flush, then learns the compressed-to-mapper-size ratio from actual
 committed file sizes. This prediction resets on restart; dry runs keep the
 conservative estimate because they produce no file receipts. Files can overshoot by
@@ -999,12 +993,12 @@ threshold before the next check. Compared with the former 32 MiB largest-table
 trigger, adaptive windows may use substantially more memory; lower this separate
 threshold to constrain estimated accumulation.
 
-`--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, partition changes, the
+`--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, UTC day changes, the
 memory threshold and clean end of input can all force files below the size
 target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
 like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
 threshold; increasing the file target does not bypass that threshold. `merge`
-and `rollup` use their own streaming writer and memory policies.
+uses its own streaming writer and memory policy.
 
 Within one flush, tables are encoded and published concurrently but under
 explicit bounds. `--flush-encode-concurrency` (default 2, 1-64) caps Parquet
@@ -1385,13 +1379,13 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 
 ```bash
 # Inspect a local file
-fireparq inspect ./output/blocks/year=2026/month=01/day=15/part-000001.parquet
+fireparq inspect ./output/blocks/date=2026-01-15/part-000001.parquet
 
 # Resolve a shorthand key against S3_BUCKET when no local path matches
 S3_BUCKET=my-bucket fireparq inspect evm/_fireparq/partitions.parquet
 
 # Inspect an S3 file
-fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/day=15/part-000001.parquet
+fireparq inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
 
 # Show only schema fields, including explicit nullability
 fireparq inspect s3://my-bucket/evm/_fireparq/partitions.parquet --schema-only
@@ -1483,7 +1477,7 @@ Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`,
 
 Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `_fireparq/merkle_roots.parquet` and in the report. Registries written by v0.7.x and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
 
-A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). `verify` only reads table data and takes no dataset ownership, so it runs while `build` writes the network. Partitions `build` may still write, decided from the dataset's authoritative ingestion state (or the legacy root `cursor.parquet` of an unprotected dataset), are reported as `open` and are not recorded. A partition that changes while `verify` reads it, or an unfinished `merge` or `rollup`, fails the run without writing anything; `verify` never recovers data. Registry writes are atomic locally and use one conditional put on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
+A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). `verify` only reads table data and takes no dataset ownership, so it runs while `build` writes the network. Partitions `build` may still write, decided from the dataset's authoritative ingestion state (or the legacy root `cursor.parquet` of an unprotected dataset), are reported as `open` and are not recorded. A partition that changes while `verify` reads it, or an unfinished `merge`, fails the run without writing anything; `verify` never recovers data. Registry writes are atomic locally and use one conditional put on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
@@ -1491,52 +1485,13 @@ See [Verify report contract](docs/verify-report-contract.md) for schema versioni
 
 See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for registry/report lifecycle, S3 publication guidance, and operational workflows.
 
-### `rollup` — Roll Up Partitions
-
-Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Validates each target partition before writing, then streams source batches into new files using the `--flush-bytes` target. The source path is a local path or an explicit S3 URI.
-
-```bash
-# Roll up minute-partitioned data into daily partitions, replacing the minute files
-fireparq rollup ./output/blocks/ -p date --delete-source
-
-# Roll up into a different output directory, keeping the source files
-fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
-
-# Roll up S3 data in place
-fireparq rollup s3://my-bucket/evm/blocks/ -p date --delete-source
-```
-
-The source path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `rollup` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
-
-Rollup holds one output part and one input batch instead of the whole target partition. The byte target limits the encoded output part; active row groups have a separate 32 MiB estimated-memory budget. A memory-bound row group is flushed within the same part; a new file starts when its encoded bytes reach the target. Checks occur between batches, so a wide row, Parquet page/dictionary, and codec overhead can exceed the target. `--flush-bytes 0` leaves the output part unlimited, while the row-group budget remains finite. A bounded validation pass reads all input data before the encoding pass so a damaged later file is rejected before that group writes anything. S3 reads use pinned byte ranges rather than downloading complete source objects; the two passes trade extra reads for bounded memory and early failure.
-
-Which files rollup reads, writes, and deletes:
-
-- Only `part-*.parquet` files below a partition finer than `--partition` are read (for `-p date`, files under `hour=`, `minute=`, or `second=` directories). Files already at the target granularity, including earlier rollup outputs, are never re-read or deleted. The same goes for files outside time partitions (`block_range=` or unpartitioned tables).
-- The `_fireparq/` artifact directory and legacy root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so rolling up a network root is safe.
-- Every run writes new, uniquely named files and never overwrites existing ones.
-- With `--delete-source`, outputs are named like ingestion parts (`part-<run>-NNNNNN.parquet`), and each source file is deleted once its target partition is written. A re-run after new data arrives only rolls up the new files.
-- Without `--delete-source`, outputs are named `part-rollup-<run>-NNNNNN.parquet` and carry the footer marker `firehose-parquet.rollup_copy=true`. They are copies of source files that are kept, so a re-run replaces the copies it wrote earlier in each target partition it rolls up (by name, or by the marker after `merge` renamed them), and leaves other files there alone. Because the re-run rebuilds those partitions from the source files that exist at that point, don't delete source files by hand between runs; use `--delete-source` instead.
-- An in-place rollup (no `--output`) requires `--delete-source`. Keeping the sources next to their rolled-up copy would store every row twice under the same root.
-- Files are only combined when they have the same columns (the same names, types, nullability, and order) and the same value-defining file metadata: chain name, block type, byte and block-id encodings, vote and failed-transaction coverage, synthetic timestamps, stream mode, and the rollup copy marker. A target partition with mixed files, such as files from two tool versions, with `--without-extended` toggled, or with hex and base58 block ids, is left untouched: nothing is written or deleted for it. The other partitions are still rolled up, and `rollup` exits non-zero with a list of the skipped partitions and how their files differ.
-- Each target partition is journaled in `_fireparq_rollup.json` in its output directory, like merge: the journal is created before any output, committed with the output names once every output is written and synced, and removed after earlier copies are cleaned up and (with `--delete-source`) the sources are deleted. Local outputs are written to a synced temporary file and linked into place, and source deletions are synced. If a run is interrupted, the next rollup into the same output finishes committed partitions (deleting their remaining sources) and deletes the partial outputs of uncommitted ones before it discovers sources, so a crash never leaves rows stored twice. A committed in-place partition can only be finished by rolling up the same source again. `merge` leaves partitions below an interrupted rollup alone until it is finished.
-- S3 source reads retry transient failures of the same pinned object version, like merge; a source that changed after listing still fails the run.
-
-| Flag | Default | Description |
-|---|---|---|
-| `-o, --output` | same as source | Output path (local or S3 URI). In-place rollups require `--delete-source` |
-| `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
-| `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
-| `--flush-bytes` | 32 MiB | Target compressed bytes per output part, with batch/codec overhead; 0 disables size-based closure |
-| `--delete-source` | `false` | Delete each source file once its target partition is written (required in place) |
-
 ### `merge` — Consolidate Part Files
 
-Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths and explicit S3 URIs.
+Consolidates multiple small part files within each `date=YYYY-MM-DD` partition directory into fewer, larger files. `merge` keeps the partition layout but reduces file count. Supports local paths and explicit S3 URIs.
 
 `merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. The `_fireparq/` artifact directory and legacy root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
 
-Parts are only merged when every part in the partition has the same columns (the same names, types, nullability, and order) and the same value-defining file metadata (see `rollup`). Merge checks each part's footer before writing anything. A partition with mixed parts, such as files from two tool versions, with `--without-extended` toggled, or with different block-id encodings, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too. Partitions at or below an output directory that still holds an interrupted rollup journal are also left alone and listed (merge exits non-zero); run that rollup again to finish it.
+Parts are only merged when every part in the partition has the same columns (the same names, types, nullability, and order) and the same value-defining file metadata: chain name, block type, byte and block-id encodings, vote and failed-transaction coverage, synthetic timestamps and stream mode. Merge checks each part's footer before writing anything. A partition with mixed parts, such as files from two tool versions, with `--without-extended` toggled, or with different block-id encodings, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
 ```bash
 # Merge small parts within each partition (default 32 MB target per file)
@@ -1564,7 +1519,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | `--flush-rows` | disabled | Flush merged output after this many rows; 0 disables |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
-> **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory. Rollup uses bounded source ranges instead.
+> **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory.
 
 Local interrupted merges recover under exclusive ownership:
 
@@ -1573,7 +1528,7 @@ Local interrupted merges recover under exclusive ownership:
 - S3 uses the persistent bucket-wide owner. An interrupted remote run retains ownership until an operator establishes writer cessation and provider-confirmed request quiescence and explicitly releases that exact owner. The subsequent guarded merge can recover journals written under this ownership protocol. Legacy S3 journals using the old expiring lock require separately reviewed migration and are refused automatically.
 - There is no timestamp takeover or best-effort conditional-write fallback. Conflicting local parent/child operations and all mutations in one S3 bucket fail immediately. See [the recovery limits and procedure](docs/audit/468-stage1-ownership.md).
 
-> **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files. They only combine files whose value-defining keys agree, so the preserved labels describe every row. Rollup copies add `firehose-parquet.rollup_copy=true`; merge keeps it.
+> **Metadata preservation:** `merge` preserves Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files. It only combines files whose value-defining keys agree, so the preserved labels describe every row.
 
 ### `truncate` — Delete Parquet Files
 
@@ -1588,49 +1543,45 @@ fireparq truncate ./output/blocks/ --dry-run
 # Delete all parquet files in a directory
 fireparq truncate ./output/blocks/ --yes
 
-# Delete one day (also matches legacy `date=15` directories)
-fireparq truncate ./output/blocks/ -p "year=2026/month=01/day=15" --yes
+# Delete one day
+fireparq truncate ./output/blocks/ -p date=2026-01-15 --yes
 
 # Delete one day in every table of a network root
-fireparq truncate ./output/mainnet/ -p "year=2026/month=01/day=15" --yes
+fireparq truncate ./output/mainnet/ -p date=2026-01-15 --yes
 
-# Delete January 2026 on S3 (filters on different keys must all match)
-fireparq truncate s3://bucket/evm/blocks/ -p year=2026 -p month=01 --yes
+# Delete January 2026 on S3
+fireparq truncate s3://bucket/evm/blocks/ -p "date=2026-01-*" --yes
 
-# Delete two days (filters on the same key match either one)
-fireparq truncate ./output/blocks/ -p "year=2026/month=01/day=01" -p "year=2026/month=01/day=02" --yes
+# Delete two days (repeated filters match either one)
+fireparq truncate ./output/blocks/ -p date=2026-01-01 -p date=2026-01-02 --yes
 
-# Delete all minute-level partitions (key-only filter)
-fireparq truncate ./output/blocks/ -p minute --yes
-
-# Glob pattern matching
-fireparq truncate s3://bucket/evm/blocks/ -p "year=2026/month=01/day=0*" --dry-run
+# Preview the 15th of every month
+fireparq truncate s3://bucket/evm/blocks/ -p "date=*-15" --dry-run
 ```
 
-Partition filters (`-p`, repeatable):
+Partition filters (`-p`, repeatable) select `date=YYYY-MM-DD` partition directories, the only partition key:
 
 | Filter | Matches |
 |---|---|
-| `month=01` | Files under a `month=01` directory. On its own that is January of every year; combine it with `-p year=2026` for one month. |
-| `minute` | Every value of the key (`minute=*`). |
-| `year=2026/month=01/day=15` | A partition path: files whose partition directories (the `key=value` directories below the given path) start with exactly these segments, in every table under the path. |
+| `date=2026-01-15` | Files in the `date=2026-01-15` directory of every table under the path. |
+| `date=2026-01-*` | One `*` glob over the date: a month (`2026-01-*`), a year (`2026-*`) or every 15th (`*-15`). |
 
-- Filters on different keys must all match (`-p year=2026 -p month=01` is January 2026 only). Filters on the same key match either value (`-p day=01 -p day=02`). Path filters match if any of them does, and must also satisfy the single-key filters.
-- Each segment may contain one `*` glob, such as `day=0*`. `day` also matches the legacy `date=DD` directories written by earlier releases.
+- Repeated filters match if any of them does.
+- A value that is neither a `YYYY-MM-DD` date nor a glob over one, such as `date=15`, is refused rather than matching nothing, and so is any other key or a path of several directories.
 - Filters only match partition directories of table data, so they never select `_fireparq/` or legacy root artifacts, even a partition-shaped path below them.
 
 The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `truncate` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
 
 | Flag | Default | Description |
 |---|---|---|
-| `-p, --partition` | *(none)* | Partition filter (repeatable, supports globs and partition paths) |
+| `-p, --partition` | *(none)* | `date=` partition filter (repeatable; a date or one `*` glob over it) |
 | `--dry-run` | `false` | List every file that would be deleted without removing anything |
 | `-y, --yes` | `false` | Delete the matched files. Without it, truncate prints a summary and exits non-zero |
 
 ### `recovery` — Ownership and Recovery State
 
-Mutating commands (`build`, `partitions build`, `merge`, `rollup` and
-`truncate`) hold dataset ownership; `verify` takes none. After an interrupted
+Mutating commands (`build`, `partitions build`, `merge` and `truncate`) hold
+dataset ownership; `verify` takes none. After an interrupted
 run, use `recovery` to inspect and finish that state. Each
 subcommand takes an existing local dataset root or an explicit
 `s3://bucket/prefix` URI: the root that `build --output` resolved to, with
@@ -2218,22 +2169,21 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.block_features` | `extended,base` |
 | `firehose-parquet.compression` | `zstd` |
 | `firehose-parquet.partition` | `date` |
-| `firehose-parquet.block_range_size` | `10000` |
 | `firehose-parquet.synthetic_timestamps` | `true` |
 | `firehose-parquet.synthetic_timestamp_policy` | `last_known_partition_routing` |
 | `firehose-parquet.with_votes` | `true` |
-| `firehose-parquet.rollup_copy` | `true` |
 
 Table files carry the pipeline, chain, encoding and compression keys.
-`partition` and `block_range_size` are written to `_fireparq/cursor.parquet` and
-`_fireparq/partitions.parquet`, and the cursor mirror also records `extended`,
-`final_blocks_only` and `include_failed_transactions`. `with_votes` appears on
-Solana output, the `synthetic_*` keys only when synthetic routing is used, and
-`rollup_copy` only on copies written by `rollup` without `--delete-source`.
+`partition` (always `date` for table output; the index granularity in the
+index) is written to `_fireparq/cursor.parquet` and
+`_fireparq/partitions.parquet`, which also records `block_range_size`, and the
+cursor mirror also records `extended`, `final_blocks_only` and
+`include_failed_transactions`. `with_votes` appears on Solana output, and the
+`synthetic_*` keys only when synthetic routing is used.
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
 
-For Solana time-based partitions, the `firehose-parquet.synthetic_*` metadata
+For Solana date partitions, the `firehose-parquet.synthetic_*` metadata
 keys mark routing as using a synthetic last-known timestamp anchor while
 canonical `timestamp` / `date` remain chain-sourced and nullable when
 `block_time` is missing.
@@ -2245,7 +2195,7 @@ Endpoint `block_id_encoding` remains a fallback only when the chain does not res
 ```python
 import pyarrow.parquet as pq
 
-meta = pq.read_metadata("output/blocks/year=2026/month=01/day=15/part-000001.parquet")
+meta = pq.read_metadata("output/blocks/date=2026-01-15/part-000001.parquet")
 for i in range(meta.metadata.count()):
     key = meta.metadata.keys()[i]
     if key.startswith("firehose-parquet."):
@@ -2255,13 +2205,13 @@ for i in range(meta.metadata.count()):
 ```sql
 -- DuckDB
 SELECT key, value
-FROM parquet_kv_metadata('output/blocks/year=2026/month=01/day=15/part-000001.parquet')
+FROM parquet_kv_metadata('output/blocks/date=2026-01-15/part-000001.parquet')
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
 ## Parquet Lookup Metadata
 
-Ingestion, merge and rollup write bounded Bloom filters for selected scalar
+Ingestion and merge write bounded Bloom filters for selected scalar
 hash, signature and account/address columns. Readers that support these filters
 can skip row groups for equality lookups; positive matches still require row
 filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
@@ -2329,10 +2279,10 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 │   ├── merkle_roots.parquet   # written by `verify`
 │   └── verify_runs/<run_id>/report.json
 ├── blocks/
-│   ├── year=2026/month=02/day=25/
+│   ├── date=2026-02-25/
 │   │   ├── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
 │   │   └── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
-│   └── year=2026/month=02/day=26/
+│   └── date=2026-02-26/
 │       └── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
 ├── transactions/
 │   └── ...
@@ -2342,7 +2292,7 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 
 `build` names each part deterministically from its stream, the first and last
 accepted event of its transaction, the transaction ID and the part index.
-`merge` and `rollup` write their own part names.
+`merge` writes its own part names.
 
 The dataset root holds only the table directories, `_fireparq/` and
 dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
@@ -2358,27 +2308,99 @@ was bound at the old default keeps `--cursor cursor.parquet`. Move the other
 files into `_fireparq/` (see the
 [runbook](docs/verifiability-artifact-runbook.md#moving-artifacts-into-_fireparq)).
 
-Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
+Every table is partitioned by UTC day: `build` writes
+`<table>/date=YYYY-MM-DD/part-*.parquet`, and there is no other layout. The
+`date=` directory has the type and the value of the table's `date` column
+(`Date32`): both come from the same whole-second block time, and `build` refuses
+to write a row whose `date` disagrees with its directory. A single file stays
+self-describing, and a Hive-partition-aware reader sees one `date` column that
+it can prune by. (Earlier releases wrote `year=YYYY/month=MM/` and a `date=DD`
+or `day=DD` day of the month; a `date=DD` directory was read over the `date`
+column by DuckDB and failed to parse in Polars. v1.0.0 reads and maintains only
+`date=YYYY-MM-DD`.)
 
-The day-of-month key is `day=`. Earlier releases wrote `date=DD`, which collides with the canonical `date` column under Hive partitioning: DuckDB's default `hive_partitioning` replaced the `date` DATE values with the day number, and Polars' `hive_partitioning=True` failed to parse `26` as a date. `rollup` and `truncate` still accept legacy `date=` directories.
+### Querying with DuckDB and Polars
 
-Query a dataset with its partition columns, e.g. in DuckDB:
+Glob one table: DuckDB does not skip `_` and `.` paths, and the tables have
+different schemas.
 
 ```sql
-SELECT date, day, count(*)
-FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is on by default
-GROUP BY ALL;
--- date: DATE (the canonical data column); year/month/day/hour: partition columns
+-- DuckDB. hive_partitioning turns date=YYYY-MM-DD into the DATE column `date`.
+SELECT date, count(*) AS blocks
+FROM read_parquet('output/mainnet/blocks/**/*.parquet', hive_partitioning = true)
+WHERE date = DATE '2026-02-25'   -- reads only blocks/date=2026-02-25/
+GROUP BY date;
 ```
+
+```python
+# Polars, from a local dataset root
+import datetime
+import polars as pl
+
+blocks = pl.scan_parquet("output/mainnet/blocks/**/*.parquet", hive_partitioning=True)
+day = blocks.filter(pl.col("date") == datetime.date(2026, 2, 25)).collect()
+
+# Polars, from a bucket with anonymous public read (no credentials, unsigned
+# requests); set the endpoint and region of the S3-compatible service
+remote = pl.scan_parquet(
+    "s3://ethereum-mainnet/blocks/**/*.parquet",
+    hive_partitioning=True,
+    storage_options={
+        "aws_endpoint_url": "https://storage.example.com",
+        "aws_region": "us-east-1",
+        "aws_skip_signature": "true",
+    },
+)
+```
+
+PyArrow infers a Hive key as a string and then fails to merge it with the
+`date` column; give it the partition schema:
+
+```python
+import pyarrow as pa
+import pyarrow.dataset as ds
+
+dataset = ds.dataset(
+    "output/mainnet/blocks",
+    format="parquet",
+    partitioning=ds.partitioning(pa.schema([("date", pa.date32())]), flavor="hive"),
+)
+```
+
+### Engine compatibility
+
+DuckDB and Polars are the supported engines. CI builds real EVM (final and
+non-final) and Solana output with a mock Firehose and reads it with both, at
+pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
+
+| Arrow type written | DuckDB | Polars | Notes |
+|---|---|---|---|
+| `UInt64`, `UInt32`, `UInt8` | `UBIGINT`, `UINTEGER`, `UTINYINT` | `UInt64`, `UInt32`, `UInt8` | Native unsigned types, never cast to signed |
+| `Timestamp(Millisecond, "UTC")` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='ms', time_zone='UTC')` | Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, sub-second values kept |
+| `Date32` (`date`, and the `date=` directory) | `DATE` | `Date` | Filters on `date` prune directories |
+| `Dictionary(Int32, Utf8)` enum labels | `VARCHAR` | `Categorical` | |
+| `List<T>` | `T[]`, for example `UTINYINT[]` | `List(T)`, for example `List(UInt8)` | |
+| `Binary` | `BLOB` | `Binary` | |
+
+- Both engines read a file's `date` from its directory when Hive partitioning is
+  on. fireparq writes the column and the directory from the same block time, so
+  they never disagree.
+- Non-final output adds `fork_step` (`VARCHAR` / `String`) and `stream_ordinal`
+  (`UBIGINT` / `UInt64`).
+- Spark and other JVM engines are not a target for this plain Parquet layout:
+  they read `UInt64` as `DECIMAL(20,0)` and reject a partition column (`date`)
+  that also appears in the data files. The planned Delta Lake output mode
+  ([#643](https://github.com/pinax-network/firehose-parquet/issues/643))
+  covers them.
 
 ### Single-network buckets
 
 With one bucket per network, the bucket root is the dataset root:
 
 ```bash
-OUTPUT=s3://<bucket> fireparq build --network mainnet --partition date
+OUTPUT=s3://<bucket> fireparq build --network mainnet
 # s3://<bucket>/.fireparq-ingest/, s3://<bucket>/_fireparq/cursor.parquet,
-# s3://<bucket>/<table>/year=YYYY/month=MM/day=DD/part-*.parquet
+# s3://<bucket>/<table>/date=YYYY-MM-DD/part-*.parquet
 ```
 
 - `partitions build --output s3://<bucket>` writes its index at
@@ -2416,7 +2438,7 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 | `timestamp` | Timestamp(Millisecond, UTC) | Block time. Parquet logical type `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`; keeps sub-second precision where the chain has it (e.g. Antelope's 500 ms blocks) |
 | `date` | Date32 | UTC day of the block time |
 
-Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
+The `date=YYYY-MM-DD` directory and `date` are derived from the whole-second block time, so a block at `23:59:59.500` lands in the same day as one at `23:59:59.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing; such rows are routed to the day of the last known block time.
 
 ## Output Encoding by Block Type
 
@@ -2498,7 +2520,7 @@ be missing or differ from canonical values. No removal is scheduled. Existing
 action JSON, nulls and enum labels remain unchanged.
 
 Use a new dataset or rebuild older ranges to populate the added columns. Schema
-union makes them null in old files; strict merge/rollup requires explicit schema
+union makes them null in old files; strict merge requires explicit schema
 reconciliation. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
 
 ## NEAR: Transactions, Receipts, Actions and Logs
@@ -2662,7 +2684,7 @@ in the directory you run `fireparq` from. Since #617:
 - Process environment variables and CLI flags win over the file.
 - Startup names the loaded file and the variables it supplied, never their
   values: an INFO `loaded env file` log line for `build`, `partitions build`,
-  `merge`, `rollup`, `truncate` and `verify`, and one stderr line for other
+  `merge`, `truncate` and `verify`, and one stderr line for other
   commands. A malformed file is an error that never echoes the offending line.
 
 ```bash
@@ -2791,12 +2813,12 @@ firehose-parquet/
 │       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
 │       │                                   #   inspect, validate and partitions/ helpers
 │       ├── ingest/                         # all-table transactions, output authority, cursor mirror, recovery
+│       ├── date_partition.rs               # the date=YYYY-MM-DD key, formatted and parsed in one place
 │       ├── writer.rs, writer/              # Arrow -> Parquet encoding, partition routing, protected parts
 │       ├── dataset_lock/, dataset_lock_s3.rs  # local directory and bucket-wide S3 ownership
 │       ├── durable_state.rs, durable_state_s3.rs  # versioned control records
 │       ├── recovery.rs                     # `fireparq recovery`
 │       ├── merge.rs, merge/, merge_journal.rs  # crash-safe merge engine and journals
-│       ├── rollup.rs, rollup/              # journaled two-pass rollup and S3 range reads
 │       ├── truncate.rs                     # `fireparq truncate`
 │       ├── maintenance/                    # shared compaction and discovery for maintenance commands
 │       ├── verify.rs, verify/              # `fireparq verify` and the merkle_v2 row encoding

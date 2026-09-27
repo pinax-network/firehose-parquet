@@ -349,7 +349,7 @@ mod tests {
     fn test_is_reserved_artifact_path_table_files() {
         assert!(!is_reserved_artifact_path(""));
         assert!(!is_reserved_artifact_path(
-            "blocks/year=2024/month=01/date=15/part-abc12345-000001.parquet"
+            "blocks/date=2024-01-15/part-abc12345-000001.parquet"
         ));
         assert!(!is_reserved_artifact_path("blocks/part-000001.parquet"));
         assert!(!is_reserved_artifact_path("my_cursor.parquet"));

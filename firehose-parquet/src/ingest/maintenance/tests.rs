@@ -3,9 +3,9 @@ use crate::dataset_lock::LocalOwnership;
 use crate::ingest::state::{tests::descriptor, RoutingPolicy};
 
 fn protected(root: &Path, mirror: MirrorBinding) -> StreamDescriptor {
-    fs::create_dir_all(root.join("blocks/100-199")).unwrap();
+    fs::create_dir_all(root.join("blocks/date=2023-11-14")).unwrap();
     let owner = LocalOwnership::acquire(&[root.to_owned()]).unwrap();
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = resolve_output_identity(root.to_str().unwrap(), &empty_aws()).unwrap();
     descriptor.mirror = mirror;
     let state = AuthorityState::initial(descriptor.clone()).unwrap();
@@ -34,7 +34,7 @@ async fn selected_partition_expands_to_whole_protected_root_and_external_mirror(
     let prepared = acquire(
         "fixture",
         vec![MaintenanceTarget::directory(
-            root.join("blocks/100-199").to_string_lossy(),
+            root.join("blocks/date=2023-11-14").to_string_lossy(),
         )],
         MaintenancePolicy::Artifacts,
         None,
@@ -90,40 +90,6 @@ async fn orphan_marker_refuses_reads_and_destructive_policy_precedes_recovery() 
     );
 }
 
-#[tokio::test]
-async fn rollup_refuses_protected_destination_and_source_deletion_but_allows_export() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = temp.path().join("source");
-    let output = temp.path().join("export");
-    protected(&source, MirrorBinding::Disabled);
-    for (destination, delete_source, allowed) in [
-        (&source, true, false),
-        (&output, true, false),
-        (&output, false, true),
-    ] {
-        let policy = MaintenancePolicy::Rollup {
-            source: source.to_string_lossy().into_owned(),
-            output: destination.to_string_lossy().into_owned(),
-            delete_source,
-        };
-        let result = acquire(
-            "rollup",
-            vec![
-                MaintenanceTarget::directory(source.to_string_lossy()),
-                MaintenanceTarget::directory(destination.to_string_lossy()),
-            ],
-            policy,
-            None,
-        )
-        .await;
-        assert_eq!(result.is_ok(), allowed);
-        if let Ok(prepared) = result {
-            prepared.ownership.release().await.unwrap();
-        }
-    }
-    assert!(!output.exists());
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn explicit_alias_resolves_root_but_nested_alias_is_refused() {
@@ -177,7 +143,7 @@ async fn remote_discovery_uses_components_and_includes_ancestors_descendants() {
         .unwrap();
     let owner = DatasetOwnership::from_remote_for_test("bucket", remote);
     let selected = BTreeSet::from([MaintenanceTarget::directory(
-        "s3://bucket/one/blocks/100-199",
+        "s3://bucket/one/blocks/date=2023-11-14",
     )]);
     assert_eq!(
         discover_markers(&owner, &selected).await.unwrap(),
@@ -211,7 +177,7 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
         }
     };
     put(".fireparq-ingest/state.json").await;
-    put("blocks/day=1/part-v1-a.parquet").await;
+    put("blocks/date=2024-01-01/part-v1-a.parquet").await;
     let remote = S3Ownership::acquire(store.clone(), "fixture", vec![String::new()])
         .await
         .unwrap();
@@ -219,7 +185,7 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     for selected in [
         "s3://bucket",
         "s3://bucket/blocks",
-        "s3://bucket/blocks/day=1",
+        "s3://bucket/blocks/date=2024-01-01",
     ] {
         let targets = BTreeSet::from([MaintenanceTarget::directory(selected)]);
         assert_eq!(
@@ -255,11 +221,11 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
         },
     );
     for destination in [
-        root.join("blocks/100-199/part-000001.parquet"),
+        root.join("blocks/date=2023-11-14/part-000001.parquet"),
         mirror,
         root.join("cursor.parquet"),
         root.join("_fireparq/cursor.parquet"),
-        root.join("blocks/100-199/_fireparq_merge.json"),
+        root.join("blocks/date=2023-11-14/_fireparq_merge.json"),
     ] {
         let result = acquire(
             "verify",
@@ -298,7 +264,7 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
         prepared.ownership.release().await.unwrap();
         assert!(!destination.exists());
     }
-    let input = root.join("blocks/100-199/part-000001.parquet");
+    let input = root.join("blocks/date=2023-11-14/part-000001.parquet");
     fs::write(&input, b"selected input").unwrap();
     let prepared = acquire(
         "verify",
@@ -323,7 +289,7 @@ fn zero_pending(descriptor: &StreamDescriptor) -> crate::ingest::state::PendingT
     let mut frontier = AcceptedFrontier::resume(&authority.checkpoint);
     let ordinal = frontier.receive(event(100, 1)).unwrap();
     frontier
-        .accept(ordinal, routing(RoutingPolicy::DirectV1))
+        .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
         .unwrap();
     PendingTransaction::prepare(
         &authority,
@@ -335,7 +301,7 @@ fn zero_pending(descriptor: &StreamDescriptor) -> crate::ingest::state::PendingT
                 table: table.clone(),
                 rows: 0,
                 schema_sha256: digest.clone(),
-                partition: "100-199".into(),
+                partition: String::new(),
             })
             .collect(),
         PartCompression::Zstd,
@@ -347,7 +313,7 @@ fn interrupted_merge(
     stream: Option<&crate::ingest::state::Digest>,
 ) -> crate::merge_journal::Journal {
     use crate::merge_journal::{Journal, LocalPartition, PartitionFiles, RunContext};
-    let partition = root.join("blocks/100-199");
+    let partition = root.join("blocks/date=2023-11-14");
     fs::create_dir_all(&partition).unwrap();
     fs::write(partition.join("part-000001.parquet"), b"original").unwrap();
     fs::write(
@@ -399,7 +365,9 @@ async fn pending_ingestion_and_merge_coexistence_refuses_before_any_cleanup() {
         fs::read(root.join(CONTROL_DIRECTORY).join("pending.json")).unwrap(),
         before
     );
-    assert!(root.join("blocks/100-199/part-000002.parquet").exists());
+    assert!(root
+        .join("blocks/date=2023-11-14/part-000002.parquet")
+        .exists());
 }
 
 #[tokio::test]
@@ -416,9 +384,11 @@ async fn bound_merge_recovers_before_artifact_reads_and_unbound_merge_is_refused
     )
     .await
     .is_err());
-    assert!(root.join("blocks/100-199/part-000002.parquet").exists());
+    assert!(root
+        .join("blocks/date=2023-11-14/part-000002.parquet")
+        .exists());
     fs::remove_file(
-        root.join("blocks/100-199")
+        root.join("blocks/date=2023-11-14")
             .join(crate::merge_journal::JOURNAL_FILE),
     )
     .unwrap();
@@ -426,16 +396,18 @@ async fn bound_merge_recovers_before_artifact_reads_and_unbound_merge_is_refused
     let prepared = acquire(
         "verify",
         vec![MaintenanceTarget::directory(
-            root.join("blocks/100-199").to_string_lossy(),
+            root.join("blocks/date=2023-11-14").to_string_lossy(),
         )],
         MaintenancePolicy::Artifacts,
         None,
     )
     .await
     .unwrap();
-    assert!(!root.join("blocks/100-199/part-000002.parquet").exists());
+    assert!(!root
+        .join("blocks/date=2023-11-14/part-000002.parquet")
+        .exists());
     assert_eq!(
-        fs::read(root.join("blocks/100-199/part-000001.parquet")).unwrap(),
+        fs::read(root.join("blocks/date=2023-11-14/part-000001.parquet")).unwrap(),
         b"original"
     );
     prepared.ownership.release().await.unwrap();
@@ -449,7 +421,7 @@ async fn legacy_merge_is_recovered_without_creating_ingestion_authority() {
         "verify",
         vec![MaintenanceTarget::input(
             temp.path()
-                .join("blocks/100-199/part-000001.parquet")
+                .join("blocks/date=2023-11-14/part-000001.parquet")
                 .to_string_lossy(),
         )
         .unwrap()],
@@ -462,16 +434,14 @@ async fn legacy_merge_is_recovered_without_creating_ingestion_authority() {
     assert!(!temp.path().join(CONTROL_DIRECTORY).exists());
     assert!(!temp
         .path()
-        .join("blocks/100-199/part-000002.parquet")
+        .join("blocks/date=2023-11-14/part-000002.parquet")
         .exists());
     prepared.ownership.release().await.unwrap();
 }
 
+/// A protected root with blocks 100 and 101 committed in two transactions, both in
+/// `blocks/date=2023-11-14/`.
 async fn committed_dataset(root: &Path) -> StreamDescriptor {
-    committed_dataset_with_time(root, false).await
-}
-
-async fn committed_dataset_with_time(root: &Path, timed: bool) -> StreamDescriptor {
     use crate::config::{BlockMetadata, Compression};
     use crate::ingest::{
         frontier::AcceptedFrontier,
@@ -488,22 +458,16 @@ async fn committed_dataset_with_time(root: &Path, timed: bool) -> StreamDescript
     };
     use std::{collections::HashMap, sync::Arc};
     fs::create_dir_all(root).unwrap();
-    let mut fields = vec![
+    let schema = Arc::new(Schema::new(vec![
         Field::new("block_num", DataType::UInt64, false),
         Field::new("value", DataType::UInt64, false),
-    ];
-    if timed {
-        fields.push(Field::new(
+        Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
-        ));
-    }
-    let schema = Arc::new(Schema::new(fields));
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
-    if timed {
-        descriptor.partition = crate::ingest::state::PartitionPolicy::Hour;
-    }
+        ),
+    ]));
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = resolve_output_identity(root.to_str().unwrap(), &empty_aws()).unwrap();
     descriptor.tables = std::collections::BTreeMap::from([(
         "blocks".into(),
@@ -538,17 +502,13 @@ async fn committed_dataset_with_time(root: &Path, timed: bool) -> StreamDescript
         event.source_timestamp = Some(timestamp);
         let ordinal = frontier.receive(event).unwrap();
         frontier
-            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
-        let mut columns: Vec<Arc<dyn Array>> = vec![
+        let columns: Vec<Arc<dyn Array>> = vec![
             Arc::new(UInt64Array::from(vec![number])),
             Arc::new(UInt64Array::from(vec![number * 2])),
+            Arc::new(TimestampMillisecondArray::from(vec![timestamp * 1000]).with_timezone("UTC")),
         ];
-        if timed {
-            columns.push(Arc::new(
-                TimestampMillisecondArray::from(vec![timestamp * 1000]).with_timezone("UTC"),
-            ));
-        }
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         let mut metadata = ParquetFileMetadata::new();
         metadata.add("chain", "mainnet");
@@ -559,8 +519,8 @@ async fn committed_dataset_with_time(root: &Path, timed: bool) -> StreamDescript
                 BlockMetadata {
                     min_block_number: number,
                     max_block_number: number,
-                    min_timestamp: timed.then_some(timestamp),
-                    max_timestamp: timed.then_some(timestamp),
+                    min_timestamp: Some(timestamp),
+                    max_timestamp: Some(timestamp),
                 },
                 Compression::Zstd,
                 metadata,
@@ -598,7 +558,7 @@ async fn real_protected_parts_merge_preserves_rows_and_frontier_without_source_r
         fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap(),
         state_before
     );
-    let path = root.join("blocks/block_range=100-200/part-000001.parquet");
+    let path = root.join("blocks/date=2023-11-14/part-000001.parquet");
     let builder = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path).unwrap()).unwrap();
     assert!(builder
         .metadata()
@@ -643,7 +603,7 @@ async fn real_protected_parts_merge_preserves_rows_and_frontier_without_source_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn public_truncate_and_rollup_refuse_a_selected_protected_table() {
+async fn public_truncate_refuses_a_selected_protected_table() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("data");
     committed_dataset(&root).await;
@@ -657,24 +617,12 @@ async fn public_truncate_and_rollup_refuse_a_selected_protected_table() {
         aws: None,
     });
     assert!(result.is_err());
-    let result = crate::rollup::run_rollup(&crate::rollup::RollupConfig {
-        source: table.clone(),
-        output: temp.path().join("export").to_string_lossy().into_owned(),
-        target: crate::rollup::RollupTarget::Date,
-        compression: crate::config::Compression::Zstd,
-        flush_bytes: 0,
-        delete_source: true,
-        aws: None,
-        cache_control: String::new(),
-    });
-    assert!(result.is_err());
-    assert!(!temp.path().join("export").exists());
     assert_eq!(
         fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap(),
         before
     );
     assert_eq!(
-        fs::read_dir(root.join("blocks/block_range=100-200"))
+        fs::read_dir(root.join("blocks/date=2023-11-14"))
             .unwrap()
             .count(),
         2
@@ -719,7 +667,7 @@ async fn remote_merge_recovery_at(prefix: &str) {
             format!("{prefix}/{relative}")
         })
     };
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = identity.clone();
     let remote = ownership.remote("bucket").unwrap();
     S3StateStore::new(remote, prefix)
@@ -746,7 +694,7 @@ async fn remote_merge_recovery_at(prefix: &str) {
     ] {
         store
             .put(
-                &key(&format!("blocks/block_range=100-200/{name}")),
+                &key(&format!("blocks/date=2023-11-14/{name}")),
                 bytes.into(),
             )
             .await
@@ -761,17 +709,17 @@ async fn remote_merge_recovery_at(prefix: &str) {
         .unwrap();
     assert!(matches!(
         store
-            .head(&key("blocks/block_range=100-200/part-000002.parquet"))
+            .head(&key("blocks/date=2023-11-14/part-000002.parquet"))
             .await,
         Err(object_store::Error::NotFound { .. })
     ));
     assert!(store
-        .head(&key("blocks/block_range=100-200/part-000001.parquet"))
+        .head(&key("blocks/date=2023-11-14/part-000001.parquet"))
         .await
         .is_ok());
     assert!(matches!(
         store
-            .head(&key(&format!("blocks/block_range=100-200/{JOURNAL_FILE}")))
+            .head(&key(&format!("blocks/date=2023-11-14/{JOURNAL_FILE}")))
             .await,
         Err(object_store::Error::NotFound { .. })
     ));
@@ -830,85 +778,6 @@ async fn ingestion_target_refuses_nested_authority_before_creating_any_path() {
     assert!(!temp.path().join(CONTROL_DIRECTORY).exists());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn protected_copy_rollup_keeps_source_frontier_and_exports_no_transaction_receipt() {
-    use arrow::array::{TimestampMillisecondArray, UInt64Array};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("source");
-    let export = temp.path().join("export");
-    committed_dataset_with_time(&root, true).await;
-    let state = fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap();
-    crate::rollup::run_rollup(&crate::rollup::RollupConfig {
-        source: root.to_string_lossy().into_owned(),
-        output: export.to_string_lossy().into_owned(),
-        target: crate::rollup::RollupTarget::Date,
-        compression: crate::config::Compression::Zstd,
-        flush_bytes: 0,
-        delete_source: false,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .unwrap();
-    assert_eq!(
-        fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap(),
-        state
-    );
-    assert_eq!(
-        fs::read_dir(root.join("blocks/year=2023/month=11/day=14/hour=22"))
-            .unwrap()
-            .count(),
-        2
-    );
-    let files: Vec<_> = fs::read_dir(export.join("blocks/year=2023/month=11/day=14"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(files.len(), 1);
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(fs::File::open(&files[0]).unwrap()).unwrap();
-    assert!(builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .unwrap()
-        .iter()
-        .all(|kv| !kv.key.starts_with("fireparq.ingest.")));
-    assert!(builder
-        .schema()
-        .metadata()
-        .keys()
-        .all(|key| !key.starts_with("fireparq.ingest.")));
-    let mut rows = Vec::new();
-    for batch in builder.build().unwrap() {
-        let batch = batch.unwrap();
-        let numbers = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let values = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let time = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            rows.push((numbers.value(i), values.value(i), time.value(i)));
-        }
-    }
-    rows.sort();
-    assert_eq!(
-        rows,
-        vec![(100, 200, 1_700_000_000_000), (101, 202, 1_700_000_001_000)]
-    );
-    assert!(!export.join(CONTROL_DIRECTORY).exists());
-}
-
 #[tokio::test]
 async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_guard() {
     use crate::ingest::{
@@ -919,12 +788,12 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
         },
     };
     use crate::{
-        config::{BlockMetadata, Compression, Partition},
+        config::{BlockMetadata, Compression},
         writer::{protected::PreparedFlush, ParquetFileMetadata},
     };
     use arrow::{
-        array::UInt64Array,
-        datatypes::{DataType, Field, Schema},
+        array::{TimestampMillisecondArray, UInt64Array},
+        datatypes::{DataType, Field, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
     use std::{collections::HashMap, sync::Arc};
@@ -949,7 +818,7 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
         let mut frontier = AcceptedFrontier::resume(&authority.checkpoint);
         let ordinal = frontier.receive(event(102, 1)).unwrap();
         frontier
-            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
         let mut pending = PendingTransaction::prepare(
             &authority,
@@ -958,7 +827,7 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
                 table: "blocks".into(),
                 rows: 1,
                 schema_sha256: descriptor.tables["blocks"].clone(),
-                partition: "block_range=100-200".into(),
+                partition: "date=2023-11-14".into(),
             }],
             PartCompression::Zstd,
         )
@@ -966,12 +835,20 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
         let schema = Arc::new(Schema::new(vec![
             Field::new("block_num", DataType::UInt64, false),
             Field::new("value", DataType::UInt64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            ),
         ]));
         let batch = RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(UInt64Array::from(vec![102])),
                 Arc::new(UInt64Array::from(vec![204])),
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![1_700_000_002_000]).with_timezone("UTC"),
+                ),
             ],
         )
         .unwrap();
@@ -987,15 +864,11 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
                 .iter()
                 .map(|part| crate::ingest::parts::writer_plan(&pending, part))
                 .collect(),
-            Partition::BlockRange {
-                size: 100,
-                start_block: Some(100),
-            },
             BlockMetadata {
                 min_block_number: 102,
                 max_block_number: 102,
-                min_timestamp: None,
-                max_timestamp: None,
+                min_timestamp: Some(1_700_000_002),
+                max_timestamp: Some(1_700_000_002),
             },
             Compression::Zstd,
             ParquetFileMetadata::new(),

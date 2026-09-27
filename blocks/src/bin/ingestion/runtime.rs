@@ -22,9 +22,8 @@ impl MapperState {
         let config = &setup.config;
         let sizing = FlushSizing::new(config.flush_bytes, config.flush_memory_bytes)?;
         let block_type = setup.block_type;
-        let use_synthetic_partition_routing = block_type.is_some_and(|kind| {
-            use_last_known_timestamp_partition_routing(kind, &config.partition)
-        });
+        let use_synthetic_partition_routing =
+            block_type.is_some_and(use_last_known_timestamp_partition_routing);
         let genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
         let mut timestamp_routing = TimestampRouting::new(use_synthetic_partition_routing);
         if let Some(kind) = block_type {
@@ -33,7 +32,6 @@ impl MapperState {
                 setup.existing_cursor_state.as_ref(),
                 args.cursor_override,
                 kind,
-                &config.partition,
             );
         }
         let mut current_file_metadata = ParquetFileMetadata::new();
@@ -239,7 +237,6 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             initial_cursor_encoding.as_ref(),
             &self.setup.config.endpoint,
             self.setup.config.compression,
-            &self.setup.config.partition,
             &self.setup.endpoint_info,
             self.state.extended,
             self.setup.config.final_blocks_only,
@@ -490,7 +487,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             let mut meta = meta;
             maybe_add_with_votes_metadata(&mut meta, detected, self.setup.with_votes);
             let detected_uses_synthetic_partition_routing =
-                use_last_known_timestamp_partition_routing(detected, &self.setup.config.partition);
+                use_last_known_timestamp_partition_routing(detected);
             maybe_add_synthetic_timestamp_metadata(
                 &mut meta,
                 detected,
@@ -503,7 +500,6 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 Some(&encode_bytes),
                 &self.setup.config.endpoint,
                 self.setup.config.compression,
-                &self.setup.config.partition,
                 &self.setup.endpoint_info,
                 self.state.extended,
                 self.setup.config.final_blocks_only,
@@ -521,7 +517,6 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.setup.existing_cursor_state.as_ref(),
                 self.args.cursor_override,
                 detected,
-                &self.setup.config.partition,
             );
             self.state.mapper = Some(detected.create_mapper(MapperOptions {
                 extended: self.state.extended,
@@ -547,18 +542,15 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         let ts = identity.timestamp;
         // Nullable-timestamp (Solana) blocks may have no timestamp; skip validation.
         if !self.state.nullable_timestamps {
-            validate_block_timestamp(block_number, ts, &self.setup.config.partition)?;
+            validate_block_timestamp(block_number, ts)?;
         }
         let has_timestamp = ts != 0;
 
-        // Flush the mapper at partition boundaries to ensure each flush
-        // produces batches belonging to exactly one partition.
+        // Flush the mapper at date boundaries to ensure each flush produces
+        // batches belonging to exactly one `date=YYYY-MM-DD` partition.
         // See: https://github.com/pinax-network/firehose-parquet/issues/110
-        let new_partition_key = self
-            .setup
-            .config
-            .partition
-            .partition_key(block_number, ts)?;
+        let new_partition_key =
+            Some(firehose_parquet::date_partition::DatePartition::from_timestamp(ts)?.path());
         if let Some(ref new_key) = new_partition_key {
             let partition_changed = self
                 .window

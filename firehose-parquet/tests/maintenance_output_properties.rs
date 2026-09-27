@@ -1,4 +1,4 @@
-//! Merge and rollup outputs carry the shared #519 lookup writer properties:
+//! Merge outputs carry the shared #519 lookup writer properties:
 //! explicit compression, bounded row groups, Bloom filters on scalar lookup
 //! columns only, no streaming sort assertion, and preserved chain metadata.
 //!
@@ -14,7 +14,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::config::Compression;
 use firehose_parquet::merge::{run_merge, MergeConfig};
-use firehose_parquet::rollup::{run_rollup, RollupConfig, RollupTarget};
 use firehose_parquet::writer::properties::{for_schema, ROW_GROUP_ROWS};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -22,7 +21,7 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 
-/// Two parts of this size give a merged/rolled-up file that needs two row
+/// Two parts of this size give a merged file that needs two row
 /// groups under the shared cap, but one under Parquet's 1M-row default.
 const PART_ROWS: usize = ROW_GROUP_ROWS / 2 + 1_000;
 const LOOKUP_COLUMNS: [&str; 2] = ["tx_hash", "address"];
@@ -224,7 +223,7 @@ fn expected_rows() -> RecordBatch {
 #[test]
 fn merge_output_carries_shared_lookup_properties() {
     let root = tempfile::tempdir().unwrap();
-    let partition = root.path().join("blocks/year=2024/month=01/day=15");
+    let partition = root.path().join("blocks/date=2024-01-15");
     write_source(&partition.join("part-000001.parquet"), &part(0));
     write_source(&partition.join("part-000002.parquet"), &part(PART_ROWS));
 
@@ -243,41 +242,6 @@ fn merge_output_carries_shared_lookup_properties() {
     assert_eq!(result.files_written, 1);
 
     let outputs = parquet_files(&partition);
-    assert_eq!(outputs.len(), 1, "{outputs:?}");
-    assert_lookup_properties(&outputs[0], &expected_rows());
-}
-
-#[test]
-fn rollup_output_carries_shared_lookup_properties() {
-    let source = tempfile::tempdir().unwrap();
-    let output = tempfile::tempdir().unwrap();
-    let day = "blocks/year=2024/month=01/day=15";
-    write_source(
-        &source
-            .path()
-            .join(format!("{day}/hour=14/part-000001.parquet")),
-        &part(0),
-    );
-    write_source(
-        &source
-            .path()
-            .join(format!("{day}/hour=15/part-000001.parquet")),
-        &part(PART_ROWS),
-    );
-
-    run_rollup(&RollupConfig {
-        source: source.path().to_string_lossy().into_owned(),
-        output: output.path().to_string_lossy().into_owned(),
-        target: RollupTarget::Date,
-        compression: Compression::Zstd,
-        flush_bytes: 0,
-        delete_source: false,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .unwrap();
-
-    let outputs = parquet_files(&output.path().join(day));
     assert_eq!(outputs.len(), 1, "{outputs:?}");
     assert_lookup_properties(&outputs[0], &expected_rows());
 }

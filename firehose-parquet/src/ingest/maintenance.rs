@@ -78,11 +78,6 @@ pub(crate) enum MaintenancePolicy {
     Recover,
     Artifacts,
     Truncate,
-    Rollup {
-        source: String,
-        output: String,
-        delete_source: bool,
-    },
 }
 
 // No Debug: the descriptor may carry private storage bindings in future versions.
@@ -117,7 +112,7 @@ pub(crate) async fn acquire(
         .await?;
         let planning = async {
             let markers = discover_markers(&ownership, &all_targets).await?;
-            enforce_policy(&markers, &policy, runtime_aws)?;
+            enforce_policy(&markers, &policy)?;
             let mut expanded = all_targets.clone();
             expanded.extend(
                 markers
@@ -405,35 +400,14 @@ fn reject_nested(roots: &BTreeSet<String>) -> Result<()> {
     }
     Ok(())
 }
-fn enforce_policy(
-    roots: &BTreeSet<String>,
-    policy: &MaintenancePolicy,
-    aws: &AwsConfig,
-) -> Result<()> {
-    match policy {
-        MaintenancePolicy::Truncate => ensure!(roots.is_empty(),"truncate is unsupported for protected datasets; it would invalidate the authoritative ingestion frontier"),
-        MaintenancePolicy::Rollup {source,output,delete_source} => {
-            let source=normalized_selection(source,aws)?; let output=normalized_selection(output,aws)?;
-            for root in roots {
-                ensure!(!path_contains(root,&output) && !path_contains(&output,root),"rollup output overlaps a protected dataset; choose a separate legacy export root");
-                ensure!(!*delete_source || (!path_contains(root,&source) && !path_contains(&source,root)),"destructive rollup is unsupported for protected sources; copy to a separate export root without deleting sources");
-            }
-        },
-        _ => {},
-    }
-    Ok(())
-}
-fn normalized_selection(path: &str, aws: &AwsConfig) -> Result<String> {
-    if !path.starts_with("s3://") && fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        let path = absolute_path(Path::new(path))?;
-        return Ok(
-            canonical_directory(path.parent().context("selection has no parent")?)?
-                .join(path.file_name().context("selection has no filename")?)
-                .to_string_lossy()
-                .into_owned(),
+fn enforce_policy(roots: &BTreeSet<String>, policy: &MaintenancePolicy) -> Result<()> {
+    if matches!(policy, MaintenancePolicy::Truncate) {
+        ensure!(
+            roots.is_empty(),
+            "truncate is unsupported for protected datasets; it would invalidate the authoritative ingestion frontier"
         );
     }
-    Ok(output_path(&resolve_output_identity(path, aws)?))
+    Ok(())
 }
 
 async fn load_roots(

@@ -174,8 +174,8 @@ impl ReadFailure {
 }
 
 /// Reads `range` of the listed snapshot of `object`, retrying transient failures of the same
-/// pinned version (never a freshly listed one) with bounded deadlines. Used by merge windows
-/// and rollup range reads.
+/// pinned version (never a freshly listed one) with bounded deadlines. Used by merge
+/// windows.
 pub(crate) async fn pinned_range(
     client: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,

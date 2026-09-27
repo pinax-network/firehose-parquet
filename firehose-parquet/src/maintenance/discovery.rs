@@ -28,7 +28,7 @@ pub(crate) struct LocalPolicy<'a> {
 }
 
 impl LocalPolicy<'_> {
-    /// Rollup and CLI scan/validate: read_dir errors propagate, including bad roots.
+    /// CLI scan/validate: read_dir errors propagate, including bad roots.
     pub(crate) const PARQUET: Self = Self {
         skip_non_directory: false,
         prune_controls: false,
@@ -60,7 +60,7 @@ impl<'a> LocalPolicy<'a> {
     }
 
     /// The same walk selecting any of several exact file names, so one pass
-    /// finds every kind of journal (verify refuses merge and rollup journals).
+    /// finds every listed kind of journal.
     pub(crate) fn named_any(names: &'a [&'a str]) -> Self {
         Self {
             prune_artifacts: true,
@@ -151,8 +151,8 @@ pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
 
 /// Existing unversioned whole-object read used by scan/inspect/validate and by
 /// verify's legacy `cursor.parquet` read. Do not use this for merge's reserved
-/// windows, rollup's pinned ranges, or verify's ETag-pinned ordered prefetch:
-/// those callers own materially different contracts.
+/// windows or verify's ETag-pinned ordered prefetch: those callers own
+/// materially different contracts.
 pub(crate) async fn read_object_bytes(
     store: &dyn ObjectStore,
     location: &ObjectPath,

@@ -149,91 +149,60 @@ fn source_file(rows: usize, marker: Option<Option<&str>>) -> bytes::Bytes {
 #[test]
 fn source_footer_choice_is_frozen_at_each_commands_existing_boundary() {
     // None is no footer list; Some(None) is an explicitly empty list. Merge
-    // freezes its first-Some selection when the first nonempty batch arrives;
-    // rollup freezes its first input even if that input has no rows or metadata.
+    // freezes its first-Some selection when the first nonempty batch arrives.
     let cases = [
         (
             vec![(0, None), (0, Some(Some("early"))), (1, Some(Some("late")))],
             Some("early"),
-            None,
         ),
-        (vec![(1, None), (1, Some(Some("late")))], None, None),
+        (vec![(1, None), (1, Some(Some("late")))], None),
         (
             vec![(0, Some(Some("first"))), (1, Some(Some("later")))],
             Some("first"),
-            Some("first"),
         ),
-        (vec![(0, Some(None)), (1, Some(Some("later")))], None, None),
-        (
-            vec![(0, None), (2, Some(Some("first")))],
-            Some("first"),
-            None,
-        ),
-        (vec![(0, None), (0, Some(Some("empty")))], None, None),
+        (vec![(0, Some(None)), (1, Some(Some("later")))], None),
+        (vec![(0, None), (2, Some(Some("first")))], Some("first")),
+        (vec![(0, None), (0, Some(Some("empty")))], None),
     ];
-    for (inputs, merge_expected, rollup_expected) in cases {
+    for (inputs, expected) in cases {
         let files: Vec<_> = inputs
             .iter()
             .map(|(rows, metadata)| source_file(*rows, *metadata))
             .collect();
         let expected_rows: usize = inputs.iter().map(|(rows, _)| rows).sum();
-        for (rollup, expected) in [(false, merge_expected), (true, rollup_expected)] {
-            let first = ParquetRecordBatchReaderBuilder::try_new(files[0].clone()).unwrap();
-            let mut encoder = if rollup {
-                Encoder::rollup(
-                    first.schema().clone(),
-                    Compression::None,
-                    first
-                        .metadata()
-                        .file_metadata()
-                        .key_value_metadata()
-                        .map(Vec::as_slice),
-                    0,
-                )
-            } else {
-                Encoder::merge(Compression::None, 0, None, 0)
-            };
-            let mut emitted = Vec::new();
-            let mut publish = |_, bytes, _| {
-                emitted.push(bytes);
-                Ok(())
-            };
-            let mut checked_rows = 0;
-            for bytes in &files {
-                let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone()).unwrap();
-                encoder
-                    .write_reader(builder, &mut publish, rollup.then_some(&mut checked_rows))
-                    .unwrap();
-            }
-            if !rollup {
-                assert_eq!(encoder.initialized(), expected_rows > 0);
-            }
-            encoder.finish(&mut publish).unwrap();
-            if rollup {
-                assert_eq!(checked_rows, expected_rows);
-            }
-            assert_eq!(emitted.len(), usize::from(expected_rows > 0));
-            for bytes in emitted {
-                let reader =
-                    ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
-                assert_eq!(
-                    reader.metadata().file_metadata().num_rows() as usize,
-                    expected_rows
-                );
-                let marker = reader
-                    .metadata()
-                    .file_metadata()
-                    .key_value_metadata()
-                    .unwrap()
-                    .iter()
-                    .find(|kv| kv.key == "audit-source")
-                    .and_then(|kv| kv.value.as_deref());
-                assert_eq!(marker, expected, "rollup={rollup}, inputs={inputs:?}");
-                assert_eq!(
-                    reader.schema().fields(),
-                    make_test_batch(0).schema().fields()
-                );
-            }
+        let mut encoder = Encoder::merge(Compression::None, 0, None, 0);
+        let mut emitted = Vec::new();
+        let mut publish = |_, bytes, _| {
+            emitted.push(bytes);
+            Ok(())
+        };
+        for bytes in &files {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone()).unwrap();
+            encoder.write_reader(builder, &mut publish).unwrap();
+        }
+        assert_eq!(encoder.initialized(), expected_rows > 0);
+        encoder.finish(&mut publish).unwrap();
+        assert_eq!(emitted.len(), usize::from(expected_rows > 0));
+        for bytes in emitted {
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
+            assert_eq!(
+                reader.metadata().file_metadata().num_rows() as usize,
+                expected_rows
+            );
+            let marker = reader
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .find(|kv| kv.key == "audit-source")
+                .and_then(|kv| kv.value.as_deref());
+            assert_eq!(marker, expected, "inputs={inputs:?}");
+            assert_eq!(
+                reader.schema().fields(),
+                make_test_batch(0).schema().fields()
+            );
         }
     }
 }
@@ -336,46 +305,8 @@ fn legacy_merge(
     parts
 }
 
-// Frozen from origin/main 9372f99 run_rollup_local / rollup_s3 (second pass): the
-// first file's stripped schema and footer, all batches counted and written.
-fn legacy_rollup(
-    files: &[bytes::Bytes],
-    compression: Compression,
-    flush_bytes: u64,
-) -> (Parts, usize) {
-    let first = ParquetRecordBatchReaderBuilder::try_new(files[0].clone())
-        .unwrap()
-        .with_batch_size(1024);
-    let schema = strip_transaction_schema(first.schema().clone());
-    let file_kv_metadata = first
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .cloned();
-    let props = writer_properties(compression, schema.as_ref(), file_kv_metadata.as_deref());
-    let mut writer = StreamingPartWriter::new(schema, props, flush_bytes, None, 0);
-    let mut parts = Parts::new();
-    let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
-        parts.push((part, bytes, part_rows));
-        Ok(())
-    };
-    let mut written_rows = 0usize;
-    for data in files {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())
-            .unwrap()
-            .with_batch_size(1024);
-        for batch in builder.build().unwrap() {
-            let batch = strip_transaction_metadata(batch.unwrap()).unwrap();
-            written_rows = written_rows.checked_add(batch.num_rows()).unwrap();
-            writer.write_batch(&batch, &mut publish).unwrap();
-        }
-    }
-    writer.finish(&mut publish).unwrap();
-    (parts, written_rows)
-}
-
 #[test]
-fn encoder_output_is_byte_identical_to_the_frozen_merge_and_rollup_loops() {
+fn encoder_output_is_byte_identical_to_the_frozen_merge_loop() {
     let inputs: Vec<(&str, Vec<bytes::Bytes>)> = vec![
         (
             "plain",
@@ -422,7 +353,7 @@ fn encoder_output_is_byte_identical_to_the_frozen_merge_and_rollup_loops() {
             };
             for data in files {
                 let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone()).unwrap();
-                encoder.write_reader(builder, &mut publish, None).unwrap();
+                encoder.write_reader(builder, &mut publish).unwrap();
             }
             let initialized = encoder.initialized();
             encoder.finish(&mut publish).unwrap();
@@ -431,41 +362,6 @@ fn encoder_output_is_byte_identical_to_the_frozen_merge_and_rollup_loops() {
                 actual == expected,
                 "merge {name} {flush_bytes} {flush_rows:?}"
             );
-        }
-        for (compression, flush_bytes) in [
-            (Compression::None, 0),
-            (Compression::Zstd, 16 * 1024),
-            (Compression::Snappy, 1),
-        ] {
-            let (expected, expected_rows) = legacy_rollup(files, compression, flush_bytes);
-            let first = ParquetRecordBatchReaderBuilder::try_new(files[0].clone()).unwrap();
-            let mut encoder = Encoder::rollup(
-                strip_transaction_schema(first.schema().clone()),
-                compression,
-                first
-                    .metadata()
-                    .file_metadata()
-                    .key_value_metadata()
-                    .map(Vec::as_slice),
-                flush_bytes,
-            );
-            let mut actual = Parts::new();
-            let mut publish = |part: u32, buf: Vec<u8>, rows: usize| -> Result<()> {
-                actual.push((part, buf, rows));
-                Ok(())
-            };
-            let mut rows = 0usize;
-            for data in files {
-                let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())
-                    .unwrap()
-                    .with_batch_size(1024);
-                encoder
-                    .write_reader(builder, &mut publish, Some(&mut rows))
-                    .unwrap();
-            }
-            encoder.finish(&mut publish).unwrap();
-            assert_eq!(rows, expected_rows, "rollup {name}");
-            assert!(actual == expected, "rollup {name} {flush_bytes}");
         }
     }
     // The receipt is stripped and ordinary metadata kept in every emitted part.

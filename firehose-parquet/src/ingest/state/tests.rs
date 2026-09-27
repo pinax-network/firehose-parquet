@@ -8,10 +8,7 @@ pub(crate) fn descriptor(policy: RoutingPolicy) -> StreamDescriptor {
         family: BlockFamily::Evm,
         bytes_encoding: "binary".into(),
         mapper_epoch: MAPPER_EPOCH.into(),
-        partition: PartitionPolicy::BlockRange {
-            size: 100,
-            anchor: 100,
-        },
+        partition: PartitionPolicy::Date,
         origin_start: 100,
         final_blocks_only: true,
         extended: false,
@@ -32,6 +29,26 @@ pub(crate) fn descriptor(policy: RoutingPolicy) -> StreamDescriptor {
             })
             .collect(),
     }
+}
+
+/// Block time of the protected-ingestion fixtures, 2023-11-14T22:13:20Z.
+pub(crate) const FIXTURE_SECONDS: i64 = 1_700_000_000;
+/// The `date=` partition directory of [`FIXTURE_SECONDS`].
+pub(crate) const FIXTURE_DATE: &str = "date=2023-11-14";
+
+/// The canonical `timestamp` column of `rows` fixture rows at [`FIXTURE_SECONDS`].
+pub(crate) fn fixture_timestamp(rows: usize) -> (arrow::datatypes::Field, arrow::array::ArrayRef) {
+    (
+        arrow::datatypes::Field::new(
+            "timestamp",
+            crate::traits::timestamp_millis_utc_type(),
+            false,
+        ),
+        std::sync::Arc::new(
+            arrow::array::TimestampMillisecondArray::from(vec![FIXTURE_SECONDS * 1_000; rows])
+                .with_timezone("UTC"),
+        ),
+    )
 }
 
 pub(crate) fn event(number: u64, step: i32) -> EventIdentity {
@@ -69,13 +86,17 @@ fn table_plan(authority: &AuthorityState, rows: u64) -> Vec<TablePlan> {
             table: table.clone(),
             rows,
             schema_sha256: schema.clone(),
-            partition: "100-199".into(),
+            partition: if rows == 0 {
+                String::new()
+            } else {
+                FIXTURE_DATE.into()
+            },
         })
         .collect()
 }
 
 fn pending(rows: u64) -> (AuthorityState, PendingTransaction) {
-    let authority = AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap();
+    let authority = AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap();
     let pending = PendingTransaction::prepare(
         &authority,
         prefix(&authority),
@@ -88,7 +109,7 @@ fn pending(rows: u64) -> (AuthorityState, PendingTransaction) {
 
 #[test]
 fn semantic_changes_bind_stream_while_table_insertion_order_does_not() {
-    let original = descriptor(RoutingPolicy::DirectV1);
+    let original = descriptor(RoutingPolicy::GenesisLookaheadV1);
     let expected = original.id().unwrap();
     let mut reordered = original.clone();
     reordered.tables = original
@@ -116,13 +137,7 @@ fn semantic_changes_bind_stream_while_table_insertion_order_does_not() {
                 canonical_root: "/tmp/other-dataset".into(),
             }
         }),
-        Box::new(|d| {
-            d.origin_start = 200;
-            d.partition = PartitionPolicy::BlockRange {
-                size: 100,
-                anchor: 200,
-            };
-        }),
+        Box::new(|d| d.origin_start = 200),
     ];
     for change in changes {
         let mut modified = original.clone();
@@ -132,24 +147,44 @@ fn semantic_changes_bind_stream_while_table_insertion_order_does_not() {
 }
 
 #[test]
-fn semantic_epoch_encoding_and_original_anchor_fail_closed() {
-    let mut d = descriptor(RoutingPolicy::DirectV1);
+fn semantic_epoch_and_encoding_fail_closed() {
+    let mut d = descriptor(RoutingPolicy::GenesisLookaheadV1);
     d.mapper_epoch = "unknown".into();
     assert!(d.id().is_err());
     d.mapper_epoch = MAPPER_EPOCH.into();
     d.bytes_encoding = "base64".into();
     assert!(d.id().is_err());
     d.bytes_encoding = "binary".into();
-    d.partition = PartitionPolicy::BlockRange {
-        size: 100,
-        anchor: 101,
-    };
-    assert!(d.id().is_err());
-    d.partition = PartitionPolicy::BlockRange {
-        size: 0,
-        anchor: 100,
-    };
-    assert!(d.id().is_err());
+    assert!(d.id().is_ok());
+}
+
+/// Epoch `v1` datasets wrote other partition layouts (`year=/month=/day=/`,
+/// `block_range=`, `hour=`, ...): their authority is refused with the reason,
+/// before any stream or maintenance mutation (#652).
+#[test]
+fn pre_date_layout_epoch_is_refused_with_its_layout() {
+    assert_eq!(MAPPER_EPOCH, "fireparq-mapping-v2");
+    let mut d = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    d.mapper_epoch = "fireparq-mapping-v1".into();
+    let error = d.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("semantic mapper epoch `fireparq-mapping-v1`")
+            && error.contains("<table>/date=YYYY-MM-DD/")
+            && error.contains("new, empty output root"),
+        "{error}"
+    );
+    // The recorded partition policy serializes as the date layout.
+    assert_eq!(
+        serde_json::to_value(&PartitionPolicy::Date).unwrap(),
+        serde_json::json!({"kind": "date"})
+    );
+    for removed in ["none", "hour", "minute", "second", "block_range"] {
+        assert!(
+            serde_json::from_value::<PartitionPolicy>(serde_json::json!({ "kind": removed }))
+                .is_err(),
+            "{removed}"
+        );
+    }
 }
 
 #[test]
@@ -184,6 +219,7 @@ fn plan_is_complete_sorted_deterministic_and_declares_zero_row_tables() {
     assert!(original == reordered);
     let mut tables = table_plan(&authority, 3);
     tables[0].rows = 0;
+    tables[0].partition = String::new();
     let mixed = PendingTransaction::prepare(
         &authority,
         original.prefix.clone(),
@@ -261,6 +297,8 @@ fn malformed_inventory_schema_partition_and_planned_paths_are_rejected() {
         PartCompression::Zstd
     )
     .is_err());
+    // Recovery republishes at the recorded partition, so it must be one
+    // `date=YYYY-MM-DD` directory, never another layout (#652).
     for path in [
         "../other",
         "/absolute",
@@ -268,6 +306,11 @@ fn malformed_inventory_schema_partition_and_planned_paths_are_rejected() {
         "x/./y",
         "x\\y",
         ".fireparq-ingest",
+        "",
+        "year=2023/month=11/day=14",
+        "date=14",
+        "block_range=100-200",
+        "date=2023-11-14/hour=22",
     ] {
         let mut tables = table_plan(&authority, 1);
         tables[0].partition = path.into();
@@ -282,6 +325,15 @@ fn malformed_inventory_schema_partition_and_planned_paths_are_rejected() {
             "{path}"
         );
     }
+    let mut tables = table_plan(&authority, 0);
+    tables[0].partition = "date=2023-11-14".into();
+    assert!(PendingTransaction::prepare(
+        &authority,
+        pending.prefix.clone(),
+        tables,
+        PartCompression::Zstd
+    )
+    .is_err());
     let mut tables = table_plan(&authority, 1);
     tables[0].schema_sha256 = Digest::hash("schema", &"foreign").unwrap();
     assert!(PendingTransaction::prepare(

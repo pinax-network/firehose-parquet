@@ -220,21 +220,6 @@ impl IngestionSetup {
             has_cursor = existing_cursor_state.is_some(),
             "resolved ingestion bounds"
         );
-        if let firehose_parquet::config::Partition::BlockRange { size, .. } = &mut config.partition
-        {
-            let explicit_start_block = args.common.start_block;
-            let effective_start_block = config.start_block;
-            validate_block_range_alignment(
-                explicit_start_block,
-                effective_start_block,
-                config.stop_block,
-                *size,
-            )?;
-            config
-                .partition
-                .set_block_range_start(effective_start_block);
-        }
-
         if chain_features.vote_transactions {
             log_solana_vote_mode(with_votes);
         }
@@ -347,7 +332,6 @@ impl IngestionSetup {
         {
             let mut labels = vec![
                 ("endpoint".to_string(), config.endpoint.clone()),
-                ("partition".to_string(), config.partition.to_string()),
                 ("compression".to_string(), config.compression.to_string()),
                 (
                     "bytes_encoding".to_string(),

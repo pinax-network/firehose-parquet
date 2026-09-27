@@ -295,7 +295,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity(path.to_str().unwrap(), &aws()).unwrap();
         let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
         require_initializable(&descriptor, &owner, &aws(), &mirror)
@@ -397,7 +397,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity(root.to_str().unwrap(), &aws()).unwrap();
         descriptor.mirror = MirrorBinding::Local {
             absolute_path: cursor.to_str().unwrap().into(),
@@ -500,7 +500,7 @@ mod tests {
             .head(&object_store::path::Path::from(OWNERSHIP_FILENAME))
             .await
             .is_ok());
-        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity("s3://data", &aws()).unwrap();
         let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
         require_initializable(&descriptor, &owner, &aws(), &mirror)
@@ -579,7 +579,7 @@ mod tests {
         .await
         .unwrap();
         let owner = DatasetOwnership::from_remote_for_test("data", remote);
-        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity("s3://data/chain", &aws()).unwrap();
         let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
         require_initializable(&descriptor, &owner, &aws(), &mirror)

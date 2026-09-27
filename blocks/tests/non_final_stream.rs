@@ -173,8 +173,6 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
                 "100",
                 "--stop-block",
                 "102",
-                "--partition",
-                "none",
                 "--flush-blocks",
                 "2",
                 "--output",
@@ -200,11 +198,11 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
         // `--output` is the dataset root.
         let root = output.clone();
         let mut values = BTreeMap::new();
-        for entry in std::fs::read_dir(root.join("blocks")).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|ext| ext != "parquet") {
-                continue;
-            }
+        for path in table_files(&root, "blocks") {
+            assert!(
+                path.parent().unwrap().ends_with("date=2023-11-14"),
+                "{path:?}"
+            );
             for batch in read_parquet(&path).unwrap() {
                 let numbers = batch
                     .column_by_name("block_num")
@@ -259,8 +257,9 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
 // ---------------------------------------------------------------------------
 
 const CHAIN: &str = "nonfinal-test";
-/// 2023-11-14 22:00:00 UTC, the first second of an hour partition.
-const HOUR: i64 = 1_699_999_200;
+/// 2023-11-14T23:00:00Z: `HOUR + 3_600` is midnight, where the next UTC day's
+/// `date=` partition starts.
+const HOUR: i64 = 1_700_002_800;
 const NEW: i32 = 1;
 const UNDO: i32 = 2;
 const FINAL: i32 = 3;
@@ -495,7 +494,7 @@ async fn finish(command: &mut tokio::process::Command) -> (bool, String, Vec<u8>
     );
     (output.status.success(), log, output.stdout)
 }
-/// A bounded `build` of the mock chain into `output`, hour partitions.
+/// A bounded `build` of the mock chain into `output` (date partitions).
 fn build(
     server: &ReplayServer,
     cwd: &Path,
@@ -508,7 +507,7 @@ fn build(
     command
         .args(["build", "--endpoint", &server.endpoint])
         .args(["--block-type", "evm", "--start-block", "100"])
-        .args(["--stop-block", &stop.to_string(), "--partition", "hour"])
+        .args(["--stop-block", &stop.to_string()])
         .args(["--flush-blocks", &flush_blocks.to_string(), "--output"])
         .arg(output)
         .arg(format!("--final-blocks-only={final_only}"));
@@ -699,7 +698,7 @@ fn readme_sql() -> Vec<String> {
 
 /// A reorg-heavy non-final history:
 /// NEW(A), UNDO(A), NEW(B) at 100; NEW(C), UNDO(C), NEW(C) at 101 (the next
-/// hour); NEW(D), UNDO(D) at 102, an unreplaced UNDO at the tip.
+/// day); NEW(D), UNDO(D) at 102, an unreplaced UNDO at the tip.
 const HISTORY: [Envelope; 8] = [
     envelope(100, 0xaa, NEW, HOUR + 3_598),
     envelope(100, 0xaa, UNDO, HOUR + 3_598),
@@ -876,7 +875,7 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
 /// window, outside fireparq's ownership. A running build (its next flushes and
 /// completion), `recovery status`, `recovery recover` and a restarted build
 /// (resume from authority, the next flushes) never read those parts, so they
-/// are unaffected when every part of an earlier hour disappears. Control state
+/// are unaffected when every part of an earlier day disappears. Control state
 /// under `.fireparq-ingest/` and the cursor mirror are left in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build() {
@@ -910,7 +909,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
         .spawn()
         .unwrap();
 
-    // Wait until the four blocks of the first hour are committed and mirrored.
+    // Wait until the four blocks of the first day are committed and mirrored.
     let cursor = root.join("_fireparq/cursor.parquet");
     let committed = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -923,21 +922,21 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
         }
     })
     .await;
-    assert!(committed.is_ok(), "first hour was never committed");
-    let hour_dirs: Vec<PathBuf> = ["blocks", "transactions"]
+    assert!(committed.is_ok(), "first day was never committed");
+    let day_dirs: Vec<PathBuf> = ["blocks", "transactions"]
         .iter()
         .map(|table| {
             let files = table_files(&root, table);
             assert_eq!(files.len(), 4, "{table}: {files:?}");
-            let hour = files[0].parent().unwrap().to_path_buf();
-            assert!(hour.ends_with("hour=22"), "{hour:?}");
-            assert!(files.iter().all(|file| file.parent().unwrap() == hour));
-            hour
+            let day = files[0].parent().unwrap().to_path_buf();
+            assert!(day.ends_with("date=2023-11-14"), "{day:?}");
+            assert!(files.iter().all(|file| file.parent().unwrap() == day));
+            day
         })
         .collect();
-    // The lifecycle rule expires the whole first hour of every table.
-    for hour in &hour_dirs {
-        std::fs::remove_dir_all(hour).unwrap();
+    // The lifecycle rule expires the whole first day of every table.
+    for day in &day_dirs {
+        std::fs::remove_dir_all(day).unwrap();
     }
     server.gate.add_permits(1);
     let output_log = running.wait_with_output();
@@ -951,7 +950,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(hour_dirs.iter().all(|hour| !hour.exists()));
+    assert!(day_dirs.iter().all(|day| !day.exists()));
     let ordinals = |table| {
         event_rows(&root, table)
             .into_iter()
@@ -979,7 +978,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
     server.assert_drained();
     assert_eq!(ordinals("blocks"), [5, 6, 7, 8]);
     assert_eq!(ordinals("transactions"), [5, 6, 7, 8]);
-    assert!(hour_dirs.iter().all(|hour| !hour.exists()));
+    assert!(day_dirs.iter().all(|day| !day.exists()));
     assert_eq!(
         load_cursor_parquet(&cursor)
             .unwrap()

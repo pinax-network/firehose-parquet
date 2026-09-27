@@ -30,7 +30,8 @@ Related docs:
     - `cli/partitions/{mod,io,queries}.rs`: partition models and vocabulary, strict v2 index IO and publication, and resolution/listing/sharding/completeness.
     - `cli/{tests,validate_tests}.rs`: CLI and validation regressions.
   - Configuration and endpoints:
-    - `src/config.rs`: pipeline `Config`, `Partition::partition_key`, `Compression` (including `zstd:<level>`) and receive-transport defaults.
+    - `src/config.rs`: pipeline `Config`, `Compression` (including `zstd:<level>`) and receive-transport defaults.
+    - `src/date_partition.rs`: the `date=YYYY-MM-DD` partition key, the only output layout (#652): `DatePartition` formats it from a block time, parses it strictly, and gives its `Date32` value; `is_date_value_pattern` checks `truncate -p date=` globs.
     - `src/networks.rs`, `src/networks_generated.rs`: built-in `--network` aliases (generated; do not edit) and `FIREHOSE_ENDPOINT_*` overrides.
     - `src/auth.rs`: Firehose credential selection by resolved provider host, and explicit env-var selectors.
     - `src/grpc.rs`, `src/grpc/{finality,finalized_range}.rs`: Firehose stream/fetch clients, shared authenticated transport, reconnect/back-off/timeouts, fatal-status classification, finalized-anchor proof and exact metadata traversal.
@@ -45,7 +46,7 @@ Related docs:
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
     - `maintenance.rs`: protected-root discovery and recovery before maintenance commands; `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
-    - `src/writer.rs`: Parquet encoding, partition directories (`ParquetTableWriter::partition_suffix`) and the unprotected low-level `OutputWriter` (not used by protected `build`).
+    - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time and `date` column must match that directory) and the unprotected low-level `OutputWriter` (not used by protected `build`).
     - `src/writer/protected.rs`, `src/writer/protected/verification.rs`: prepared complete parts, publication and exact receipt/schema verification; `src/writer/protected/budget.rs`: the `--flush-inflight-bytes` encoded-byte budget.
     - `src/writer/local.rs`: atomic, synced publication of one local part; `src/writer/properties.rs`: bounded Bloom filters, row-group limits and sort metadata shared by ingestion and maintenance.
     - `src/flush.rs`: adaptive compressed `--flush-bytes` targets and the summed `--flush-memory-bytes` trigger.
@@ -61,9 +62,8 @@ Related docs:
     - `src/s3/delete.rs`: single-attempt, bounded-concurrency maintenance deletes.
   - Maintenance and verification:
     - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, and bounded pinned S3 read windows.
-    - `src/rollup.rs`, `src/rollup/engine.rs`, `src/rollup/journal.rs`, `src/rollup/range_reader.rs`: `rollup`, its two-pass journaled group engine and recovery, the `_fireparq_rollup.json` record and pinned S3 range reads.
-    - `src/truncate.rs`: `truncate` planning (AND across keys, `--yes`) and deletion.
-    - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge/rollup encoder.
+    - `src/truncate.rs`: `truncate` planning (`date=` filters, `--yes`) and deletion.
+    - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge encoder.
     - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`.
     - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/partitions.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
     - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
@@ -82,7 +82,7 @@ Related docs:
   - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet.
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*` including `bench_ingestion_concurrency`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`).
-  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `partition_coverage.rs`, `partition_probe_failures.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
+  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `partition_coverage.rs`, `partition_probe_failures.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
 - `.env.example`: every environment variable the CLI reads, kept in sync by a test.
@@ -97,7 +97,7 @@ Related docs:
 4. Stream messages come from `grpc.rs`. `ingestion/runtime.rs` filters, orders and routes them; the chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and appends Arrow columns using `schema.rs`.
 5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `_fireparq/cursor.parquet` mirror.
 6. `metrics.rs` exposes counters, readiness and health.
-7. Maintenance (`merge`, `rollup`, `truncate`) runs the shared engines under the same ownership, after `ingest/maintenance.rs` recovers protected roots. `verify` reads without ownership, using `ingest/observe.rs` to find open partitions.
+7. Maintenance (`merge`, `truncate`) runs the shared engines under the same ownership, after `ingest/maintenance.rs` recovers protected roots. `verify` reads without ownership, using `ingest/observe.rs` to find open partitions.
 
 ## Where To Edit For X
 
@@ -120,7 +120,9 @@ Related docs:
 - Adjust per-family behavior (encodings, nullable timestamps, block gaps, extended/votes, failed-transaction defaults):
   - `blocks/src/chain.rs` (`ChainProfile`); ingestion reads these properties instead of comparing `block_type` strings.
 - Change partitioning or output file layout:
-  - `firehose-parquet/src/config.rs` (`Partition::partition_key`) and `firehose-parquet/src/writer.rs` (`ParquetTableWriter::partition_suffix`).
+  - `firehose-parquet/src/date_partition.rs` (the `date=YYYY-MM-DD` key) and `firehose-parquet/src/writer.rs` (`ParquetTableWriter::partition_suffix` and the partition contract).
+  - A layout change must advance `MAPPER_EPOCH` in `firehose-parquet/src/ingest/state.rs`, so protected roots of the old layout are refused instead of resumed into a mixed layout; `PendingTransaction::validate` checks recorded partitions against the layout.
+  - `blocks/tests/engine_compat.rs` reads real output with DuckDB and Polars.
   - Artifact locations (`_fireparq/`) and what walkers reserve: `firehose-parquet/src/artifacts.rs` only; the dataset root must hold only table directories, `_fireparq/` and dot-prefixed control state (`assert_dataset_root_layout` in `blocks/tests/ingestion_transactions.rs`).
   - `firehose-parquet/src/ingest/state.rs` (deterministic `part-v1-*` and `.fireparq-txn-*.tmp` names) and `firehose-parquet/src/writer/protected.rs` (staging, publication, receipt verification).
   - `blocks/src/bin/ingestion/runtime.rs` (flush windows and partition-boundary flushes) and `firehose-parquet/src/flush.rs` (size and memory triggers).
@@ -150,8 +152,7 @@ Related docs:
   - `firehose-parquet/src/cli/partitions/{io,queries}.rs` (v2 IO and strict queries).
   - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication).
   - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md`.
-- Change rollup/merge/truncate behavior:
-  - `firehose-parquet/src/rollup.rs`, `rollup/engine.rs`, `rollup/journal.rs`, `rollup/range_reader.rs`.
+- Change merge/truncate behavior:
   - `firehose-parquet/src/merge.rs`, `merge/engine.rs`, `merge_journal.rs`, `merge/read.rs`.
   - `firehose-parquet/src/truncate.rs`.
   - `firehose-parquet/src/maintenance/{compaction,discovery}.rs` for encoding, schema checks and discovery shared by several commands. Engine changes apply to local and S3 alike; storage-specific steps stay in each command's local and S3 hooks.
@@ -169,6 +170,7 @@ Related docs:
 - Real-path ingestion regressions: `blocks/tests/ingestion_transactions.rs` drives the built `fireparq` binary against a cursor-aware mock Firehose; prefer it over unit tests of helpers when a fix concerns what `build` commits
 - Regenerate the schema reference: `cargo run -p blocks --example dump_schemas`
 - README live-view SQL: `blocks/tests/non_final_stream.rs` runs the README "Non-final streams and reorgs" SQL in DuckDB when a CLI is found (`FIREPARQ_DUCKDB`, else `duckdb` on `PATH`); CI installs a pinned, checksum-verified CLI and sets `FIREPARQ_REQUIRE_DUCKDB`, so the check cannot be skipped there
+- Engine compatibility: `blocks/tests/engine_compat.rs` builds EVM (final and non-final) and Solana output and reads it with the DuckDB CLI (as above) and with Polars through the interpreter in `FIREPARQ_POLARS_PYTHON`; CI installs Polars from the hash-pinned `blocks/tests/engines/requirements.txt` (`pip install --require-hashes`) and sets `FIREPARQ_REQUIRE_POLARS`. Locally, for example: `uv venv /tmp/polars && uv pip install --python /tmp/polars/bin/python -r blocks/tests/engines/requirements.txt`, then `FIREPARQ_POLARS_PYTHON=/tmp/polars/bin/python cargo test -p blocks --test engine_compat`
 - Build release: `cargo build --release --workspace`
 - Run binary from source: `cargo run --bin fireparq -- --help`
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`
@@ -176,7 +178,7 @@ Related docs:
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
 - CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` plus the `advisories` job, which calls `advisories.yml`)
 - Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
-- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT`, `FIREPARQ_TEST_ROLLUP_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests. Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
+- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests. Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
 - Docker publish workflow: `.github/workflows/docker-publish.yml` (supports a build-only manual run)
 - Release assets workflow: `.github/workflows/release.yml` (supports a dry-run dispatch)
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`

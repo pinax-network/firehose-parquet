@@ -285,7 +285,7 @@ pub fn resolve_parquet_input_path_string(path: &str) -> String {
 }
 
 /// Resolves the path argument of a command that deletes or rewrites files (`truncate`,
-/// `merge`, `rollup`).
+/// `merge`).
 ///
 /// Unlike [`resolve_parquet_input_path_string`], a relative path that does not exist locally
 /// is never turned into `s3://$S3_BUCKET/<path>` (with `.env` auto-loaded, a typo would

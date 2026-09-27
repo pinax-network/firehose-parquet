@@ -4,7 +4,7 @@ use super::{
 };
 use arrow::{array::*, datatypes::Int32Type, record_batch::RecordBatch};
 use firehose_parquet::{
-    config::{BlockMetadata, Compression, Partition},
+    config::{BlockMetadata, Compression},
     encode::{encode_bytes, EncodeBytes},
     traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::{read_parquet, ParquetTableWriter},
@@ -117,7 +117,7 @@ fn roundtrip(table: &str, batch: &RecordBatch) {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
-    let mut writer = ParquetTableWriter::new(tmp.path(), Partition::None, Compression::Zstd);
+    let mut writer = ParquetTableWriter::new(tmp.path(), Compression::Zstd);
     let (path, _) = writer
         .write_batch(
             table,
@@ -125,8 +125,8 @@ fn roundtrip(table: &str, batch: &RecordBatch) {
             &BlockMetadata {
                 min_block_number: 0,
                 max_block_number: 0,
-                min_timestamp: None,
-                max_timestamp: None,
+                min_timestamp: Some(1_700_000_000),
+                max_timestamp: Some(1_700_000_000),
             },
         )
         .unwrap();

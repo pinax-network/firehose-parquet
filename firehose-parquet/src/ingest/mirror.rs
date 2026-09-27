@@ -534,14 +534,9 @@ fn expected_config(descriptor: &StreamDescriptor) -> BTreeMap<String, String> {
         BlockFamily::Beacon => "beacon",
     };
     let partition = match descriptor.partition {
-        PartitionPolicy::None => "none",
-        PartitionPolicy::BlockRange { .. } => "block_range",
         PartitionPolicy::Date => "date",
-        PartitionPolicy::Hour => "hour",
-        PartitionPolicy::Minute => "minute",
-        PartitionPolicy::Second => "second",
     };
-    let mut values: BTreeMap<String, String> = [
+    let values: BTreeMap<String, String> = [
         ("chain_name", descriptor.chain.clone()),
         ("block_type", family.into()),
         ("bytes_encoding", descriptor.bytes_encoding.clone()),
@@ -561,13 +556,6 @@ fn expected_config(descriptor: &StreamDescriptor) -> BTreeMap<String, String> {
     .into_iter()
     .map(|(key, value)| (format!("firehose-parquet.{key}"), value))
     .collect();
-    if let PartitionPolicy::BlockRange { size, anchor } = descriptor.partition {
-        values.insert("firehose-parquet.block_range_size".into(), size.to_string());
-        values.insert(
-            "firehose-parquet.block_range_start".into(),
-            anchor.to_string(),
-        );
-    }
     values
 }
 fn encode(authority: &AuthorityState) -> Result<Bytes> {

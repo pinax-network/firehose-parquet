@@ -364,8 +364,6 @@ fn command_with_limits(
             &origin.to_string(),
             "--stop-block",
             &stop.to_string(),
-            "--partition",
-            "none",
             "--flush-blocks",
             &flush_blocks.to_string(),
             "--flush-bytes",
@@ -534,8 +532,6 @@ fn relative_output_build(
             "100",
             "--stop-block",
             "102",
-            "--partition",
-            "none",
             "--stream-idle-timeout-secs",
             "0",
         ]);
@@ -776,6 +772,32 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
                 .join(ControlKey::State.filename())
                 .exists());
         }
+    }
+}
+
+/// #652: `build` writes only `<table>/date=YYYY-MM-DD/`. A root holding
+/// partitions of an older layout (v0.x `year=/month=/date=DD`, pre-release
+/// `year=/month=/day=`, `block_range=`) is refused before any Blocks request,
+/// and nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_with_older_partition_layouts_are_refused_before_blocks() {
+    let server = MockFirehose::start(vec![response(100, 3)], vec![]).await;
+    for legacy in [
+        "blocks/year=2024/month=01/date=15/part-000001.parquet",
+        "blocks/year=2023/month=11/day=14/hour=22/part-v1-a.parquet",
+        "blocks/block_range=100-200/part-v1-a.parquet",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = root(dir.path());
+        let path = root.join(legacy);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old layout").unwrap();
+        let before = tree_digests(&root);
+        let output = run(command(&server, dir.path(), 100, 101)).await;
+        assert!(!output.status.success(), "{}", logs(&output));
+        assert!(logs(&output).contains("legacy data"), "{}", logs(&output));
+        assert_eq!(server.calls(), 0, "{legacy}");
+        assert_eq!(tree_digests(&root), before, "{legacy}");
     }
 }
 
@@ -1233,7 +1255,12 @@ async fn storage_failure_during_flush_keeps_authority_and_rerun_recovers_rows_on
     let before_mirror = std::fs::read(root.join(MIRROR)).unwrap();
     let before_parts = parts(&root);
 
-    let blocked = root.join("transactions");
+    // The next block lands in the same `date=` partition directory.
+    let blocked = before_parts
+        .keys()
+        .find(|path| path.starts_with("transactions"))
+        .map(|path| root.join(path).parent().unwrap().to_path_buf())
+        .unwrap();
     if !deny_writes(&blocked) {
         return;
     }
@@ -1454,8 +1481,6 @@ async fn solana_null_block_time_routes_by_source_metadata_on_the_real_path() {
             "42",
             "--stop-block",
             "43",
-            "--partition",
-            "date",
             "--stream-idle-timeout-secs",
             "0",
             "--output",
@@ -1470,7 +1495,7 @@ async fn solana_null_block_time_routes_by_source_metadata_on_the_real_path() {
     assert_eq!(blocks.len(), 1);
     // 1_700_000_000 is 2023-11-14 UTC.
     assert!(
-        blocks[0].starts_with("blocks/year=2023/month=11/day=14"),
+        blocks[0].starts_with("blocks/date=2023-11-14/"),
         "{blocks:?}"
     );
     let batches = read_parquet(&root.join(&blocks[0])).unwrap();
@@ -2147,8 +2172,12 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
 /// recorded, and the build keeps its ownership throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
+    // Two blocks per UTC day from 2023-11-14.
+    const MIDNIGHT: i64 = 1_699_920_000;
     let server = MockFirehose::start(
-        (100..106).map(|n| response(n, 3)).collect(),
+        (100..106)
+            .map(|n| response_at(n, MIDNIGHT + (n as i64 - 100) / 2 * 86_400))
+            .collect(),
         vec![Plan {
             cursor: "",
             origin: 100,
@@ -2176,10 +2205,6 @@ async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
             "100",
             "--stop-block",
             "1000",
-            "--partition",
-            "block_range",
-            "--block-range-size",
-            "2",
             "--flush-blocks",
             "2",
             "--flush-interval-secs",
@@ -2248,9 +2273,9 @@ async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
     success(verify(&first)).await;
     let first = report_of(&first);
     let expected: BTreeMap<String, String> = [
-        ("block_range=100-102", "missing_expected"),
-        ("block_range=102-104", "missing_expected"),
-        ("block_range=104-106", "open"),
+        ("date=2023-11-14", "missing_expected"),
+        ("date=2023-11-15", "missing_expected"),
+        ("date=2023-11-16", "open"),
     ]
     .into_iter()
     .map(|(partition, status)| (partition.to_string(), status.to_string()))
@@ -2289,8 +2314,8 @@ fn fireparq(dir: &Path) -> tokio::process::Command {
     command
 }
 
-/// An hourly-partitioned bounded build from block 100 into `<dir>/output`.
-fn hourly_build(server: &MockFirehose, dir: &Path, stop: u64) -> tokio::process::Command {
+/// A bounded build from block 100 into `<dir>/output` (date partitions).
+fn daily_build(server: &MockFirehose, dir: &Path, stop: u64) -> tokio::process::Command {
     let mut command = fireparq(dir);
     command
         .args([
@@ -2303,8 +2328,6 @@ fn hourly_build(server: &MockFirehose, dir: &Path, stop: u64) -> tokio::process:
             "100",
             "--stop-block",
             &stop.to_string(),
-            "--partition",
-            "hour",
             "--flush-interval-secs",
             "1000000000",
             "--stream-idle-timeout-secs",
@@ -2496,9 +2519,9 @@ async fn fireparq_output(dir: &Path, args: &[&str]) -> Output {
 /// recorded, and every downstream command works on that root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_is_the_dataset_root_and_every_command_follows_it() {
-    // 2023-11-14 22:13:20 UTC. Blocks 101 and 102 share hour 23, so the two
-    // runs leave two parts there for merge; 104 is the finalized head that
-    // `partitions build` proves.
+    // 2023-11-14 22:13:20 UTC. Blocks 100 to 102 share 2023-11-14, so the two
+    // runs leave two parts there for merge; 103 starts 2023-11-15, and 104 is
+    // the finalized head that `partitions build` proves.
     const T: i64 = 1_700_000_000;
     let server = MockFirehose::start_with_partition_probes(
         vec![
@@ -2522,7 +2545,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     );
 
     // build: data and authority sit at the root, the mirror in `_fireparq/`.
-    let logs_first = plain_logs(&success(hourly_build(&server, dir.path(), 102)).await);
+    let logs_first = plain_logs(&success(daily_build(&server, dir.path(), 102)).await);
     assert!(
         logs_first.contains(&format!(
             "resolved write destinations output={} cursor={}",
@@ -2545,32 +2568,32 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     assert_checkpoint(&root, 2, 101, 102);
     assert_eq!(block_numbers(&root), [100, 101]);
     let first_parts = parts(&root);
-    // <table>/year=/month=/day=/hour=/<part>, with no chain directory above.
-    assert!(first_parts.keys().all(|path| path.components().count() == 6
+    // <table>/date=YYYY-MM-DD/<part>, with no chain directory above.
+    assert!(first_parts.keys().all(|path| path.components().count() == 3
         && path
             .iter()
             .nth(1)
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("year=")));
+            .starts_with("date=")));
     let blocks_part = first_parts
         .keys()
-        .find(|path| path.starts_with("blocks/year=2023/month=11/day=14/hour=22"))
+        .find(|path| path.starts_with("blocks/date=2023-11-14"))
         .unwrap();
     let footer = inspect_footer(&root.join(blocks_part)).await;
     assert_eq!(footer_value(&footer, "firehose-parquet.chain_name"), CHAIN);
 
     // The same command resumes the root from its authority.
-    success(hourly_build(&server, dir.path(), 104)).await;
+    success(daily_build(&server, dir.path(), 104)).await;
     assert_eq!(server.calls(), 2);
     assert_checkpoint(&root, 4, 103, 104);
     assert_eq!(block_numbers(&root), [100, 101, 102, 103]);
-    let hour_23 = Path::new("blocks/year=2023/month=11/day=14/hour=23");
+    let day_14 = Path::new("blocks/date=2023-11-14");
     assert_eq!(
         parts(&root)
             .keys()
-            .filter(|path| path.starts_with(hour_23))
+            .filter(|path| path.starts_with(day_14))
             .count(),
         2
     );
@@ -2604,14 +2627,10 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
             .collect()
     };
     let expected = |closed: &str| -> BTreeMap<String, String> {
-        [
-            ("year=2023/month=11/day=14/hour=22", closed),
-            ("year=2023/month=11/day=14/hour=23", closed),
-            ("year=2023/month=11/day=15/hour=00", "open"),
-        ]
-        .into_iter()
-        .map(|(partition, status)| (partition.to_string(), status.to_string()))
-        .collect()
+        [("date=2023-11-14", closed), ("date=2023-11-15", "open")]
+            .into_iter()
+            .map(|(partition, status)| (partition.to_string(), status.to_string()))
+            .collect()
     };
     let canonical = std::fs::canonicalize(&root).unwrap();
     success(verify(&dir.path().join("verify-1.json"))).await;
@@ -2647,7 +2666,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
 
     // Read-only commands take the table directory under the root.
     let scanned = json_output(&fireparq_output(dir.path(), &["scan", &blocks_arg, "--json"]).await);
-    assert_eq!(scanned["files_scanned"], 4);
+    assert_eq!(scanned["files_scanned"], 3);
     for args in [
         vec!["validate", &blocks_arg],
         vec!["inspect", root.join(MIRROR).to_str().unwrap()],
@@ -2683,7 +2702,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     assert_eq!(
         parts(&root)
             .keys()
-            .filter(|path| path.starts_with(hour_23))
+            .filter(|path| path.starts_with(day_14))
             .count(),
         1
     );
@@ -2691,48 +2710,21 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     success(verify(&dir.path().join("verify-3.json"))).await;
     assert_eq!(statuses(&verify_report("verify-3.json")), expected("match"));
 
-    // rollup reads the root into a separate export and skips the root
-    // artifacts; in place (and truncate) stay refused for protected data,
-    // exactly as below a chain directory.
-    let export = dir.path().join("export");
-    let output = fireparq_output(
-        dir.path(),
-        &[
-            "rollup",
-            &root_arg,
-            "--output",
-            export.to_str().unwrap(),
-            "--partition",
-            "date",
-        ],
-    )
-    .await;
-    assert!(output.status.success(), "{}", logs(&output));
-    let exported: Vec<String> = tree_digests(&export).into_keys().collect();
-    assert_eq!(exported.len(), 2, "{exported:?}");
-    assert!(exported[0].starts_with("blocks/year=2023/month=11/day=14/part-rollup-"));
-    assert!(exported[1].starts_with("blocks/year=2023/month=11/day=15/part-rollup-"));
-    assert_eq!(table_block_numbers(&export, "blocks"), [100, 101, 102, 103]);
-    for (args, expected) in [
-        (
-            vec![
-                "rollup",
-                &root_arg,
-                "--partition",
-                "date",
-                "--delete-source",
-            ],
-            "overlaps a protected dataset",
-        ),
-        (
-            vec!["truncate", &root_arg, "-p", "hour=22", "--yes"],
-            "truncate is unsupported for protected datasets",
-        ),
-    ] {
+    // truncate stays refused for protected data, exactly as below a chain
+    // directory.
+    {
         let before = tree_digests(&root);
-        let output = fireparq_output(dir.path(), &args).await;
+        let output = fireparq_output(
+            dir.path(),
+            &["truncate", &root_arg, "-p", "date=2023-11-14", "--yes"],
+        )
+        .await;
         assert!(!output.status.success(), "{}", logs(&output));
-        assert!(logs(&output).contains(expected), "{}", logs(&output));
+        assert!(
+            logs(&output).contains("truncate is unsupported for protected datasets"),
+            "{}",
+            logs(&output)
+        );
         assert_eq!(tree_digests(&root), before);
     }
 
@@ -2923,7 +2915,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     assert!(output.status.success(), "{}", logs(&output));
 
     // A completed range at the root is still an authority-backed no-op.
-    let repeated = hourly_build(&server, dir.path(), 104);
+    let repeated = daily_build(&server, dir.path(), 104);
     assert!(logs(&success(repeated).await).contains("without opening Blocks"));
     assert_eq!(server.calls(), 2);
     assert!(!root.join(CHAIN).exists());

@@ -11,7 +11,7 @@ use firehose_parquet::cli::{
     PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionListRequest,
     PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
-use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::config::{BlockMetadata, Compression, Config};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::dataset_lock::DatasetOwnership;
 use firehose_parquet::encode::EncodeBytes;
@@ -590,7 +590,6 @@ fn build_cursor_file_metadata(
     encoding: Option<&EncodeBytes>,
     endpoint: &str,
     compression: Compression,
-    partition: &firehose_parquet::config::Partition,
     endpoint_info: &Option<EndpointInfo>,
     extended: bool,
     final_blocks_only: bool,
@@ -599,14 +598,7 @@ fn build_cursor_file_metadata(
     let mut meta = ParquetFileMetadata::new();
     add_common_file_metadata(&mut meta, block_type, encoding, endpoint, endpoint_info);
     meta.add("firehose-parquet.compression", compression.to_string());
-    meta.add("firehose-parquet.partition", partition.to_string());
-    meta.add(
-        "firehose-parquet.block_range_size",
-        match partition {
-            firehose_parquet::config::Partition::BlockRange { size, .. } => size.to_string(),
-            _ => "0".to_string(),
-        },
-    );
+    meta.add("firehose-parquet.partition", "date");
     add_cursor_compatibility_metadata(
         &mut meta,
         extended,
@@ -616,35 +608,22 @@ fn build_cursor_file_metadata(
     meta
 }
 
-fn partition_requires_timestamp(partition: &Partition) -> bool {
-    matches!(
-        partition,
-        Partition::Date | Partition::Hour | Partition::Minute | Partition::Second
-    )
-}
-
 use firehose_parquet::partition_index::SOLANA_GENESIS_TIMESTAMP;
 
-fn use_last_known_timestamp_partition_routing(
-    block_type: ChainKind,
-    partition: &Partition,
-) -> bool {
-    block_type.profile().nullable_timestamps && partition_requires_timestamp(partition)
+/// Whether blocks of this family route by the last known block time: every
+/// table is partitioned by date, and these families may omit block times.
+fn use_last_known_timestamp_partition_routing(block_type: ChainKind) -> bool {
+    block_type.profile().nullable_timestamps
 }
 
-fn validate_block_timestamp(block_num: u64, timestamp: i64, partition: &Partition) -> Result<()> {
+fn validate_block_timestamp(block_num: u64, timestamp: i64) -> Result<()> {
     firehose_parquet::traits::checked_timestamp(timestamp)?;
     if timestamp != 0 {
         return Ok(());
     }
-
-    if partition_requires_timestamp(partition) {
-        return Err(anyhow!(
-            "block {block_num} is missing timestamp metadata; time-based partitioning requires timestamps"
-        ));
-    }
-
-    Err(anyhow!("block {block_num} is missing timestamp metadata"))
+    Err(anyhow!(
+        "block {block_num} is missing timestamp metadata; date partitioning requires timestamps"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -829,9 +808,8 @@ fn restore_sparse_routing_cursor_anchor(
     cursor_state: Option<&CursorState>,
     cursor_override: bool,
     block_type: ChainKind,
-    partition: &Partition,
 ) {
-    if cursor_override || !use_last_known_timestamp_partition_routing(block_type, partition) {
+    if cursor_override || !use_last_known_timestamp_partition_routing(block_type) {
         return;
     }
 
@@ -1351,7 +1329,6 @@ async fn run_partitions_build(
         stop_block,
         cursor_path: None,
         output: PathBuf::from(&output_root),
-        partition: Partition::None,
         flush_rows: None,
         flush_blocks: None,
         flush_bytes: 0,
@@ -2409,7 +2386,6 @@ fn env_file_notice_on_stderr(command: Option<&Commands>) -> bool {
         Some(
             Commands::Build(_)
                 | Commands::Partitions(PartitionsCommands::Build { .. })
-                | Commands::Rollup { .. }
                 | Commands::Verify { .. }
                 | Commands::Merge { .. }
                 | Commands::Truncate { .. }
@@ -2807,34 +2783,6 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            Commands::Rollup {
-                source,
-                output,
-                partition,
-                compression,
-                flush_bytes,
-                delete_source,
-                aws,
-                cache_control,
-            } => {
-                init_tracing(&cli.global.log_level, cli.global.verbose);
-                let target = firehose_parquet::rollup::parse_rollup_target(partition)?;
-                let compression = firehose_parquet::cli::parse_compression(compression)?;
-                let output_path = output.clone().unwrap_or_else(|| source.clone());
-                let aws = Some(AwsConfig::from(aws));
-                let rollup_config = firehose_parquet::rollup::RollupConfig {
-                    source: source.clone(),
-                    output: output_path,
-                    target,
-                    compression,
-                    flush_bytes: *flush_bytes,
-                    delete_source: *delete_source,
-                    aws,
-                    cache_control: cache_control.clone(),
-                };
-                firehose_parquet::rollup::run_rollup(&rollup_config)?;
-                return Ok(());
-            }
             Commands::Verify {
                 path,
                 chain,
@@ -2905,13 +2853,6 @@ async fn main() -> Result<()> {
                         result.schema_mismatches.len()
                     );
                 }
-                if !result.rollups_pending.is_empty() {
-                    anyhow::bail!(
-                        "{} partition(s) were not merged because an interrupted rollup of \
-                         their directory must be finished first; run that rollup again",
-                        result.rollups_pending.len()
-                    );
-                }
                 return Ok(());
             }
             Commands::Truncate {
@@ -2946,6 +2887,7 @@ mod tests {
     use blocks::evm::mapper::EvmBlockMapper;
     use clap::CommandFactory;
     use firehose_parquet::cursor::CursorLocation;
+    use firehose_parquet::date_partition::DatePartition;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
@@ -3261,13 +3203,24 @@ mod tests {
     }
 
     #[test]
-    fn test_build_subcommand_rejects_zero_block_range_size_and_stop_block() {
-        for (flag, value) in [("--block-range-size", "0"), ("--stop-block", "0")] {
+    fn test_build_subcommand_rejects_zero_stop_block_and_has_no_partition_mode() {
+        let error = Cli::try_parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--stop-block",
+            "0",
+        ])
+        .expect_err("zero should be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("--stop-block"), "{error}");
+        // Every table is written as <table>/date=YYYY-MM-DD/ (#652).
+        for (flag, value) in [("--partition", "date"), ("--block-range-size", "100")] {
             let error =
                 Cli::try_parse_from(["fireparq", "build", "--network", "mainnet", flag, value])
-                    .expect_err("zero should be rejected");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-            assert!(error.to_string().contains(flag), "{error}");
+                    .expect_err("output partition flags are removed");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
     }
 
@@ -4208,23 +4161,6 @@ mod tests {
                 ],
             ),
             (
-                "rollup",
-                vec![
-                    "Selection:",
-                    "Output:",
-                    "Execution:",
-                    "AWS / S3:",
-                    "Runtime / Logging:",
-                ],
-                vec![
-                    "<SOURCE>",
-                    "--output",
-                    "--delete-source",
-                    "--cache-control",
-                    "--log-level",
-                ],
-            ),
-            (
                 "verify",
                 vec![
                     "Selection:",
@@ -5036,28 +4972,22 @@ mod tests {
 
     #[test]
     fn test_validate_block_timestamp_missing_errors() {
-        let err = validate_block_timestamp(42, 0, &Partition::None)
-            .expect_err("missing timestamp should error");
+        let err = validate_block_timestamp(42, 0).expect_err("missing timestamp should error");
         assert!(err.to_string().contains("missing timestamp metadata"));
+        assert!(err
+            .to_string()
+            .contains("date partitioning requires timestamps"));
+        validate_block_timestamp(42, 1_700_000_000).unwrap();
     }
 
     #[test]
     fn test_validate_block_timestamp_missing_in_first_streamable_block_is_generic() {
-        let err = validate_block_timestamp(0, 0, &Partition::None)
+        let err = validate_block_timestamp(0, 0)
             .expect_err("missing timestamp should still report a missing timestamp");
         let message = err.to_string();
 
         assert!(message.contains("missing timestamp metadata"));
         assert!(!message.contains("--bootstrap-missing-genesis-timestamp"));
-    }
-
-    #[test]
-    fn test_validate_block_timestamp_missing_time_partition_errors() {
-        let err = validate_block_timestamp(42, 0, &Partition::Date)
-            .expect_err("time-based partitioning requires a timestamp");
-        assert!(err
-            .to_string()
-            .contains("time-based partitioning requires timestamps"));
     }
 
     #[test]
@@ -5147,27 +5077,11 @@ mod tests {
     }
 
     #[test]
-    fn test_last_known_timestamp_partition_routing_is_automatic_for_solana_time_partitions() {
-        for partition in [
-            Partition::Date,
-            Partition::Hour,
-            Partition::Minute,
-            Partition::Second,
-        ] {
-            assert!(use_last_known_timestamp_partition_routing(
-                ChainKind::Solana,
-                &partition
-            ));
-        }
-
-        assert!(!use_last_known_timestamp_partition_routing(
-            ChainKind::Solana,
-            &Partition::None
+    fn test_last_known_timestamp_partition_routing_is_automatic_for_solana() {
+        assert!(use_last_known_timestamp_partition_routing(
+            ChainKind::Solana
         ));
-        assert!(!use_last_known_timestamp_partition_routing(
-            ChainKind::Evm,
-            &Partition::Date
-        ));
+        assert!(!use_last_known_timestamp_partition_routing(ChainKind::Evm));
     }
 
     #[test]
@@ -5274,17 +5188,10 @@ mod tests {
             )
             .expect("missing block should reuse the last-known timestamp");
         let routing_timestamp = routed.identity.timestamp;
-
-        for partition in [
-            Partition::Date,
-            Partition::Hour,
-            Partition::Minute,
-            Partition::Second,
-        ] {
-            let anchor_key = partition.partition_key(100, 1_700_000_000).unwrap();
-            let routed_key = partition.partition_key(101, routing_timestamp).unwrap();
-            assert_eq!(routed_key, anchor_key);
-        }
+        assert_eq!(
+            DatePartition::from_timestamp(routing_timestamp).unwrap(),
+            DatePartition::from_timestamp(1_700_000_000).unwrap()
+        );
     }
 
     #[test]
@@ -5302,20 +5209,7 @@ mod tests {
                 },
             )
             .expect("genesis anchor should route the first missing-timestamp block");
-        let routing_timestamp = routed.identity.timestamp;
-
-        for partition in [
-            Partition::Date,
-            Partition::Hour,
-            Partition::Minute,
-            Partition::Second,
-        ] {
-            let expected = partition
-                .partition_key(0, SOLANA_GENESIS_TIMESTAMP)
-                .unwrap();
-            let routed_key = partition.partition_key(0, routing_timestamp).unwrap();
-            assert_eq!(routed_key, expected);
-        }
+        assert_eq!(routed.identity.timestamp, SOLANA_GENESIS_TIMESTAMP);
     }
 
     #[test]
@@ -5332,7 +5226,6 @@ mod tests {
             Some(&cursor_state),
             false,
             ChainKind::Solana,
-            &Partition::Hour,
         );
 
         let routed = backfill
@@ -5986,7 +5879,6 @@ mod tests {
             Some(&EncodeBytes::TronBase58),
             "https://example.com",
             Compression::Zstd,
-            &firehose_parquet::config::Partition::Date,
             &ei,
             true,
             false,

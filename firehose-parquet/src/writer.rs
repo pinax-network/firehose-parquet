@@ -1,4 +1,5 @@
-use crate::config::{BlockMetadata, Compression, Config, Partition};
+use crate::config::{BlockMetadata, Compression, Config};
+use crate::date_partition::{DatePartition, DATE_KEY};
 use crate::metrics::PipelineMetrics;
 use anyhow::Result;
 use arrow::array::Array;
@@ -38,11 +39,10 @@ impl ParquetFileMetadata {
     }
 }
 
-/// Writes Arrow RecordBatches to Parquet files, handling partitioning and
-/// file naming. Supports local filesystem and S3 output.
+/// Writes Arrow RecordBatches to Parquet files under `<table>/date=YYYY-MM-DD/`,
+/// handling file naming. Supports local filesystem and S3 output.
 pub struct ParquetTableWriter {
     output_dir: PathBuf,
-    partition: Partition,
     compression: Compression,
     /// Part counter per logical partition key (table + partition value).
     part_counters: HashMap<String, u32>,
@@ -61,14 +61,9 @@ pub struct ParquetTableWriter {
 }
 
 impl ParquetTableWriter {
-    pub fn new(
-        output_dir: impl Into<PathBuf>,
-        partition: Partition,
-        compression: Compression,
-    ) -> Self {
+    pub fn new(output_dir: impl Into<PathBuf>, compression: Compression) -> Self {
         Self {
             output_dir: output_dir.into(),
-            partition,
             compression,
             part_counters: HashMap::new(),
             process_id: short_uuid(),
@@ -80,19 +75,13 @@ impl ParquetTableWriter {
     }
 
     /// Create a writer that uploads Parquet files to S3.
-    pub fn new_s3(
-        output_path: &str,
-        partition: Partition,
-        compression: Compression,
-        config: &Config,
-    ) -> Result<Self> {
+    pub fn new_s3(output_path: &str, compression: Compression, config: &Config) -> Result<Self> {
         crate::s3::validate_output_bucket(output_path, config.s3_bucket.as_deref())?;
         let (bucket, prefix) = parse_s3_url(output_path)?;
         let client = crate::s3::build_ingestion_mutation_client(config, &bucket)?;
 
         Ok(Self {
             output_dir: PathBuf::from(output_path),
-            partition,
             compression,
             part_counters: HashMap::new(),
             process_id: short_uuid(),
@@ -194,36 +183,23 @@ impl ParquetTableWriter {
         })
     }
 
-    /// Return the partition-relative path, rejecting invalid time metadata.
-    /// Missing time retains the nullable-chain unpartitioned fallback.
+    /// Return the partition-relative path, `<table>/date=YYYY-MM-DD`, of a
+    /// flush whose routing time is `metadata.min_timestamp`. Both routing
+    /// times must be valid; a flush without one has no partition.
     pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> Result<String> {
-        if !matches!(
-            self.partition,
-            Partition::None | Partition::BlockRange { .. }
-        ) {
-            for timestamp in [metadata.min_timestamp, metadata.max_timestamp]
-                .into_iter()
-                .flatten()
-            {
-                crate::traits::checked_timestamp(timestamp)?;
-            }
+        if let Some(max) = metadata.max_timestamp {
+            crate::traits::checked_timestamp(max)?;
         }
-        if !matches!(
-            self.partition,
-            Partition::None | Partition::BlockRange { .. }
-        ) && metadata.min_timestamp.is_none()
-        {
-            return Ok(table.to_string());
-        }
-        Ok(
-            match self.partition.partition_key(
-                metadata.min_block_number,
-                metadata.min_timestamp.unwrap_or(0),
-            )? {
-                Some(key) => format!("{table}/{key}"),
-                None => table.to_string(),
-            },
-        )
+        let seconds = metadata.min_timestamp.ok_or_else(|| {
+            anyhow::anyhow!(
+                "table `{table}` needs a routing block time: every table is partitioned by \
+                 date=YYYY-MM-DD"
+            )
+        })?;
+        Ok(format!(
+            "{table}/{}",
+            DatePartition::from_timestamp(seconds)?
+        ))
     }
 
     fn partition_dir(&self, table: &str, metadata: &BlockMetadata) -> Result<PathBuf> {
@@ -240,26 +216,13 @@ impl ParquetTableWriter {
     /// Check every row against the declared destination, without assuming row
     /// order: reversible NEW/UNDO streams may visit the same partition in either
     /// order. Metadata describes the whole mapper flush, not each table's exact
-    /// extrema. Existing partition-key timestamp policy is shared with routing.
+    /// extrema. The partition key is formatted by `crate::date_partition` alone.
     fn validate_partition(
         &self,
         table: &str,
         batch: &RecordBatch,
         metadata: &BlockMetadata,
     ) -> Result<()> {
-        // Reject invalid numeric configuration before path formatting can divide
-        // by zero or use the legacy pre-anchor fallback.
-        if let Partition::BlockRange { size, start_block } = &self.partition {
-            anyhow::ensure!(
-                *size > 0,
-                "block-range partition size must be greater than zero"
-            );
-            let anchor = start_block.unwrap_or(0);
-            anyhow::ensure!(
-                metadata.min_block_number >= anchor && metadata.max_block_number >= anchor,
-                "table `{table}` metadata precedes block-range start {anchor}"
-            );
-        }
         let expected = self.partition_suffix(table, metadata)?;
         let check = |row_metadata: &BlockMetadata| -> Result<()> {
             let actual = self.partition_suffix(table, row_metadata)?;
@@ -267,80 +230,71 @@ impl ParquetTableWriter {
                 "table `{table}` spans partitions or disagrees with its metadata: expected `{expected}`, found `{actual}`; flush the mapper at partition boundaries");
             Ok(())
         };
-        match &self.partition {
-            Partition::None => Ok(()),
-            Partition::BlockRange { start_block, .. } => {
-                let anchor = start_block.unwrap_or(0);
-                check(&BlockMetadata {
-                    min_block_number: metadata.max_block_number,
-                    ..metadata.clone()
-                })?;
-                let blocks = batch.column_by_name("block_num")
-                    .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
-                    .ok_or_else(|| anyhow::anyhow!("table `{table}` needs canonical UInt64 block_num for block-range partitioning"))?;
-                anyhow::ensure!(
-                    blocks.null_count() == 0,
-                    "table `{table}` has null block_num values"
-                );
-                let mut previous = None;
-                for block in blocks.values() {
-                    // Canonical identities repeat across a block's table rows.
-                    // Still inspect every row, but format its destination only
-                    // when the routing value changes.
-                    if previous == Some(*block) {
-                        continue;
-                    }
-                    anyhow::ensure!(
-                        *block >= anchor,
-                        "table `{table}` block {block} precedes block-range start {anchor}"
-                    );
-                    check(&BlockMetadata {
-                        min_block_number: *block,
-                        ..metadata.clone()
-                    })?;
-                    previous = Some(*block);
-                }
-                Ok(())
+        let column = batch.column_by_name("timestamp").ok_or_else(|| {
+            anyhow::anyhow!("table `{table}` needs canonical timestamp for date partitioning")
+        })?;
+        anyhow::ensure!(
+            column.data_type() == &crate::traits::timestamp_millis_utc_type(),
+            "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
+        );
+        let timestamps = column
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .expect("canonical timestamp type checked above");
+        let max = metadata.max_timestamp.ok_or_else(|| {
+            anyhow::anyhow!("table `{table}` needs both minimum and maximum routing timestamps")
+        })?;
+        check(&BlockMetadata {
+            min_timestamp: Some(max),
+            ..metadata.clone()
+        })?;
+        let mut previous = None;
+        for timestamp in timestamps.iter().flatten() {
+            let seconds = timestamp.div_euclid(1_000);
+            if previous == Some(seconds) {
+                continue;
             }
-            Partition::Date | Partition::Hour | Partition::Minute | Partition::Second => {
-                let column = batch.column_by_name("timestamp").ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "table `{table}` needs canonical timestamp for time partitioning"
-                    )
-                })?;
-                anyhow::ensure!(
-                    column.data_type() == &crate::traits::timestamp_millis_utc_type(),
-                    "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
-                );
-                let timestamps = column
-                    .as_any()
-                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                    .expect("canonical timestamp type checked above");
-                match (metadata.min_timestamp, metadata.max_timestamp) {
-                    (Some(_), Some(max)) => check(&BlockMetadata { min_timestamp: Some(max), ..metadata.clone() })?,
-                    (None, None) => {},
-                    _ => anyhow::bail!("table `{table}` needs both minimum and maximum routing timestamps, or neither"),
-                }
-                let mut previous = None;
-                for timestamp in timestamps.iter().flatten() {
-                    let seconds = timestamp.div_euclid(1_000);
-                    if previous == Some(seconds) {
-                        continue;
-                    }
-                    anyhow::ensure!(metadata.min_timestamp.is_some(),
-                        "table `{table}` has non-null timestamps without routing timestamp metadata");
-                    check(&BlockMetadata {
-                        min_timestamp: Some(seconds),
-                        ..metadata.clone()
-                    })?;
-                    previous = Some(seconds);
-                }
-                // Null Solana payload times deliberately use the metadata's
-                // synthetic anchor. All-null rows without an anchor preserve
-                // the existing flat-table destination.
-                Ok(())
-            }
+            check(&BlockMetadata {
+                min_timestamp: Some(seconds),
+                ..metadata.clone()
+            })?;
+            previous = Some(seconds);
         }
+        // Null Solana payload times deliberately use the metadata's synthetic
+        // anchor.
+        self.validate_date_column(table, batch, metadata)
+    }
+
+    /// The `date` data column must equal the `date=` directory it is written
+    /// to (#652). Both derive from the same checked block time, so this holds
+    /// by construction; checking it keeps a Hive reader's `date` (the
+    /// directory) and a plain file read's `date` (the column) identical.
+    fn validate_date_column(
+        &self,
+        table: &str,
+        batch: &RecordBatch,
+        metadata: &BlockMetadata,
+    ) -> Result<()> {
+        let Some(column) = batch.column_by_name(DATE_KEY) else {
+            return Ok(());
+        };
+        let dates = column
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .ok_or_else(|| anyhow::anyhow!("table `{table}` date must be Date32"))?;
+        let seconds = metadata
+            .min_timestamp
+            .expect("validate_partition requires a routing time");
+        let expected = DatePartition::from_timestamp(seconds)?.date32();
+        for date in dates.iter().flatten() {
+            anyhow::ensure!(
+                date == expected,
+                "table `{table}` date {date} (days since 1970-01-01) differs from its date \
+                 partition directory; the date column and the directory come from the same \
+                 block time"
+            );
+        }
+        Ok(())
     }
 
     fn writer_properties(&self, batch: &RecordBatch) -> Result<WriterProperties> {
@@ -415,13 +369,9 @@ pub struct OutputWriter {
 }
 
 impl OutputWriter {
-    pub fn new(
-        output_dir: impl Into<PathBuf>,
-        partition: Partition,
-        compression: Compression,
-    ) -> Self {
+    pub fn new(output_dir: impl Into<PathBuf>, compression: Compression) -> Self {
         Self {
-            inner: ParquetTableWriter::new(output_dir, partition, compression),
+            inner: ParquetTableWriter::new(output_dir, compression),
             buffers: HashMap::new(),
             compression_ratio: compression_ratio(&compression),
             metrics: None,
@@ -429,14 +379,9 @@ impl OutputWriter {
     }
 
     /// Create a writer that uploads Parquet files to S3.
-    pub fn new_s3(
-        output_path: &str,
-        partition: Partition,
-        compression: Compression,
-        config: &Config,
-    ) -> Result<Self> {
+    pub fn new_s3(output_path: &str, compression: Compression, config: &Config) -> Result<Self> {
         Ok(Self {
-            inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
+            inner: ParquetTableWriter::new_s3(output_path, compression, config)?,
             buffers: HashMap::new(),
             compression_ratio: compression_ratio(&compression),
             metrics: None,
@@ -646,60 +591,42 @@ mod tests {
             aws_region: Some("us-east-1".into()),
             ..Config::default()
         };
-        let writer = ParquetTableWriter::new_s3(
-            "s3://data/mainnet",
-            Partition::None,
-            Compression::Zstd,
-            &config,
-        )
-        .unwrap();
+        let writer =
+            ParquetTableWriter::new_s3("s3://data/mainnet", Compression::Zstd, &config).unwrap();
         assert_eq!(writer.s3_client.unwrap().to_string(), "AmazonS3(data)");
         assert_eq!(writer.s3_prefix.as_deref(), Some("mainnet"));
 
         config.s3_bucket = Some("wrong-bucket".into());
-        let error = ParquetTableWriter::new_s3(
-            "s3://data/mainnet",
-            Partition::None,
-            Compression::Zstd,
-            &config,
-        )
-        .err()
-        .expect("bucket mismatch must fail");
+        let error = ParquetTableWriter::new_s3("s3://data/mainnet", Compression::Zstd, &config)
+            .err()
+            .expect("bucket mismatch must fail");
         assert!(error
             .to_string()
             .contains("S3 output bucket `data` disagrees"));
     }
-    use crate::config::{BlockMetadata, Compression, Partition};
+    use crate::config::{BlockMetadata, Compression};
     use anyhow::anyhow;
-    use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
+    /// 2024-01-15T12:00:00Z.
+    const T: i64 = 1_705_320_000;
+
+    /// One row at `T`.
     fn make_test_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "block_number",
-            DataType::UInt64,
-            false,
-        )]));
-        let mut builder = UInt64Builder::new();
-        builder.append_value(42);
-        RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
+        partition_batch(vec![Some(42)], vec![Some(T * 1_000)])
     }
 
+    /// A flush routed at `T`.
     fn default_metadata() -> BlockMetadata {
-        BlockMetadata {
-            min_block_number: 0,
-            max_block_number: 0,
-            min_timestamp: None,
-            max_timestamp: None,
-        }
+        routed_metadata(Some(T))
     }
 
     #[test]
     fn test_parquet_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer = ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
+        let mut writer = ParquetTableWriter::new(dir.path(), Compression::Snappy);
         let meta = default_metadata();
         let (path, compressed_bytes) = writer.write_batch("blocks", &batch, &meta).unwrap();
 
@@ -710,93 +637,44 @@ mod tests {
     }
 
     #[test]
-    fn test_block_range_partitioning() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::block_range(100), Compression::None);
-        let meta = BlockMetadata {
-            min_block_number: 150,
-            max_block_number: 150,
-            min_timestamp: None,
-            max_timestamp: None,
-        };
-        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(path.to_string_lossy().contains("block_range=100-200"));
-    }
-
-    #[test]
-    fn test_block_range_partitioning_uses_start_block_anchor() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut partition = Partition::block_range(100);
-        partition.set_block_range_start(Some(9_820_210));
-        let mut writer = ParquetTableWriter::new(dir.path(), partition, Compression::None);
-        let meta = BlockMetadata {
-            min_block_number: 9_820_250,
-            max_block_number: 9_820_250,
-            min_timestamp: None,
-            max_timestamp: None,
-        };
-
-        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(path
-            .to_string_lossy()
-            .contains("block_range=9820210-9820310"));
-    }
-
-    #[test]
     fn test_date_partitioning() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
-        // 2024-01-15 12:00:00 UTC = 1705320000
-        let meta = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000),
-            max_timestamp: Some(1705320000),
-        };
-        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(
-            path.to_string_lossy().contains("year=2024/month=01/day=15"),
+        let mut writer = ParquetTableWriter::new(dir.path(), Compression::None);
+        let (path, _) = writer
+            .write_batch("blocks", &batch, &default_metadata())
+            .unwrap();
+        assert_eq!(
+            path.parent().unwrap(),
+            dir.path().join("blocks/date=2024-01-15"),
             "path: {}",
             path.display()
         );
-    }
-
-    #[test]
-    fn test_hour_partitioning() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Hour, Compression::None);
-        // 2024-01-15 14:30:00 UTC = 1705329000
-        let meta = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705329000),
-            max_timestamp: Some(1705329000),
-        };
+        // The next UTC day is the next partition.
+        let meta = routed_metadata(Some(1_705_363_200));
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("year=2024/month=01/day=15"),
-            "path: {}",
-            path_str
+        assert_eq!(
+            path.parent().unwrap(),
+            dir.path().join("blocks/date=2024-01-16")
         );
-        assert!(path_str.contains("hour=14"), "path: {}", path_str);
+        // Without a routing time there is no partition to write to.
+        let error = writer
+            .write_batch("blocks", &batch, &routed_metadata(None))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("date=YYYY-MM-DD"), "{error}");
     }
 
     #[test]
     fn test_rollover_part_counter() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
+        let mut writer = ParquetTableWriter::new(dir.path(), Compression::None);
         let meta = BlockMetadata {
             min_block_number: 100,
             max_block_number: 200,
-            min_timestamp: Some(1705320000),
-            max_timestamp: Some(1705320000),
+            min_timestamp: Some(T),
+            max_timestamp: Some(T),
         };
         let (path1, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         let (path2, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
@@ -829,13 +707,12 @@ mod tests {
 
         // write_all publishes each table immediately, so flush_remaining() has
         // nothing left to write.
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
+        let mut out = OutputWriter::new(dir.path(), Compression::Zstd);
         let meta = default_metadata();
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
-        assert!(dir.path().join("blocks").exists());
-
-        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+        let day = dir.path().join("blocks/date=2024-01-15");
+        let parts: Vec<_> = std::fs::read_dir(&day)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
@@ -953,14 +830,10 @@ mod tests {
         }
     }
 
-    fn assert_rejected_without_publication(
-        partition: Partition,
-        batch: RecordBatch,
-        metadata: BlockMetadata,
-    ) {
+    fn assert_rejected_without_publication(batch: RecordBatch, metadata: BlockMetadata) {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
-        let mut writer = OutputWriter::new(&output, partition, Compression::None);
+        let mut writer = OutputWriter::new(&output, Compression::None);
         let (_, metrics) = crate::metrics::init();
         writer.set_metrics(metrics.clone());
         assert!(writer
@@ -975,30 +848,26 @@ mod tests {
     #[test]
     fn test_each_mapper_batch_materializes_immediately() {
         let dir = tempfile::tempdir().unwrap();
-        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
+        let mut writer = OutputWriter::new(dir.path(), Compression::Zstd);
         let batches = HashMap::from([("blocks".into(), make_test_batch())]);
         for _ in 0..2 {
             assert!(writer.write_all(&batches, &default_metadata()).unwrap());
             assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
             assert!(!writer.flush_remaining().unwrap());
         }
-        assert_eq!(
-            std::fs::read_dir(dir.path().join("blocks"))
-                .unwrap()
-                .count(),
-            2
-        );
-        assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 2);
+        let day = dir.path().join("blocks/date=2024-01-15");
+        assert_eq!(std::fs::read_dir(&day).unwrap().count(), 2);
+        assert_eq!(parquet_rows_in(&day), 2);
     }
 
     #[test]
     fn metrics_keep_one_file_series_across_partitions_and_reset_writer_buffers() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, metrics) = crate::metrics::init();
-        let mut writer = OutputWriter::new(dir.path(), Partition::Minute, Compression::None);
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
         writer.set_metrics(metrics.clone());
         for offset in 0..3 {
-            let timestamp = 1_705_320_000 + offset * 60;
+            let timestamp = T + offset * 86_400;
             let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1000)]);
             writer
                 .write_all(
@@ -1034,21 +903,20 @@ mod tests {
     fn test_all_tables_are_preflighted_before_any_publication() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
-        let timestamp = 1_705_320_000;
-        let valid = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
+        let valid = partition_batch(vec![Some(501)], vec![Some(T * 1_000)]);
         let invalid = partition_batch(
             vec![Some(501), Some(502), Some(503)],
             vec![
-                Some(timestamp * 1_000),
-                Some((timestamp + 172_800) * 1_000),
-                Some(timestamp * 1_000),
+                Some(T * 1_000),
+                Some((T + 172_800) * 1_000),
+                Some(T * 1_000),
             ],
         );
-        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None);
+        let mut writer = OutputWriter::new(&output, Compression::None);
         let error = writer
             .write_all(
                 &HashMap::from([("a_valid".into(), valid), ("z_invalid".into(), invalid)]),
-                &routed_metadata(Some(timestamp)),
+                &routed_metadata(Some(T)),
             )
             .unwrap_err();
         assert!(error.to_string().contains("z_invalid"));
@@ -1061,55 +929,38 @@ mod tests {
     }
 
     #[test]
-    fn test_time_partition_validation_checks_all_rows_and_metadata_endpoints() {
-        let timestamp = 1_705_320_000;
-        for (partition, width) in [
-            (Partition::Date, 86_400),
-            (Partition::Hour, 3_600),
-            (Partition::Minute, 60),
-            (Partition::Second, 1),
-        ] {
-            let batch = partition_batch(
-                vec![Some(501), Some(502), Some(503), Some(504)],
-                vec![
-                    Some(timestamp * 1_000),
-                    Some((timestamp + width * 2) * 1_000),
-                    Some((timestamp + width) * 1_000),
-                    Some(timestamp * 1_000),
-                ],
-            );
-            assert_rejected_without_publication(
-                partition.clone(),
-                batch,
-                routed_metadata(Some(timestamp)),
-            );
-            let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
-            let mut metadata = routed_metadata(Some(timestamp));
-            metadata.max_timestamp = Some(timestamp + width);
-            assert_rejected_without_publication(partition, batch, metadata);
-        }
+    fn test_date_partition_validation_checks_all_rows_and_metadata_endpoints() {
+        let batch = partition_batch(
+            vec![Some(501), Some(502), Some(503), Some(504)],
+            vec![
+                Some(T * 1_000),
+                Some((T + 86_400 * 2) * 1_000),
+                Some((T + 86_400) * 1_000),
+                Some(T * 1_000),
+            ],
+        );
+        assert_rejected_without_publication(batch, routed_metadata(Some(T)));
+        let batch = partition_batch(vec![Some(501)], vec![Some(T * 1_000)]);
+        let mut metadata = routed_metadata(Some(T));
+        metadata.max_timestamp = Some(T + 86_400);
+        assert_rejected_without_publication(batch, metadata);
     }
 
     #[test]
-    fn test_time_partition_validation_allows_unordered_same_partition_and_null_anchor() {
+    fn test_date_partition_validation_allows_unordered_same_partition_and_null_anchor() {
         let dir = tempfile::tempdir().unwrap();
-        let timestamp = 1_705_320_000;
         let batch = partition_batch(
             vec![Some(503), Some(501), Some(502)],
-            vec![
-                Some((timestamp + 2) * 1_000),
-                None,
-                Some(timestamp * 1_000 + 999),
-            ],
+            vec![Some((T + 2) * 1_000), None, Some(T * 1_000 + 999)],
         );
-        let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None);
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
         assert!(writer
             .write_all(
                 &HashMap::from([("blocks".into(), batch.clone())]),
-                &routed_metadata(Some(timestamp))
+                &routed_metadata(Some(T))
             )
             .unwrap());
-        let path = std::fs::read_dir(dir.path().join("blocks/year=2024/month=01/day=15"))
+        let path = std::fs::read_dir(dir.path().join("blocks/date=2024-01-15"))
             .unwrap()
             .next()
             .unwrap()
@@ -1120,79 +971,122 @@ mod tests {
 
     #[test]
     fn invalid_times_never_publish_files_or_advance_part_counters() {
-        for partition in [
-            Partition::Date,
-            Partition::Hour,
-            Partition::Minute,
-            Partition::Second,
-        ] {
-            for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
-                let batch = partition_batch(vec![Some(501)], vec![Some(0)]);
-                assert_rejected_without_publication(
-                    partition.clone(),
-                    batch.clone(),
-                    routed_metadata(Some(timestamp)),
-                );
-                let mut metadata = routed_metadata(Some(0));
-                metadata.max_timestamp = Some(timestamp);
-                assert_rejected_without_publication(partition.clone(), batch.clone(), metadata);
-                let dir = tempfile::tempdir().unwrap();
-                let output = dir.path().join("output");
-                let mut writer =
-                    ParquetTableWriter::new(&output, partition.clone(), Compression::None);
-                assert!(writer
-                    .write_batch("blocks", &batch, &routed_metadata(Some(timestamp)))
-                    .is_err());
-                assert!(!output.exists());
-                assert!(writer.part_counters.is_empty());
-                assert!(writer
-                    .s3_object_key("blocks", &routed_metadata(Some(timestamp)), "part.parquet")
-                    .is_err());
-            }
-            let batch = partition_batch(vec![Some(501)], vec![Some(i64::MAX)]);
-            assert_rejected_without_publication(partition, batch, routed_metadata(Some(0)));
+        for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+            let batch = partition_batch(vec![Some(501)], vec![Some(0)]);
+            assert_rejected_without_publication(batch.clone(), routed_metadata(Some(timestamp)));
+            let mut metadata = routed_metadata(Some(0));
+            metadata.max_timestamp = Some(timestamp);
+            assert_rejected_without_publication(batch.clone(), metadata);
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join("output");
+            let mut writer = ParquetTableWriter::new(&output, Compression::None);
+            assert!(writer
+                .write_batch("blocks", &batch, &routed_metadata(Some(timestamp)))
+                .is_err());
+            assert!(!output.exists());
+            assert!(writer.part_counters.is_empty());
+            assert!(writer
+                .s3_object_key("blocks", &routed_metadata(Some(timestamp)), "part.parquet")
+                .is_err());
         }
+        let batch = partition_batch(vec![Some(501)], vec![Some(i64::MAX)]);
+        assert_rejected_without_publication(batch, routed_metadata(Some(0)));
     }
 
     #[test]
     fn test_negative_milliseconds_use_floor_seconds_for_partition_membership() {
         let dir = tempfile::tempdir().unwrap();
         let batch = partition_batch(vec![Some(501), Some(502)], vec![Some(-1), Some(-999)]);
-        let mut writer = OutputWriter::new(dir.path(), Partition::Second, Compression::None);
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
         assert!(writer
             .write_all(
                 &HashMap::from([("blocks".into(), batch)]),
                 &routed_metadata(Some(-1))
             )
             .unwrap());
-        assert!(dir
-            .path()
-            .join("blocks/year=1969/month=12/day=31/hour=23/minute=59/second=59")
-            .is_dir());
+        assert!(dir.path().join("blocks/date=1969-12-31").is_dir());
     }
 
+    /// Null payload times (Solana without `block_time`) use the metadata's
+    /// routing anchor; a flush without any routing time is refused.
     #[test]
-    fn test_null_timestamp_routes_preserve_flat_and_anchored_destinations() {
-        for timestamp in [None, Some(1_705_320_000)] {
-            let dir = tempfile::tempdir().unwrap();
-            let batch = partition_batch(vec![Some(501)], vec![None]);
-            let metadata = routed_metadata(timestamp);
-            let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None);
-            let suffix = writer.inner.partition_suffix("blocks", &metadata).unwrap();
-            assert!(writer
-                .write_all(&HashMap::from([("blocks".into(), batch)]), &metadata)
-                .unwrap());
-            assert_eq!(parquet_rows_in(&dir.path().join(suffix)), 1);
+    fn test_null_timestamps_route_by_the_metadata_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = partition_batch(vec![Some(501)], vec![None]);
+        let metadata = routed_metadata(Some(T));
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
+        let suffix = writer.inner.partition_suffix("blocks", &metadata).unwrap();
+        assert_eq!(suffix, "blocks/date=2024-01-15");
+        assert!(writer
+            .write_all(
+                &HashMap::from([("blocks".into(), batch.clone())]),
+                &metadata
+            )
+            .unwrap());
+        assert_eq!(parquet_rows_in(&dir.path().join(suffix)), 1);
+        assert_rejected_without_publication(batch, routed_metadata(None));
+    }
+
+    /// The `date` column equals the `date=` directory of its rows (#652): a
+    /// matching column is written, a disagreeing or mistyped one is refused
+    /// before anything is published, and null dates follow their null times.
+    #[test]
+    fn test_date_column_must_equal_its_date_directory() {
+        let with_dates = |dates: Vec<Option<i32>>| {
+            let base = partition_batch(
+                vec![Some(501); dates.len()],
+                dates.iter().map(|date| date.map(|_| T * 1_000)).collect(),
+            );
+            let mut fields = base.schema().fields().to_vec();
+            fields.push(Arc::new(Field::new("date", DataType::Date32, true)));
+            let mut columns = base.columns().to_vec();
+            columns.push(Arc::new(arrow::array::Date32Array::from(dates)));
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        };
+        let day = crate::traits::date32_from_timestamp_seconds(T).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
+        let metadata = routed_metadata(Some(T));
+        assert!(writer
+            .write_all(
+                &HashMap::from([("blocks".into(), with_dates(vec![Some(day), None]))]),
+                &metadata
+            )
+            .unwrap());
+        assert_eq!(
+            parquet_rows_in(&dir.path().join("blocks/date=2024-01-15")),
+            2
+        );
+        for wrong in [day - 1, day + 1] {
+            assert_rejected_without_publication(
+                with_dates(vec![Some(day), Some(wrong)]),
+                routed_metadata(Some(T)),
+            );
         }
+        let base = partition_batch(vec![Some(501)], vec![Some(T * 1_000)]);
+        let mut fields = base.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new("date", DataType::Int32, false)));
+        let mut columns = base.columns().to_vec();
+        columns.push(Arc::new(arrow::array::Int32Array::from(vec![day])));
+        assert_rejected_without_publication(
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap(),
+            routed_metadata(Some(T)),
+        );
     }
 
     #[test]
-    fn test_time_partition_rejects_missing_mistyped_or_unanchored_timestamps() {
-        let timestamp = 1_705_320_000;
+    fn test_date_partition_rejects_missing_mistyped_or_unanchored_timestamps() {
         assert_rejected_without_publication(
-            Partition::Date,
-            make_test_batch(),
-            routed_metadata(Some(timestamp)),
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "block_num",
+                    DataType::UInt64,
+                    false,
+                )])),
+                vec![Arc::new(arrow::array::UInt64Array::from(vec![42]))],
+            )
+            .unwrap(),
+            routed_metadata(Some(T)),
         );
         let wrong = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new(
@@ -1200,15 +1094,11 @@ mod tests {
                 DataType::Int64,
                 false,
             )])),
-            vec![Arc::new(arrow::array::Int64Array::from(vec![timestamp]))],
+            vec![Arc::new(arrow::array::Int64Array::from(vec![T]))],
         )
         .unwrap();
-        assert_rejected_without_publication(
-            Partition::Date,
-            wrong,
-            routed_metadata(Some(timestamp)),
-        );
-        let unzoned = arrow::array::TimestampMillisecondArray::from(vec![timestamp * 1_000]);
+        assert_rejected_without_publication(wrong, routed_metadata(Some(T)));
+        let unzoned = arrow::array::TimestampMillisecondArray::from(vec![T * 1_000]);
         let wrong = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new(
                 "timestamp",
@@ -1218,68 +1108,12 @@ mod tests {
             vec![Arc::new(unzoned)],
         )
         .unwrap();
-        assert_rejected_without_publication(
-            Partition::Date,
-            wrong,
-            routed_metadata(Some(timestamp)),
-        );
-        let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
-        assert_rejected_without_publication(Partition::Date, batch.clone(), routed_metadata(None));
-        let mut metadata = routed_metadata(Some(timestamp));
+        assert_rejected_without_publication(wrong, routed_metadata(Some(T)));
+        let batch = partition_batch(vec![Some(501)], vec![Some(T * 1_000)]);
+        assert_rejected_without_publication(batch.clone(), routed_metadata(None));
+        let mut metadata = routed_metadata(Some(T));
         metadata.max_timestamp = None;
-        assert_rejected_without_publication(Partition::Date, batch, metadata);
-    }
-
-    #[test]
-    fn test_block_partition_checks_all_rows_and_anchor_without_timestamps() {
-        let mut partition = Partition::block_range(100);
-        partition.set_block_range_start(Some(500));
-        for blocks in [
-            vec![Some(501), Some(701), Some(601), Some(501)],
-            vec![None],
-            vec![Some(499)],
-        ] {
-            let len = blocks.len();
-            assert_rejected_without_publication(
-                partition.clone(),
-                partition_batch(blocks, vec![None; len]),
-                routed_metadata(None),
-            );
-        }
-        assert_rejected_without_publication(
-            partition.clone(),
-            make_test_batch(),
-            routed_metadata(None),
-        );
-        let valid = partition_batch(vec![Some(599), Some(501), Some(599)], vec![None; 3]);
-        let mut metadata = routed_metadata(None);
-        metadata.max_block_number = 600;
-        assert_rejected_without_publication(partition.clone(), valid.clone(), metadata);
-        let dir = tempfile::tempdir().unwrap();
-        let mut writer = OutputWriter::new(dir.path(), partition, Compression::None);
-        assert!(writer
-            .write_all(
-                &HashMap::from([("blocks".into(), valid)]),
-                &routed_metadata(None)
-            )
-            .unwrap());
-        assert_eq!(
-            parquet_rows_in(&dir.path().join("blocks/block_range=500-600")),
-            3
-        );
-    }
-
-    #[test]
-    fn test_invalid_numeric_configuration_is_an_error_before_path_formatting() {
-        let batch = partition_batch(vec![Some(501)], vec![None]);
-        assert_rejected_without_publication(
-            Partition::block_range(0),
-            batch.clone(),
-            routed_metadata(None),
-        );
-        let mut partition = Partition::block_range(100);
-        partition.set_block_range_start(Some(600));
-        assert_rejected_without_publication(partition, batch, routed_metadata(None));
+        assert_rejected_without_publication(batch, metadata);
     }
 
     #[test]
@@ -1287,14 +1121,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("logs");
         std::fs::write(&blocker, b"not a directory").unwrap();
-        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::None);
+        let mut writer = OutputWriter::new(dir.path(), Compression::None);
         let batches = HashMap::from([
             ("blocks".into(), make_test_batch()),
             ("logs".into(), make_test_batch()),
             ("transactions".into(), make_test_batch()),
         ]);
+        let day = |table: &str| dir.path().join(table).join("date=2024-01-15");
         assert!(writer.write_all(&batches, &default_metadata()).is_err());
-        assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 1);
+        assert_eq!(parquet_rows_in(&day("blocks")), 1);
         assert!(!dir.path().join("transactions").exists());
         let stats = writer.buffered_stats();
         assert_eq!(stats.tables, 2);
@@ -1315,7 +1150,7 @@ mod tests {
         assert!(!writer.flush_remaining().unwrap());
         assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
         for table in ["blocks", "logs", "transactions"] {
-            assert_eq!(parquet_rows_in(&dir.path().join(table)), 1);
+            assert_eq!(parquet_rows_in(&day(table)), 1);
         }
     }
 
@@ -1323,7 +1158,7 @@ mod tests {
     fn test_empty_mapper_flush_does_not_publish_or_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
-        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None);
+        let mut writer = OutputWriter::new(&output, Compression::None);
         assert!(!writer
             .write_all(&HashMap::new(), &default_metadata())
             .unwrap());

@@ -8,7 +8,7 @@ use anyhow::{ensure, Context, Result};
 use blocks::antelope::mapper::AntelopeBlockMapper;
 use clap::Parser;
 use firehose_parquet::{
-    config::{BlockMetadata, Compression, Partition},
+    config::{BlockMetadata, Compression},
     encode::EncodeBytes,
     traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::ParquetTableWriter,
@@ -83,11 +83,8 @@ fn main() -> Result<()> {
             for fork in [false, true] {
                 let case = format!("{name}-failed{include_failed}-fork{fork}");
                 let mut mapper = AntelopeBlockMapper::new(fork, encoding.clone(), include_failed);
-                let mut writer = ParquetTableWriter::new(
-                    args.output.join(&case),
-                    Partition::None,
-                    Compression::Zstd,
-                );
+                let mut writer =
+                    ParquetTableWriter::new(args.output.join(&case), Compression::Zstd);
                 for (bytes, identity) in &blocks {
                     mapper.map_block_bytes(
                         bytes.clone().into(),

@@ -9,7 +9,7 @@ fn plan(authority: &AuthorityState, rows: u64) -> PendingTransaction {
     let mut frontier = AcceptedFrontier::resume(&authority.checkpoint);
     let ordinal = frontier.receive(event(100, 1)).unwrap();
     frontier
-        .accept(ordinal, routing(RoutingPolicy::DirectV1))
+        .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
         .unwrap();
     let tables = authority
         .descriptor
@@ -19,7 +19,11 @@ fn plan(authority: &AuthorityState, rows: u64) -> PendingTransaction {
             table: name.clone(),
             schema_sha256: digest.clone(),
             rows,
-            partition: String::new(),
+            partition: if rows == 0 {
+                String::new()
+            } else {
+                crate::ingest::state::tests::FIXTURE_DATE.into()
+            },
         })
         .collect();
     PendingTransaction::prepare(
@@ -32,7 +36,7 @@ fn plan(authority: &AuthorityState, rows: u64) -> PendingTransaction {
 }
 
 async fn exercise_reopen_and_commit(store: &TransactionStateStore<'_>) {
-    let original = AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap();
+    let original = AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap();
     let authority = store.initialize(original).await.unwrap();
     let writing = store
         .begin(&authority, plan(&authority.payload, 0))
@@ -121,7 +125,7 @@ async fn frozen_receipt_cas_rejects_stale_writer_and_commit_missing_table_receip
     let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
     let store = TransactionStateStore::local(root.path(), &owner).unwrap();
     let authority = store
-        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap())
+        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap())
         .await
         .unwrap();
     let writing = store
@@ -157,7 +161,7 @@ async fn orphan_pending_and_inconsistent_authority_fail_closed() {
     let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
     let store = TransactionStateStore::local(root.path(), &owner).unwrap();
     let raw = LocalStateStore::new(root.path(), &owner).unwrap();
-    let authority = AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap();
+    let authority = AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap();
     let writing = plan(&authority, 0);
     let orphan = raw.create(ControlKey::Pending, &writing).unwrap();
     assert!(store.load().await.is_err());
@@ -186,7 +190,7 @@ async fn uncertain_remote_owner_prevents_further_state_mutation() {
         .unwrap();
     let store = TransactionStateStore::s3("dataset", &owner).unwrap();
     let authority = store
-        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap())
+        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap())
         .await
         .unwrap();
     owner.mark_mutation_uncertain();
@@ -204,7 +208,7 @@ async fn batched_receipts_persist_together_and_keep_every_receipt_rule() {
     let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
     let store = TransactionStateStore::local(root.path(), &owner).unwrap();
     let authority = store
-        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap())
+        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::GenesisLookaheadV1)).unwrap())
         .await
         .unwrap();
     let writing = store

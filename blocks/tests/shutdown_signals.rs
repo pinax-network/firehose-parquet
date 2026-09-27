@@ -66,8 +66,6 @@ async fn shutdown_signals_interrupt_info_without_output_or_cursor_changes() {
                 "100",
                 "--stop-block",
                 "102",
-                "--partition",
-                "none",
                 "--output",
             ])
             .arg(&output)

@@ -12,7 +12,7 @@ pub use partitions::*;
 pub use paths::*;
 pub use validate::*;
 
-use crate::config::{Compression, Config, Partition};
+use crate::config::{Compression, Config};
 use crate::networks::KNOWN_NETWORK_NAMES;
 use crate::partition_index::{
     PartitionCoverage, PartitionSpanProof, VerifiedPartitionIndex, VerifiedPartitionSpan,
@@ -241,6 +241,8 @@ pub struct CommonArgs {
     /// bucket name), for example `s3://datasets/{chain}`; write `{{` and `}}`
     /// for literal braces. The resolved root is bound when a dataset is
     /// created, so later runs must resolve to the same root.
+    ///
+    /// Every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`.
     #[arg(
         long,
         env = "OUTPUT",
@@ -249,27 +251,6 @@ pub struct CommonArgs {
         help_heading = "Output"
     )]
     pub output: PathBuf,
-
-    /// Partitioning mode: none, block_range, date, hour, minute, second
-    #[arg(
-        long,
-        env = "PARTITION",
-        default_value = "none",
-        hide_env_values = true,
-        help_heading = "Output"
-    )]
-    pub partition: String,
-
-    /// Block range size when partition=block_range (must be at least 1)
-    #[arg(
-        long,
-        env = "BLOCK_RANGE_SIZE",
-        default_value = "10000",
-        hide_env_values = true,
-        help_heading = "Output",
-        value_parser = clap::value_parser!(u64).range(1..)
-    )]
-    pub block_range_size: u64,
 
     /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
     #[arg(
@@ -438,7 +419,7 @@ pub struct CommonArgs {
 /// Arguments for the `build` subcommand — main Firehose ingestion pipeline.
 ///
 /// Streams blocks from a Firehose gRPC endpoint and writes Apache Parquet
-/// datasets partitioned by block range, date, hour, minute, or second.
+/// datasets, one `date=YYYY-MM-DD` partition per UTC day in every table.
 #[derive(clap::Args, Debug, Clone)]
 #[command(after_long_help = "\
 Examples:
@@ -474,18 +455,18 @@ Examples:
 
   # Resume: rerun the same command. Progress comes from the output's
   # .fireparq-ingest/ state; _fireparq/cursor.parquet is only an optional mirror
-  fireparq build --network mainnet --partition date
+  fireparq build --network mainnet
 
   # Create an output without the _fireparq/cursor.parquet mirror (bound at creation)
-  fireparq build --network mainnet --partition date --cursor none
+  fireparq build --network mainnet --cursor none
 
   # One bucket per network: --output is the dataset root, here the bucket root
-  fireparq build --network mainnet --partition date \\
+  fireparq build --network mainnet \\
     --output s3://ethereum-mainnet
 
   # Several networks in one bucket: {chain} expands to the endpoint's
   # chain_name, here s3://datasets/v1/mainnet (bound at creation)
-  fireparq build --network mainnet --partition date \\
+  fireparq build --network mainnet \\
     --output 's3://datasets/v1/{chain}'
 ")]
 pub struct BuildArgs {
@@ -592,8 +573,8 @@ pub enum Commands {
     },
     /// Stream blocks from a Firehose gRPC endpoint and write Apache Parquet datasets.
     ///
-    /// This is the primary ingestion workflow. Partitions output by block range,
-    /// date, hour, minute, or second. Supports live mode and S3 output. A rerun
+    /// This is the primary ingestion workflow. Writes every table as
+    /// `<table>/date=YYYY-MM-DD/part-*.parquet`. Supports live mode and S3 output. A rerun
     /// resumes from the output's authoritative state under `.fireparq-ingest/`;
     /// `_fireparq/cursor.parquet` is only an optional mirror (`--cursor none`
     /// disables it).
@@ -833,86 +814,11 @@ Lookup order for the data path:
         #[command(flatten)]
         aws: AwsArgs,
     },
-    /// Roll up fine-grained partitioned Parquet files into coarser intervals.
-    ///
-    /// Reads minute/hour-partitioned files and merges them into hourly or daily
-    /// partitions, streaming one output part at a time with a --flush-bytes target.
-    #[command(after_long_help = "\
-Examples:
-  # Roll up minute partitions into daily, replacing the minute files (in-place)
-  fireparq rollup ./output/blocks/ --delete-source
-
-  # Roll up to hourly partitions with a separate output, keeping the source files
-  fireparq rollup ./output/blocks/ -o ./merged/ -p hour
-
-  # Roll up S3 data, delete source files after
-  fireparq rollup s3://bucket/blocks/ --delete-source
-
-  # Custom file size limit (256 MB)
-  fireparq rollup ./output/blocks/ -o ./daily/blocks/ --flush-bytes 268435456
-
-Only part-*.parquet files below a partition finer than --partition are read.
-Files already at the target granularity, the _fireparq/ artifact directory and
-legacy root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
-verify_runs/) are left untouched, so re-running a rollup is safe. Without
---delete-source, outputs carry the firehose-parquet.rollup_copy=true footer
-marker, and each re-run replaces the copies it wrote earlier in the target
-partitions it rolls up, also after merge renamed them.
-
-Each target partition is journaled in _fireparq_rollup.json in its output
-directory. The next rollup into the same output finishes or undoes an
-interrupted partition before discovering sources, so a crash never leaves rows
-stored twice.
-
-A target partition whose source files have different columns (names, types,
-nullability, or order) or different value-defining file metadata (chain, block
-type, byte or block-id encoding, vote or failed-transaction coverage, synthetic
-timestamps, stream mode) is left untouched, and rollup exits non-zero.
-
-The source path must exist locally or be an explicit s3://bucket/... URI. Unlike
-scan and inspect, rollup never falls back to s3://$S3_BUCKET/<path> for a missing
-local path.
-")]
-    Rollup {
-        /// Source path containing partitioned Parquet files (existing local directory or s3:// URI)
-        #[arg(help_heading = "Selection")]
-        source: String,
-        /// Output path (local directory or S3 URI). Defaults to source (in-place rollup, which requires --delete-source).
-        #[arg(short = 'o', long, help_heading = "Selection")]
-        output: Option<String>,
-        /// Target partition interval: hour or date
-        #[arg(
-            short = 'p',
-            long = "partition",
-            default_value = "date",
-            help_heading = "Selection"
-        )]
-        partition: String,
-        /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
-        #[arg(long, default_value = "zstd", help_heading = "Output")]
-        compression: String,
-        /// Target compressed bytes per part, with batch/codec overhead (0 = unlimited output size)
-        #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Output")]
-        flush_bytes: u64,
-        /// Delete each source file once its target partition is written (required for in-place rollup)
-        #[arg(long, default_value = "false", help_heading = "Execution")]
-        delete_source: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-        /// Cache-Control header for S3 uploads (empty string = no header)
-        #[arg(
-            long,
-            env = "CACHE_CONTROL",
-            default_value = "public, max-age=31536000, immutable",
-            help_heading = "AWS / S3"
-        )]
-        cache_control: String,
-    },
     /// Merge small parquet part files within each partition into larger files.
     ///
-    /// Unlike rollup (which changes partition granularity), merge consolidates
-    /// multiple small parts within each existing partition directory into fewer,
-    /// larger files. Source parts are deleted after successful merge. Use
+    /// Merge consolidates multiple small parts within each existing
+    /// `date=YYYY-MM-DD` partition directory into fewer, larger files. Source
+    /// parts are deleted after successful merge. Use
     /// --flush-bytes and/or --flush-rows to cap merged output size.
     #[command(after_long_help = "\
 Examples:
@@ -942,8 +848,7 @@ partitions.parquet, merkle_roots.parquet, verify_runs/) are skipped. A partition
 whose parts have different columns (names, types, nullability, or order) or
 different value-defining file metadata (chain, block type, byte or block-id
 encoding, vote or failed-transaction coverage, synthetic timestamps, stream
-mode) is left untouched and listed in the summary, and merge exits non-zero. Partitions below an interrupted rollup
-(_fireparq_rollup.json) are left alone until that rollup is run again.
+mode) is left untouched and listed in the summary, and merge exits non-zero.
 
 Each partition merge is journaled in _fireparq_merge.json. Local interrupted
 merges recover under the common directory guard. S3 mutations hold a persistent
@@ -1039,30 +944,23 @@ Examples:
   # Delete a single parquet file directly
   fireparq truncate ./output/mainnet/_fireparq/partitions.parquet --yes
 
-  # Delete one day (also matches legacy date=15 directories)
-  fireparq truncate ./output/blocks/ -p \"year=2026/month=01/day=15\" --yes
+  # Delete one day
+  fireparq truncate ./output/blocks/ -p date=2026-01-15 --yes
 
   # Delete one day in every table of a network root
-  fireparq truncate ./output/mainnet/ -p \"year=2026/month=01/day=15\" --yes
+  fireparq truncate ./output/mainnet/ -p date=2026-01-15 --yes
 
-  # Delete January 2026 on S3 (filters on different keys must all match)
-  fireparq truncate s3://bucket/eth-mainnet/blocks/ -p year=2026 -p month=01 --yes
+  # Delete January 2026 on S3
+  fireparq truncate s3://bucket/eth-mainnet/blocks/ -p \"date=2026-01-*\" --yes
 
-  # Delete two days (filters on the same key match either value)
-  fireparq truncate ./output/blocks/ -p year=2026/month=01/day=01 -p year=2026/month=01/day=02 --yes
-
-  # Delete all minute-level partitions (key-only filter)
-  fireparq truncate ./output/blocks/ -p minute --yes
+  # Delete two days (repeated filters match either value)
+  fireparq truncate ./output/blocks/ -p date=2026-01-01 -p date=2026-01-02 --yes
 
 Partition filters:
-  key=value       matches files under a directory with that segment, e.g. month=01
-                  (every January of every year, unless combined with -p year=...)
-  key             matches every value of the key, e.g. minute
-  a/b/c           a partition path, e.g. year=2026/month=01/day=15: matches files whose
-                  partition directories start with exactly these segments
-  Each segment may contain one * glob (day=0*). day= also matches legacy date= directories.
-  Filters on different keys must all match; filters on the same key (and path filters)
-  match if any of them does.
+  date=YYYY-MM-DD   matches files in that date=YYYY-MM-DD partition directory
+  date=<glob>       one * glob over the date, e.g. date=2026-01-* (a month),
+                    date=2026-* (a year) or date=*-15 (every 15th)
+  Repeated filters match if any of them does. Every table is partitioned by date only.
 
 The path must exist locally or be an explicit s3://bucket/... URI. Unlike scan and
 inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local path.
@@ -1071,11 +969,9 @@ inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local
         /// Path to a .parquet file or a directory containing .parquet files (existing local path or s3:// URI)
         #[arg(help_heading = "Selection")]
         path: String,
-        /// Partition filter(s) — only delete files matching these partitions. A key=value
-        /// segment with an optional glob (e.g. "month=01", "day=0*"), a key name for all its
-        /// values (e.g. "minute"), or a partition path (e.g. "year=2026/month=01/day=15").
-        /// Filters on different keys must all match; filters on the same key match either.
-        /// `day` also matches the legacy `date=DD` day directories. Repeatable.
+        /// Partition filter(s): only delete files in matching `date=YYYY-MM-DD`
+        /// partitions. A date (e.g. "date=2026-01-15") or a glob over one with a single `*`
+        /// (e.g. "date=2026-01-*"). Repeatable; a file matches when any filter does.
         #[arg(long, short = 'p', help_heading = "Selection")]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting

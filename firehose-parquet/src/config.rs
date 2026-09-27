@@ -1,31 +1,5 @@
 use std::path::PathBuf;
 
-/// Hive prefix of the day-of-month directory written by time-based partitioning
-/// (`year=YYYY/month=MM/day=DD/...`).
-pub const DAY_PARTITION_PREFIX: &str = "day=";
-
-/// Day-of-month prefix written by earlier releases (`date=DD`). Under hive
-/// partitioning it collided with the canonical `date` column, so new output uses
-/// [`DAY_PARTITION_PREFIX`]. Readers accept both.
-pub const LEGACY_DAY_PARTITION_PREFIX: &str = "date=";
-
-/// Partitioning strategy for output files.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Partition {
-    /// No partitioning — all data in a flat directory per table.
-    None,
-    /// Partition by block number ranges of the given size.
-    BlockRange { size: u64, start_block: Option<u64> },
-    /// Partition by date (`year=YYYY/month=MM/day=DD`).
-    Date,
-    /// Partition by hour (`.../day=DD/hour=HH`).
-    Hour,
-    /// Partition by minute (`.../hour=HH/minute=MM`).
-    Minute,
-    /// Partition by second (`.../minute=MM/second=SS`).
-    Second,
-}
-
 /// Compression codec for Parquet files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -183,8 +157,9 @@ pub struct Config {
     /// Resolved cursor location — either a local path or an `s3://` URI.
     /// Must have a `.parquet` extension.
     pub cursor_path: Option<String>,
+    /// Dataset root. Every table is written as
+    /// `<table>/date=YYYY-MM-DD/part-*.parquet` ([`crate::date_partition`]).
     pub output: PathBuf,
-    pub partition: Partition,
     pub flush_rows: Option<u32>,
     pub flush_blocks: Option<u64>,
     pub flush_bytes: u64,
@@ -206,120 +181,6 @@ pub struct Config {
     pub metrics_port: Option<u16>,
     pub stream_idle_timeout_secs: Option<u64>,
     pub reconnect_stall_timeout_secs: Option<u64>,
-}
-
-impl Partition {
-    pub fn block_range(size: u64) -> Self {
-        Self::BlockRange {
-            size,
-            start_block: None,
-        }
-    }
-
-    pub fn set_block_range_start(&mut self, start_block: Option<u64>) {
-        if let Self::BlockRange {
-            start_block: anchor,
-            ..
-        } = self
-        {
-            *anchor = start_block;
-        }
-    }
-
-    pub fn block_range_bounds(&self, block_number: u64) -> Option<(u64, u64)> {
-        let Self::BlockRange { size, start_block } = self else {
-            return None;
-        };
-
-        let anchor = start_block.unwrap_or(0);
-        if block_number < anchor {
-            debug_assert!(
-                block_number >= anchor,
-                "block number {block_number} precedes anchored block-range start {anchor}"
-            );
-            let stop = anchor.saturating_add(*size);
-            return Some((anchor, stop));
-        }
-
-        let relative_block = block_number - anchor;
-        let partition_index = relative_block / *size;
-        let start = anchor.saturating_add(partition_index.saturating_mul(*size));
-        let stop = start.saturating_add(*size);
-        Some((start, stop))
-    }
-
-    /// Compute the partition key for a block given its number and timestamp.
-    ///
-    /// Returns a string that uniquely identifies the partition bucket this block
-    /// belongs to. Two blocks in the same partition return the same key.
-    /// Returns `None` for `Partition::None` (no partitioning).
-    pub fn partition_key(
-        &self,
-        block_number: u64,
-        timestamp: i64,
-    ) -> anyhow::Result<Option<String>> {
-        Ok(match self {
-            Partition::None => None,
-            Partition::BlockRange { .. } => self
-                .block_range_bounds(block_number)
-                .map(|(start, stop)| format!("block_range={start}-{stop}")),
-            Partition::Date => {
-                let dt = crate::traits::checked_timestamp(timestamp)?;
-                Some(format!(
-                    "year={:04}/month={:02}/day={:02}",
-                    dt.year(),
-                    dt.month() as u8,
-                    dt.day()
-                ))
-            }
-            Partition::Hour => {
-                let dt = crate::traits::checked_timestamp(timestamp)?;
-                Some(format!(
-                    "year={:04}/month={:02}/day={:02}/hour={:02}",
-                    dt.year(),
-                    dt.month() as u8,
-                    dt.day(),
-                    dt.hour()
-                ))
-            }
-            Partition::Minute => {
-                let dt = crate::traits::checked_timestamp(timestamp)?;
-                Some(format!(
-                    "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}",
-                    dt.year(),
-                    dt.month() as u8,
-                    dt.day(),
-                    dt.hour(),
-                    dt.minute()
-                ))
-            }
-            Partition::Second => {
-                let dt = crate::traits::checked_timestamp(timestamp)?;
-                Some(format!(
-                    "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/second={:02}",
-                    dt.year(),
-                    dt.month() as u8,
-                    dt.day(),
-                    dt.hour(),
-                    dt.minute(),
-                    dt.second()
-                ))
-            }
-        })
-    }
-}
-
-impl std::fmt::Display for Partition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Partition::None => write!(f, "none"),
-            Partition::BlockRange { size, .. } => write!(f, "block_range({size})"),
-            Partition::Date => write!(f, "date"),
-            Partition::Hour => write!(f, "hour"),
-            Partition::Minute => write!(f, "minute"),
-            Partition::Second => write!(f, "second"),
-        }
-    }
 }
 
 impl std::fmt::Display for Compression {
@@ -380,7 +241,7 @@ impl std::fmt::Display for Config {
             None => writeln!(f, "  cursor             none (mirror disabled)")?,
         }
         writeln!(f, "  output             {}", self.output.display())?;
-        writeln!(f, "  partition          {}", self.partition)?;
+        writeln!(f, "  partition          date")?;
         writeln!(f, "  compression        {}", self.compression)?;
         if let Some(rows) = self.flush_rows {
             writeln!(f, "  flush_rows         {rows}")?;
@@ -478,7 +339,6 @@ impl Default for Config {
             stop_block: None,
             cursor_path: None,
             output: PathBuf::from("."),
-            partition: Partition::None,
             flush_rows: None,
             flush_blocks: None,
             flush_bytes: DEFAULT_FLUSH_BYTES,
@@ -507,17 +367,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_partition_display() {
-        assert_eq!(Partition::None.to_string(), "none");
-        assert_eq!(
-            Partition::block_range(10000).to_string(),
-            "block_range(10000)"
-        );
-        assert_eq!(Partition::Date.to_string(), "date");
-        assert_eq!(Partition::Hour.to_string(), "hour");
-    }
-
-    #[test]
     fn test_compression_display() {
         assert_eq!(Compression::None.to_string(), "none");
         assert_eq!(Compression::Snappy.to_string(), "snappy");
@@ -535,7 +384,7 @@ mod tests {
         assert!(display.contains("stop_block         stream forever (exclusive)"));
         assert!(display
             .contains("missing_blocks     not probed; the stream delivers only produced blocks"));
-        assert!(display.contains("partition          none"));
+        assert!(display.contains("partition          date"));
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
         assert!(!display.contains("flush_blocks"));
@@ -727,99 +576,5 @@ mod tests {
             ..Config::default()
         };
         assert!(config.to_string().contains("disabled"));
-    }
-
-    #[test]
-    fn time_partitions_reject_invalid_seconds_and_preserve_negative_dates() {
-        for partition in [
-            Partition::Date,
-            Partition::Hour,
-            Partition::Minute,
-            Partition::Second,
-        ] {
-            for seconds in [i64::MIN, i64::MAX, 1_700_000_000_000] {
-                assert!(partition.partition_key(1, seconds).is_err());
-            }
-            assert!(partition
-                .partition_key(1, -1)
-                .unwrap()
-                .unwrap()
-                .starts_with("year=1969/month=12/day=31"));
-        }
-    }
-
-    #[test]
-    fn test_partition_key_none() {
-        assert_eq!(Partition::None.partition_key(100, 1000).unwrap(), None);
-    }
-
-    #[test]
-    fn test_partition_key_block_range() {
-        assert_eq!(
-            Partition::block_range(1000).partition_key(1000, 0).unwrap(),
-            Some("block_range=1000-2000".to_string())
-        );
-        assert_eq!(
-            Partition::block_range(1000).partition_key(1500, 0).unwrap(),
-            Some("block_range=1000-2000".to_string())
-        );
-        assert_eq!(
-            Partition::block_range(1000).partition_key(1999, 0).unwrap(),
-            Some("block_range=1000-2000".to_string())
-        );
-        assert_eq!(
-            Partition::block_range(1000).partition_key(2000, 0).unwrap(),
-            Some("block_range=2000-3000".to_string())
-        );
-    }
-
-    #[test]
-    fn test_partition_key_block_range_uses_start_block_anchor() {
-        let mut partition = Partition::block_range(100);
-        partition.set_block_range_start(Some(9_820_210));
-
-        assert_eq!(
-            partition.partition_key(9_820_210, 0).unwrap(),
-            Some("block_range=9820210-9820310".to_string())
-        );
-        assert_eq!(
-            partition.partition_key(9_820_309, 0).unwrap(),
-            Some("block_range=9820210-9820310".to_string())
-        );
-        assert_eq!(
-            partition.partition_key(9_820_310, 0).unwrap(),
-            Some("block_range=9820310-9820410".to_string())
-        );
-    }
-
-    #[test]
-    fn test_partition_key_date() {
-        // 2024-01-15 12:00:00 UTC = 1705320000
-        assert_eq!(
-            Partition::Date.partition_key(100, 1705320000).unwrap(),
-            Some("year=2024/month=01/day=15".to_string())
-        );
-        // 2024-01-16 00:00:00 UTC = 1705363200
-        assert_eq!(
-            Partition::Date.partition_key(200, 1705363200).unwrap(),
-            Some("year=2024/month=01/day=16".to_string())
-        );
-    }
-
-    #[test]
-    fn test_partition_key_hour() {
-        // 2024-01-15 14:30:00 UTC = 1705329000
-        assert_eq!(
-            Partition::Hour.partition_key(100, 1705329000).unwrap(),
-            Some("year=2024/month=01/day=15/hour=14".to_string())
-        );
-    }
-
-    #[test]
-    fn test_partition_key_detects_boundary() {
-        // Last second of 2024-01-15 vs first second of 2024-01-16
-        let key1 = Partition::Date.partition_key(100, 1705363199).unwrap(); // 23:59:59
-        let key2 = Partition::Date.partition_key(101, 1705363200).unwrap(); // 00:00:00
-        assert_ne!(key1, key2);
     }
 }
