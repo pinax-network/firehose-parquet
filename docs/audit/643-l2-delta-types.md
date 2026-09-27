@@ -1,7 +1,7 @@
 # Delta column types at the flush boundary (#643, lane L2)
 
-Refs #643; part of #463. Design: [`docs/design/delta-lake.md`](../design/delta-lake.md)
-§6 (types), §2, §3.3 and the L2 row of §11. PR: see the #643 row of the
+Refs #643; part of #463. PR: [#669](https://github.com/pinax-network/firehose-parquet/pull/669). Design: [`docs/design/delta-lake.md`](../design/delta-lake.md)
+§6 (types), §2, §3.3 and the L2 row of §11. Index: the #643 row of the
 [audit index](README.md).
 
 ## Diagnosis
@@ -228,7 +228,9 @@ The real-binary tests that read parts (`adaptive_flush.rs`,
 - `cargo fmt --all` and `cargo test --workspace --locked` pass with
   `FIREPARQ_REQUIRE_DUCKDB=1 FIREPARQ_DUCKDB=/opt/homebrew/bin/duckdb`
   (DuckDB 1.1.1) and `FIREPARQ_REQUIRE_POLARS=1` with Polars 1.44.2 from the
-  pinned `blocks/tests/engines/requirements.txt`. The counts are in the PR.
+  pinned `blocks/tests/engines/requirements.txt`: 1,129 passed, 16 ignored,
+  on origin/main `3890651` plus this change. `cargo test -p blocks --example
+  refresh_evm_golden --locked` passes.
 - `cargo run -p blocks --example dump_schemas` regenerated `docs/schemas/`.
   Every column shows its Delta type, and each chain ends with its mapping and
   its `decimal(20,0)` columns.
