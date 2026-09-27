@@ -319,8 +319,8 @@ pub struct CommonArgs {
     )]
     pub flush_interval_secs: Option<u64>,
 
-    /// Parquet encoders running at once within one flush (at least 1; each also
-    /// holds its table's encoder working memory)
+    /// Parquet encoders running at once within one flush (1-64; each also holds
+    /// its table's encoder working memory)
     #[arg(
         long,
         env = "FLUSH_ENCODE_CONCURRENCY",
@@ -331,8 +331,9 @@ pub struct CommonArgs {
     )]
     pub flush_encode_concurrency: usize,
 
-    /// Table parts published at once within one flush (at least 1). Receipts are
-    /// journaled one at a time, and local output stages and publishes serially
+    /// Table parts published at once within one flush (1-64); for local output
+    /// also the threads that stage, publish and verify files. Each part still
+    /// publishes only after its receipt is journaled
     #[arg(
         long,
         env = "FLUSH_PUBLISH_CONCURRENCY",
