@@ -4,18 +4,63 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Supported Chains
 
-| `--block-type` | Endpoint Example | Tables |
+| `--block-type` | Example `--network` → endpoint | Tables, columns and types |
 |---|---|---|
-| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, withdrawals, access_lists, set_code_authorizations, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations, system_* (`--without-extended` disables the call and state-change tables) |
-| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
-| `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars, withdrawals, bls_to_execution_changes, deposit_requests, withdrawal_requests, consolidation_requests ([details](#beacon-chain-tables)) |
-| `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions, contracts, internal_call_values |
-| `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
-| `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, receipt_actions, execution_logs, state_changes |
+| `evm` | `mainnet` → `eth.firehose.pinax.network:443` | [EVM schema](docs/schemas/evm.md). `--without-extended` drops the call, state-change and `system_*` tables |
+| `solana` | `solana-mainnet-beta` → `solana.firehose.pinax.network:443` | [Solana schema](docs/schemas/solana.md). `--without-votes` drops `vote_transactions` |
+| `bitcoin` | `btc` → `bitcoin.firehose.pinax.network:443` | [Bitcoin schema](docs/schemas/bitcoin.md) |
+| `beacon` | `mainnet-cl` → `eth-cl.firehose.pinax.network:443` | [Beacon schema](docs/schemas/beacon.md) ([fork coverage](#beacon-chain-tables)) |
+| `tron` | `tron` → `mainnet.tron.streamingfast.io:443` | [Tron schema](docs/schemas/tron.md) |
+| `cosmos` | no built-in name; `--endpoint https://mainnet.injective.streamingfast.io:443` | [Cosmos schema](docs/schemas/cosmos.md) |
+| `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) |
+| `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
+
+The generated [schema reference](docs/schemas/README.md) lists every table,
+column, Arrow type and nullability. The sections below explain semantics, joins
+and queries. Select columns by name, not position: `fork_step` is not always the
+last column, because later additions follow it on several Solana, Antelope,
+NEAR and Tron tables.
+
+## What's new in v1.0.0
+
+v1.0.0 is a breaking release that follows the v0.7 series. The
+[v1.0.0 release notes](docs/releases/v1.0.0.md) list every change and include
+the upgrade guide.
+
+- **Data-integrity hardening.** `build` commits every table of a flush in one
+  transaction. The authoritative checkpoint is stored under
+  `<output>/<chain>/.fireparq-ingest/`, and `cursor.parquet` is now an optional
+  mirror. `merge` and `rollup` use per-partition journals and recover from
+  crashes. Every mutating command takes dataset ownership, which
+  `fireparq recovery` can inspect.
+- **One consistent schema across chains.** Canonical `timestamp` is
+  `Timestamp(Millisecond, UTC)` on every table, and day directories are now
+  `day=DD`. Most chains gain columns and tables, for example EVM withdrawals,
+  access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
+  Beacon Electra requests and Tron contracts. See the
+  [schema reference](docs/schemas/README.md).
+- **Verifiability.** `verify` computes versioned `merkle_v2` roots and keeps
+  one `merkle_roots.parquet` registry per network. It infers the chain and table
+  from the data, and a failing run never changes the registry.
+- **Explicit credentials and destinations.** Firehose credentials are scoped to
+  the provider (`PINAX_*`, `STREAMINGFAST_*`). S3 writes need an explicit
+  `s3://bucket/prefix` output, and `.env` is read only from the working
+  directory or from `--env-file`. `truncate` deletes nothing without `--yes`.
+- **Failed transactions.** EVM includes failed transactions by default, with
+  only their persistent state changes. Solana, Tron, Antelope and NEAR child
+  rows carry the outcome of their parent transaction or receipt.
+- **Performance.** Identifier columns are encoded once per block without
+  per-value allocations, and EVM decimals are written directly into Arrow.
+  Each `build` flush encodes and publishes its tables concurrently within
+  explicit bounds. `verify` and `rollup` stream with bounded memory. File sizes
+  follow an adaptive compressed-size target. Firehose receive windows are 16 MiB
+  and accept zstd replies.
+- **Existing datasets must be rebuilt into a new output root.** v1.0.0 does not
+  adopt output written by earlier releases, and the schemas changed. Rebuild
+  into a new empty output root and keep old datasets only for read-only tools.
+  See the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first).
 
 ## Features
 
@@ -43,6 +88,24 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 ## Quick Start
 
 > `v0.5.0+` renames the installed CLI binary from `firehose-parquet` to `fireparq`. The repository/crate names and Parquet metadata namespace remain `firehose-parquet.*`.
+
+### Install
+
+Each GitHub release attaches `fireparq` binaries for Linux and macOS
+(`x86_64` and `aarch64`), with build provenance attestations:
+
+```bash
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.0/fireparq-linux-x86_64.tar.gz
+tar xzf fireparq-linux-x86_64.tar.gz
+./fireparq-linux-x86_64/fireparq --version
+```
+
+The other archives are `fireparq-linux-aarch64`, `fireparq-macos-x86_64` and
+`fireparq-macos-aarch64`. To build from source instead, run
+`cargo install --path blocks` or use the commands below. A
+[Docker image](#docker) is also published.
+
+### Run
 
 ```bash
 # Build
@@ -81,7 +144,16 @@ cargo build --release --workspace
   --start-block 19000000 \
   --stop-block 19001000 \
   --without-extended \
-  --bytes-encoding hex
+  --output ./output
+
+# Write to S3: the output must be an explicit s3:// URI, and S3 output needs
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or the matching flags)
+./target/release/fireparq build \
+  --network mainnet \
+  --start-block 20000000 \
+  --stop-block 20001000 \
+  --output s3://my-bucket/v1 \
+  --partition date
 
 # Stream Antelope blocks
 ./target/release/fireparq build \
@@ -164,17 +236,18 @@ fails at startup with an error.
 
 ### Docker
 
-The image is published to GitHub Container Registry on each release:
-
-The image path stays `ghcr.io/pinax-network/firehose-parquet`, but the container entrypoint now runs `fireparq`.
+The image is published to GitHub Container Registry for each release tag; this
+release is tagged `1.0.0`, `1.0`, `1` and `latest`. The image path stays
+`ghcr.io/pinax-network/firehose-parquet`, and the container entrypoint runs
+`fireparq`.
 
 ```bash
-docker pull ghcr.io/pinax-network/firehose-parquet:latest
+docker pull ghcr.io/pinax-network/firehose-parquet:1.0.0
 
 docker run --rm \
   -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
-  ghcr.io/pinax-network/firehose-parquet \
+  ghcr.io/pinax-network/firehose-parquet:1.0.0 \
   build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -233,7 +306,7 @@ fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
 fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 
-# Canonical-name override
+# Hyphens in the network name become underscores in the override variable
 export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
 fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 ```
@@ -482,8 +555,10 @@ flushes the remaining buffers and saves the final cursor.
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
-under subcommands such as `partitions`, `scan`, `inspect`, `validate`,
-`verify`, `rollup`, `merge`, and `truncate`.
+under the subcommands `partitions`, `scan`, `inspect`, `validate`, `verify`,
+`rollup`, `merge`, `truncate`, `recovery` and `completions`. The global flags
+`--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
+`--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
 
 For full CLI help, run `fireparq --help` for the top-level command surface or
 `fireparq build --help` for ingestion-specific flags. The summary below keeps
@@ -496,10 +571,11 @@ recovery knobs to dedicated advanced sections.
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
 | Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
-| Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror |
-| Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
+| Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `cursor.parquet`, or `none`) |
+| Output | `--output <OUTPUT>` (default `.`; an explicit `s3://bucket/prefix` for S3), `--partition <PARTITION>` (default `none`), `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
-| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval), `--flush-encode-concurrency` / `--flush-publish-concurrency` / `--flush-inflight-bytes` (bounded table work inside each flush) |
+| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
+| Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
 
 ### Non-final streams and reorgs
 
@@ -507,8 +583,8 @@ Finalized-only output is the default. Use `--final-blocks-only=false` to receive
 reversible blocks, or set `FINAL_BLOCKS_ONLY=false`. An explicit CLI value takes
 precedence over the environment. The bare `--final-blocks-only` flag still means
 `true`; optional values use `=` so the flag cannot consume a following command.
-An unbounded `--live` run controls when streaming stops, independently of whether
-blocks must be final.
+Whether a run is live (no `--stop-block`) is independent of whether blocks must
+be final.
 
 Non-final output is an **append-only event history**. Every mapped envelope adds
 rows carrying `fork_step`: `NEW` adds a block, `UNDO` records its removal from the
@@ -640,17 +716,20 @@ end-to-end ingestion or provider performance guarantee. See the
 
 ### Advanced S3 / deployment knobs
 
-Most operators can point `--output` directly at a local path or `s3://...`
-prefix and rely on ambient AWS credentials. These flags are only needed for
-custom deployment environments:
+Most operators point `--output` at a local path or an explicit
+`s3://bucket/prefix`. S3 output or an S3 cursor for `build` and
+`partitions build` requires both an access key ID and a secret access key, from
+the flags or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. These commands never
+fall back to profile or instance-metadata credentials. The remaining flags are
+only needed for custom deployment environments:
 
-| Flag group | Purpose |
+| Flag (environment) | Purpose |
 |---|---|
-| `--s3-bucket <S3_BUCKET>` | Optional check that an explicit `s3://` output uses this bucket; a relative output is then rejected, never expanded |
-| `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` | Override ambient AWS credential and region resolution |
-| `--aws-endpoint-url <AWS_ENDPOINT_URL_S3>` | Target S3-compatible object stores |
-| `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |
-| `--metrics-port <METRICS_PORT>` | Expose Prometheus and health endpoints for monitored deployments |
+| `--s3-bucket` (`S3_BUCKET`) | Optional check that an explicit `s3://` output uses this bucket; a relative output is then rejected, never expanded |
+| `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`) | S3 credentials and region |
+| `--aws-endpoint-url` (`AWS_ENDPOINT_URL_S3`) | Target S3-compatible object stores |
+| `--cache-control` (`CACHE_CONTROL`) | Cache-Control header for S3 uploads, default `public, max-age=31536000, immutable`; an empty string sends no header |
+| `--metrics-port` (`METRICS_PORT`) | Expose Prometheus and health endpoints for monitored deployments |
 
 Each `build` mapper flush commits its nonempty tables together before advancing
 output authority and the cursor mirror. `--flush-bytes` is a **target compressed
@@ -793,13 +872,15 @@ parent context, skipped-slot handling and endpoint requirements.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--partition` | none | `date`, `hour`, `minute`, `second`, or `block_range` |
+| `--network` / `--endpoint` | none | Firehose network name or endpoint URL (`NETWORK` / `ENDPOINT`), resolved as for `build` |
+| `--partition` | required | `date`, `hour`, `minute`, `second`, or `block_range` |
 | `--block-range-size` | required for `block_range` | Width of deterministic block-number partitions |
 | `--start-block` | inferred | Fresh bounded start: explicit value, sibling cursor frontier, then endpoint first streamable block; fresh live uses explicit value or endpoint |
 | `--stop-block` | none in live mode | Exclusive bounded stop, no later than the proven finalized block plus one; incompatible with `--live` |
 | `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
 | `--poll-interval-secs` | `30` | Wait between live finalized-head checks |
 | `--output` | required | Local output root or explicit `s3://bucket/prefix`; with a bucket option set, a relative path is rejected |
+| `--compression` | `zstd` | Codec for `partitions.parquet`: zstd (level 3), `zstd:<level>`, snappy, gzip, none |
 | `--s3-bucket` | none | Optional check that an explicit `s3://` output uses this bucket; never supplies the output |
 | `--resume` | `false` | Extend an existing verified v2 index |
 | `--overwrite` | `false` | Rebuild and replace the index after successful validation; conflicts with `--resume` |
@@ -828,6 +909,7 @@ fireparq partitions ls \
 
 | Flag | Default | Description |
 |---|---|---|
+| `--partitions-index` | required | Index file: local path, shorthand S3 key via `S3_BUCKET`, or `s3://` URI |
 | `--partition-type` | none | Optional partition type filter |
 | `--partition-chain` | none | Optional chain filter |
 | `--from` | none | Inclusive lower bound on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for `block_range`) |
@@ -867,8 +949,10 @@ Strategies:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--shard-count` | none | Total shard count |
-| `--shard-index` | none | Zero-based shard index |
+| `--partitions-index` | required | Index file, as for `partitions ls` |
+| `--partition-type`, `--partition-chain`, `--from`, `--to` | none | Optional filters, as for `partitions ls` |
+| `--shard-count` | required | Total shard count |
+| `--shard-index` | required | Zero-based shard index |
 | `--strategy` | `ordinal` | Assignment strategy: `ordinal` or `hash` |
 | `--json` | `false` | Emit machine-readable output |
 
@@ -883,11 +967,18 @@ fireparq partitions validate \
 
 # Validate one chain/type and emit JSON
 fireparq partitions validate \
-  --partitions-index s3://my-bucket/partitions.parquet \
+  --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
   --partition-type date \
   --partition-chain eth-mainnet \
   --json
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--partitions-index` | required | Index file, as for `partitions ls` |
+| `--partition-type`, `--partition-chain` | none | Optional filters |
+| `--allow-gaps` | `false` | Legacy indexes only; with a v2 index it only adds a warning |
+| `--json` | `false` | Emit machine-readable output |
 
 V2 validation first reads the whole snapshot with the verified reader, which
 rejects (as an error) any break in source-order continuity (a gap or overlap),
@@ -933,6 +1024,16 @@ fireparq --log-level error partitions resolve \
   --all-spans --json
 ```
 
+| Flag | Default | Description |
+|---|---|---|
+| `--partitions-index` | required | Index file, as for `partitions ls` |
+| `--partition-type` | required | Partition type to resolve, such as `hour` or `date` |
+| `--partition-value` | required | Partition value, such as `2015-07-30 15:00:00`, or a start block for `block_range` |
+| `--partition-chain` | none | Optional chain filter |
+| `--all-spans` | `false` | Return every matching complete span (requires `--json`) |
+| `--strict-single-chain` | `false` | Accepted for compatibility |
+| `--json` | `false` | Emit machine-readable output |
+
 `--all-spans` requires `--json` and returns ordered separate spans without an
 enclosing `start_block`/`stop_block`. It still rejects incomplete matches and
 marks any span whose routing requires prior timestamp context. Such a span is
@@ -971,9 +1072,9 @@ Most operators can rely on the default `cursor.parquet` placement. Use
 cursor paths.
 
 ```bash
-# Keep a dedicated cursor for this live pipeline
+# Keep a dedicated cursor for this live pipeline (no --stop-block)
 fireparq build --network mainnet \
-  --live \
+  --output ./output \
   --cursor-template 'cursor/live-mainnet.parquet'
 
 # Store a cursor under the S3 output prefix
@@ -987,6 +1088,8 @@ fireparq build --network mainnet \
 Rules:
 
 - template path must end in `.parquet`
+- `build` supplies no template variables, so a `{chain}`-style placeholder is
+  an error; use a literal path
 - `{{` and `}}` escape literal braces
 - with S3 output, relative cursor template paths are stored under the output prefix
 - a template cannot be combined with `--cursor none`
@@ -1007,7 +1110,17 @@ fireparq scan ./output/blocks/part-000001.parquet --json
 fireparq scan ./output/blocks/ --limit 10
 fireparq scan ./output/blocks/part-000001.parquet --order desc --limit 20
 fireparq scan ./output/blocks/part-000001.parquet --order desc --offset 20 --limit 20
+fireparq scan ./output/blocks/ --schema-only
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-n, --limit` | `20` | Sample rows across the full scan (`0` = schema only) |
+| `--offset` | `0` | Rows to skip before displaying |
+| `--order` | `asc` | Row order for pagination and previews: `asc` or `desc` |
+| `--schema-only` | `false` | Show file metadata (schema, row count, size) without data |
+| `--vertical` | `false` | Row-by-row display instead of a boxed table |
+| `--json` | `false` | Machine-readable file info, schema and sampled rows |
 
 Lookup order:
 
@@ -1096,7 +1209,7 @@ S3_BUCKET=my-bucket fireparq verify mainnet/blocks --checks protocol
 fireparq verify s3://my-bucket/mainnet/blocks
 ```
 
-Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`. That shorthand is read-only: a run that writes registry roots (the `roots` check, which fills missing roots by default), `--report-json`, `--publish-report` or `--publish-report-path` also takes dataset ownership next to the data, so it refuses a data path that only the shorthand resolved to S3 and asks for the explicit `s3://` URI (#617). Registry writes log `writing merkle roots registry` with the absolute destination.
+Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`. That shorthand is read-only: a run that writes registry roots (the `roots` check, which fills missing roots by default), `--report-json`, `--publish-report` or `--publish-report-path` writes artifacts, so it refuses a data path that only the shorthand resolved to S3 and asks for the explicit `s3://` URI (#617). Registry writes log `writing merkle roots registry` with the absolute destination.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1108,12 +1221,14 @@ Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` U
 | `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
 | `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
 | `--hash-strategy` | `auto` | Hash strategy for leaves+Merkle nodes: `auto`, `keccak256`, `sha256` |
+| `--no-fail-fast` | `false` | Keep scanning and aggregate findings instead of stopping at the first mismatch |
+| `--report-json` | none | Write the JSON report to this path |
 | `--publish-report` | `false` | Publish `report.json` to the suggested verify artifact path |
 | `--publish-report-path` | *(suggested path)* | Override where the published report is written (local or `s3://`) |
 
 Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`, and the default registry moved from `<chain>/mainnet/merkle_roots.parquet` to the network directory. `verify` warns when it finds a registry at the old location; see [Moving a registry from the old default location](docs/verifiability-artifact-runbook.md#moving-a-registry-from-the-old-default-location).
 
-Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
+Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.x and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
 
 A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). `verify` only reads table data and takes no dataset ownership, so it runs while `build` writes the network. Partitions `build` may still write, decided from the dataset's authoritative ingestion state (or a legacy `cursor.parquet`), are reported as `open` and are not recorded. A partition that changes while `verify` reads it, or an unfinished `merge` or `rollup`, fails the run without writing anything; `verify` never recovers data. Registry writes are atomic locally and use one conditional put on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
 
@@ -1258,6 +1373,60 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | `-p, --partition` | *(none)* | Partition filter (repeatable, supports globs and partition paths) |
 | `--dry-run` | `false` | List every file that would be deleted without removing anything |
 | `-y, --yes` | `false` | Delete the matched files. Without it, truncate prints a summary and exits non-zero |
+
+### `recovery` — Ownership and Recovery State
+
+Mutating commands (`build`, `partitions build`, `merge`, `rollup` and
+`truncate`) hold dataset ownership; `verify` takes none. After an interrupted
+run, use `recovery` to inspect and finish that state. Each
+subcommand takes an existing local dataset root or an explicit
+`s3://bucket/prefix` URI.
+
+```bash
+# Read ownership and control-record summaries (changes nothing)
+fireparq recovery status ./output/mainnet
+
+# Recover protected ingestion, the cursor mirror and recognized merge journals
+fireparq recovery recover ./output/mainnet
+
+# Release one exact S3 owner after provider-confirmed request quiescence
+fireparq recovery release s3://my-bucket/v1/mainnet \
+  --expected-owner <owner-uuid-from-status> \
+  --expected-generation <generation-from-status> \
+  --stopped-writer-evidence <reference> \
+  --provider-quiescence-evidence <reference>
+```
+
+| Subcommand | Behavior |
+|---|---|
+| `status` | Read-only ownership and control-record summary |
+| `recover` | Recover protected ingestion, the mirror and recognized merge journals under one owner. A retained S3 owner must be released first |
+| `release` | S3 only. Requires `--expected-owner` and `--expected-generation` exactly as reported by `status`, plus `--stopped-writer-evidence` and `--provider-quiescence-evidence` (non-secret operator references). It changes only ownership and repairs no data |
+
+Local ownership is an OS directory lock that is released when the owning process
+exits; it cannot be forcibly released. Stopping a process or waiting does not
+make a delayed remote PUT or DELETE safe, so release an S3 owner only with
+provider evidence. Like the other commands, `recovery` reads its S3-compatible
+endpoint from `--aws-endpoint-url` / `AWS_ENDPOINT_URL_S3`, and also accepts
+`AWS_ENDPOINT_URL` as a fallback. See the
+[ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
+
+## Schema Reference
+
+Per-chain schema references are generated from the mapper schemas and list
+every table, column, Arrow type and nullability:
+
+- [Schema reference index](docs/schemas/README.md)
+- [EVM](docs/schemas/evm.md), [Solana](docs/schemas/solana.md),
+  [Bitcoin](docs/schemas/bitcoin.md), [Beacon](docs/schemas/beacon.md),
+  [Tron](docs/schemas/tron.md), [Cosmos](docs/schemas/cosmos.md),
+  [Antelope](docs/schemas/antelope.md), [NEAR](docs/schemas/near.md)
+
+The README keeps the semantics that a column list cannot show: failed-transaction
+rules, join keys, ordering and example queries. `fireparq inspect <file> --schema-only`
+prints the schema of an existing file. Select columns by name: `fork_step`
+(non-final streams only) is followed by later columns on several Solana,
+Antelope, NEAR and Tron tables.
 
 ## Failed Transaction Filtering
 
@@ -1454,13 +1623,13 @@ files before querying optional tables. No placeholder files are synthesized.
 
 ### EVM: withdrawals, access lists and EIP-7702 authorizations
 
-Three tables hold block and transaction data that is not a column of `blocks` or `transactions`. They are written at both detail levels, including with `--without-extended`. Their rows follow their transaction: they are written for failed transactions too, and dropped with `--exclude-failed-transactions`.
+Three tables hold block and transaction data that is not a column of `blocks` or `transactions`. They are written at both detail levels, including with `--without-extended`. Access-list and authorization rows follow their transaction: they are written for failed transactions too, and dropped with `--exclude-failed-transactions`. Columns and types are in the [EVM schema reference](docs/schemas/evm.md).
 
-| Table | One row per | Columns |
+| Table | One row per | Notes |
 |---|---|---|
-| `withdrawals` | beacon-chain withdrawal in the block (Shanghai and later) | `block_number`, `index` (the global withdrawal index), `validator_index`, `address`, `amount_gwei` (`UInt64`, in gwei, not wei) |
-| `access_lists` | entry of a transaction's access list (EIP-2930) | `block_number`, `tx_hash`, `tx_index`, `access_index` (position in the list), `address`, `storage_keys` (list of bytes, may be empty) |
-| `set_code_authorizations` | authorization of a `SET_CODE` transaction (EIP-7702) | `block_number`, `tx_hash`, `tx_index`, `authorization_index` (position in the list), `chain_id` (decimal string; `0` allows any chain), `address` (delegation target), `nonce`, `v`, `r`, `s`, `authority` (recovered signer), `discarded` |
+| `withdrawals` | beacon-chain withdrawal in the block (Shanghai and later) | `index` is the global withdrawal index; `amount_gwei` is in gwei, not wei |
+| `access_lists` | entry of a transaction's access list (EIP-2930) | `access_index` is the position in the list; `storage_keys` may be empty |
+| `set_code_authorizations` | authorization of a `SET_CODE` transaction (EIP-7702) | `authorization_index` is the position in the list; `chain_id` is a decimal string (`0` allows any chain); `address` is the delegation target and `authority` the recovered signer |
 
 - A withdrawal also appears in `system_balance_changes` with reason `WITHDRAWAL`, in wei and without the validator. `sum(amount_gwei) * 1e9` per block and address equals the summed balance delta there.
 - `authority` is `NULL` when it can't be recovered from the signature, and those authorizations are `discarded`. `address` is `NULL` on the few testnet blocks where Firehose did not record it.
@@ -1468,28 +1637,12 @@ Three tables hold block and transaction data that is not a column of `blocks` or
 
 ### EVM: header, signature, blob and ordinal columns
 
-These columns hold Firehose fields as they are, with bytes in the output encoding and big integers as decimal strings like the other value columns. Fields introduced by a fork are `NULL` in blocks and transactions from before it.
+`blocks`, `transactions`, `calls`, `system_calls` and `logs` carry Firehose header, signature, blob and ordinal fields as they are, with bytes in the output encoding and big integers as decimal strings like the other value columns. The [EVM schema reference](docs/schemas/evm.md) lists each column, type and nullability.
 
-| Table | Column | Type | Notes |
-|---|---|---|---|
-| `blocks` | `uncle_hash`, `logs_bloom` | bytes | |
-| `blocks` | `withdrawals_root` | bytes, nullable | Shanghai |
-| `blocks` | `blob_gas_used`, `excess_blob_gas` | `UInt64`, nullable | Cancun (EIP-4844) |
-| `blocks` | `parent_beacon_root` | bytes, nullable | Cancun (EIP-4788) |
-| `blocks` | `requests_hash` | bytes, nullable | Prague (EIP-7685) |
-| `transactions` | `v`, `r`, `s` | bytes | signature |
-| `transactions` | `return_data` | bytes | |
-| `transactions` | `logs_bloom` | bytes, nullable | from the receipt; `NULL` without a receipt |
-| `transactions` | `blob_gas`, `blob_gas_fee_cap` | `UInt64` / decimal `Utf8`, nullable | blob transactions only |
-| `transactions` | `blob_hashes` | list of bytes | empty for non-blob transactions |
-| `transactions` | `blob_gas_used`, `blob_gas_price` | `UInt64` / decimal `Utf8`, nullable | from the receipt, blob transactions only |
-| `transactions` | `begin_ordinal`, `end_ordinal` | `UInt64` | execution-order range of the transaction in the block |
-| `calls`, `system_calls` | `failure_reason` | `Utf8`, nullable | `NULL` when the call did not fail |
-| `calls`, `system_calls` | `address_delegates_to` | bytes, nullable | EIP-7702 delegation target of the called account |
-| `calls`, `system_calls` | `begin_ordinal`, `end_ordinal` | `UInt64` | execution-order range of the call |
-| `logs` | `ordinal` | `UInt64` | execution order in the block |
-
-The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
+- Fields introduced by a fork are `NULL` in blocks and transactions from before it: `withdrawals_root` (Shanghai), `blob_gas_used` / `excess_blob_gas` and `parent_beacon_root` (Cancun), and `requests_hash` (Prague).
+- The blob columns of `transactions` are `NULL` for non-blob transactions, and `blob_hashes` is an empty list. `transactions.logs_bloom` comes from the receipt and is `NULL` without one.
+- `failure_reason` on `calls` and `system_calls` is `NULL` when the call did not fail; `address_delegates_to` is the EIP-7702 delegation target of the called account.
+- `begin_ordinal` / `end_ordinal` on transactions and calls, and `ordinal` on logs, give the execution order in the block. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
 
 ## Tron Contracts, Receipts and Internal Values
 
@@ -1670,7 +1823,7 @@ before relying on the corrected key; appending new output does not repair old ro
 
 ## Beacon Chain Tables
 
-Each Beacon table gets rows from the fork that introduced its data. Blocks from earlier forks add no rows to it, so a range from before that fork writes no file for the table.
+Each Beacon table gets rows from the fork that introduced its data. Blocks from earlier forks add no rows to it, so a range from before that fork writes no file for the table. The [Beacon schema reference](docs/schemas/beacon.md) lists every column; the table below gives each table's source and first fork.
 
 | Table | Rows from | Source |
 |---|---|---|
@@ -1799,7 +1952,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `0.5.3` |
+| `firehose-parquet.version` | `1.0.0` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
@@ -1814,6 +1967,15 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.block_range_size` | `10000` |
 | `firehose-parquet.synthetic_timestamps` | `true` |
 | `firehose-parquet.synthetic_timestamp_policy` | `last_known_partition_routing` |
+| `firehose-parquet.with_votes` | `true` |
+| `firehose-parquet.rollup_copy` | `true` |
+
+Table files carry the pipeline, chain, encoding and compression keys.
+`partition` and `block_range_size` are written to `cursor.parquet` and
+`partitions.parquet`, and the cursor mirror also records `extended`,
+`final_blocks_only` and `include_failed_transactions`. `with_votes` appears on
+Solana output, the `synthetic_*` keys only when synthetic routing is used, and
+`rollup_copy` only on copies written by `rollup` without `--delete-source`.
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
 
@@ -1843,22 +2005,51 @@ FROM parquet_kv_metadata('output/blocks/year=2026/month=01/day=15/part-000001.pa
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
+## Parquet Lookup Metadata
+
+Ingestion, merge and rollup write bounded Bloom filters for selected scalar
+hash, signature and account/address columns. Readers that support these filters
+can skip row groups for equality lookups; positive matches still require row
+filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
+65,536 rows, with at most eight filters per group. This changes physical layout,
+not table schemas or row order. Dictionary encoding retains its existing policy.
+The retained-data benchmark measured 0.74–1.92% larger files and faster missing-key
+lookups; readers without Bloom pruning may only see the storage overhead.
+
+Complete ingestion parts declare ascending `block_num` only when every observed
+height proves that order. Streaming maintenance omits that assertion. Neither
+path sorts or reconstructs reversible-chain history.
+
+Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
+`zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default
+levels participate in protected transaction identity; recover any pending work
+with a supporting version before downgrading. See the
+[lookup properties and measurements](docs/audit/519-parquet-lookup-properties.md).
+
 ## Output Directory Layout
 
 ```
-<chain_name>/
-├── cursor.parquet
+<output>/<chain_name>/
+├── .fireparq-ingest/          # authoritative checkpoint and transaction journal (do not edit)
+├── cursor.parquet             # optional mirror of the checkpoint (absent with --cursor none)
+├── partitions.parquet         # written by `partitions build`
+├── merkle_roots.parquet       # written by `verify`
+├── verify_runs/<run_id>/report.json
 ├── blocks/
 │   ├── year=2026/month=02/day=25/
-│   │   ├── part-000001.parquet
-│   │   └── part-000002.parquet
+│   │   ├── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
+│   │   └── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
 │   └── year=2026/month=02/day=26/
-│       └── part-000001.parquet
+│       └── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
 ├── transactions/
 │   └── ...
 └── logs/
     └── ...
 ```
+
+`build` names each part deterministically from its stream, the first and last
+accepted event of its transaction, the transaction ID and the part index.
+`merge` and `rollup` write their own part names.
 
 Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
 
@@ -1974,7 +2165,7 @@ reconciliation. See [the implementation and live comparison](docs/audit/508-ante
 
 ## NEAR: Transactions, Receipts, Actions and Logs
 
-A NEAR transaction's own outcome records its inclusion and conversion into a receipt. Contract calls run when action receipts execute, often in later blocks and on other shards. `transactions` and `receipts` carry the keys to follow that chain:
+A NEAR transaction's own outcome records its inclusion and conversion into a receipt. Contract calls run when action receipts execute, often in later blocks and on other shards. `transactions` and `receipts` carry the keys to follow that chain (every column is in the [NEAR schema reference](docs/schemas/near.md)):
 
 | Table | Column | Type | Meaning |
 |---|---|---|---|
@@ -2149,7 +2340,8 @@ PINAX_API_KEY=your-pinax-api-key-here
 # EXCLUDE_FAILED_TRANSACTIONS=true   # drop failed txs (EVM includes them by default)
 # INCLUDE_FAILED_TRANSACTIONS=true   # include failed txs on non-EVM chains
 
-# AWS S3 output (optional)
+# AWS S3 output (optional): an explicit URI plus both keys
+# OUTPUT=s3://my-bucket/v1
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
 # AWS_REGION=us-east-1
@@ -2198,26 +2390,33 @@ The binary is built with [`clap`](https://docs.rs/clap) v4 using derive macros, 
 
 ### Shared CLI module
 
-Common arguments, parsing helpers, and completions are defined once in `firehose-parquet::cli`:
+Subcommands, shared arguments (`AwsArgs`, `CommonArgs`, `BuildArgs`), parsing
+helpers and completions are defined once in `firehose_parquet::cli`. The binary
+in `blocks/src/bin/main.rs` only adds the global logging flags and dispatches:
 
 ```rust
-use firehose_parquet::cli::{CommonArgs, Commands, build_config, init_tracing};
+use firehose_parquet::cli::{build_config, init_tracing, Commands};
 
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Option<Commands>, // Build(BuildArgs), Partitions, Scan, Verify, Recovery, ...
 
     #[command(flatten)]
-    common: CommonArgs,
-
-    // binary-specific flags (block_type, extended)
+    global: GlobalArgs, // --log-level, --verbose, --env-file
 }
 ```
 
+`BuildArgs` flattens `CommonArgs` (connection, range, output, flush and AWS
+flags) and adds the chain flags (`--network`, `--block-type`,
+`--without-extended`, `--without-votes`, the failed-transaction flags and
+`--cursor-override`). `Commands::Build` runs `ingestion::run_ingestion` in
+`blocks/src/bin/ingestion/`.
+
 ### Shell completions
 
-The binary supports the `completions` subcommand:
+The binary supports the `completions` subcommand for `bash`, `zsh`, `fish`,
+`elvish` and `powershell`:
 
 ```bash
 # Bash
@@ -2232,54 +2431,49 @@ fireparq completions fish > ~/.config/fish/completions/fireparq.fish
 
 ## Repository Structure
 
+A summary of the workspace; [docs/repo-navigation.md](docs/repo-navigation.md)
+maps every module and where to edit for common tasks.
+
 ```
 firehose-parquet/
-├── Cargo.toml                              # workspace root
+├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks)
 ├── Dockerfile                              # multi-stage Docker build
-├── .env.example                            # environment variables template
-├── .github/workflows/
-│   ├── ci.yml                              # CI pipeline (build + test)
-│   ├── docker-publish.yml                  # GHCR Docker image publish
-│   └── release.yml                         # release assets for Linux/macOS targets
-├── proto/                                  # Protobuf definitions (flat layout)
-│   ├── firehose.proto                      # Firehose streaming protocol
-│   ├── ethereum.proto
-│   ├── solana.proto
-│   ├── bitcoin.proto
-│   ├── beacon.proto
-│   ├── tron.proto
-│   ├── cosmos.proto
-│   ├── antelope.proto
-│   └── near.proto
-├── firehose-protos/                        # Centralized proto compilation
-│   ├── build.rs                            # Compiles ./proto/*.proto at build time
-│   └── src/lib.rs                          # include_proto! modules and aliases
-├── firehose-parquet/                       # Core library
+├── .env.example                            # environment variables template (drift-tested against the CLI)
+├── .github/workflows/                      # ci, docker-publish, release, network-endpoints
+├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
+├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
+├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
+├── docs/                                   # contracts, runbooks, schema reference, release notes, audit records
+├── firehose-parquet/                       # core library
 │   └── src/
-│       ├── artifacts.rs                    # Reserved dataset artifact names (cursor, partitions, verify)
-│       ├── cli.rs                          # Shared CLI args, subcommands, helpers
-│       ├── config.rs                       # Config, partitioning, compression enums
-│       ├── cursor.rs                       # Cursor persistence (parquet format)
-│       ├── encode.rs                       # Binary encoding strategies
-│       ├── grpc.rs                         # Firehose gRPC client + reconnect logic
-│       ├── metrics.rs                      # Prometheus metrics & HTTP server
-│       ├── merge.rs                        # merge subcommand implementation
-│       ├── rollup.rs                       # rollup subcommand implementation
-│       ├── truncate.rs                     # truncate subcommand implementation
-│       ├── s3.rs                           # object_store/S3 abstraction
-│       ├── traits.rs                       # BlockMapper trait, canonical fields
-│       └── writer.rs                       # Arrow->Parquet writer and flushing
-├── blocks/                                 # Chain mappers + unified binary
-│   └── src/
-│       ├── bin/main.rs                     # Single unified binary (fireparq)
-│       ├── evm/                            # mapper.rs, schema.rs, proto.rs
-│       ├── solana/
-│       ├── bitcoin/
-│       ├── beacon/
-│       ├── tron/
-│       ├── cosmos/
-│       ├── antelope/
-│       └── near/
+│       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
+│       │                                   #   inspect, validate and partitions/ helpers
+│       ├── ingest/                         # all-table transactions, output authority, cursor mirror, recovery
+│       ├── writer.rs, writer/              # Arrow -> Parquet encoding, partition routing, protected parts
+│       ├── dataset_lock/, dataset_lock_s3.rs  # local directory and bucket-wide S3 ownership
+│       ├── durable_state.rs, durable_state_s3.rs  # versioned control records
+│       ├── recovery.rs                     # `fireparq recovery`
+│       ├── merge.rs, merge/, merge_journal.rs  # crash-safe merge engine and journals
+│       ├── rollup.rs, rollup/              # journaled two-pass rollup and S3 range reads
+│       ├── truncate.rs                     # `fireparq truncate`
+│       ├── maintenance/                    # shared compaction and discovery for maintenance commands
+│       ├── verify.rs, verify/              # `fireparq verify` and the merkle_v2 row encoding
+│       ├── partition_index.rs, partition_index/  # partitions.parquet coverage, scan and builder
+│       ├── grpc.rs, grpc/                  # Firehose client, reconnects, finality proofs
+│       ├── s3.rs, s3/                      # AWS config, bounded uploads, S3 deletes
+│       ├── auth.rs                         # provider-scoped credential selection
+│       ├── networks.rs, networks_generated.rs  # built-in --network names (generated)
+│       ├── config.rs, flush.rs, cursor.rs  # config model, flush sizing, cursor Parquet format
+│       ├── encode.rs, encode/              # identifier encodings
+│       └── artifacts.rs, metrics.rs, traits.rs  # reserved names, Prometheus, BlockMapper trait
+├── blocks/                                 # chain mappers + unified binary
+│   ├── src/
+│   │   ├── bin/main.rs                     # `fireparq` entrypoint and command dispatch
+│   │   ├── bin/ingestion/                  # `build`: mod.rs, setup.rs (endpoint/resume), runtime.rs
+│   │   ├── chain.rs                        # ChainKind / ChainProfile per chain family
+│   │   └── evm/, solana/, bitcoin/, beacon/, tron/, cosmos/, antelope/, near/
+│   │                                       # per chain: proto.rs, schema.rs, mapper.rs
+│   └── tests/                              # integration tests, including `fireparq` runs against a mock Firehose
 └── target/                                 # build output
 ```
 
@@ -2302,24 +2496,3 @@ cargo install --path blocks
 ## License
 
 [MIT](LICENSE)
-
-## Parquet Lookup Metadata
-
-Ingestion, merge and rollup write bounded Bloom filters for selected scalar
-hash, signature and account/address columns. Readers that support these filters
-can skip row groups for equality lookups; positive matches still require row
-filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
-65,536 rows, with at most eight filters per group. This changes physical layout,
-not table schemas or row order. Dictionary encoding retains its existing policy.
-The retained-data benchmark measured 0.74–1.92% larger files and faster missing-key
-lookups; readers without Bloom pruning may only see the storage overhead.
-
-Complete ingestion parts declare ascending `block_num` only when every observed
-height proves that order. Streaming maintenance omits that assertion. Neither
-path sorts or reconstructs reversible-chain history.
-
-Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
-`zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default
-levels participate in protected transaction identity; recover any pending work
-with a supporting version before downgrading. See the
-[lookup properties and measurements](docs/audit/519-parquet-lookup-properties.md).
