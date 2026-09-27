@@ -371,7 +371,10 @@ impl std::fmt::Display for Config {
         writeln!(f, "  auth               {auth}")?;
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop} (exclusive)")?;
-        writeln!(f, "  missing_blocks     skip after probe retries")?;
+        writeln!(
+            f,
+            "  missing_blocks     not probed; the stream delivers only produced blocks"
+        )?;
         match self.cursor_path {
             Some(ref path) => writeln!(f, "  cursor             {}", path)?,
             None => writeln!(f, "  cursor             none (mirror disabled)")?,
@@ -530,7 +533,8 @@ mod tests {
         assert!(display.contains("auth               none"));
         assert!(display.contains("start_block        N/A"));
         assert!(display.contains("stop_block         stream forever (exclusive)"));
-        assert!(display.contains("missing_blocks     skip after probe retries"));
+        assert!(display
+            .contains("missing_blocks     not probed; the stream delivers only produced blocks"));
         assert!(display.contains("partition          none"));
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
@@ -580,7 +584,7 @@ mod tests {
     fn test_config_default_skips_missing_blocks() {
         assert!(Config::default()
             .to_string()
-            .contains("missing_blocks     skip after probe retries"));
+            .contains("missing_blocks     not probed; the stream delivers only produced blocks"));
     }
 
     #[test]
