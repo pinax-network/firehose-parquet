@@ -92,6 +92,58 @@ pub const DEFAULT_FLUSH_BYTES: u64 = 32 * 1024 * 1024;
 /// Independent summed logical mapper buffer threshold (256 MiB, not RSS).
 pub const DEFAULT_FLUSH_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Default blocking Parquet encoders per all-table flush.
+pub const DEFAULT_FLUSH_ENCODE_CONCURRENCY: usize = 2;
+/// Default concurrent part publications per all-table flush.
+pub const DEFAULT_FLUSH_PUBLISH_CONCURRENCY: usize = 4;
+/// Default budget for encoded parts in flight within one flush (256 MiB).
+pub const DEFAULT_FLUSH_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Bounded table work inside one protected all-table transaction (#516).
+///
+/// At most `encoders` blocking Parquet encoders and `publications` part
+/// publications run at once, and encoded parts that are encoding, staged or
+/// publishing reserve at most `inflight_bytes` (memory for local and generic S3
+/// output, private disk spool for native S3). One part larger than the whole
+/// budget runs alone with an explicit overshoot warning. Receipts are still
+/// journaled one at a time before each publication, and authority advances only
+/// after every part is published and verified. `1/1` keeps one encoder and one
+/// publication; the next table may still encode while the previous publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushConcurrency {
+    pub encoders: usize,
+    pub publications: usize,
+    pub inflight_bytes: u64,
+}
+
+impl FlushConcurrency {
+    /// One encoder and one publication, with the default byte budget.
+    pub const SERIAL: Self = Self {
+        encoders: 1,
+        publications: 1,
+        inflight_bytes: DEFAULT_FLUSH_INFLIGHT_BYTES,
+    };
+
+    /// Zero limits are invalid: they could never admit work.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.encoders > 0 && self.publications > 0 && self.inflight_bytes > 0,
+            "flush concurrency limits must be positive"
+        );
+        Ok(())
+    }
+}
+
+impl Default for FlushConcurrency {
+    fn default() -> Self {
+        Self {
+            encoders: DEFAULT_FLUSH_ENCODE_CONCURRENCY,
+            publications: DEFAULT_FLUSH_PUBLISH_CONCURRENCY,
+            inflight_bytes: DEFAULT_FLUSH_INFLIGHT_BYTES,
+        }
+    }
+}
+
 /// Default initial HTTP/2 stream and connection receive window (16 MiB).
 pub const DEFAULT_GRPC_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
 /// Default maximum encoded or decompressed gRPC response size (128 MiB).
@@ -138,6 +190,8 @@ pub struct Config {
     pub flush_bytes: u64,
     pub flush_memory_bytes: u64,
     pub flush_interval_secs: Option<u64>,
+    /// Bounded encoder/publication work inside each protected flush.
+    pub flush_concurrency: FlushConcurrency,
     pub compression: Compression,
     pub final_blocks_only: bool,
     pub dry_run: bool,
@@ -337,6 +391,13 @@ impl std::fmt::Display for Config {
             "  flush_memory_bytes {} B (summed mapper estimate)",
             self.flush_memory_bytes
         )?;
+        writeln!(
+            f,
+            "  flush_concurrency  {} encoders, {} publications, {} B in flight",
+            self.flush_concurrency.encoders,
+            self.flush_concurrency.publications,
+            self.flush_concurrency.inflight_bytes
+        )?;
         if let Some(secs) = self.flush_interval_secs {
             writeln!(f, "  flush_interval     {secs}s")?;
         }
@@ -420,6 +481,7 @@ impl Default for Config {
             flush_bytes: DEFAULT_FLUSH_BYTES,
             flush_memory_bytes: DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
+            flush_concurrency: FlushConcurrency::default(),
             compression: Compression::Zstd,
             final_blocks_only: true,
             dry_run: false,
