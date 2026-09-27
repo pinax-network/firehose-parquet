@@ -10,6 +10,7 @@ fn record_committed_flush_sizing(
     estimate: MapperBufferEstimate,
     committed: &firehose_parquet::ingest::CommittedFlush,
     trigger: &str,
+    pace: StreamPace,
 ) {
     let largest_file_bytes = committed
         .tables
@@ -20,6 +21,7 @@ fn record_committed_flush_sizing(
     sizing.observe_committed(estimate.largest_table_bytes, largest_file_bytes);
     info!(
         trigger,
+        pace = pace.as_str(),
         largest_file_bytes,
         largest_mapper_estimated_bytes = estimate.largest_table_bytes,
         total_mapper_estimated_bytes = estimate.total_bytes,

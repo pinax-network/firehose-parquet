@@ -1,7 +1,11 @@
 //! Transient compressed-size prediction for all-table ingestion transactions.
 //! The independent logical-buffer threshold is not a process RSS limit.
+//! [`pace`] decides when the flush interval applies (#659).
 
 use anyhow::{ensure, Result};
+
+pub mod pace;
+pub use pace::{PaceCause, PaceDetector, PaceTiming, PaceTransition, StreamPace};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MapperBufferEstimate {

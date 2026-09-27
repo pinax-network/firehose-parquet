@@ -283,7 +283,9 @@ pub struct CommonArgs {
     )]
     pub flush_memory_bytes: u64,
 
-    /// Flush mapper state and write Parquet every N seconds (0 or unset disables)
+    /// Flush mapper state and write Parquet every N seconds while caught up with the chain
+    /// head; suspended while the stream catches up, when only the size, row and block
+    /// triggers flush (0 or unset disables)
     #[arg(
         long,
         env = "FLUSH_INTERVAL_SECS",

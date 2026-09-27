@@ -877,6 +877,7 @@ fn test_build_help_clarifies_flush_semantics() {
     assert!(help.contains("--flush-memory-bytes"));
     assert!(help.contains("summed mapper byte estimate"));
     assert!(help.contains("Flush mapper state and write Parquet every N seconds"));
+    assert!(help.contains("suspended while the stream catches up"));
 }
 
 #[test]
