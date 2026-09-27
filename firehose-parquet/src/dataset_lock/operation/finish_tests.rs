@@ -185,5 +185,25 @@ async fn local_only_failure_returns_the_error_unchanged_and_frees_the_os_lock() 
         .await
         .unwrap_err();
     assert_eq!(format!("{error:#}"), format!("{:#}", unauthenticated()));
-    LocalOwnership::acquire(&[root]).unwrap();
+    reacquire_after_release(&root);
+}
+
+/// `finish` drops the local guard before it returns, but the lock is a
+/// `flock` on the directory's open file description. Other tests in this
+/// binary spawn child processes, and a child forked in the window before it
+/// execs holds a copy of every descriptor, so the lock can outlive the drop
+/// for a moment. Retry briefly: the lock must be free, just not always on the
+/// first attempt.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reacquire_after_release(root: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match LocalOwnership::acquire(&[root.to_path_buf()]) {
+            Ok(_) => return,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("the OS lock was not freed within 5 s: {error:#}"),
+        }
+    }
 }
