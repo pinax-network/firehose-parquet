@@ -2082,11 +2082,24 @@ directly under `<output>/` with [`--without-chain-dir`](#single-network-buckets)
 accepted event of its transaction, the transaction ID and the part index.
 `merge` and `rollup` write their own part names.
 
+Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
+
+The day-of-month key is `day=`. Earlier releases wrote `date=DD`, which collides with the canonical `date` column under Hive partitioning: DuckDB's default `hive_partitioning` replaced the `date` DATE values with the day number, and Polars' `hive_partitioning=True` failed to parse `26` as a date. `rollup` and `truncate` still accept legacy `date=` directories.
+
+Query a dataset with its partition columns, e.g. in DuckDB:
+
+```sql
+SELECT date, day, count(*)
+FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is on by default
+GROUP BY ALL;
+-- date: DATE (the canonical data column); year/month/day/hour: partition columns
+```
+
 ### Single-network buckets
 
 `build` appends the endpoint's `chain_name` to `--output`, so a bucket named
 after its network repeats the name: `s3://ethereum-mainnet/mainnet/blocks/...`.
-`--without-chain-dir` (`WITHOUT_CHAIN_DIR=true`) writes the tree above directly
+`--without-chain-dir` (`WITHOUT_CHAIN_DIR=true`) writes the same tree directly
 into `--output` instead, for example at the bucket root:
 
 ```bash
@@ -2100,33 +2113,21 @@ OUTPUT=s3://<bucket> WITHOUT_CHAIN_DIR=true fireparq build --network mainnet --p
   identity; only the directory level goes away.
 - The choice is bound when the dataset is created. A later run that switches it
   points at `<output>/<chain_name>` inside the dataset, or at the parent of an
-  existing one, and is refused (`selected ingestion output overlaps another
-  protected root`) before any Blocks request.
+  existing one, and is refused before any Blocks request
+  (`selected ingestion output overlaps another protected root`).
 - Pass `--without-chain-dir` to `partitions build` as well, so its index lands
   at `s3://<bucket>/partitions.parquet` and a missing `--start-block` is
   inferred from `s3://<bucket>/cursor.parquet`.
-- Other commands take the root or its tables directly: `verify
-  s3://<bucket>/blocks` (registry at `s3://<bucket>/merkle_roots.parquet`),
-  `merge s3://<bucket>`, `recovery status s3://<bucket>`, and `scan` /
-  `validate` / `inspect` on `s3://<bucket>/<table>/...`. They skip the root
-  artifacts and the bucket's owner records as they do below a chain directory.
+- Other commands take the root or its tables directly:
+  `verify s3://<bucket>/blocks` (registry at
+  `s3://<bucket>/merkle_roots.parquet`), `merge s3://<bucket>`,
+  `recovery status s3://<bucket>`, and `scan` / `validate` / `inspect` on
+  `s3://<bucket>/<table>/...`. They skip the root artifacts and the bucket's
+  owner records as they do below a chain directory.
 - The first `build` needs an empty bucket; only the bucket owner record and a
   same-chain `partitions.parquet` may already exist there. S3 ownership is
   bucket-wide in any case, so a bucket per network also gives each concurrently
   running `build` its own owner.
-
-Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
-
-The day-of-month key is `day=`. Earlier releases wrote `date=DD`, which collides with the canonical `date` column under Hive partitioning: DuckDB's default `hive_partitioning` replaced the `date` DATE values with the day number, and Polars' `hive_partitioning=True` failed to parse `26` as a date. `rollup` and `truncate` still accept legacy `date=` directories.
-
-Query a dataset with its partition columns, e.g. in DuckDB:
-
-```sql
-SELECT date, day, count(*)
-FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is on by default
-GROUP BY ALL;
--- date: DATE (the canonical data column); year/month/day/hour: partition columns
-```
 
 ## Canonical Identity Columns
 
