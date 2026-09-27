@@ -1,8 +1,9 @@
 # Issue #655: resume cost independent of data size
 
-Closes #655; part of #463. Related: #468 (the overlap guarantees kept here),
-#643 ([Delta design](../design/delta-lake.md) §5 and §8), #658 (RGW listing
-latency), #659.
+Closes #655 (PR [#668](https://github.com/pinax-network/firehose-parquet/pull/668));
+part of #463. Related: #468 (the overlap guarantees kept here), #643
+([Delta design](../design/delta-lake.md) §5 and §8), #658 (listing latency),
+#659.
 
 ## Problem
 
