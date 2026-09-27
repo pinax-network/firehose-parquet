@@ -127,6 +127,7 @@ Docker runs before a release.
 |---|---|
 | [#625](https://github.com/pinax-network/firehose-parquet/issues/625) | Open. Every known StreamingFast NEAR producer leaves block state changes empty, so NEAR `state_changes` stays empty. |
 | [#630](https://github.com/pinax-network/firehose-parquet/issues/630) | Open. #516 stage B: decouple gRPC receive and mapping from the writer ([design](516-concurrency-design.md#stage-b-follow-up)). |
+| [#658](https://github.com/pinax-network/firehose-parquet/issues/658) | Open. Writer throughput on fast chains: step 1 (benchmark and baseline) is recorded ([record](658-live-flush-benchmark.md)); removing the measured round trips is next. |
 | [#635](https://github.com/pinax-network/firehose-parquet/issues/635) | Open. Protected datasets are bound to their output location; a copied or moved dataset cannot be maintained or resumed, and there is no relocation procedure. |
 | [#636](https://github.com/pinax-network/firehose-parquet/issues/636) | Open. S3 ownership is bucket-wide, so maintenance cannot run beside a live `build` on the same bucket. |
 | [#637](https://github.com/pinax-network/firehose-parquet/issues/637) | Open. A malformed `./.env` breaks `--help` and `--version`, because it is loaded before argument parsing. |
@@ -223,6 +224,7 @@ Docker runs before a release.
 - [#523: bounded S3 maintenance concurrency](523-s3-maintenance-concurrency.md)
 - [#524: projected validation and partition boundary performance](524-validation-performance.md)
 - [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
+- [#658: writer catch-up throughput, head-cadence margin and commit phases on Robinhood and Arbitrum One (v1.0.0 baseline)](658-live-flush-benchmark.md)
 
 ### Structure
 
