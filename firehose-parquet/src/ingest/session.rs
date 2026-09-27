@@ -12,6 +12,7 @@ use super::binding::{
 };
 use super::controller::{CommittedFlush, TransactionController};
 use super::frontier::AcceptedFrontier;
+use super::maintenance::{IngestionTarget, MergeJournals};
 use super::mirror::ProtectedMirror;
 use super::parts::TransactionParts;
 use super::state::*;
@@ -20,6 +21,7 @@ use crate::cli::AwsConfig;
 use crate::config::{BlockMetadata, Compression, Config};
 use crate::cursor::CursorState;
 use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
+use crate::maintenance::discovery::ListingStats;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use crate::writer::ParquetFileMetadata;
@@ -284,8 +286,44 @@ impl<'a> IngestionSession<'a> {
         let expected = descriptor(config, mapper)?;
         let aws = aws_config(config);
         let permit = reserve(&expected.output, ownership)?;
-        super::maintenance::validate_ingestion_target(&expected.output, ownership).await?;
-        let service = mirror_service(&expected.mirror, &aws)?;
+        let listing = ListingStats::default();
+        let started = std::time::Instant::now();
+        let opened = Self::open_reserved(
+            config, expected, &aws, ownership, permit, metrics, shutdown, &listing,
+        )
+        .await;
+        record_startup_listing(metrics, &listing, started.elapsed(), opened.is_ok());
+        opened
+    }
+
+    /// Startup reads only control state on resume: the authority, the pending
+    /// journal, the merge intent record and the mirror, plus one control-prefix
+    /// request per ancestor directory. The whole tree is listed only when the
+    /// dataset is created, or when a merge intent says journals may exist (#655).
+    #[allow(clippy::too_many_arguments)]
+    async fn open_reserved(
+        config: &Config,
+        expected: StreamDescriptor,
+        aws: &AwsConfig,
+        ownership: &'a DatasetOwnership,
+        permit: SessionPermit<'a>,
+        metrics: Option<&'a PipelineMetrics>,
+        shutdown: Option<&'a AtomicBool>,
+        listing: &ListingStats,
+    ) -> Result<Self> {
+        let resuming = existing(&expected.output, ownership).await?.is_some();
+        super::maintenance::validate_ingestion_target(
+            &expected.output,
+            ownership,
+            if resuming {
+                IngestionTarget::Resume
+            } else {
+                IngestionTarget::Create
+            },
+            listing,
+        )
+        .await?;
+        let service = mirror_service(&expected.mirror, aws)?;
         let mut mirror = ProtectedMirror::new(ownership, &expected.mirror, service.as_ref())?;
         if let Some(metrics) = metrics {
             mirror = mirror.with_metrics(metrics);
@@ -293,8 +331,9 @@ impl<'a> IngestionSession<'a> {
         if let Some(shutdown) = shutdown {
             mirror = mirror.with_shutdown(shutdown);
         }
-        if existing(&expected.output, ownership).await?.is_none() {
-            super::eligibility::require_initializable(&expected, ownership, &aws, &mirror).await?;
+        if !resuming {
+            super::eligibility::require_initializable(&expected, ownership, aws, &mirror, listing)
+                .await?;
             if matches!(expected.output, StorageIdentity::Local { .. }) {
                 ownership.revalidate_local_paths()?;
                 // Keep lexical alias spelling here to sync both parent chains.
@@ -318,7 +357,13 @@ impl<'a> IngestionSession<'a> {
                 config.cache_control.as_deref().unwrap_or_default(),
             )?,
         };
-        super::maintenance::validate_ingestion_recovery_order(&expected.output, ownership).await?;
+        super::maintenance::validate_ingestion_recovery_order(
+            &expected.output,
+            ownership,
+            MergeJournals::IfIntended,
+            listing,
+        )
+        .await?;
         let controller = TransactionController::open_reserved(
             states(&expected.output, ownership)?,
             parts,
@@ -328,7 +373,13 @@ impl<'a> IngestionSession<'a> {
         )
         .await?
         .with_concurrency(config.flush_concurrency)?;
-        super::maintenance::prepare_ingestion(&expected.output, ownership, &aws).await?;
+        super::maintenance::prepare_ingestion(
+            &expected.output,
+            ownership,
+            &controller.authority().descriptor.id()?,
+            listing,
+        )
+        .await?;
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =
             (metrics, controller.authority().checkpoint.event.as_ref())
@@ -626,6 +677,33 @@ fn require_prefix_stream_ordinals(
         );
     }
     Ok(())
+}
+
+/// Export and log what opening the dataset listed (#655). A resume lists no
+/// data objects, so its request count stays at the ancestor depth of the root
+/// whatever the dataset's size.
+fn record_startup_listing(
+    metrics: Option<&PipelineMetrics>,
+    listing: &ListingStats,
+    elapsed: std::time::Duration,
+    opened: bool,
+) {
+    if let Some(metrics) = metrics {
+        metrics
+            .startup_list_requests
+            .set(i64::try_from(listing.requests()).unwrap_or(i64::MAX));
+        metrics
+            .startup_listing_seconds
+            .set(listing.duration().as_secs_f64());
+    }
+    tracing::info!(
+        list_requests = listing.requests(),
+        listed_objects = listing.objects(),
+        listing_ms = u64::try_from(listing.duration().as_millis()).unwrap_or(u64::MAX),
+        open_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        opened,
+        "protected dataset startup checks finished"
+    );
 }
 
 /// A failed/cancelled controller consumes and drops its in-memory prepared map;

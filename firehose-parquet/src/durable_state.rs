@@ -22,6 +22,8 @@ pub const MAX_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 pub enum ControlKey {
     State,
     Pending,
+    /// A `merge` may have left partition journals in this dataset (#655).
+    MergeIntent,
 }
 
 impl ControlKey {
@@ -29,6 +31,7 @@ impl ControlKey {
         match self {
             Self::State => "state.json",
             Self::Pending => "pending.json",
+            Self::MergeIntent => "merge-intent.json",
         }
     }
 }

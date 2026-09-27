@@ -3,8 +3,9 @@
 //! which an ingestion checkpoint can be made.
 
 use anyhow::{bail, ensure, Context, Result};
-use futures::StreamExt;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::binding::{output_path, validate_runtime_bindings};
 use super::mirror::ProtectedMirror;
@@ -12,6 +13,7 @@ use super::state::{StorageIdentity, StreamDescriptor};
 use crate::artifacts::{OWNERSHIP_FILENAME, OWNERSHIP_PROBES_DIRECTORY};
 use crate::cli::AwsConfig;
 use crate::dataset_lock::DatasetOwnership;
+use crate::maintenance::discovery::{visit_objects, ListingStats, LIST_REQUEST_TIMEOUT};
 
 const MAX_INITIALIZATION_ENTRIES: usize = 100_000;
 
@@ -20,6 +22,7 @@ pub(crate) async fn require_initializable(
     ownership: &DatasetOwnership,
     aws: &AwsConfig,
     mirror: &ProtectedMirror<'_>,
+    listing: &ListingStats,
 ) -> Result<()> {
     let path = output_path(&descriptor.output);
     validate_runtime_bindings(descriptor, &path, aws)?;
@@ -32,7 +35,7 @@ pub(crate) async fn require_initializable(
                 owner.roots().iter().any(|scope| root.starts_with(scope)),
                 "initialization output is outside ownership"
             );
-            local_contents(root)?;
+            local_contents(root, listing)?;
         }
         StorageIdentity::S3 { bucket, prefix, .. } => {
             let owner = ownership
@@ -42,7 +45,7 @@ pub(crate) async fn require_initializable(
                 !owner.is_mutation_uncertain(),
                 "remote initialization requires resolved ownership"
             );
-            remote_contents(owner.object_store().as_ref(), prefix).await?;
+            remote_contents(owner.object_store().as_ref(), prefix, listing).await?;
         }
     }
     // Includes an independently located mirror: even a parseable legacy cursor
@@ -56,11 +59,21 @@ fn reject_existing() -> anyhow::Error {
     anyhow::anyhow!("output contains legacy data, cursor, recovery controls or unrelated files; protected ingestion requires a new empty root or an existing authoritative stream")
 }
 
+/// [`walk_local_contents`], adding its directory reads to `listing`. Runs only
+/// when a dataset is created, so the walk sees an empty tree.
+fn local_contents(root: &Path, listing: &ListingStats) -> Result<()> {
+    let started = Instant::now();
+    let mut counts = (0, 0);
+    let checked = walk_local_contents(root, &mut counts);
+    listing.record(counts.0, counts.1, started.elapsed());
+    checked
+}
+
 /// Fails unless the local root holds nothing but (empty) directories.
-fn local_contents(root: &Path) -> Result<()> {
+fn walk_local_contents(root: &Path, (reads, visited): &mut (u64, u64)) -> Result<()> {
     let mut directories = vec![PathBuf::from(root)];
-    let mut visited = 0usize;
     while let Some(directory) = directories.pop() {
+        *reads += 1;
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && directory == root => {
@@ -70,9 +83,9 @@ fn local_contents(root: &Path) -> Result<()> {
         };
         for entry in entries {
             let entry = entry.context("inspecting initialization entry")?;
-            visited += 1;
+            *visited += 1;
             ensure!(
-                visited <= MAX_INITIALIZATION_ENTRIES,
+                *visited <= MAX_INITIALIZATION_ENTRIES as u64,
                 "initialization tree is too large to prove empty"
             );
             let kind = entry
@@ -93,16 +106,23 @@ fn local_contents(root: &Path) -> Result<()> {
 }
 
 /// Fails unless the S3 dataset prefix is empty. At a bucket root the
-/// bucket-wide ownership record and its probes may exist.
-async fn remote_contents(store: &dyn object_store::ObjectStore, prefix: &str) -> Result<()> {
+/// bucket-wide ownership record and its probes may exist. The listing stops at
+/// the first other object, and each of its requests has its own timeout.
+async fn remote_contents(
+    store: &dyn object_store::ObjectStore,
+    prefix: &str,
+    listing: &ListingStats,
+) -> Result<()> {
     let object_prefix =
         (!prefix.is_empty()).then(|| object_store::path::Path::from(format!("{prefix}/")));
-    let list = async {
-        let mut entries = store.list(object_prefix.as_ref());
-        let mut visited = 0usize;
-        while let Some(entry) = entries.next().await {
-            let entry = entry
-                .map_err(|_| anyhow::anyhow!("cannot list protected initialization objects"))?;
+    let mut visited = 0usize;
+    let refused = visit_objects(
+        store,
+        object_prefix.as_ref(),
+        "listing protected initialization objects",
+        LIST_REQUEST_TIMEOUT,
+        listing,
+        |entry| {
             visited += 1;
             ensure!(
                 visited <= MAX_INITIALIZATION_ENTRIES,
@@ -121,15 +141,16 @@ async fn remote_contents(store: &dyn object_store::ObjectStore, prefix: &str) ->
                 && (relative == OWNERSHIP_FILENAME
                     || relative.starts_with(&format!("{OWNERSHIP_PROBES_DIRECTORY}/")))
             {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
-            return Err(reject_existing());
-        }
-        Ok(())
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(60), list)
-        .await
-        .map_err(|_| anyhow::anyhow!("protected initialization listing timed out"))?
+            Ok(ControlFlow::Break(()))
+        },
+    )
+    .await?;
+    match refused {
+        Some(()) => Err(reject_existing()),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -167,25 +188,43 @@ mod tests {
         let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity(path.to_str().unwrap(), &aws()).unwrap();
         let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
-        require_initializable(&descriptor, &owner, &aws(), &mirror)
-            .await
-            .unwrap();
+        require_initializable(
+            &descriptor,
+            &owner,
+            &aws(),
+            &mirror,
+            &ListingStats::default(),
+        )
+        .await
+        .unwrap();
         for leftover in ["_fireparq/partitions.parquet", "partitions.parquet"] {
             let file = path.join(leftover);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, b"index").unwrap();
-            let error = require_initializable(&descriptor, &owner, &aws(), &mirror)
-                .await
-                .unwrap_err()
-                .to_string();
+            let error = require_initializable(
+                &descriptor,
+                &owner,
+                &aws(),
+                &mirror,
+                &ListingStats::default(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
             assert!(error.contains("unrelated files"), "{leftover}: {error}");
             std::fs::remove_file(&file).unwrap();
         }
         // An empty `_fireparq/` directory is still accepted.
         assert!(path.join("_fireparq").is_dir());
-        require_initializable(&descriptor, &owner, &aws(), &mirror)
-            .await
-            .unwrap();
+        require_initializable(
+            &descriptor,
+            &owner,
+            &aws(),
+            &mirror,
+            &ListingStats::default(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -205,12 +244,15 @@ mod tests {
             let path = dir.path().join(existing);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"existing").unwrap();
-            assert!(local_contents(dir.path()).is_err(), "{existing}");
+            assert!(
+                local_contents(dir.path(), &ListingStats::default()).is_err(),
+                "{existing}"
+            );
         }
         // Empty directories, such as an empty `_fireparq/`, are accepted.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("_fireparq")).unwrap();
-        local_contents(dir.path()).unwrap();
+        local_contents(dir.path(), &ListingStats::default()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("output");
         let cursor = dir.path().join("external/cursor.parquet");
@@ -237,9 +279,15 @@ mod tests {
             mirror_service(&descriptor.mirror, &aws()).unwrap().as_ref(),
         )
         .unwrap();
-        assert!(require_initializable(&descriptor, &owner, &aws(), &mirror)
-            .await
-            .is_err());
+        assert!(require_initializable(
+            &descriptor,
+            &owner,
+            &aws(),
+            &mirror,
+            &ListingStats::default()
+        )
+        .await
+        .is_err());
         assert!(!root.join(".fireparq-ingest").exists());
         assert_eq!(std::fs::read(cursor).unwrap(), b"legacy private cursor");
     }
@@ -248,7 +296,9 @@ mod tests {
     async fn remote_listing_never_ignores_arbitrary_control_or_legacy_objects() {
         let store = object_store::memory::InMemory::new();
         use object_store::ObjectStore;
-        remote_contents(&store, "chain").await.unwrap();
+        remote_contents(&store, "chain", &ListingStats::default())
+            .await
+            .unwrap();
         store
             .put(
                 &"other/legacy.parquet".into(),
@@ -256,7 +306,9 @@ mod tests {
             )
             .await
             .unwrap();
-        remote_contents(&store, "chain").await.unwrap();
+        remote_contents(&store, "chain", &ListingStats::default())
+            .await
+            .unwrap();
         store
             .put(
                 &"chain/.fireparq-ingest/state.json".into(),
@@ -264,7 +316,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(remote_contents(&store, "chain").await.is_err());
+        assert!(remote_contents(&store, "chain", &ListingStats::default())
+            .await
+            .is_err());
         let store = object_store::memory::InMemory::new();
         store
             .put(
@@ -273,7 +327,9 @@ mod tests {
             )
             .await
             .unwrap();
-        remote_contents(&store, "").await.unwrap();
+        remote_contents(&store, "", &ListingStats::default())
+            .await
+            .unwrap();
         store
             .put(
                 &"cursor.parquet".into(),
@@ -281,7 +337,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(remote_contents(&store, "").await.is_err());
+        assert!(remote_contents(&store, "", &ListingStats::default())
+            .await
+            .is_err());
     }
 
     /// A bucket root that holds only the bucket-wide owner record stays
@@ -306,9 +364,15 @@ mod tests {
         let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
         descriptor.output = resolve_output_identity("s3://data", &aws()).unwrap();
         let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
-        require_initializable(&descriptor, &owner, &aws(), &mirror)
-            .await
-            .unwrap();
+        require_initializable(
+            &descriptor,
+            &owner,
+            &aws(),
+            &mirror,
+            &ListingStats::default(),
+        )
+        .await
+        .unwrap();
         for key in [
             "_fireparq/partitions.parquet",
             "partitions.parquet",
@@ -319,15 +383,27 @@ mod tests {
                 .put(&key, bytes::Bytes::from_static(b"leftover").into())
                 .await
                 .unwrap();
-            let error = require_initializable(&descriptor, &owner, &aws(), &mirror)
-                .await
-                .unwrap_err()
-                .to_string();
+            let error = require_initializable(
+                &descriptor,
+                &owner,
+                &aws(),
+                &mirror,
+                &ListingStats::default(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
             assert!(error.contains("unrelated files"), "{key}: {error}");
             store.delete(&key).await.unwrap();
         }
-        require_initializable(&descriptor, &owner, &aws(), &mirror)
-            .await
-            .unwrap();
+        require_initializable(
+            &descriptor,
+            &owner,
+            &aws(),
+            &mirror,
+            &ListingStats::default(),
+        )
+        .await
+        .unwrap();
     }
 }

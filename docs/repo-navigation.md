@@ -42,7 +42,7 @@ Related docs:
     - `frontier.rs`: the accepted-event prefix; `binding.rs`: output and mirror identities from the actual storage configuration (`--cursor none` binds no mirror).
     - `eligibility.rs`: new streams may only initialize empty destinations; legacy data, cursors and any other file are refused.
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
-    - `maintenance.rs`: protected-root discovery and recovery before maintenance commands; `observe.rs`: read-only authority observation for `verify`.
+    - `maintenance.rs`: protected-root discovery and recovery before maintenance commands, and `build`'s startup checks (the whole tree when a dataset is created, only ancestors and the merge intent on resume, #655); `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
     - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time and `date` column must match that directory) and the unprotected low-level `OutputWriter` (not used by protected `build`).
     - `src/writer/protected.rs`, `src/writer/protected/verification.rs`: prepared complete parts, publication and exact receipt/schema verification; `src/writer/protected/budget.rs`: the `--flush-inflight-bytes` encoded-byte budget.
@@ -60,10 +60,10 @@ Related docs:
     - `src/s3/upload.rs`: native ingestion uploads (disk spool, one conditional PUT, spooled readback verification, explicit timeouts).
     - `src/s3/delete.rs`: single-attempt, bounded-concurrency maintenance deletes.
   - Maintenance and verification:
-    - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, and bounded pinned S3 read windows.
+    - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, the `.fireparq-ingest/merge-intent.json` record that tells `build` a merge may have left journals (#655), and bounded pinned S3 read windows.
     - `src/truncate.rs`: `truncate` planning (`date=` filters, `--yes`) and deletion.
     - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge encoder.
-    - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`.
+    - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`; `visit_objects`, the paged listing with a timeout per request and no total deadline, and `ListingStats` (#655). `discovery/paged_bucket.rs` is a test bucket of a million generated keys that counts LIST pages.
     - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
     - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.

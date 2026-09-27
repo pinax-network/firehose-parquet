@@ -705,6 +705,12 @@ Removing today's three full-root listings (nested-marker discovery twice and
 merge-journal discovery) is #655's own work. With `merge` gone, the
 merge-journal listing disappears altogether.
 
+Update (#655): done. A resume lists no data objects: nested and enclosing
+datasets are checked in full at creation and through the ancestors on resume,
+and merge journals are looked for only while `.fireparq-ingest/merge-intent.json`
+exists. L5 deletes that record (`ControlKey::MergeIntent`) with `merge`. See
+[the #655 record](../audit/655-resume-cost.md).
+
 ## 9. Maintenance CronJob
 
 The CronJob is not fireparq code: it is the `deltalake` Python package
