@@ -1,6 +1,6 @@
 # Issue #648: per-row `stream_ordinal` for dedup-safe non-final output
 
-Closes #648; refs #474; part of #463.
+Closes #648 (PR [#649](https://github.com/pinax-network/firehose-parquet/pull/649)); refs #474; part of #463.
 
 ## Problem
 
