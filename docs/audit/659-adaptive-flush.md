@@ -1,6 +1,6 @@
 # Issue #659: adaptive flush interval
 
-Closes #659; part of #463. Related: #658 (live-flush benchmark), #630 (stage B),
+Closes #659 (PR [#664](https://github.com/pinax-network/firehose-parquet/pull/664)); part of #463. Related: #658 (live-flush benchmark), #630 (stage B),
 #515 (size targets).
 
 ## Decision
