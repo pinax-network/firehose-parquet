@@ -716,6 +716,7 @@ fn recover_s3_merges(s3: &S3Merge<'_>, result: &mut MergeResult) -> Result<()> {
     for obj in &objects {
         if obj.location.filename() != Some(JOURNAL_FILE)
             || crate::artifacts::is_control_path(obj.location.as_ref())
+            || is_reserved_artifact_path(relative_key(s3.prefix, obj.location.as_ref()))
         {
             continue;
         }
@@ -758,6 +759,7 @@ fn merge_s3_partitions(
         .filter(|obj| {
             obj.location.filename() == Some(crate::rollup::ROLLUP_JOURNAL_FILE)
                 && !crate::artifacts::is_control_path(obj.location.as_ref())
+                && !is_reserved_artifact_path(relative_key(prefix, obj.location.as_ref()))
         })
         .map(|obj| {
             obj.location
@@ -1398,12 +1400,20 @@ mod tests {
         assert_eq!(attempts, 1);
     }
 
-    const RESERVED: [&str; 5] = [
+    /// Legacy root artifacts first (the only root-level files), then the
+    /// `_fireparq/` artifact directory, whose two same-schema files would
+    /// merge together if it were treated as a partition.
+    const RESERVED: [&str; 10] = [
         "cursor.parquet",
         "merkle_roots.parquet",
         "partitions.parquet",
         "verify_runs/run-1/a.parquet",
         "verify_runs/run-1/b.parquet",
+        "_fireparq/cursor.parquet",
+        "_fireparq/merkle_roots.parquet",
+        "_fireparq/partitions.parquet",
+        "_fireparq/other.parquet",
+        "_fireparq/verify_runs/run-1/a.parquet",
     ];
     const DAY: &str = "blocks/year=2024/month=01/date=15";
 
@@ -1548,10 +1558,11 @@ mod tests {
         assert_eq!(object_row_count(&store, &blocks[0]), 30);
         let mut others = list_keys(&store, "mainnet");
         others.retain(|key| !key.starts_with("mainnet/blocks/"));
-        let expected: Vec<String> = RESERVED
+        let mut expected: Vec<String> = RESERVED
             .iter()
             .map(|rel| format!("mainnet/{rel}"))
             .collect();
+        expected.sort();
         assert_eq!(others, expected);
     }
 
@@ -2471,6 +2482,10 @@ mod tests {
         // Parquet-named artifacts that would merge together if they were
         // treated as one root partition of table data.
         let artifacts = [
+            "_fireparq/cursor.parquet",
+            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/verify_runs/run/report.json",
             "cursor.parquet",
             "partitions.parquet",
             "merkle_roots.parquet",

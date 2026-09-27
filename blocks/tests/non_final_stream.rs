@@ -244,7 +244,7 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
             );
             assert_eq!(values.values().filter(|&&count| count == 1).count(), 4);
         }
-        let cursor = load_cursor_parquet(&root.join("cursor.parquet"))
+        let cursor = load_cursor_parquet(&root.join("_fireparq/cursor.parquet"))
             .unwrap()
             .unwrap();
         assert_eq!(cursor.last_block_num, 101);

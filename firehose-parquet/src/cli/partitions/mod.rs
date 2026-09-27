@@ -310,9 +310,9 @@ pub fn build_partitions_output_root(output_root: &str, chain: &str) -> String {
     }
 }
 
-/// The chain root that `partitions build` writes its index into and reads a
-/// sibling `cursor.parquet` from: `<output>/<chain>`, or the output root itself
-/// with `--without-chain-dir` (see [`output_root_without_chain_dir`]).
+/// The dataset root that `partitions build` writes its index into and reads the default
+/// cursor mirror from: `<output>/<chain>`, or the output root itself with
+/// `--without-chain-dir` (see [`output_root_without_chain_dir`]).
 pub fn resolve_partitions_output_root(
     output_root: &str,
     chain: &str,
@@ -329,28 +329,15 @@ pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
     partitions_index_path_in(&build_partitions_output_root(output_root, chain))
 }
 
-/// `partitions.parquet` directly under a chain root (local path or S3 URI).
+/// `_fireparq/partitions.parquet` under a dataset root (local path or S3 URI).
 pub fn partitions_index_path_in(chain_root: &str) -> String {
-    if chain_root.starts_with("s3://") {
-        format!("{chain_root}/partitions.parquet")
-    } else {
-        std::path::PathBuf::from(chain_root)
-            .join("partitions.parquet")
-            .to_string_lossy()
-            .into_owned()
-    }
+    crate::artifacts::DatasetArtifact::PartitionsIndex.path_in(chain_root)
 }
 
+/// The default cursor mirror `_fireparq/cursor.parquet` under `<output_root>/<chain>`.
 pub fn build_partitions_cursor_path(output_root: &str, chain: &str) -> String {
-    let chain_root = build_partitions_output_root(output_root, chain);
-    if chain_root.starts_with("s3://") {
-        format!("{chain_root}/cursor.parquet")
-    } else {
-        std::path::PathBuf::from(chain_root)
-            .join("cursor.parquet")
-            .to_string_lossy()
-            .into_owned()
-    }
+    crate::artifacts::DatasetArtifact::CursorMirror
+        .path_in(&build_partitions_output_root(output_root, chain))
 }
 
 pub(in crate::cli) fn format_partition_timestamp(timestamp: i64) -> anyhow::Result<String> {

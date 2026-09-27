@@ -652,8 +652,12 @@ pub(in crate::cli) fn write_partitions_index_impl(
         .map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
     } else {
         let output_path = std::path::Path::new(path);
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Creates the dataset's `_fireparq/` directory for the default index.
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            crate::writer::create_dir_all_durable(parent)?;
         }
         let file_name = output_path
             .file_name()

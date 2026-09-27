@@ -1062,3 +1062,86 @@ async fn direct_source_time_preserves_positive_negative_zero_and_null() {
         assert!(current.checkpoint.routing.anchor.is_none());
     }
 }
+
+/// The default mirror is `<root>/_fireparq/cursor.parquet`, two levels below
+/// the dataset root. Publication creates `_fireparq/` beside the table
+/// directories with default permissions (it also holds the partition index,
+/// the registry and the verify reports), keeps the mirror file private, and
+/// still creates other missing mirror directories with mode 0700.
+#[cfg(unix)]
+#[tokio::test]
+async fn default_mirror_creates_the_shared_artifact_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("mainnet");
+    fs::create_dir(&root).unwrap();
+    let reference = dir.path().join("reference");
+    fs::create_dir(&reference).unwrap();
+    let default_mode = fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
+    let no_aws = crate::cli::AwsConfig {
+        aws_access_key_id: None,
+        aws_secret_access_key: None,
+        aws_session_token: None,
+        aws_region: None,
+        aws_endpoint_url: None,
+    };
+    for (relative, directory_mode) in [
+        (crate::artifacts::DEFAULT_CURSOR_MIRROR, default_mode),
+        ("state/worker/cursor.parquet", 0o700),
+    ] {
+        let path = root.join(relative);
+        let ownership = DatasetOwnership::acquire_blocking(
+            "test",
+            vec![
+                MutationScope::directory(root.to_string_lossy()),
+                MutationScope::file(path.to_string_lossy()),
+            ],
+            None,
+        )
+        .unwrap();
+        let mut desc = descriptor(RoutingPolicy::DirectV1);
+        desc.mirror = crate::ingest::binding::resolve_mirror_binding(
+            root.to_str().unwrap(),
+            Some(relative),
+            &no_aws,
+        )
+        .unwrap();
+        assert!(
+            matches!(&desc.mirror, MirrorBinding::Local { absolute_path } if Path::new(absolute_path) == path),
+            "{relative}"
+        );
+        desc.output = StorageIdentity::Local {
+            canonical_root: root.to_string_lossy().into_owned(),
+        };
+        let initial = AuthorityState::initial(desc).unwrap();
+        let adapter = mirror(&ownership, &initial);
+        adapter.require_absent_for_initialization().await.unwrap();
+        assert!(!path.parent().unwrap().exists(), "{relative}");
+        let current = advance(&initial, 100);
+        assert_eq!(
+            adapter.reconcile(&current).await.unwrap(),
+            MirrorOutcome::Repaired
+        );
+        let parent_mode = fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent_mode, directory_mode, "{relative}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{relative}"
+        );
+        assert_eq!(
+            adapter.reconcile(&current).await.unwrap(),
+            MirrorOutcome::Unchanged
+        );
+    }
+    let mut entries: Vec<_> = fs::read_dir(root.join("_fireparq"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["cursor.parquet"], "no temporary is left behind");
+}

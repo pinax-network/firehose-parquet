@@ -599,6 +599,9 @@ impl Backend for Remote<'_> {
                         .is_some_and(|tail| tail.starts_with('/')))
                     && key.rsplit('/').next() == Some(ROLLUP_JOURNAL_FILE)
                     && !crate::artifacts::is_control_path(key)
+                    && !crate::artifacts::is_reserved_artifact_path(discovery::relative_key(
+                        prefix, key,
+                    ))
             })
             .map(|key| key.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned())
             .collect())

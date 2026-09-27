@@ -23,6 +23,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tonic::codegen::{http, BoxFuture, Service};
 
 const CHAIN: &str = "ingestion-test";
+/// The default `--cursor` mirror, relative to the dataset root.
+const MIRROR: &str = "_fireparq/cursor.parquet";
 
 #[derive(Clone)]
 struct Info {
@@ -502,9 +504,7 @@ fn assert_checkpoint(root: &Path, ordinal: u64, number: u64, stop: u64) {
         format!("fixture-{number}")
     );
     assert_eq!(state["checkpoint"]["completed_stop"], stop);
-    let mirror = load_cursor_parquet(&root.join("cursor.parquet"))
-        .unwrap()
-        .unwrap();
+    let mirror = load_cursor_parquet(&root.join(MIRROR)).unwrap().unwrap();
     assert_eq!(mirror.last_block_num, number);
     assert_eq!(mirror.cursor, format!("fixture-{number}"));
 }
@@ -582,10 +582,7 @@ async fn parent_env_file_is_ignored_and_bucket_never_redirects_relative_output()
         "{logs}"
     );
     assert!(
-        logs.contains(&format!(
-            "cursor={}",
-            local_root.join("cursor.parquet").display()
-        )),
+        logs.contains(&format!("cursor={}", local_root.join(MIRROR).display())),
         "{logs}"
     );
     assert!(logs.contains("resolved write destinations"), "{logs}");
@@ -672,7 +669,7 @@ async fn repeated_completed_range_is_noop_and_deleted_mirror_is_repaired_before_
     assert_eq!(parts(&root), initial_parts);
     assert_eq!(authority(&root), initial_state);
 
-    std::fs::remove_file(root.join("cursor.parquet")).unwrap();
+    std::fs::remove_file(root.join(MIRROR)).unwrap();
     success(command(&server, dir.path(), 100, 102)).await;
     assert_eq!(server.calls(), 1);
     assert_checkpoint(&root, 2, 101, 102);
@@ -681,7 +678,7 @@ async fn repeated_completed_range_is_noop_and_deleted_mirror_is_repaired_before_
 
     // The extension must also work with no compatibility mirror; only authority
     // can select fixture-101. The fake serves source events after that cursor.
-    std::fs::remove_file(root.join("cursor.parquet")).unwrap();
+    std::fs::remove_file(root.join(MIRROR)).unwrap();
     success(command(&server, dir.path(), 100, 103)).await;
     assert_eq!(server.calls(), 2);
     assert_checkpoint(&root, 3, 102, 103);
@@ -834,7 +831,7 @@ async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_c
     assert_eq!(state["checkpoint"]["ordinal"], 2);
     assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-101");
     assert_eq!(state["checkpoint"]["completed_stop"], 102);
-    assert!(!root.join("cursor.parquet").exists());
+    assert!(!root.join(MIRROR).exists());
 
     // Same-bound completion is still an authority-backed no-op.
     let repeated = success(without_mirror(100, 102)).await;
@@ -854,7 +851,7 @@ async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_c
     );
     assert_eq!(server.calls(), 1);
     assert_eq!((authority(&root), parts(&root)), before);
-    assert!(!root.join("cursor.parquet").exists());
+    assert!(!root.join(MIRROR).exists());
 
     // Extension resumes from the authoritative cursor alone.
     success(without_mirror(100, 103)).await;
@@ -864,7 +861,7 @@ async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_c
     assert_eq!(state["checkpoint"]["ordinal"], 3);
     assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-102");
     assert_eq!(state["checkpoint"]["completed_stop"], 103);
-    assert!(!root.join("cursor.parquet").exists());
+    assert!(!root.join(MIRROR).exists());
     server.assert_drained();
 }
 
@@ -890,7 +887,7 @@ async fn external_cursor_template_is_owned_and_bound_as_one_mirror() {
     let saved = load_cursor_parquet(&mirror).unwrap().unwrap();
     assert_eq!(saved.last_block_num, 100);
     assert_eq!(saved.cursor, "fixture-100");
-    assert!(!root.join("cursor.parquet").exists());
+    assert!(!root.join(MIRROR).exists());
     server.assert_drained();
 }
 
@@ -901,7 +898,7 @@ async fn cursor_none_cannot_drop_an_existing_bound_mirror() {
     let dir = tempfile::tempdir().unwrap();
     let root = root(dir.path());
     success(command(&server, dir.path(), 100, 101)).await;
-    assert!(root.join("cursor.parquet").exists());
+    assert!(root.join(MIRROR).exists());
     let before = (authority(&root), parts(&root));
     let mut request = command(&server, dir.path(), 100, 102);
     request.args(["--cursor", "none"]);
@@ -914,6 +911,57 @@ async fn cursor_none_cannot_drop_an_existing_bound_mirror() {
     );
     assert_eq!(server.calls(), 1);
     assert_eq!((authority(&root), parts(&root)), before);
+    server.assert_drained();
+}
+
+/// #647 moved the default mirror to `_fireparq/cursor.parquet`, and the mirror
+/// location is bound when a dataset is created. A dataset whose mirror was
+/// bound at the old default `<root>/cursor.parquet` is refused before Blocks
+/// when rerun with the new default, with the exact flag that resumes it, and
+/// nothing moves; `--cursor cursor.parquet` then resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mirror_bound_at_the_pre_v1_default_resumes_only_with_that_cursor() {
+    let server = MockFirehose::start(
+        (100..103).map(|n| response(n, 3)).collect(),
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-101", 100, 102),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    let legacy = |origin, stop| {
+        let mut request = command(&server, dir.path(), origin, stop);
+        request.args(["--cursor", "cursor.parquet"]);
+        request
+    };
+    success(legacy(100, 102)).await;
+    let legacy_mirror = root.join("cursor.parquet");
+    assert_eq!(
+        authority(&root)["descriptor"]["mirror"]["absolute_path"],
+        legacy_mirror.to_str().unwrap()
+    );
+    assert!(!root.join("_fireparq").exists());
+
+    let before = tree_digests(&root);
+    let output = run(command(&server, dir.path(), 100, 103)).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("pre-v1.0.0 default cursor mirror")
+            && logs(&output).contains("--cursor cursor.parquet"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 1);
+    assert_eq!(tree_digests(&root), before);
+
+    success(legacy(100, 103)).await;
+    assert_eq!(server.calls(), 2);
+    assert_eq!(block_numbers(&root), [100, 101, 102]);
+    let mirror = load_cursor_parquet(&legacy_mirror).unwrap().unwrap();
+    assert_eq!(mirror.last_block_num, 102);
+    assert!(!root.join(MIRROR).exists());
     server.assert_drained();
 }
 
@@ -1087,9 +1135,7 @@ async fn genesis_bootstrap_keeps_zero_height_filtered_ordinals_and_lookahead_pro
             assert_eq!(anchor["source_block_num"], 1);
             assert_eq!(anchor["source_block_id"], format!("{:064x}", 1));
             assert_eq!(anchor["seconds"], 1_700_000_000);
-            let mirror = load_cursor_parquet(&root.join("cursor.parquet"))
-                .unwrap()
-                .unwrap();
+            let mirror = load_cursor_parquet(&root.join(MIRROR)).unwrap().unwrap();
             assert_eq!(mirror.last_block_num, 0);
             assert_eq!(mirror.cursor, "fixture-0-undo");
         } else {
@@ -1183,7 +1229,7 @@ async fn storage_failure_during_flush_keeps_authority_and_rerun_recovers_rows_on
     assert_eq!(table_block_numbers(&root, "blocks"), [100]);
     assert_eq!(table_block_numbers(&root, "transactions"), [100]);
     let before_state = authority(&root);
-    let before_mirror = std::fs::read(root.join("cursor.parquet")).unwrap();
+    let before_mirror = std::fs::read(root.join(MIRROR)).unwrap();
     let before_parts = parts(&root);
 
     let blocked = root.join("transactions");
@@ -1204,10 +1250,7 @@ async fn storage_failure_during_flush_keeps_authority_and_rerun_recovers_rows_on
         logs(&output)
     );
     assert_eq!(authority(&root), before_state);
-    assert_eq!(
-        std::fs::read(root.join("cursor.parquet")).unwrap(),
-        before_mirror
-    );
+    assert_eq!(std::fs::read(root.join(MIRROR)).unwrap(), before_mirror);
     // `blocks` sorts before `transactions`, so its part was published by the
     // failed transaction. The Writing journal owns it; no temp survives.
     let failed_parts = parts(&root);
@@ -1761,7 +1804,7 @@ async fn parallel_flush_matches_strict_serial_bytes_on_the_retained_evm_block() 
     let expected_paths = parts(&output);
     assert!(expected_paths.len() >= 10, "{}", expected_paths.len());
     let expected_authority = authority(&output);
-    let expected_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+    let expected_mirror = read_parquet(&output.join(MIRROR)).unwrap();
 
     // Same canonical root, so the stream identity and names are identical.
     for (extra, limits) in [
@@ -1783,7 +1826,7 @@ async fn parallel_flush_matches_strict_serial_bytes_on_the_retained_evm_block() 
         let logged = plain_logs(&success(run(extra)).await);
         assert_eq!(parts(&output), expected_paths, "{extra:?}");
         assert_eq!(authority(&output), expected_authority, "{extra:?}");
-        let mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+        let mirror = read_parquet(&output.join(MIRROR)).unwrap();
         for (actual, expected) in mirror.iter().zip(&expected_mirror) {
             for (index, field) in actual.schema().fields().iter().enumerate() {
                 if field.name() != "updated_at" {
@@ -1864,7 +1907,7 @@ async fn parallel_flush_faults_recover_every_row_exactly_once() {
         ))
         .await;
         let before = (authority(&output), parts(&output));
-        let mirror_before = std::fs::read(output.join("cursor.parquet")).unwrap();
+        let mirror_before = std::fs::read(output.join(MIRROR)).unwrap();
 
         let mut faulted = command_with_flush(&server, directory.path(), origin, number + 1, 1);
         faulted.args(PARALLEL).env("FIREPARQ_DEBUG_FAULT", fault);
@@ -1882,7 +1925,7 @@ async fn parallel_flush_faults_recover_every_row_exactly_once() {
         }
         assert_eq!(authority(&output), before.0, "{fault}");
         assert_eq!(
-            std::fs::read(output.join("cursor.parquet")).unwrap(),
+            std::fs::read(output.join(MIRROR)).unwrap(),
             mirror_before,
             "{fault}"
         );
@@ -2017,7 +2060,7 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
         .keys()
         .map(|path| (path.clone(), read_parquet(&output.join(path)).unwrap()))
         .collect();
-    let expected_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+    let expected_mirror = read_parquet(&output.join(MIRROR)).unwrap();
 
     // Every child has exited via output(). No process can retain the old inode
     // ownership when the disposable qualification root is restored in place.
@@ -2064,7 +2107,7 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
         .join(ControlKey::Pending.filename())
         .exists());
     assert_checkpoint(&output, 2, number, number + 1);
-    let actual_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+    let actual_mirror = read_parquet(&output.join(MIRROR)).unwrap();
     assert_eq!(actual_mirror.len(), expected_mirror.len());
     for (actual, expected) in actual_mirror.iter().zip(&expected_mirror) {
         assert_eq!(actual.schema().fields(), expected.schema().fields());
@@ -2294,6 +2337,82 @@ fn tree_digests(root: &Path) -> BTreeMap<String, Vec<u8>> {
     files
 }
 
+/// Every `.parquet` file below `dir`, like a `<dir>/**/*.parquet` glob. With
+/// `skip_hidden`, paths with a component starting with `_` or `.` are left
+/// out, the Hadoop/Hive convention Spark, Trino, Hive and Delta follow.
+fn glob_parquet(dir: &Path, skip_hidden: bool) -> std::collections::BTreeSet<PathBuf> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if skip_hidden && (name.starts_with('_') || name.starts_with('.')) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if name.ends_with(".parquet") {
+                files.insert(path);
+            }
+        }
+    }
+    files
+}
+
+/// #647: a dataset root holds only its table directories, fireparq's
+/// `_fireparq/` artifact directory and dot-prefixed control state. A
+/// DuckDB-style per-table glob `<root>/<table>/**/*.parquet` reads only that
+/// table's parts, and a dataset-wide read that follows the `_`/`.` hidden-path
+/// convention reads exactly the union of the table globs. Only a naive
+/// dataset-wide glob would also pick up the artifacts.
+fn assert_dataset_root_layout(root: &Path, tables: &[&str], artifacts: &[&str]) {
+    let names = |dir: &Path| -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
+    };
+    for name in names(root) {
+        assert!(
+            name == "_fireparq" || name.starts_with('.') || tables.contains(&name.as_str()),
+            "unexpected root entry {name} in {root:?}"
+        );
+        if !name.starts_with('.') || name == ".fireparq-ingest" {
+            assert!(root.join(&name).is_dir(), "{name} is a directory");
+        }
+    }
+    let in_artifacts = names(&root.join("_fireparq"));
+    for artifact in artifacts {
+        assert!(
+            in_artifacts.contains(*artifact),
+            "{artifact}: {in_artifacts:?}"
+        );
+    }
+    let mut union = std::collections::BTreeSet::new();
+    for table in tables {
+        let files = glob_parquet(&root.join(table), false);
+        assert!(!files.is_empty(), "{table}");
+        let mut schema = None;
+        for file in &files {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with("part-"), "{table}: {file:?}");
+            let batches = read_parquet(file).unwrap();
+            let file_schema = batches[0].schema();
+            assert_eq!(
+                schema.get_or_insert_with(|| file_schema.clone()),
+                &file_schema,
+                "{file:?}"
+            );
+        }
+        union.extend(files);
+    }
+    assert_eq!(glob_parquet(root, true), union);
+    assert!(glob_parquet(root, false)
+        .iter()
+        .any(|file| file.starts_with(root.join("_fireparq"))));
+}
+
 fn json_output(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("{error}: {}", logs(output)))
@@ -2338,7 +2457,7 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         root.join("blocks").to_str().unwrap().to_string(),
     );
 
-    // build: data, authority and the mirror sit at the root.
+    // build: data and authority sit at the root, the mirror in `_fireparq/`.
     let mut first = hourly_build(&server, dir.path(), 102);
     first.arg("--without-chain-dir");
     let logs_first = plain_logs(&success(first).await);
@@ -2346,7 +2465,7 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         logs_first.contains(&format!(
             "resolved write destinations output={} cursor={}",
             root.display(),
-            root.join("cursor.parquet").display()
+            root.join(MIRROR).display()
         )),
         "{logs_first}"
     );
@@ -2359,7 +2478,7 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     );
     assert_eq!(
         state["descriptor"]["mirror"]["absolute_path"],
-        root.join("cursor.parquet").to_str().unwrap()
+        root.join(MIRROR).to_str().unwrap()
     );
     assert_checkpoint(&root, 2, 101, 102);
     assert_eq!(block_numbers(&root), [100, 101]);
@@ -2418,8 +2537,9 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         2
     );
 
-    // verify infers the root from the layout: registry at the root, the
-    // network from file metadata, open partitions from the root authority.
+    // verify infers the root from the layout: registry in the root's
+    // `_fireparq/`, the network from file metadata, open partitions from the
+    // root authority.
     let verify = |report: &Path| {
         let mut command = fireparq(dir.path());
         command
@@ -2467,18 +2587,22 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     assert_eq!(report["table"], "blocks");
     assert_eq!(
         report["registry_path"],
-        canonical.join("merkle_roots.parquet").to_str().unwrap()
+        canonical
+            .join("_fireparq/merkle_roots.parquet")
+            .to_str()
+            .unwrap()
     );
     assert!(report["suggested_run_report_path"]
         .as_str()
         .unwrap()
-        .starts_with(canonical.join("verify_runs").to_str().unwrap()));
+        .starts_with(canonical.join("_fireparq/verify_runs").to_str().unwrap()));
     assert_eq!(report["summary"]["wrote_registry"], true);
     assert!(report["warnings"][0].as_str().unwrap().contains(&format!(
         "authoritative ingestion state of {} is at block 103",
         canonical.display()
     )));
-    assert!(root.join("merkle_roots.parquet").exists());
+    assert!(root.join("_fireparq/merkle_roots.parquet").exists());
+    assert!(!root.join("merkle_roots.parquet").exists());
     success(verify(&dir.path().join("verify-2.json"))).await;
     let report = verify_report("verify-2.json");
     assert_eq!(statuses(&report), expected("match"), "{report:#}");
@@ -2488,14 +2612,14 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     assert_eq!(scanned["files_scanned"], 4);
     for args in [
         vec!["validate", &blocks_arg],
-        vec!["inspect", root.join("cursor.parquet").to_str().unwrap()],
+        vec!["inspect", root.join(MIRROR).to_str().unwrap()],
     ] {
         let output = fireparq_output(dir.path(), &args).await;
         assert!(output.status.success(), "{args:?}: {}", logs(&output));
     }
 
     // merge at the root compacts table partitions and never touches the
-    // root artifacts (mirror, authority, registry).
+    // artifacts (mirror and registry in `_fireparq/`, authority).
     let artifacts = |root: &Path| -> BTreeMap<String, Vec<u8>> {
         tree_digests(root)
             .into_iter()
@@ -2505,8 +2629,8 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     let artifacts_before = artifacts(&root);
     for name in [
         ".fireparq-ingest/state.json",
-        "cursor.parquet",
-        "merkle_roots.parquet",
+        MIRROR,
+        "_fireparq/merkle_roots.parquet",
     ] {
         assert!(artifacts_before.contains_key(name), "{artifacts_before:?}");
     }
@@ -2574,8 +2698,9 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         assert_eq!(tree_digests(&root), before);
     }
 
-    // partitions build --without-chain-dir writes <output>/partitions.parquet
-    // and infers --start-block from the root cursor mirror (block 103 + 1).
+    // partitions build --without-chain-dir writes
+    // <output>/_fireparq/partitions.parquet and infers --start-block from the
+    // default mirror <output>/_fireparq/cursor.parquet (block 103 + 1).
     let partitions_build = |extra: &[&str]| {
         let mut command = fireparq(dir.path());
         command
@@ -2605,7 +2730,10 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         ]))
         .await,
     );
-    assert_eq!(built["partitions_index"], "output/partitions.parquet");
+    assert_eq!(
+        built["partitions_index"],
+        "output/_fireparq/partitions.parquet"
+    );
     assert_eq!(built["chain"], CHAIN);
     assert_eq!(
         (built["start_block"].as_u64(), built["stop_block"].as_u64()),
@@ -2625,7 +2753,8 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     );
     assert_eq!(rebuilt["row_count"], 2);
     assert!(!root.join(CHAIN).exists());
-    let index = root.join("partitions.parquet");
+    let index = root.join("_fireparq/partitions.parquet");
+    assert!(!root.join("partitions.parquet").exists());
     let listed = json_output(
         &fireparq_output(
             dir.path(),
@@ -2682,15 +2811,35 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         (Some(100), Some(102))
     );
 
-    // The index at the root is a reserved artifact: later maintenance and
-    // verify runs leave it and every other root artifact alone.
+    // The index in `_fireparq/` is a reserved artifact: later maintenance and
+    // verify runs leave it and every other artifact alone.
     let artifacts_before = artifacts(&root);
-    assert!(artifacts_before.contains_key("partitions.parquet"));
+    assert!(artifacts_before.contains_key("_fireparq/partitions.parquet"));
     let output = fireparq_output(dir.path(), &["merge", &root_arg]).await;
     assert!(output.status.success(), "{}", logs(&output));
     assert_eq!(artifacts(&root), artifacts_before);
     success(verify(&dir.path().join("verify-4.json"))).await;
     assert_eq!(statuses(&verify_report("verify-4.json")), expected("match"));
+
+    // The root holds table directories, `_fireparq/` (mirror, index,
+    // registry) and dot-prefixed control state only, and a per-table glob is
+    // unaffected by the artifacts.
+    assert_eq!(MIRROR, firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR);
+    let tables: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('_') && !name.starts_with('.'))
+        .collect();
+    assert!(tables.iter().any(|table| table == "blocks"), "{tables:?}");
+    assert_dataset_root_layout(
+        &root,
+        &tables.iter().map(String::as_str).collect::<Vec<_>>(),
+        &[
+            "cursor.parquet",
+            "partitions.parquet",
+            "merkle_roots.parquet",
+        ],
+    );
 
     // recovery reads the same root.
     let status =
@@ -2727,7 +2876,7 @@ async fn default_layout_is_unchanged_and_cannot_switch_to_without_chain_dir() {
         logs_first.contains(&format!(
             "resolved write destinations output={} cursor={}",
             chain_root.display(),
-            chain_root.join("cursor.parquet").display()
+            chain_root.join(MIRROR).display()
         )),
         "{logs_first}"
     );
@@ -2738,6 +2887,18 @@ async fn default_layout_is_unchanged_and_cannot_switch_to_without_chain_dir() {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>(),
         [std::ffi::OsString::from(CHAIN)]
+    );
+    assert!(!chain_root.join("cursor.parquet").exists());
+    let tables: Vec<String> = std::fs::read_dir(&chain_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('_') && !name.starts_with('.'))
+        .collect();
+    assert!(tables.iter().any(|table| table == "blocks"), "{tables:?}");
+    assert_dataset_root_layout(
+        &chain_root,
+        &tables.iter().map(String::as_str).collect::<Vec<_>>(),
+        &["cursor.parquet"],
     );
 
     let before = tree_digests(&output_dir);

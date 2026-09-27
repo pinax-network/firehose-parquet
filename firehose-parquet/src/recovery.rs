@@ -130,6 +130,11 @@ impl SlotSummary {
 }
 
 pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
+    let path = match command {
+        RecoveryCommands::Status(storage) | RecoveryCommands::Recover(storage) => &storage.path,
+        RecoveryCommands::Release(args) => &args.storage.path,
+    };
+    refuse_artifact_directory(path)?;
     let result = match command {
         RecoveryCommands::Status(storage) => status(storage).await?,
         RecoveryCommands::Recover(storage) => {
@@ -204,6 +209,17 @@ fn local_status(root: &Path) -> Result<RecoveryStatus> {
         state: load(ControlKey::State)?,
         pending: load(ControlKey::Pending)?,
     })
+}
+
+/// `_fireparq/` holds a dataset's artifacts, never its control records.
+fn refuse_artifact_directory(path: &str) -> Result<()> {
+    if crate::artifacts::is_in_artifacts_dir(path) {
+        bail!(
+            "recovery requires a dataset root, not the {}/ artifact directory inside it",
+            crate::artifacts::ARTIFACTS_DIR
+        );
+    }
+    Ok(())
 }
 
 fn remote_path(path: &str) -> Result<(String, String)> {
@@ -340,6 +356,37 @@ mod tests {
         let json = serde_json::to_string(&local_status(temp.path()).unwrap()).unwrap();
         assert!(json.contains("incarnation"));
         assert!(!json.contains("opaque-private-cursor"));
+    }
+
+    #[tokio::test]
+    async fn the_artifact_directory_is_not_a_recovery_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join("mainnet/_fireparq");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        for path in [
+            artifacts.to_string_lossy().into_owned(),
+            "s3://bucket/_fireparq".to_string(),
+            "s3://bucket/mainnet/_fireparq/".to_string(),
+        ] {
+            for command in [
+                RecoveryCommands::Status(RecoveryStorageArgs {
+                    path: path.clone(),
+                    aws: Default::default(),
+                }),
+                RecoveryCommands::Recover(RecoveryStorageArgs {
+                    path: path.clone(),
+                    aws: Default::default(),
+                }),
+            ] {
+                let error = run_recovery(&command).await.unwrap_err().to_string();
+                assert!(
+                    error.contains("not the _fireparq/ artifact directory"),
+                    "{path}: {error}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_dir(&artifacts).unwrap().count(), 0);
+        assert!(!temp.path().join("mainnet").join(CONTROL_DIRECTORY).exists());
     }
 
     #[tokio::test]

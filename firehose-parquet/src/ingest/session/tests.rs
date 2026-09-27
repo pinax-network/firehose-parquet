@@ -230,6 +230,13 @@ fn mutation_scopes_follow_the_recorded_mirror_binding() {
         ),
         (
             local_output.clone(),
+            Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
+            Some(MutationScope::file(format!(
+                "{local_output}/_fireparq/cursor.parquet"
+            ))),
+        ),
+        (
+            local_output.clone(),
             Some(template.clone()),
             Some(MutationScope::file(format!("{local_output}/{template}"))),
         ),
@@ -258,6 +265,18 @@ fn mutation_scopes_follow_the_recorded_mirror_binding() {
             "s3://data".into(),
             Some("cursor.parquet".into()),
             Some(MutationScope::file("s3://data/cursor.parquet")),
+        ),
+        (
+            "s3://data/chain".into(),
+            Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
+            Some(MutationScope::file(
+                "s3://data/chain/_fireparq/cursor.parquet",
+            )),
+        ),
+        (
+            "s3://data".into(),
+            Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
+            Some(MutationScope::file("s3://data/_fireparq/cursor.parquet")),
         ),
         (
             "s3://data/chain".into(),
@@ -305,6 +324,115 @@ fn mutation_scopes_follow_the_recorded_mirror_binding() {
         };
         assert!(ingestion_mutation_scopes(&config).is_err(), "{cursor}");
     }
+}
+
+/// A new dataset with the default `--cursor` binds the mirror inside the
+/// dataset's `_fireparq/` directory, and a rerun with the same default resumes
+/// without a binding drift. The root then holds only table directories,
+/// `_fireparq/` and dot-prefixed control state.
+#[tokio::test]
+async fn default_mirror_is_bound_in_the_artifact_directory_and_resumes_without_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.cursor_path = Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into());
+    let owner = own(&config).await;
+    let mirror = config.output.join("_fireparq/cursor.parquet");
+    let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &session.authority().descriptor.mirror,
+            MirrorBinding::Local { absolute_path } if Path::new(absolute_path) == mirror
+        ),
+        "the mirror is bound at creation, in _fireparq/"
+    );
+    assert!(!mirror.exists());
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    flush(&mut session, &[100]).await;
+    assert_eq!(
+        crate::cursor::load_cursor_parquet(&mirror)
+            .unwrap()
+            .unwrap()
+            .last_block_num,
+        100
+    );
+    drop(session);
+
+    let resume = load_authoritative_resume(&config, &owner, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resume.last_block_num, 100);
+    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    assert_eq!(session.authority().checkpoint.ordinal, 1);
+    drop(session);
+
+    let mut entries: Vec<_> = std::fs::read_dir(&config.output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, [".fireparq-ingest", "_fireparq", "blocks", "logs"]);
+
+    // The pre-v1.0.0 spelling is another binding for this dataset.
+    let mut legacy = config.clone();
+    legacy.cursor_path = Some("cursor.parquet".into());
+    let error = load_authoritative_resume(&legacy, &owner, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("configured cursor binding differs"),
+        "{error}"
+    );
+}
+
+/// A dataset created before v1.0.0 bound the then-default mirror
+/// `<root>/cursor.parquet`. Rerunning it with the new default is refused before
+/// anything is written, with the exact flag that resumes it; the mirror is not
+/// moved.
+#[tokio::test]
+async fn pre_v1_default_mirror_is_named_when_resumed_with_the_new_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut created = config(dir.path());
+    created.cursor_path = Some(crate::cursor::CURSOR_PARQUET_FILENAME.into());
+    let owner = own(&created).await;
+    let mut session =
+        IngestionSession::open(&created, mapper(BlockFamily::Evm), &owner, None, None)
+            .await
+            .unwrap();
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    flush(&mut session, &[100]).await;
+    drop(session);
+    let legacy_mirror = created.output.join("cursor.parquet");
+    let before = std::fs::read(&legacy_mirror).unwrap();
+
+    let mut current = created.clone();
+    current.cursor_path = Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into());
+    let error = load_authoritative_resume(&current, &owner, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, PRE_V1_DEFAULT_MIRROR);
+    assert!(error.contains("--cursor cursor.parquet"), "{error}");
+    assert!(!error.contains(&dir.path().to_string_lossy().to_string()));
+    assert!(!created.output.join("_fireparq").exists());
+    assert_eq!(std::fs::read(&legacy_mirror).unwrap(), before);
+
+    let resume = load_authoritative_resume(&created, &owner, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resume.last_block_num, 100);
 }
 
 #[tokio::test]
@@ -640,7 +768,7 @@ fn bucket_root_config(output: &str) -> Config {
         output: output.into(),
         start_block: Some(100),
         partition: Partition::None,
-        cursor_path: Some("cursor.parquet".into()),
+        cursor_path: Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
         ..Default::default()
     }
 }
@@ -655,7 +783,7 @@ async fn bucket_owner(store: &Arc<object_store::memory::InMemory>) -> DatasetOwn
 
 /// `build --without-chain-dir --output s3://data` keeps the whole dataset at
 /// the bucket root: authority under `.fireparq-ingest/`, parts under the
-/// table prefixes and the mirror at `cursor.parquet`, beside the bucket-wide
+/// table prefixes and the default mirror at `_fireparq/cursor.parquet`, beside the bucket-wide
 /// owner record, which does not make the root ineligible. The default layout
 /// of the same stream, `s3://data/<chain>`, is nested in it and refused.
 #[tokio::test]
@@ -667,7 +795,7 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_ro
         ingestion_mutation_scopes(&config).unwrap(),
         [
             MutationScope::directory("s3://data"),
-            MutationScope::file("s3://data/cursor.parquet"),
+            MutationScope::file("s3://data/_fireparq/cursor.parquet"),
         ]
     );
     let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
@@ -681,7 +809,7 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_ro
     }
     assert!(matches!(
         &session.authority().descriptor.mirror,
-        MirrorBinding::S3 { bucket, key, .. } if bucket == "data" && key == "cursor.parquet"
+        MirrorBinding::S3 { bucket, key, .. } if bucket == "data" && key == "_fireparq/cursor.parquet"
     ));
     let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
     session
@@ -696,7 +824,7 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_ro
     for expected in [
         crate::dataset_lock_s3::OWNER_KEY,
         ".fireparq-ingest/state.json",
-        "cursor.parquet",
+        "_fireparq/cursor.parquet",
     ] {
         assert!(keys.iter().any(|key| key == expected), "{keys:?}");
     }
@@ -711,6 +839,15 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_ro
         keys.iter().all(|key| !key.starts_with("mainnet/")),
         "{keys:?}"
     );
+    // The bucket root holds only table prefixes, `_fireparq/` and
+    // dot-prefixed control state.
+    for key in &keys {
+        let top = key.split('/').next().unwrap();
+        assert!(
+            ["blocks", "logs", "_fireparq"].contains(&top) || top.starts_with('.'),
+            "{key}"
+        );
+    }
 
     let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
         .await
@@ -752,7 +889,8 @@ async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
     drop(session);
     let keys = bucket_keys(&store).await;
     assert!(
-        keys.iter().any(|key| key == "mainnet/cursor.parquet"),
+        keys.iter()
+            .any(|key| key == "mainnet/_fireparq/cursor.parquet"),
         "{keys:?}"
     );
 

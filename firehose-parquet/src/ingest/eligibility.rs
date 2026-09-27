@@ -1,6 +1,7 @@
 //! New protected streams may initialize only empty destinations (optionally
-//! retaining one verified standalone index). Existing random-name data and
-//! cursor files are not evidence from which an ingestion checkpoint can be made.
+//! retaining one verified standalone index at `_fireparq/partitions.parquet`).
+//! Existing random-name data and cursor files are not evidence from which an
+//! ingestion checkpoint can be made.
 
 use anyhow::{bail, ensure, Context, Result};
 use futures::StreamExt;
@@ -9,7 +10,9 @@ use std::path::{Path, PathBuf};
 use super::binding::{output_path, validate_runtime_bindings};
 use super::mirror::ProtectedMirror;
 use super::state::{StorageIdentity, StreamDescriptor};
-use crate::artifacts::{OWNERSHIP_FILENAME, OWNERSHIP_PROBES_DIRECTORY, PARTITIONS_INDEX_FILENAME};
+use crate::artifacts::{
+    legacy_artifact_refusal, DatasetArtifact, OWNERSHIP_FILENAME, OWNERSHIP_PROBES_DIRECTORY,
+};
 use crate::cli::AwsConfig;
 use crate::dataset_lock::DatasetOwnership;
 
@@ -42,7 +45,7 @@ pub(crate) async fn require_initializable(
                 !owner.is_mutation_uncertain(),
                 "remote initialization requires resolved ownership"
             );
-            remote_contents(owner.object_store().as_ref(), prefix).await?
+            remote_contents(owner.object_store().as_ref(), prefix, &path).await?
         }
     };
     if index {
@@ -50,8 +53,8 @@ pub(crate) async fn require_initializable(
         // final live span is valid here because no bounds are consumed.
         let index = match &descriptor.output {
             StorageIdentity::Local { canonical_root } => {
-                let index_path = Path::new(canonical_root).join(PARTITIONS_INDEX_FILENAME);
-                crate::cli::read_verified_partitions_index(index_path.to_str().context("index path must be UTF-8")?,Some(aws))
+                let index_path = DatasetArtifact::PartitionsIndex.path_in(canonical_root);
+                crate::cli::read_verified_partitions_index(&index_path,Some(aws))
             }
             StorageIdentity::S3 { bucket, prefix, .. } => {
                 let store=ownership.remote(bucket).context("index bucket is not owned")?.object_store();
@@ -79,11 +82,7 @@ async fn read_remote_index(
     deadline: std::time::Duration,
 ) -> Result<crate::partition_index::VerifiedPartitionIndex> {
     const MAX_BYTES: usize = 64 * 1024 * 1024;
-    let key = if prefix.is_empty() {
-        PARTITIONS_INDEX_FILENAME.into()
-    } else {
-        format!("{prefix}/{PARTITIONS_INDEX_FILENAME}")
-    };
+    let key = DatasetArtifact::PartitionsIndex.key_in(prefix);
     let read = async {
         let response = store
             .get(&object_store::path::Path::from(key))
@@ -115,6 +114,25 @@ fn reject_existing() -> anyhow::Error {
     anyhow::anyhow!("output contains legacy data, cursor, recovery controls or unrelated files; protected ingestion requires a new empty root or an existing authoritative stream")
 }
 
+/// A standalone index from a release before v1.0.0 sits at the dataset root.
+/// It is neither adopted nor shadowed: the operator moves it into `_fireparq/`.
+fn reject_legacy_index(root: &str) -> anyhow::Error {
+    let artifact = DatasetArtifact::PartitionsIndex;
+    legacy_artifact_refusal(
+        artifact,
+        &artifact.legacy_path_in(root),
+        &artifact.path_in(root),
+    )
+}
+
+/// The only file an uninitialized root may hold: `_fireparq/partitions.parquet`.
+fn is_standalone_index(relative: &str) -> bool {
+    relative == DatasetArtifact::PartitionsIndex.relative_path()
+}
+fn is_legacy_index(relative: &str) -> bool {
+    relative == DatasetArtifact::PartitionsIndex.name()
+}
+
 fn local_contents(root: &Path) -> Result<bool> {
     let mut directories = vec![PathBuf::from(root)];
     let mut visited = 0usize;
@@ -141,10 +159,15 @@ fn local_contents(root: &Path) -> Result<bool> {
             // Control directories with no authority are not silently claimed,
             // even when empty: an operator must reconcile a failed initialization.
             ensure!(!crate::artifacts::is_control_path(relative.to_str().context("initialization entry must be UTF-8")?), "uninitialized output contains recovery controls; inspect them before choosing a new root");
+            let relative = relative
+                .to_str()
+                .context("initialization entry must be UTF-8")?;
             if kind.is_dir() {
                 directories.push(entry.path());
-            } else if kind.is_file() && relative == Path::new(PARTITIONS_INDEX_FILENAME) {
+            } else if kind.is_file() && is_standalone_index(relative) {
                 index = true;
+            } else if kind.is_file() && is_legacy_index(relative) {
+                return Err(reject_legacy_index(&root.to_string_lossy()));
             } else {
                 return Err(reject_existing());
             }
@@ -153,7 +176,12 @@ fn local_contents(root: &Path) -> Result<bool> {
     Ok(index)
 }
 
-async fn remote_contents(store: &dyn object_store::ObjectStore, prefix: &str) -> Result<bool> {
+/// `root` is the dataset root URI, for messages.
+async fn remote_contents(
+    store: &dyn object_store::ObjectStore,
+    prefix: &str,
+    root: &str,
+) -> Result<bool> {
     let object_prefix =
         (!prefix.is_empty()).then(|| object_store::path::Path::from(format!("{prefix}/")));
     let list = async {
@@ -183,8 +211,10 @@ async fn remote_contents(store: &dyn object_store::ObjectStore, prefix: &str) ->
             {
                 continue;
             }
-            if relative == PARTITIONS_INDEX_FILENAME {
+            if is_standalone_index(relative) {
                 index = true;
+            } else if is_legacy_index(relative) {
+                return Err(reject_legacy_index(root));
             } else {
                 return Err(reject_existing());
             }
@@ -254,7 +284,8 @@ mod tests {
     #[tokio::test]
     async fn empty_root_and_strict_same_chain_index_only_are_eligible() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("chain");
+        // Canonical, as the refusal names paths under the canonical output root.
+        let path = std::fs::canonicalize(dir.path()).unwrap().join("chain");
         let owner = DatasetOwnership::acquire(
             "test",
             vec![crate::dataset_lock::MutationScope::directory(
@@ -270,7 +301,10 @@ mod tests {
         require_initializable(&descriptor, &owner, &aws(), &mirror)
             .await
             .unwrap();
-        let destination = path.join(PARTITIONS_INDEX_FILENAME);
+        let destination = std::path::PathBuf::from(
+            DatasetArtifact::PartitionsIndex.path_in(path.to_str().unwrap()),
+        );
+        assert!(destination.ends_with("_fireparq/partitions.parquet"));
         crate::cli::write_verified_partitions_index(
             destination.to_str().unwrap(),
             &index("mainnet"),
@@ -279,6 +313,30 @@ mod tests {
             None,
         )
         .unwrap();
+        require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap();
+        // The same index at the pre-v1.0.0 root location is refused, not
+        // adopted, and names the move into _fireparq/.
+        let legacy = path.join("partitions.parquet");
+        std::fs::copy(&destination, &legacy).unwrap();
+        let error = require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("legacy partition index")
+                && error.contains(legacy.to_str().unwrap())
+                && error.contains(destination.to_str().unwrap()),
+            "{error}"
+        );
+        std::fs::remove_file(&destination).unwrap();
+        assert!(require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("legacy partition index"));
+        std::fs::rename(&legacy, &destination).unwrap();
         require_initializable(&descriptor, &owner, &aws(), &mirror)
             .await
             .unwrap();
@@ -306,6 +364,9 @@ mod tests {
         for existing in [
             "blocks/old-random.parquet",
             "cursor.parquet",
+            "_fireparq/cursor.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/other.parquet",
             ".fireparq-ingest/.state.json.unfinished.tmp",
             "partitions.parquet",
             ".fireparq-owner-v1.json",
@@ -314,8 +375,15 @@ mod tests {
             let path = dir.path().join(existing);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"existing").unwrap();
-            assert!(local_contents(dir.path()).is_err() || existing == PARTITIONS_INDEX_FILENAME);
+            assert!(local_contents(dir.path()).is_err(), "{existing}");
         }
+        // Only the standalone index inside _fireparq/ (checked by content
+        // later) and an empty _fireparq/ directory are accepted.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("_fireparq")).unwrap();
+        assert!(!local_contents(dir.path()).unwrap());
+        std::fs::write(dir.path().join("_fireparq/partitions.parquet"), b"index").unwrap();
+        assert!(local_contents(dir.path()).unwrap());
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("output");
         let cursor = dir.path().join("external/cursor.parquet");
@@ -353,7 +421,9 @@ mod tests {
     async fn remote_listing_never_ignores_arbitrary_control_or_legacy_objects() {
         let store = object_store::memory::InMemory::new();
         use object_store::ObjectStore;
-        assert!(!remote_contents(&store, "chain").await.unwrap());
+        assert!(!remote_contents(&store, "chain", "s3://data/chain")
+            .await
+            .unwrap());
         store
             .put(
                 &"other/legacy.parquet".into(),
@@ -361,7 +431,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!remote_contents(&store, "chain").await.unwrap());
+        assert!(!remote_contents(&store, "chain", "s3://data/chain")
+            .await
+            .unwrap());
         store
             .put(
                 &"chain/.fireparq-ingest/state.json".into(),
@@ -369,7 +441,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(remote_contents(&store, "chain").await.is_err());
+        assert!(remote_contents(&store, "chain", "s3://data/chain")
+            .await
+            .is_err());
         let store = object_store::memory::InMemory::new();
         store
             .put(
@@ -378,7 +452,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!remote_contents(&store, "").await.unwrap());
+        assert!(!remote_contents(&store, "", "s3://data").await.unwrap());
         store
             .put(
                 &"cursor.parquet".into(),
@@ -386,7 +460,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(remote_contents(&store, "").await.is_err());
+        assert!(remote_contents(&store, "", "s3://data").await.is_err());
     }
     /// `partitions build --without-chain-dir --output s3://data` can run
     /// before the first `build --without-chain-dir` into the same bucket: the
@@ -409,7 +483,7 @@ mod tests {
             bytes::Bytes::from(std::fs::read(path).unwrap())
         };
         let store = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let key = object_store::path::Path::from(PARTITIONS_INDEX_FILENAME);
+        let key = object_store::path::Path::from("_fireparq/partitions.parquet");
         store
             .put(&key, index_bytes("mainnet").into())
             .await
@@ -443,6 +517,27 @@ mod tests {
             .put(&key, index_bytes("mainnet").into())
             .await
             .unwrap();
+        // A same-chain index at the pre-v1.0.0 bucket-root location is refused
+        // and names the move into _fireparq/.
+        let legacy = object_store::path::Path::from("partitions.parquet");
+        store
+            .put(&legacy, index_bytes("mainnet").into())
+            .await
+            .unwrap();
+        let error = require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("legacy partition index")
+                && error.contains("s3://data/partitions.parquet")
+                && error.contains("s3://data/_fireparq/partitions.parquet"),
+            "{error}"
+        );
+        store.delete(&legacy).await.unwrap();
+        require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap();
         store
             .put(
                 &"mainnet/blocks/part-1.parquet".into(),
@@ -459,7 +554,7 @@ mod tests {
     async fn remote_index_eligibility_uses_native_owned_store_and_bounded_get() {
         use object_store::ObjectStore;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(PARTITIONS_INDEX_FILENAME);
+        let path = dir.path().join("index.parquet");
         crate::cli::write_verified_partitions_index(
             path.to_str().unwrap(),
             &index("mainnet"),
@@ -471,7 +566,7 @@ mod tests {
         let store = std::sync::Arc::new(object_store::memory::InMemory::new());
         store
             .put(
-                &"chain/partitions.parquet".into(),
+                &"chain/_fireparq/partitions.parquet".into(),
                 bytes::Bytes::from(std::fs::read(&path).unwrap()).into(),
             )
             .await
@@ -506,7 +601,7 @@ mod tests {
         );
         store
             .put(
-                &"chain/partitions.parquet".into(),
+                &"chain/_fireparq/partitions.parquet".into(),
                 bytes::Bytes::from_static(b"invalid").into(),
             )
             .await

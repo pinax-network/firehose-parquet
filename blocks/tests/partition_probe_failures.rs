@@ -204,7 +204,7 @@ async fn invalid_block_range_probes_cannot_create_or_replace_partition_output() 
         "{}",
         String::from_utf8_lossy(&seeded.stderr)
     );
-    let index = existing.join("test-chain/partitions.parquet");
+    let index = existing.join("test-chain/_fireparq/partitions.parquet");
     let original = std::fs::read(&index).unwrap();
     for failure_mode in 1..=5 {
         mode.store(failure_mode, Ordering::SeqCst);

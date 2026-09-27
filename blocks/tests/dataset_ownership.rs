@@ -149,7 +149,9 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
     let root = temp.path().join("output/test-chain");
     let table = root.join("blocks");
     let owner = LocalOwnership::acquire(&[table]).unwrap();
-    let cursor = root.join("cursor.parquet");
+    // The default mirror location, inside the dataset's `_fireparq/`.
+    let cursor = root.join("_fireparq/cursor.parquet");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
     std::fs::write(&cursor, b"unchanged-private-checkpoint").unwrap();
     let output = temp.path().join("output");
     let output = output.to_str().unwrap();

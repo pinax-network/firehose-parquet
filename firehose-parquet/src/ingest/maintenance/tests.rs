@@ -258,6 +258,7 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
         root.join("blocks/100-199/part-000001.parquet"),
         mirror,
         root.join("cursor.parquet"),
+        root.join("_fireparq/cursor.parquet"),
         root.join("blocks/100-199/_fireparq_merge.json"),
     ] {
         let result = acquire(
@@ -274,6 +275,10 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
         assert!(!destination.exists());
     }
     for destination in [
+        root.join("_fireparq/merkle_roots.parquet"),
+        root.join("_fireparq/partitions.parquet"),
+        root.join("_fireparq/verify_runs/run/report.json"),
+        root.join("_fireparq/verify_runs/run/roots.parquet"),
         root.join("merkle_roots.parquet"),
         root.join("partitions.parquet"),
         root.join("verify_runs/run/report.json"),
