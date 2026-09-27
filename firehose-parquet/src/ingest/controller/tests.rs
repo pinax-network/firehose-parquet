@@ -314,6 +314,77 @@ async fn every_publication_boundary_recovers_to_one_complete_all_table_prefix() 
     }
 }
 
+/// Part names of `root` that carry the accepted-event window `first..=last`.
+fn window_parts(root: &Path, first: u64, last: u64) -> usize {
+    data_files(root)
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&format!("-{first}-{last}-"))
+        })
+        .count()
+}
+
+/// The accepted-event ordinals that non-final rows carry as `stream_ordinal`
+/// are durable. After a crash at every boundary of a second transaction, the
+/// resumed frontier (the session's `AcceptedFrontier::resume` of recovered
+/// authority) assigns the next event either the ordinal after the rolled-forward
+/// window, whose parts stay, or, after a rollback, the rolled-back window's
+/// first ordinal again, whose parts are gone. No committed row's ordinal is
+/// ever assigned to another event.
+#[tokio::test]
+async fn recovery_never_reassigns_the_ordinal_of_a_committed_row() {
+    for stage in [
+        Stage::WritingPersisted,
+        Stage::Staged(0),
+        Stage::ReceiptPersisted(0),
+        Stage::Published(0),
+        Stage::Published(1),
+        Stage::CommittedPersisted,
+        Stage::AuthorityAdvanced,
+        Stage::MirrorReconciled,
+        Stage::PendingCleared,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = actual_descriptor(root.path());
+        let mirror = Mirror::default();
+        {
+            let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+            initialize(root.path(), &owner, &descriptor).await;
+            let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+                .await
+                .unwrap();
+            assert_eq!(commit(&mut controller).await.unwrap().ordinal, 2);
+            let injected = fail(stage);
+            assert!(commit(&mut controller).await.is_err(), "{stage:?}");
+            drop(injected);
+        }
+        let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+        let controller = open(root.path(), &owner, &mirror, &descriptor)
+            .await
+            .unwrap();
+        let rolled_forward = matches!(
+            stage,
+            Stage::CommittedPersisted
+                | Stage::AuthorityAdvanced
+                | Stage::MirrorReconciled
+                | Stage::PendingCleared
+        );
+        let mut frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+        let next = frontier.receive(event(102, 1)).unwrap();
+        assert_eq!(window_parts(root.path(), 1, 2), 2, "{stage:?}");
+        if rolled_forward {
+            assert_eq!(next, 5, "{stage:?}");
+            assert_eq!(window_parts(root.path(), 3, 4), 2, "{stage:?}");
+        } else {
+            assert_eq!(next, 3, "{stage:?}");
+            assert_eq!(window_parts(root.path(), 3, 4), 0, "{stage:?}");
+        }
+    }
+}
+
 fn staged_temporaries(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
     let mut found = Vec::new();

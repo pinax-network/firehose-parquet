@@ -8,7 +8,11 @@ use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
 fn map(block: &beacon::Block, encoding: EncodeBytes) -> HashMap<String, RecordBatch> {
     let mut mapper = BeaconBlockMapper::new(false, encoding);
     mapper
-        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &block.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let batches = mapper.flush().unwrap();
     for (table, batch) in &batches {
@@ -141,12 +145,20 @@ fn malformed_fee_rejects_whole_block_without_mutating_buffered_tables() {
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         let valid = payload_block(beacon::Spec::Deneb, vec![1]);
         mapper
-            .map_block(&valid.encode_to_vec(), &BlockIdentity::default(), None)
+            .map_block(
+                &valid.encode_to_vec(),
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         for length in lengths {
             let invalid = payload_block(fork, vec![0; length]);
             let error = mapper
-                .map_block(&invalid.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &invalid.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap_err();
             assert!(error.to_string().contains("base_fee_per_gas"));
         }
@@ -173,7 +185,7 @@ fn generated_spec_names_are_dictionary_encoded_with_distinct_unknown() {
                 }
                 .encode_to_vec(),
                 &BlockIdentity::default(),
-                None,
+                StreamEvent::default(),
             )
             .unwrap();
     }
@@ -241,7 +253,11 @@ fn full_size_blobs_remain_binary_in_every_encoding_and_after_flush() {
         let mut mapper = BeaconBlockMapper::new(false, encoding.clone());
         for _ in 0..2 {
             mapper
-                .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &block.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
             let (table, estimate) = mapper.largest_table();
             assert_eq!(table, "blob_sidecars");

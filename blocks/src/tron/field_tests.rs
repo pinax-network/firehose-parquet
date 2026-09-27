@@ -6,7 +6,7 @@ use arrow::{array::*, datatypes::Int32Type, record_batch::RecordBatch};
 use firehose_parquet::{
     config::{BlockMetadata, Compression, Partition},
     encode::{encode_bytes, EncodeBytes},
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::{read_parquet, ParquetTableWriter},
 };
 use prost::Message;
@@ -151,7 +151,7 @@ fn all_contracts_receipts_and_call_values_survive_every_encoding_and_flush() {
                     .map_block(
                         &block.encode_to_vec(),
                         &BlockIdentity::default(),
-                        Some("FINAL"),
+                        StreamEvent::new(Some("FINAL"), 1),
                     )
                     .unwrap();
                 assert!(mapper.largest_table().1 > 0);
@@ -285,7 +285,11 @@ fn missing_messages_are_null_but_present_defaults_are_values() {
     block.transactions = vec![absent, present, missing_parameter];
     let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, true);
     mapper
-        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &block.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let batches = mapper.flush().unwrap();
     let tx = &batches["transactions"];
@@ -347,7 +351,11 @@ fn source_positions_do_not_renumber_after_failed_filtering() {
     for include_failed in [false, true] {
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, include_failed);
         mapper
-            .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+            .map_block(
+                &block.encode_to_vec(),
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let b = mapper.flush().unwrap();
         let row = usize::from(include_failed) * 2;
@@ -379,7 +387,11 @@ fn malformed_recognized_payload_rejects_all_rows_of_block() {
     let valid = sample();
     let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, true);
     mapper
-        .map_block(&valid.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &valid.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let rows = mapper.total_rows();
     for mismatch in [false, true] {
@@ -395,7 +407,11 @@ fn malformed_recognized_payload_rejects_all_rows_of_block() {
             parameter.value = vec![255];
         }
         assert!(mapper
-            .map_block(&invalid.encode_to_vec(), &BlockIdentity::default(), None)
+            .map_block(
+                &invalid.encode_to_vec(),
+                &BlockIdentity::default(),
+                StreamEvent::default()
+            )
             .is_err());
         assert_eq!(mapper.total_rows(), rows);
     }

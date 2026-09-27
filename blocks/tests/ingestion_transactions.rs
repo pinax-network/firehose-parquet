@@ -1597,7 +1597,7 @@ async fn compressed_receipts_train_later_cli_flush_windows() {
 async fn summed_memory_flushes_cli_when_each_table_is_below_the_limit() {
     use firehose_parquet::{
         encode::EncodeBytes,
-        traits::{BlockIdentity, BlockMapper},
+        traits::{BlockIdentity, BlockMapper, StreamEvent},
     };
     let events: Vec<_> = (100..103)
         .map(|height| response_with_sizing_payload(height, true))
@@ -1611,7 +1611,7 @@ async fn summed_memory_flushes_cli_when_each_table_is_below_the_limit() {
                 timestamp: 1_700_000_000,
                 ..Default::default()
             },
-            None,
+            StreamEvent::default(),
         )
         .unwrap();
     let sizes = mapper.table_estimates();

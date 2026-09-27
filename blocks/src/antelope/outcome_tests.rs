@@ -14,7 +14,7 @@ use arrow::datatypes::{DataType, Int32Type};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ fn map(include_failed: bool, filtered: bool) -> HashMap<String, RecordBatch> {
         .map_block(
             &block.encode_to_vec(),
             &BlockIdentity::default(),
-            Some("NEW"),
+            StreamEvent::new(Some("NEW"), 1),
         )
         .unwrap();
     let batches = mapper.flush().unwrap();

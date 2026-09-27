@@ -2,7 +2,8 @@
 //!
 //! Every table of every chain, under every bytes encoding and both
 //! `fork_step` settings, must have unique column names and round-trip through
-//! the Parquet writer and reader unchanged. Arrow and the Parquet writer accept
+//! the Parquet writer and reader unchanged. Non-final tables also carry the
+//! envelope's `stream_ordinal` on every row, directly after `fork_step`. Arrow and the Parquet writer accept
 //! duplicate names silently, but Spark and Polars reject such files, DuckDB
 //! renames the second column (`timestamp_1`), and `Schema::index_of` only ever
 //! finds the first one.
@@ -17,7 +18,9 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use firehose_parquet::config::{BlockMetadata, Compression, Partition};
 use firehose_parquet::encode::{decode_base58, EncodeBytes};
-use firehose_parquet::traits::{timestamp_millis_utc_type, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{
+    timestamp_millis_utc_type, BlockIdentity, BlockMapper, StreamEvent,
+};
 use firehose_parquet::verify::{
     partition_root, verify_parquet, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
     VerifyScope,
@@ -39,6 +42,13 @@ use crate::{antelope, beacon, bitcoin, cosmos, evm, near, solana, tron};
 
 const BLOCK_NUM: u64 = 100;
 const TIMESTAMP: i64 = 1_700_000_000;
+/// The accepted-event ordinal of the fixture block `BLOCK_NUM + offset`,
+/// deliberately unrelated to its block number.
+const FIRST_STREAM_ORDINAL: u64 = 7_000;
+
+fn stream_ordinal(block_num: u64) -> u64 {
+    FIRST_STREAM_ORDINAL + (block_num - BLOCK_NUM)
+}
 
 /// Every `EncodeBytes` variant. Mappers accept any of them, so all are covered
 /// rather than only the per-chain defaults.
@@ -303,9 +313,14 @@ fn flush_all_cases() -> Vec<Flushed> {
                     case.label
                 );
                 for (offset, block) in case.blocks.iter().enumerate() {
-                    let identity = identity(BLOCK_NUM + offset as u64, fork_step);
+                    let block_num = BLOCK_NUM + offset as u64;
+                    let identity = identity(block_num, fork_step);
                     case.mapper
-                        .map_block(block, &identity, fork_step)
+                        .map_block(
+                            block,
+                            &identity,
+                            StreamEvent::new(fork_step, stream_ordinal(block_num)),
+                        )
                         .unwrap_or_else(|err| panic!("{context}: map_block failed: {err:#}"));
                 }
 
@@ -453,6 +468,7 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
                 flushed.include_fork_step,
                 "{context}: fork_step column"
             );
+            assert_stream_ordinals(&context, batch, flushed.include_fork_step);
             assert_eq!(
                 batch
                     .schema()
@@ -486,6 +502,49 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
     }
 
     assert_eq!(checked, expected_table_count());
+}
+
+/// Non-final tables carry `stream_ordinal` (`UInt64`, not null) directly after
+/// `fork_step`, and every row holds the ordinal of the envelope that produced
+/// it, the same value in every table. Final-only tables carry neither column.
+fn assert_stream_ordinals(context: &str, batch: &RecordBatch, include_fork_step: bool) {
+    let schema = batch.schema();
+    let ordinal = schema.index_of("stream_ordinal").ok();
+    assert_eq!(
+        ordinal.is_some(),
+        include_fork_step,
+        "{context}: stream_ordinal column"
+    );
+    let Some(ordinal) = ordinal else {
+        return;
+    };
+    assert_eq!(
+        schema.index_of("fork_step").ok(),
+        Some(ordinal - 1),
+        "{context}: stream_ordinal must directly follow fork_step"
+    );
+    let field = schema.field(ordinal);
+    assert_eq!(
+        (field.data_type(), field.is_nullable()),
+        (&DataType::UInt64, false),
+        "{context}: stream_ordinal type"
+    );
+    let block_nums = batch
+        .column_by_name("block_num")
+        .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
+        .unwrap_or_else(|| panic!("{context}: block_num"));
+    let ordinals = batch
+        .column(ordinal)
+        .as_any()
+        .downcast_ref::<arrow::array::UInt64Array>()
+        .unwrap_or_else(|| panic!("{context}: stream_ordinal is UInt64"));
+    for row in 0..batch.num_rows() {
+        assert_eq!(
+            ordinals.value(row),
+            stream_ordinal(block_nums.value(row)),
+            "{context}: row {row} does not carry its envelope's ordinal"
+        );
+    }
 }
 
 /// Whether `data_type` is, or nests, a `Struct`.
@@ -542,7 +601,7 @@ fn verify_records_and_rematches_every_table_of_every_chain() {
             for (offset, block) in case.blocks.iter().enumerate() {
                 let identity = identity(BLOCK_NUM + offset as u64, Some("NEW"));
                 case.mapper
-                    .map_block(block, &identity, Some("NEW"))
+                    .map_block(block, &identity, StreamEvent::new(Some("NEW"), 1))
                     .unwrap();
             }
             let chain_root = scratch.0.join(format!("{encoding:?}-{case_index}/net"));
@@ -638,11 +697,15 @@ fn invalid_identity_timestamps_leave_every_chain_mapper_unchanged() {
         let valid = identity(BLOCK_NUM, Some("NEW"));
         expected
             .mapper
-            .map_block(&expected.blocks[0], &valid, Some("NEW"))
+            .map_block(
+                &expected.blocks[0],
+                &valid,
+                StreamEvent::new(Some("NEW"), 1),
+            )
             .unwrap();
         actual
             .mapper
-            .map_block(&actual.blocks[0], &valid, Some("NEW"))
+            .map_block(&actual.blocks[0], &valid, StreamEvent::new(Some("NEW"), 1))
             .unwrap();
         for (timestamp, timestamp_nanos) in [
             (i64::MIN, 0),
@@ -659,7 +722,11 @@ fn invalid_identity_timestamps_leave_every_chain_mapper_unchanged() {
             assert!(
                 actual
                     .mapper
-                    .map_block(&actual.blocks[0], &invalid, Some("UNDO"))
+                    .map_block(
+                        &actual.blocks[0],
+                        &invalid,
+                        StreamEvent::new(Some("UNDO"), 1)
+                    )
                     .is_err(),
                 "{} accepted malformed identity",
                 actual.label
@@ -703,15 +770,14 @@ fn owned_payload_mapping_matches_borrowed_for_every_chain_and_encoding() {
                 let context = format!("{} {encoding:?} fork={include_fork_step}", owned.label);
                 for _ in 0..2 {
                     for (offset, block) in borrowed.blocks.iter().enumerate() {
-                        let identity = identity(BLOCK_NUM + offset as u64, fork_step);
+                        let block_num = BLOCK_NUM + offset as u64;
+                        let identity = identity(block_num, fork_step);
+                        let event = StreamEvent::new(fork_step, stream_ordinal(block_num));
                         let payload = prost::bytes::Bytes::from(block.clone());
-                        let expected = borrowed
-                            .mapper
-                            .map_block(block, &identity, fork_step)
-                            .unwrap();
+                        let expected = borrowed.mapper.map_block(block, &identity, event).unwrap();
                         let actual = owned
                             .mapper
-                            .map_block_bytes(payload.clone(), &identity, fork_step)
+                            .map_block_bytes(payload.clone(), &identity, event)
                             .unwrap();
                         drop(payload); // Arrow output must outlive the original protobuf allocation.
                         assert_eq!(actual, expected, "{context}: mapped transaction count");
@@ -726,17 +792,14 @@ fn owned_payload_mapping_matches_borrowed_for_every_chain_and_encoding() {
                     assert_eq!(actual, expected, "{context}: complete output after flush");
                 }
                 let identity = identity(BLOCK_NUM, fork_step);
+                let event = StreamEvent::new(fork_step, stream_ordinal(BLOCK_NUM));
                 let expected = borrowed
                     .mapper
-                    .map_block(&[255], &identity, fork_step)
+                    .map_block(&[255], &identity, event)
                     .unwrap_err();
                 let actual = owned
                     .mapper
-                    .map_block_bytes(
-                        prost::bytes::Bytes::from_static(&[255]),
-                        &identity,
-                        fork_step,
-                    )
+                    .map_block_bytes(prost::bytes::Bytes::from_static(&[255]), &identity, event)
                     .unwrap_err();
                 assert_eq!(
                     actual.to_string(),

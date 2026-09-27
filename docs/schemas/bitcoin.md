@@ -7,11 +7,11 @@ Generated from the `bitcoin` mapper; do not edit by hand. Regenerate with `cargo
 - Block type: `--block-type bitcoin`.
 - Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
 - Columns typed `Utf8` (hex) hold binary values written as text in that encoding.
-- `fork_step` is listed where it sits on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is absent.
+- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 
 ## Tables
 
-| Table | Columns (without `fork_step`) | Written |
+| Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 22 | Always. |
 | [`transactions`](#transactions) | 18 | Always. |
@@ -45,6 +45,7 @@ Generated from the `bitcoin` mapper; do not edit by hand. Regenerate with `cargo
 | `mediantime` | `Int64` | no | |
 | `chainwork` | `Utf8` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `transactions`
 
@@ -69,6 +70,7 @@ Generated from the `bitcoin` mapper; do not edit by hand. Regenerate with `cargo
 | `block_time` | `Int64` | no | |
 | `tx_index` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `inputs`
 
@@ -93,6 +95,7 @@ Generated from the `bitcoin` mapper; do not edit by hand. Regenerate with `cargo
 | `witness` | `List<Utf8>` | no | |
 | `tx_index` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `outputs`
 
@@ -115,3 +118,4 @@ Generated from the `bitcoin` mapper; do not edit by hand. Regenerate with `cargo
 | `script_pubkey_address` | `Utf8` | yes | |
 | `value_sats` | `UInt64` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

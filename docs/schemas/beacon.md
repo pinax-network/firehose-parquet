@@ -7,11 +7,11 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 - Block type: `--block-type beacon`.
 - Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
 - Columns typed `Utf8` (hex) hold binary values written as text in that encoding.
-- `fork_step` is listed where it sits on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is absent.
+- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 
 ## Tables
 
-| Table | Columns (without `fork_step`) | Written |
+| Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 17 | Always. |
 | [`attestations`](#attestations) | 19 | Always. |
@@ -49,6 +49,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `spec` | `Dictionary(Int32, Utf8)` | no | |
 | `graffiti` | `Utf8` (hex) | yes | Null only when the block has no body. |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `attestations`
 
@@ -74,6 +75,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `signature` | `Utf8` (hex) | no | |
 | `committee_bits` | `Utf8` (hex) | yes | EIP-7549 (Electra+): the committees the attestation aggregates. Null before Electra, where `committee_index` identifies the committee. |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `deposits`
 
@@ -93,6 +95,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `amount` | `UInt64` | yes | |
 | `signature` | `Utf8` (hex) | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `proposer_slashings`
 
@@ -118,6 +121,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `header_2_state_root` | `Utf8` (hex) | yes | |
 | `header_2_body_root` | `Utf8` (hex) | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `attester_slashings`
 
@@ -149,6 +153,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `attestation_1_attesting_indices` | `List<UInt64>` | yes | |
 | `attestation_2_attesting_indices` | `List<UInt64>` | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `voluntary_exits`
 
@@ -167,6 +172,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `validator_index` | `UInt64` | yes | |
 | `signature` | `Utf8` (hex) | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `execution_payload`
 
@@ -194,6 +200,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `blob_gas_used` | `UInt64` | yes | |
 | `excess_blob_gas` | `UInt64` | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `blob_sidecars`
 
@@ -212,6 +219,7 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 | `kzg_commitment` | `Utf8` (hex) | no | |
 | `kzg_proof` | `Utf8` (hex) | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `withdrawals`
 
@@ -232,6 +240,7 @@ Capella+: `execution_payload.withdrawals`, one row per withdrawal.
 | `address` | `Utf8` (hex) | no | |
 | `amount` | `UInt64` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `bls_to_execution_changes`
 
@@ -253,6 +262,7 @@ Deneb+ (the Firehose Capella body does not carry them): signed BLS-to-execution 
 | `to_execution_address` | `Utf8` (hex) | yes | |
 | `signature` | `Utf8` (hex) | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `deposit_requests`
 
@@ -275,6 +285,7 @@ Electra+: EIP-6110 deposit requests from `execution_requests.deposits`.
 | `amount` | `UInt64` | no | |
 | `signature` | `Utf8` (hex) | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `withdrawal_requests`
 
@@ -295,6 +306,7 @@ Electra+: EIP-7002 withdrawal requests from `execution_requests.withdrawals`.
 | `validator_pubkey` | `Utf8` (hex) | no | |
 | `amount` | `UInt64` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `consolidation_requests`
 
@@ -315,3 +327,4 @@ Electra+: EIP-7251 consolidation requests from `execution_requests.consolidation
 | `source_pubkey` | `Utf8` (hex) | no | |
 | `target_pubkey` | `Utf8` (hex) | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

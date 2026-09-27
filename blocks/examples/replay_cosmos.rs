@@ -5,7 +5,7 @@ use blocks::cosmos::{mapper::CosmosBlockMapper, proto::cosmos};
 use clap::Parser;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use parquet::arrow::ArrowWriter;
 use prost::Message;
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Binary, true);
-    mapper.map_block(&raw, &identity, None)?;
+    mapper.map_block(&raw, &identity, StreamEvent::default())?;
     let batches = mapper.flush()?;
     fs::create_dir(&args.output)?;
     let mut counts = std::collections::BTreeMap::new();

@@ -13,7 +13,7 @@ use arrow::datatypes::{DataType, Int32Type};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -21,7 +21,11 @@ use std::collections::HashMap;
 fn map(block: &near::Block, include_failed: bool, fork: bool) -> HashMap<String, RecordBatch> {
     let mut mapper = NearBlockMapper::new(fork, EncodeBytes::Base58, include_failed);
     mapper
-        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &block.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let batches = mapper.flush().unwrap();
     assert_eq!(mapper.total_rows(), 0);
@@ -155,6 +159,10 @@ fn receipt_status_is_a_last_non_null_dictionary_column() {
             assert!(!last.is_nullable());
             assert_eq!(
                 schema.index_of("fork_step").ok(),
+                fork.then(|| schema.fields().len() - 3)
+            );
+            assert_eq!(
+                schema.index_of("stream_ordinal").ok(),
                 fork.then(|| schema.fields().len() - 2)
             );
         }

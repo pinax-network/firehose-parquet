@@ -6,9 +6,10 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{decode_base58, BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bin, est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str,
-    est_str, est_u32, est_u64, estimated_dictionary_index_bytes, finish_fork_step,
-    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, est_bin, est_bool, est_f64, est_fork_step, est_i64, est_list_str,
+    est_list_u64, est_str, est_u32, est_u64, estimated_dictionary_index_bytes, finish_fork_step,
+    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, ForkStepBuilder,
+    PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -56,7 +57,7 @@ fn append_transaction(
     tx: &solana::Transaction,
     meta: &solana::TransactionStatusMeta,
     identity: &PreparedIdentity,
-    fork_step: Option<&str>,
+    fork_step: StreamEvent<'_>,
 ) {
     builder.canonical.append(identity);
     builder.slot.append_value(slot);
@@ -216,7 +217,7 @@ impl SolanaBlockMapper {
         &mut self,
         block: &solana::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<()> {
         let slot = block.slot;
         let blockhash_bytes = solana_hash_bytes(&block.blockhash);
@@ -289,7 +290,7 @@ impl SolanaBlockMapper {
         tx_idx: u32,
         confirmed: &solana::ConfirmedTransaction,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
         next_reward_index: &mut u64,
     ) -> anyhow::Result<()> {
         let tx = match confirmed.transaction.as_ref() {
@@ -511,7 +512,7 @@ impl SolanaBlockMapper {
         balances: &[solana::TokenBalance],
         transaction_success: bool,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         for (i, tb) in balances.iter().enumerate() {
             self.token_balances.canonical.append(identity);
@@ -555,7 +556,7 @@ impl SolanaBlockMapper {
         tx_idx: Option<u32>,
         transaction_success: Option<bool>,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<()> {
         let idx = u32::try_from(*next_reward_index)
             .map_err(|_| anyhow::anyhow!("slot {slot} has more rewards than UInt32 can index"))?;
@@ -592,7 +593,7 @@ impl SolanaBlockMapper {
         &mut self,
         block: solana::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block.transactions.len() as u64;
         self.map_solana_block(&block, identity, fork_step)?;
@@ -605,7 +606,7 @@ impl BlockMapper for SolanaBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(solana::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -614,7 +615,7 @@ impl BlockMapper for SolanaBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(solana::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -699,7 +700,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_i64(&self.blocks.block_time)
             + est_u32(&self.blocks.num_transactions)
             + est_u32(&self.blocks.num_rewards)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let transactions = self.transactions.estimated_bytes();
         let vote_transactions = match self.vote_transactions {
             Some(ref mut vt) => vt.estimated_bytes(),
@@ -717,7 +718,7 @@ impl BlockMapper for SolanaBlockMapper {
             + self.messages.account_keys.estimated_bytes()
             + self.messages.loaded_writable_addresses.estimated_bytes()
             + self.messages.loaded_readonly_addresses.estimated_bytes()
-            + est_opt_str(&self.messages.fork_step)
+            + est_fork_step(&self.messages.fork_step)
             + est_bool(&self.messages.transaction_success);
         let instructions = self.instructions.canonical.estimated_bytes()
             + est_u64(&self.instructions.slot)
@@ -731,7 +732,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u32(&self.instructions.stack_height)
             + est_u32(&self.instructions.parent_instruction_index)
             + est_u32(&self.instructions.inner_instruction_index)
-            + est_opt_str(&self.instructions.fork_step)
+            + est_fork_step(&self.instructions.fork_step)
             + est_bool(&self.instructions.transaction_success);
         let rewards = self.rewards.canonical.estimated_bytes()
             + est_u64(&self.rewards.slot)
@@ -743,7 +744,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_str(&self.rewards.commission)
             + est_str(&self.rewards.source)
             + est_u32(&self.rewards.transaction_index)
-            + est_opt_str(&self.rewards.fork_step)
+            + est_fork_step(&self.rewards.fork_step)
             + est_bool(&self.rewards.transaction_success);
         let token_balances = self.token_balances.canonical.estimated_bytes()
             + est_u64(&self.token_balances.slot)
@@ -758,7 +759,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_f64(&self.token_balances.ui_amount)
             + est_u32(&self.token_balances.decimals)
             + est_str(&self.token_balances.ui_amount_string)
-            + est_opt_str(&self.token_balances.fork_step)
+            + est_fork_step(&self.token_balances.fork_step)
             + est_bool(&self.token_balances.transaction_success);
         let account_lookups = self.account_lookups.canonical.estimated_bytes()
             + est_u64(&self.account_lookups.slot)
@@ -767,7 +768,7 @@ impl BlockMapper for SolanaBlockMapper {
             + self.account_lookups.account_key.estimated_bytes()
             + estimated_index_list_bytes(&mut self.account_lookups.writable_indexes)
             + estimated_index_list_bytes(&mut self.account_lookups.readonly_indexes)
-            + est_opt_str(&self.account_lookups.fork_step)
+            + est_fork_step(&self.account_lookups.fork_step)
             + est_bool(&self.account_lookups.transaction_success);
         [
             ("blocks", blocks),
@@ -806,7 +807,7 @@ struct BlocksBuilder {
     block_time: Int64Builder,
     num_transactions: UInt32Builder,
     num_rewards: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -858,7 +859,7 @@ struct TransactionsBuilder {
     post_balances: ListBuilder<UInt64Builder>,
     return_data_program_id: BytesColumn,
     return_data: BinaryBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl TransactionsBuilder {
@@ -921,7 +922,7 @@ impl TransactionsBuilder {
             + est_list_u64(&mut self.post_balances)
             + self.return_data_program_id.estimated_bytes()
             + est_bin(&self.return_data)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -938,7 +939,7 @@ struct MessagesBuilder {
     account_keys: BytesListColumn,
     loaded_writable_addresses: BytesListColumn,
     loaded_readonly_addresses: BytesListColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     transaction_success: BooleanBuilder,
 }
 
@@ -996,7 +997,7 @@ struct InstructionsBuilder {
     stack_height: UInt32Builder,
     parent_instruction_index: UInt32Builder,
     inner_instruction_index: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     transaction_success: BooleanBuilder,
 }
 
@@ -1052,7 +1053,7 @@ struct RewardsBuilder {
     commission: StringBuilder,
     source: StringBuilder,
     transaction_index: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     transaction_success: BooleanBuilder,
 }
 
@@ -1107,7 +1108,7 @@ struct TokenBalancesBuilder {
     ui_amount: Float64Builder,
     decimals: UInt32Builder,
     ui_amount_string: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     transaction_success: BooleanBuilder,
 }
 
@@ -1162,7 +1163,7 @@ struct AccountLookupsBuilder {
     account_key: BytesColumn,
     writable_indexes: ListBuilder<UInt8Builder>,
     readonly_indexes: ListBuilder<UInt8Builder>,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     transaction_success: BooleanBuilder,
 }
 
@@ -1368,13 +1369,13 @@ pub(crate) mod tests {
                 SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, false);
             let identity = BlockIdentity::default();
             baseline
-                .map_block(&valid.encode_to_vec(), &identity, None)
+                .map_block(&valid.encode_to_vec(), &identity, StreamEvent::default())
                 .unwrap();
             subject
-                .map_block(&valid.encode_to_vec(), &identity, None)
+                .map_block(&valid.encode_to_vec(), &identity, StreamEvent::default())
                 .unwrap();
             assert!(subject
-                .map_block(&invalid.encode_to_vec(), &identity, None)
+                .map_block(&invalid.encode_to_vec(), &identity, StreamEvent::default())
                 .is_err());
             assert_eq!(subject.flush().unwrap(), baseline.flush().unwrap());
         }
@@ -1386,7 +1387,11 @@ pub(crate) mod tests {
         block.block_time.as_mut().unwrap().timestamp = -1;
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+            .map_block(
+                &block.encode_to_vec(),
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         for batch in mapper
             .flush()
@@ -1417,7 +1422,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1463,7 +1472,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, true, false);
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
@@ -1529,7 +1540,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -1579,7 +1592,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -1642,7 +1657,11 @@ pub(crate) mod tests {
             let mut mapper =
                 SolanaBlockMapper::new(with_votes, false, EncodeBytes::Binary, false, false);
             mapper
-                .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &block.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
             let batches = mapper.flush().unwrap();
             for (table, count) in [
@@ -1862,7 +1881,11 @@ pub(crate) mod tests {
                         false,
                     );
                     mapper
-                        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                        .map_block(
+                            &block.encode_to_vec(),
+                            &BlockIdentity::default(),
+                            StreamEvent::default(),
+                        )
                         .unwrap();
                     let batches = mapper.flush().unwrap();
                     for table in [
@@ -1932,7 +1955,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1990,7 +2017,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2049,7 +2080,11 @@ pub(crate) mod tests {
         // With include_failed_transactions = true, failed tx should be included
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, true);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2077,7 +2112,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -2098,7 +2137,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -2113,13 +2156,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("NEW"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -2134,7 +2192,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
@@ -2153,7 +2215,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
@@ -2171,7 +2237,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -2214,7 +2284,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -2273,7 +2347,7 @@ pub(crate) mod tests {
                     .map_block(
                         &block.encode_to_vec(),
                         &BlockIdentity::default(),
-                        Some("NEW"),
+                        StreamEvent::new(Some("NEW"), 1),
                     )
                     .unwrap();
                 let batch = mapper.flush().unwrap().remove("instructions").unwrap();
@@ -2332,7 +2406,7 @@ pub(crate) mod tests {
                     .map_block(
                         &block.encode_to_vec(),
                         &BlockIdentity::default(),
-                        Some("NEW"),
+                        StreamEvent::new(Some("NEW"), 1),
                     )
                     .unwrap();
                 assert_eq!(mapper.flush().unwrap()["instructions"], batch);
@@ -2390,7 +2464,11 @@ pub(crate) mod tests {
                         ..Default::default()
                     };
                     mapper
-                        .map_block(&block.encode_to_vec(), &identity, Some(step))
+                        .map_block(
+                            &block.encode_to_vec(),
+                            &identity,
+                            StreamEvent::new(Some(step), event_index as u64 + 1),
+                        )
                         .unwrap();
                     if (event_index + 1) % flush_every == 0 {
                         batches.push(mapper.flush().unwrap().remove("rewards").unwrap());
@@ -2419,6 +2497,17 @@ pub(crate) mod tests {
                     assert_eq!(indices.value(row), index as u32);
                     assert_eq!(get_string_value(result, "fork_step", row), events[event].1);
                     assert_eq!(
+                        result
+                            .column_by_name("stream_ordinal")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt64Array>()
+                            .unwrap()
+                            .value(row),
+                        event as u64 + 1,
+                        "every row of one envelope carries its ordinal"
+                    );
+                    assert_eq!(
                         get_string_value(result, "source", row),
                         if index < rewards_per_event - 2 {
                             "transaction"
@@ -2437,7 +2526,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -2469,7 +2562,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -2494,7 +2591,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -2575,7 +2676,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();

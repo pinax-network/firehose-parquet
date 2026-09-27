@@ -36,7 +36,11 @@ const CANONICAL_COLUMNS: [&str; 7] = [
     "date",
 ];
 
-const FORK_STEP: &str = "fork_step";
+const FORK_STEP: &str = firehose_parquet::traits::FORK_STEP_COLUMN;
+const STREAM_ORDINAL: &str = firehose_parquet::traits::STREAM_ORDINAL_COLUMN;
+
+/// Columns that exist only on non-final streams, in their file order.
+const NON_FINAL_COLUMNS: [&str; 2] = [FORK_STEP, STREAM_ORDINAL];
 
 /// One rendered file of `docs/schemas/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,6 +527,12 @@ fn canonical_description(column: &str) -> Option<&'static str> {
             "**Non-final streams only** (`--final-blocks-only=false`): the Firehose fork \
              step of the block, `NEW`, `UNDO` or `FINAL`."
         }
+        STREAM_ORDINAL => {
+            "**Non-final streams only** (`--final-blocks-only=false`): accepted-event \
+             ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. \
+             Strictly increasing in delivery order and durable across reconnects and \
+             restarts; every row of one event, in every table, has the same value."
+        }
         _ => return None,
     })
 }
@@ -588,7 +598,7 @@ struct TableReference {
     votes_only: bool,
     /// An earlier table with the same schema.
     same_as: Option<String>,
-    /// Every column in file order, `fork_step` included.
+    /// Every column in file order, `fork_step` and `stream_ordinal` included.
     columns: Vec<ColumnReference>,
 }
 
@@ -601,8 +611,11 @@ struct ColumnReference {
 }
 
 impl TableReference {
-    fn column_count_without_fork_step(&self) -> usize {
-        self.columns.iter().filter(|c| c.name != FORK_STEP).count()
+    fn column_count_without_non_final_columns(&self) -> usize {
+        self.columns
+            .iter()
+            .filter(|c| !NON_FINAL_COLUMNS.contains(&c.name.as_str()))
+            .count()
     }
 }
 
@@ -743,7 +756,7 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
     ensure!(
         table_names(&final_only) == table_names(&full)
             && table_names(&binary) == table_names(&full),
-        "{kind}: fork_step or the encoding changes the set of tables"
+        "{kind}: fork_step, stream_ordinal or the encoding changes the set of tables"
     );
 
     let mut tables = Vec::with_capacity(full.len());
@@ -771,13 +784,25 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             "{context}: canonical timestamp type"
         );
 
+        for column in NON_FINAL_COLUMNS {
+            ensure!(
+                fields.iter().filter(|f| f.name() == column).count() == 1,
+                "{context}: expected one {column} column on non-final streams"
+            );
+        }
+        let fork_step = schema.index_of(FORK_STEP)?;
         ensure!(
-            fields.iter().filter(|f| f.name() == FORK_STEP).count() == 1,
-            "{context}: expected one fork_step column on non-final streams"
+            schema.index_of(STREAM_ORDINAL)? == fork_step + 1,
+            "{context}: stream_ordinal must directly follow fork_step"
+        );
+        ensure!(
+            schema.field(fork_step + 1).data_type() == &DataType::UInt64
+                && !schema.field(fork_step + 1).is_nullable(),
+            "{context}: stream_ordinal must be a non-null UInt64"
         );
         let without_fork_step: Vec<&Field> = fields
             .iter()
-            .filter(|f| f.name() != FORK_STEP)
+            .filter(|f| !NON_FINAL_COLUMNS.contains(&f.name().as_str()))
             .map(|f| f.as_ref())
             .collect();
         let final_fields: Vec<&Field> = final_only[index]
@@ -788,7 +813,7 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             .collect();
         ensure!(
             without_fork_step == final_fields,
-            "{context}: final-only schema is not the non-final schema without fork_step"
+            "{context}: final-only schema is not the non-final schema without fork_step and stream_ordinal"
         );
 
         let binary_fields = binary[index].1.fields();
@@ -957,15 +982,19 @@ fn render_index(references: &[ChainReference]) -> String {
          by all chains (`firehose_parquet::traits`). `timestamp` is \
          `Timestamp(Millisecond, \"UTC\")` and `date` is `Date32`; both are nullable only \
          on chains whose blocks may lack a timestamp (Solana).\n\
-         - `fork_step` (`Utf8`, `NEW`, `UNDO` or `FINAL`) exists only on non-final streams \
-         (`--final-blocks-only=false`). The references list it where it sits in that mode; \
-         with the default `--final-blocks-only=true` it is absent and the other columns \
-         keep their order. It follows each table's original columns; columns added \
-         later may come after it (for example `transaction_success`), so it is not \
-         always the last column.\n\
+         - `fork_step` (`Utf8`, `NEW`, `UNDO` or `FINAL`) and `stream_ordinal` (`UInt64`) \
+         exist only on non-final streams (`--final-blocks-only=false`). `stream_ordinal` \
+         is the accepted-event ordinal of the stream event that produced the row: strictly \
+         increasing in delivery order, durable across reconnects and restarts, and the \
+         same for every row of one event in every table. The references list both where \
+         they sit in that mode; with the default `--final-blocks-only=true` they are \
+         absent and the other columns keep their order. They follow each table's \
+         original columns, `stream_ordinal` directly after `fork_step`; columns added \
+         later may come after them (for example `transaction_success`), so they are not \
+         always the last columns.\n\
          - Select columns by name, not by position: new columns are sometimes inserted \
-         in the middle of a table, and `fork_step` changes the positions of the columns \
-         after it.\n\
+         in the middle of a table, and `fork_step` and `stream_ordinal` change the \
+         positions of the columns after them.\n\
          - Byte encoding: binary values (hashes, addresses, keys) are written as text in the \
          chain's encoding, fixed per chain in v1.0.0 (`ChainProfile` in \
          `blocks/src/chain.rs`). Their type is suffixed with the encoding, for example \
@@ -1039,9 +1068,9 @@ fn render_chain(reference: &ChainReference) -> String {
     );
     let _ = writeln!(
         out,
-        "- `fork_step` is listed where it sits on non-final streams \
-         (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is \
-         absent."
+        "- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams \
+         (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they \
+         are absent."
     );
     if profile.nullable_timestamps {
         let _ = writeln!(
@@ -1056,14 +1085,14 @@ fn render_chain(reference: &ChainReference) -> String {
 
     out.push_str(
         "\n## Tables\n\n\
-         | Table | Columns (without `fork_step`) | Written |\n\
+         | Table | Columns (without `fork_step`, `stream_ordinal`) | Written |\n\
          |---|---|---|\n",
     );
     for table in &reference.tables {
         let _ = writeln!(
             out,
             "| [`{name}`](#{name}) | {} | {} |",
-            table.column_count_without_fork_step(),
+            table.column_count_without_non_final_columns(),
             table_condition(table).unwrap_or("Always."),
             name = table.name,
         );

@@ -7,9 +7,9 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
-    append_fork_step, decode_id_bytes, est_f64, est_i32, est_i64, est_list_str, est_opt_str,
+    append_fork_step, decode_id_bytes, est_f64, est_fork_step, est_i32, est_i64, est_list_str,
     est_str, est_u32, est_u64, finish_fork_step, fork_step_builder, BlockIdentity, BlockMapper,
-    CanonicalBuilder, PreparedIdentity,
+    CanonicalBuilder, ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ impl BitcoinBlockMapper {
         block: &btc::Block,
         output_satoshis: &[Vec<u64>],
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let height = block.height;
         let block_hash = &block.hash;
@@ -100,7 +100,7 @@ impl BitcoinBlockMapper {
         tx: &btc::Transaction,
         output_satoshis: &[u64],
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let tx_hash = &tx.txid;
 
@@ -188,7 +188,7 @@ impl BitcoinBlockMapper {
         &mut self,
         block: btc::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block.tx.len() as u64;
         // Preflight every output before appending any row, including the block
@@ -222,7 +222,7 @@ impl BlockMapper for BitcoinBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(btc::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -231,7 +231,7 @@ impl BlockMapper for BitcoinBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(btc::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -290,7 +290,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_u32(&self.blocks.n_tx)
             + est_i64(&self.blocks.mediantime)
             + est_str(&self.blocks.chainwork)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + est_str(&self.transactions.txid)
             + est_str(&self.transactions.hash)
@@ -303,7 +303,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_i64(&self.transactions.block_height)
             + est_i64(&self.transactions.block_time)
             + est_u32(&self.transactions.tx_index)
-            + est_opt_str(&self.transactions.fork_step);
+            + est_fork_step(&self.transactions.fork_step);
         let inputs = self.inputs.canonical.estimated_bytes()
             + est_str(&self.inputs.tx_hash)
             + est_i64(&self.inputs.block_height)
@@ -316,7 +316,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.inputs.script_sig_hex)
             + est_str(&self.inputs.coinbase)
             + est_list_str(&mut self.inputs.witness)
-            + est_opt_str(&self.inputs.fork_step);
+            + est_fork_step(&self.inputs.fork_step);
         let outputs = self.outputs.canonical.estimated_bytes()
             + est_str(&self.outputs.tx_hash)
             + est_i64(&self.outputs.block_height)
@@ -327,7 +327,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.outputs.script_pubkey_hex)
             + est_str(&self.outputs.script_pubkey_type)
             + est_str(&self.outputs.script_pubkey_address)
-            + est_opt_str(&self.outputs.fork_step);
+            + est_fork_step(&self.outputs.fork_step);
         [
             ("blocks", blocks),
             ("transactions", transactions),
@@ -364,7 +364,7 @@ struct BlocksBuilder {
     n_tx: UInt32Builder,
     mediantime: Int64Builder,
     chainwork: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -427,7 +427,7 @@ struct TransactionsBuilder {
     block_height: Int64Builder,
     block_time: Int64Builder,
     tx_index: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl TransactionsBuilder {
@@ -482,7 +482,7 @@ struct InputsBuilder {
     script_sig_hex: StringBuilder,
     coinbase: StringBuilder,
     witness: ListBuilder<StringBuilder>,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl InputsBuilder {
@@ -535,7 +535,7 @@ struct OutputsBuilder {
     script_pubkey_hex: StringBuilder,
     script_pubkey_type: StringBuilder,
     script_pubkey_address: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl OutputsBuilder {
@@ -691,11 +691,19 @@ pub(crate) mod tests {
             invalid.tx.push(later);
             let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
             mapper
-                .map_block(&valid.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &valid.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
             let before = mapper.total_rows();
             let error = mapper
-                .map_block(&invalid.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &invalid.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap_err();
             assert!(error.to_string().contains("transaction 1: output 0"));
             assert_eq!(mapper.total_rows(), before);
@@ -765,7 +773,7 @@ pub(crate) mod tests {
                         .map_block(
                             &block.encode_to_vec(),
                             &BlockIdentity::default(),
-                            fork_step.then_some("FINAL"),
+                            StreamEvent::new(fork_step.then_some("FINAL"), 1),
                         )
                         .unwrap();
                     let batches = mapper.flush().unwrap();
@@ -857,7 +865,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -883,7 +895,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -932,7 +946,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -991,7 +1007,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1006,7 +1026,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1028,13 +1052,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(true, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("FINAL"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()

@@ -590,7 +590,11 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
 
         let (mapped, mapper_estimate) = {
             let mapper = self.state.mapper.as_mut().unwrap();
-            let mapped = mapper.map_block_bytes(block_bytes.clone(), identity, fork_step);
+            let mapped = mapper.map_block_bytes(
+                block_bytes.clone(),
+                identity,
+                StreamEvent::new(fork_step, received_ordinal),
+            );
             let estimate = update_mapper_buffer_metrics(self.pipeline_metrics, mapper.as_mut());
             (mapped, estimate)
         };

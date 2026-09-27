@@ -3,7 +3,7 @@ use arrow::{array::*, datatypes::DataType, record_batch::RecordBatch};
 use blocks::evm::mapper::EvmBlockMapper;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use firehose_protos::eth;
 use prost::{bytes::Bytes, Message};
@@ -177,6 +177,10 @@ fn assert_value(batch: &RecordBatch, row: usize, column: &str, expected: &Value,
     );
 }
 
+/// The accepted-event ordinal the fixture block is mapped with on non-final
+/// streams; every row of every table must carry it.
+const GOLDEN_STREAM_ORDINAL: u64 = 4_242;
+
 /// Map the fixture through the borrowed and the owned (production, #518) entry
 /// points and require identical tables, schemas and rows.
 fn map_both_ways(
@@ -186,7 +190,7 @@ fn map_both_ways(
     encoding: &EncodeBytes,
     fork_step: bool,
 ) -> HashMap<String, RecordBatch> {
-    let step = fork_step.then_some("FINAL");
+    let step = StreamEvent::new(fork_step.then_some("FINAL"), GOLDEN_STREAM_ORDINAL);
     let mut borrowed = EvmBlockMapper::new(extended, fork_step, encoding.clone(), true);
     assert_eq!(
         borrowed.map_block(fixture.block, identity, step).unwrap(),
@@ -260,9 +264,17 @@ fn check_fixture(fixture: &Fixture) {
                         }
                         if fork_step {
                             assert_value(batch, row, "fork_step", &json!("FINAL"), table);
+                            assert_value(
+                                batch,
+                                row,
+                                "stream_ordinal",
+                                &json!(GOLDEN_STREAM_ORDINAL),
+                                table,
+                            );
                         }
                     }
                     assert_eq!(batch.column_by_name("fork_step").is_some(), fork_step);
+                    assert_eq!(batch.column_by_name("stream_ordinal").is_some(), fork_step);
                     // The byte encoding is a schema contract, not only equal
                     // printable values after conversion.
                     assert_eq!(

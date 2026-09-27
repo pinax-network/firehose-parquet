@@ -7,11 +7,11 @@ Generated from the `cosmos` mapper; do not edit by hand. Regenerate with `cargo 
 - Block type: `--block-type cosmos`.
 - Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
 - Columns typed `Utf8` (hex) hold binary values written as text in that encoding.
-- `fork_step` is listed where it sits on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is absent.
+- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 
 ## Tables
 
-| Table | Columns (without `fork_step`) | Written |
+| Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 17 | Always. |
 | [`transactions`](#transactions) | 25 | Always. |
@@ -40,6 +40,7 @@ Generated from the `cosmos` mapper; do not edit by hand. Regenerate with `cargo 
 | `num_txs` | `UInt32` | no | |
 | `tx_decode_failures` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `transactions`
 
@@ -71,6 +72,7 @@ Generated from the `cosmos` mapper; do not edit by hand. Regenerate with `cargo 
 | `signer_infos` | `List<non-null Struct<public_key_type_url: Utf8, public_key_value: Binary, mode_info: Binary, sequence: non-null UInt64>>` | yes | |
 | `signatures` | `List<non-null Binary>` | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `events`
 
@@ -92,6 +94,7 @@ Generated from the `cosmos` mapper; do not edit by hand. Regenerate with `cargo 
 | `key` | `Utf8` | yes | |
 | `value` | `Utf8` | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `messages`
 
@@ -110,3 +113,4 @@ Generated from the `cosmos` mapper; do not edit by hand. Regenerate with `cargo 
 | `type_url` | `Utf8` | no | |
 | `value` | `Binary` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

@@ -10,7 +10,7 @@ use arrow::{
 };
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -99,9 +99,17 @@ fn map(
         };
         let bytes = block.encode_to_vec();
         if owned {
-            mapper.map_block_bytes(bytes.into(), &identity, fork.then_some("FINAL"))
+            mapper.map_block_bytes(
+                bytes.into(),
+                &identity,
+                StreamEvent::new(fork.then_some("FINAL"), 1),
+            )
         } else {
-            mapper.map_block(&bytes, &identity, fork.then_some("FINAL"))
+            mapper.map_block(
+                &bytes,
+                &identity,
+                StreamEvent::new(fork.then_some("FINAL"), 1),
+            )
         }
         .unwrap();
         if each || i + 1 == blocks.len() {

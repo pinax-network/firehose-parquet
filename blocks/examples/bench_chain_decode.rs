@@ -6,7 +6,7 @@ use blocks::{beacon, evm, solana};
 use clap::{Parser, ValueEnum};
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::{bytes::Bytes, Message};
 use sha2::{Digest, Sha256};
@@ -65,9 +65,9 @@ fn map(
     borrowed: bool,
 ) -> Result<u64> {
     if borrowed {
-        mapper.map_block(raw.as_ref(), identity, None)
+        mapper.map_block(raw.as_ref(), identity, StreamEvent::default())
     } else {
-        mapper.map_block_bytes(raw.clone(), identity, None)
+        mapper.map_block_bytes(raw.clone(), identity, StreamEvent::default())
     }
 }
 fn main() -> Result<()> {

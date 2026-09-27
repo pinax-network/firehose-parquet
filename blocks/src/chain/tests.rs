@@ -518,14 +518,20 @@ fn restructured_table(kind: ChainKind, table: &str) -> bool {
     matches!((kind, table), (ChainKind::Near, "state_changes"))
 }
 
-/// The pre-#550 view of a schema: appended columns, which must be its last
-/// fields, removed; restructured tables left out.
+/// The pre-#550 view of a schema: the non-final `stream_ordinal` (added after
+/// `fork_step` by the #474 follow-up) and the appended columns, which must be
+/// its last fields, removed; restructured tables left out.
 fn without_appended_columns(kind: ChainKind, table: &str, schema: &Schema) -> Option<Schema> {
     if restructured_table(kind, table) {
         return None;
     }
     let added = appended_columns(kind, table);
-    let fields = schema.fields();
+    let fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .filter(|field| field.name() != firehose_parquet::traits::STREAM_ORDINAL_COLUMN)
+        .cloned()
+        .collect();
     let kept = fields.len() - added.len();
     let trailing: Vec<&str> = fields[kept..]
         .iter()
@@ -570,9 +576,19 @@ fn inventory_lines_with(
 }
 
 fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -> String {
+    schema_digest_where(|_| true, project)
+}
+
+fn schema_digest_where(
+    include: impl Fn(&MapperOptions) -> bool,
+    project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
+) -> String {
     let mut hasher = Sha256::new();
     for kind in ChainKind::ALL {
-        for options in option_matrix() {
+        for options in option_matrix()
+            .into_iter()
+            .filter(|options| include(options))
+        {
             let mut mapper = kind.create_mapper(options.clone());
             let lines = inventory_lines_with(kind, &options, mapper.as_mut(), |table, schema| {
                 project(kind, table, schema)
@@ -634,9 +650,24 @@ fn every_mapper_schema_matches_the_pinned_digest() {
     );
 }
 
-/// Without the columns appended by #550 and #507, every schema of every family
-/// and option is exactly the pre-#550 schema, except the restructured NEAR
-/// `state_changes`, which both sides leave out. The pinned value was produced by
+/// The final-only half of the matrix (`--final-blocks-only=true`, no
+/// `fork_step`). The pinned value was produced by the same loop on origin/main
+/// `081dea5`, before `stream_ordinal`: adding it left every final-only schema,
+/// and so every final-only protected table digest, byte-identical.
+#[test]
+fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
+    assert_eq!(
+        schema_digest_where(
+            |options| !options.include_fork_step,
+            |_, _, schema| Some(schema.clone())
+        ),
+        FINAL_ONLY_SCHEMA_DIGEST
+    );
+}
+
+/// Without `stream_ordinal` and the columns appended by #550 and #507, every
+/// schema of every family and option is exactly the pre-#550 schema, except the
+/// restructured NEAR `state_changes`, which both sides leave out. The pinned value was produced by
 /// the same loop, with the same table left out, on origin/main `8462692` (after
 /// #526, before #550).
 #[test]
@@ -648,7 +679,10 @@ fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
 }
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "3016cf74a6850831805ed6a4d2176bcd2021e3256faeb1ecef7dd0c0bd8a6789";
+    "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
+
+const FINAL_ONLY_SCHEMA_DIGEST: &str =
+    "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
 
 const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
     "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";

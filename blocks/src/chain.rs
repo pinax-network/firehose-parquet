@@ -251,7 +251,7 @@ pub struct MapperOptions {
     pub extended: bool,
     /// Solana `vote_transactions`.
     pub with_votes: bool,
-    /// Append the `fork_step` column (non-final streams).
+    /// Append the `fork_step` and `stream_ordinal` columns (non-final streams).
     pub include_fork_step: bool,
     pub encode_bytes: EncodeBytes,
     /// Solana last-known timestamp partition routing.

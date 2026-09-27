@@ -5,9 +5,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bin, est_i64, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
+    append_fork_step, est_bin, est_fork_step, est_i64, est_list_u64, est_str, est_u32, est_u64,
     finish_fork_step, fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder,
-    PreparedIdentity,
+    ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use num_bigint::BigUint;
 use prost::Message;
@@ -340,7 +340,7 @@ impl BeaconBlockMapper {
         &mut self,
         block: &beacon::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<()> {
         // Validate conversions before appending any row to any table.
         let body = extract_body_fields(block);
@@ -762,7 +762,7 @@ impl BeaconBlockMapper {
         &mut self,
         block: beacon::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let identity =
             self.blocks
@@ -779,7 +779,7 @@ impl BlockMapper for BeaconBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -788,7 +788,7 @@ impl BlockMapper for BeaconBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -903,7 +903,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.blocks.signature.estimated_bytes()
             + self.blocks.spec.len() * std::mem::size_of::<i32>()
             + self.blocks.graffiti.estimated_bytes()
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let attestations = self.attestations.canonical.estimated_bytes()
             + est_u64(&self.attestations.block_slot)
             + est_u32(&self.attestations.attestation_index)
@@ -917,7 +917,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.attestations.target_root.estimated_bytes()
             + self.attestations.signature.estimated_bytes()
             + self.attestations.committee_bits.estimated_bytes()
-            + est_opt_str(&self.attestations.fork_step);
+            + est_fork_step(&self.attestations.fork_step);
         let deposits = self.deposits.canonical.estimated_bytes()
             + est_u64(&self.deposits.block_slot)
             + est_u32(&self.deposits.deposit_index)
@@ -925,7 +925,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.deposits.withdrawal_credentials.estimated_bytes()
             + est_u64(&self.deposits.amount)
             + self.deposits.signature.estimated_bytes()
-            + est_opt_str(&self.deposits.fork_step);
+            + est_fork_step(&self.deposits.fork_step);
         let proposer_slashings = self.proposer_slashings.canonical.estimated_bytes()
             + est_u64(&self.proposer_slashings.block_slot)
             + est_u32(&self.proposer_slashings.slashing_index)
@@ -951,7 +951,7 @@ impl BlockMapper for BeaconBlockMapper {
                 .header_2_state_root
                 .estimated_bytes()
             + self.proposer_slashings.header_2_body_root.estimated_bytes()
-            + est_opt_str(&self.proposer_slashings.fork_step);
+            + est_fork_step(&self.proposer_slashings.fork_step);
         let attester_slashings = self.attester_slashings.canonical.estimated_bytes()
             + est_u64(&self.attester_slashings.block_slot)
             + est_u32(&self.attester_slashings.slashing_index)
@@ -989,14 +989,14 @@ impl BlockMapper for BeaconBlockMapper {
                 .estimated_bytes()
             + est_list_u64(&mut self.attester_slashings.attestation_1_attesting_indices)
             + est_list_u64(&mut self.attester_slashings.attestation_2_attesting_indices)
-            + est_opt_str(&self.attester_slashings.fork_step);
+            + est_fork_step(&self.attester_slashings.fork_step);
         let voluntary_exits = self.voluntary_exits.canonical.estimated_bytes()
             + est_u64(&self.voluntary_exits.block_slot)
             + est_u32(&self.voluntary_exits.exit_index)
             + est_u64(&self.voluntary_exits.epoch)
             + est_u64(&self.voluntary_exits.validator_index)
             + self.voluntary_exits.signature.estimated_bytes()
-            + est_opt_str(&self.voluntary_exits.fork_step);
+            + est_fork_step(&self.voluntary_exits.fork_step);
         let execution_payload = self.execution_payload.canonical.estimated_bytes()
             + est_u64(&self.execution_payload.block_slot)
             + self.execution_payload.parent_hash.estimated_bytes()
@@ -1012,14 +1012,14 @@ impl BlockMapper for BeaconBlockMapper {
             + est_str(&self.execution_payload.base_fee_per_gas)
             + est_u64(&self.execution_payload.blob_gas_used)
             + est_u64(&self.execution_payload.excess_blob_gas)
-            + est_opt_str(&self.execution_payload.fork_step);
+            + est_fork_step(&self.execution_payload.fork_step);
         let blob_sidecars = self.blob_sidecars.canonical.estimated_bytes()
             + est_u64(&self.blob_sidecars.block_slot)
             + est_u64(&self.blob_sidecars.blob_index)
             + est_bin(&self.blob_sidecars.blob)
             + self.blob_sidecars.kzg_commitment.estimated_bytes()
             + self.blob_sidecars.kzg_proof.estimated_bytes()
-            + est_opt_str(&self.blob_sidecars.fork_step);
+            + est_fork_step(&self.blob_sidecars.fork_step);
         [
             ("blocks", blocks),
             ("attestations", attestations),
@@ -1069,7 +1069,7 @@ struct BlocksBuilder {
     signature: BytesColumn,
     spec: StringDictionaryBuilder<Int32Type>,
     graffiti: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -1123,7 +1123,7 @@ struct AttestationsBuilder {
     target_root: BytesColumn,
     signature: BytesColumn,
     committee_bits: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl AttestationsBuilder {
@@ -1175,7 +1175,7 @@ struct DepositsBuilder {
     withdrawal_credentials: BytesColumn,
     amount: UInt64Builder,
     signature: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl DepositsBuilder {
@@ -1221,7 +1221,7 @@ struct ProposerSlashingsBuilder {
     header_2_parent_root: BytesColumn,
     header_2_state_root: BytesColumn,
     header_2_body_root: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl ProposerSlashingsBuilder {
@@ -1285,7 +1285,7 @@ struct AttesterSlashingsBuilder {
     attestation_2_target_root: BytesColumn,
     attestation_1_attesting_indices: ListBuilder<UInt64Builder>,
     attestation_2_attesting_indices: ListBuilder<UInt64Builder>,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl AttesterSlashingsBuilder {
@@ -1348,7 +1348,7 @@ struct VoluntaryExitsBuilder {
     epoch: UInt64Builder,
     validator_index: UInt64Builder,
     signature: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl VoluntaryExitsBuilder {
@@ -1394,7 +1394,7 @@ struct ExecutionPayloadBuilder {
     base_fee_per_gas: StringBuilder,
     blob_gas_used: UInt64Builder,
     excess_blob_gas: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl ExecutionPayloadBuilder {
@@ -1449,7 +1449,7 @@ struct BlobSidecarsBuilder {
     blob: BinaryBuilder,
     kzg_commitment: BytesColumn,
     kzg_proof: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlobSidecarsBuilder {
@@ -1486,7 +1486,7 @@ struct WithdrawalsBuilder {
     validator_index: UInt64Builder,
     address: BytesColumn,
     amount: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl WithdrawalsBuilder {
@@ -1522,7 +1522,7 @@ impl WithdrawalsBuilder {
             + est_u64(&self.validator_index)
             + self.address.estimated_bytes()
             + est_u64(&self.amount)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -1534,7 +1534,7 @@ struct BlsToExecutionChangesBuilder {
     from_bls_pubkey: BytesColumn,
     to_execution_address: BytesColumn,
     signature: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlsToExecutionChangesBuilder {
@@ -1573,7 +1573,7 @@ impl BlsToExecutionChangesBuilder {
             + self.from_bls_pubkey.estimated_bytes()
             + self.to_execution_address.estimated_bytes()
             + self.signature.estimated_bytes()
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -1586,7 +1586,7 @@ struct DepositRequestsBuilder {
     withdrawal_credentials: BytesColumn,
     amount: UInt64Builder,
     signature: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl DepositRequestsBuilder {
@@ -1628,7 +1628,7 @@ impl DepositRequestsBuilder {
             + self.withdrawal_credentials.estimated_bytes()
             + est_u64(&self.amount)
             + self.signature.estimated_bytes()
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -1639,7 +1639,7 @@ struct WithdrawalRequestsBuilder {
     source_address: BytesColumn,
     validator_pubkey: BytesColumn,
     amount: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl WithdrawalRequestsBuilder {
@@ -1675,7 +1675,7 @@ impl WithdrawalRequestsBuilder {
             + self.source_address.estimated_bytes()
             + self.validator_pubkey.estimated_bytes()
             + est_u64(&self.amount)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -1686,7 +1686,7 @@ struct ConsolidationRequestsBuilder {
     source_address: BytesColumn,
     source_pubkey: BytesColumn,
     target_pubkey: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl ConsolidationRequestsBuilder {
@@ -1722,7 +1722,7 @@ impl ConsolidationRequestsBuilder {
             + self.source_address.estimated_bytes()
             + self.source_pubkey.estimated_bytes()
             + self.target_pubkey.estimated_bytes()
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 }
 
@@ -1957,7 +1957,11 @@ pub(crate) mod tests {
     fn map_one(block: &beacon::Block) -> HashMap<String, RecordBatch> {
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+            .map_block(
+                &block.encode_to_vec(),
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         mapper.flush().unwrap()
     }
@@ -2023,7 +2027,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2056,7 +2064,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2334,7 +2346,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -2363,13 +2379,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(true, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("FINAL"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -2384,7 +2415,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2409,7 +2444,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let blocks = &batches["blocks"];
