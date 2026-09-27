@@ -1,7 +1,9 @@
 # cargo-deny configuration for the CI dependency advisory gate.
 #
-# CI runs only `cargo deny --locked check advisories` (see .github/workflows/ci.yml):
-# the locked dependency graph is checked against the RustSec advisory database.
+# CI runs only `cargo deny --locked check advisories` (see
+# .github/workflows/advisories.yml, called by ci.yml on every push and pull request
+# and also run weekly): the locked dependency graph is checked against the RustSec
+# advisory database.
 # Licenses, bans and sources are intentionally not enforced by this gate.
 #
 # Every vulnerability advisory fails the job unless it is listed in `ignore` with

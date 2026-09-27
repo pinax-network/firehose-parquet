@@ -31,8 +31,15 @@ pub enum RecoveryCommands {
     Release(RecoveryReleaseArgs),
 }
 
+/// Endpoint variable `recovery` read before it shared `AWS_ENDPOINT_URL_S3` with every
+/// other command. It is still accepted, but only when `AWS_ENDPOINT_URL_S3` is unset.
+pub const LEGACY_ENDPOINT_ENV: &str = "AWS_ENDPOINT_URL";
+
 #[derive(Args)]
-#[command(mut_arg("aws_endpoint_url", |arg| arg.env("AWS_ENDPOINT_URL")))]
+#[command(mut_arg("aws_endpoint_url", |arg| arg.help(
+    "AWS endpoint URL (for S3-compatible services); AWS_ENDPOINT_URL is read when \
+     AWS_ENDPOINT_URL_S3 is unset"
+)))]
 pub struct RecoveryStorageArgs {
     /// Existing local dataset root or explicit s3://bucket/prefix URI.
     pub path: String,
@@ -48,8 +55,15 @@ impl std::fmt::Debug for RecoveryStorageArgs {
 }
 
 impl RecoveryStorageArgs {
-    fn aws(&self) -> AwsConfig {
-        AwsConfig::from(&self.aws)
+    /// The S3 settings, with `--aws-endpoint-url` resolved like every other command
+    /// (`AWS_ENDPOINT_URL_S3`), then from [`LEGACY_ENDPOINT_ENV`] when neither the
+    /// flag nor `AWS_ENDPOINT_URL_S3` is set.
+    pub fn aws(&self) -> AwsConfig {
+        let mut aws = AwsConfig::from(&self.aws);
+        if aws.aws_endpoint_url.is_none() && std::env::var_os("AWS_ENDPOINT_URL_S3").is_none() {
+            aws.aws_endpoint_url = std::env::var(LEGACY_ENDPOINT_ENV).ok();
+        }
+        aws
     }
 }
 

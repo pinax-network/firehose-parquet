@@ -39,12 +39,19 @@ pub(crate) const JOURNAL_FILE: &str = "_fireparq_merge.json";
 pub(crate) const LOCK_FILE: &str = ".fireparq-merge.lock";
 
 /// Environment variable that aborts `merge` at a named step, to test crash recovery:
-/// `after-outputs`, `after-commit`, or `after-first-delete`.
+/// `after-outputs`, `after-commit`, or `after-first-delete`. Only debug builds read it
+/// ([`CRASH_HOOKS`]).
 pub(crate) const CRASH_ENV: &str = "FIREPARQ_TEST_MERGE_CRASH_AT";
 
 /// Environment variable that aborts `rollup` at a named step, to test crash recovery:
-/// `after-first-part`, `after-outputs`, `after-commit`, or `after-first-delete`.
+/// `after-first-part`, `after-outputs`, `after-commit`, or `after-first-delete`. Only
+/// debug builds read it ([`CRASH_HOOKS`]).
 pub(crate) const ROLLUP_CRASH_ENV: &str = "FIREPARQ_TEST_ROLLUP_CRASH_AT";
+
+/// Whether this build honors [`CRASH_ENV`] and [`ROLLUP_CRASH_ENV`]. Like
+/// `FIREPARQ_DEBUG_FAULT`, only debug builds (as built by `cargo test`) read them: a
+/// release binary never reads either variable and never aborts at a crash point.
+const CRASH_HOOKS: bool = cfg!(debug_assertions);
 
 const JOURNAL_VERSION: u32 = 1;
 
@@ -55,8 +62,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Simulates a crash at `step` when [`CRASH_ENV`] names it: the process aborts without any
-/// cleanup, like `kill -9`. Tests inject an error instead.
+/// Simulates a crash at `step` when [`CRASH_ENV`] names it in a debug build: the process
+/// aborts without any cleanup, like `kill -9`. Tests inject an error instead.
 pub(crate) fn crash_point(step: &str) -> Result<()> {
     crash_at(CRASH_ENV, step, step)
 }
@@ -74,11 +81,17 @@ fn crash_at(env: &str, step: &str, injected: &str) -> Result<()> {
     }
     #[cfg(not(test))]
     let _ = injected;
-    if std::env::var(env).is_ok_and(|value| value == step) {
+    if crash_requested(CRASH_HOOKS, step, || std::env::var(env).ok()) {
         eprintln!("{env}={step}: aborting to simulate a crash");
         std::process::abort();
     }
     Ok(())
+}
+
+/// Whether a crash hook asks to abort at `step`. With `hooks` off (release builds),
+/// `read` is never called, so no environment can stop the process.
+fn crash_requested(hooks: bool, step: &str, read: impl FnOnce() -> Option<String>) -> bool {
+    hooks && read().is_some_and(|value| value == step)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +817,25 @@ mod tests {
             "part-000001.parquet".to_string(),
             "part-abcd1234-000007.parquet".to_string(),
         ]
+    }
+
+    /// With the gate off, as in release builds, a crash hook never reads its variable, so
+    /// no value can abort the process. With it on, only the exact step name aborts.
+    #[test]
+    fn crash_hooks_are_ignored_when_the_debug_gate_is_off() {
+        for step in ["after-outputs", "after-commit", "after-first-delete"] {
+            assert!(!crash_requested(false, step, || {
+                panic!("a disabled crash hook read its environment variable")
+            }));
+            assert!(crash_requested(true, step, || Some(step.to_string())));
+        }
+        assert!(!crash_requested(true, "after-outputs", || None));
+        assert!(!crash_requested(true, "after-outputs", || Some(
+            "after-commit".to_string()
+        )));
+        assert!(!crash_requested(true, "after-outputs", || Some(
+            String::new()
+        )));
     }
 
     #[test]

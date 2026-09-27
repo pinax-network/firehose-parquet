@@ -202,7 +202,7 @@ fn native_permission_errors_are_not_silently_dropped() {
     let root = tempfile::tempdir().unwrap();
     let denied = root.path().join("denied");
     std::fs::create_dir(&denied).unwrap();
-    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
     let native_error = std::fs::read_dir(&denied).err().map(|e| e.kind());
     let mut paths = vec![];
     let actual = collect_local(root.path(), LocalPolicy::PARQUET, &mut paths)

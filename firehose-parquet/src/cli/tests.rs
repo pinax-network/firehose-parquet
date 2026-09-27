@@ -287,6 +287,8 @@ fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
             "date",
             "--stop-block",
             "10",
+            "--output",
+            "./output",
             "--grpc-adaptive-window=false",
             "--grpc-max-message-bytes",
             "268435456",
@@ -348,24 +350,19 @@ fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
 
 #[test]
 #[serial]
-fn shared_aws_args_preserve_env_precedence_and_recovery_endpoint_name() {
+fn shared_aws_args_preserve_env_precedence() {
     use crate::recovery::RecoveryCommands;
     let _key = EnvVarGuard::set("AWS_ACCESS_KEY_ID", "synthetic-env-key");
     let _secret = EnvVarGuard::set("AWS_SECRET_ACCESS_KEY", "synthetic-env-secret");
     let _token = EnvVarGuard::set("AWS_SESSION_TOKEN", "synthetic-env-token");
     let _region = EnvVarGuard::set("AWS_REGION", "synthetic-env-region");
     let _endpoint = EnvVarGuard::set("AWS_ENDPOINT_URL_S3", "https://ordinary.example");
-    let _recovery = EnvVarGuard::set("AWS_ENDPOINT_URL", "https://recovery.example");
-    for (base, endpoint) in [
-        (vec!["test-cli"], "https://ordinary.example"),
-        (
-            vec!["test-cli", "inspect", "fixture.parquet"],
-            "https://ordinary.example",
-        ),
-        (
-            vec!["test-cli", "recovery", "status", "fixture"],
-            "https://recovery.example",
-        ),
+    // Recovery's legacy name never overrides AWS_ENDPOINT_URL_S3.
+    let _legacy = EnvVarGuard::set("AWS_ENDPOINT_URL", "https://legacy.example");
+    for base in [
+        vec!["test-cli"],
+        vec!["test-cli", "inspect", "fixture.parquet"],
+        vec!["test-cli", "recovery", "status", "fixture"],
     ] {
         for explicit in [false, true] {
             let mut args = base.clone();
@@ -384,13 +381,12 @@ fn shared_aws_args_preserve_env_precedence_and_recovery_endpoint_name() {
                 ]);
             }
             let cli = try_parse(&args).unwrap();
-            let aws = match cli.command {
-                None => cli.common.aws,
-                Some(Commands::Inspect { aws, .. }) => aws,
-                Some(Commands::Recovery(RecoveryCommands::Status(storage))) => storage.aws,
+            let config = match cli.command {
+                None => AwsConfig::from(&cli.common.aws),
+                Some(Commands::Inspect { aws, .. }) => AwsConfig::from(&aws),
+                Some(Commands::Recovery(RecoveryCommands::Status(storage))) => storage.aws(),
                 _ => panic!("unexpected fixture command"),
             };
-            let config = AwsConfig::from(&aws);
             let source = if explicit { "cli" } else { "env" };
             assert_eq!(
                 config.aws_access_key_id,
@@ -413,7 +409,7 @@ fn shared_aws_args_preserve_env_precedence_and_recovery_endpoint_name() {
                 Some(if explicit {
                     "https://explicit.example"
                 } else {
-                    endpoint
+                    "https://ordinary.example"
                 })
             );
         }
@@ -426,6 +422,107 @@ fn shared_aws_args_preserve_env_precedence_and_recovery_endpoint_name() {
     ] {
         assert!(!help.contains(secret));
     }
+}
+
+/// `recovery` reads `AWS_ENDPOINT_URL_S3` like every other command. Its former
+/// `AWS_ENDPOINT_URL` is a fallback used only when `AWS_ENDPOINT_URL_S3` is unset
+/// (not merely empty) and no `--aws-endpoint-url` is given.
+#[test]
+#[serial]
+fn recovery_endpoint_reads_aws_endpoint_url_s3_then_the_legacy_name() {
+    use crate::recovery::{RecoveryCommands, RecoveryStorageArgs};
+    fn storage(args: &[&str]) -> RecoveryStorageArgs {
+        match try_parse(args).unwrap().command {
+            Some(Commands::Recovery(RecoveryCommands::Status(storage)))
+            | Some(Commands::Recovery(RecoveryCommands::Recover(storage))) => storage,
+            Some(Commands::Recovery(RecoveryCommands::Release(release))) => release.storage,
+            _ => panic!("unexpected fixture command"),
+        }
+    }
+    let commands: [&[&str]; 3] = [
+        &["test-cli", "recovery", "status", "fixture"],
+        &["test-cli", "recovery", "recover", "fixture"],
+        &[
+            "test-cli",
+            "recovery",
+            "release",
+            "fixture",
+            "--expected-owner",
+            "owner",
+            "--expected-generation",
+            "1",
+            "--stopped-writer-evidence",
+            "stopped",
+            "--provider-quiescence-evidence",
+            "drained",
+        ],
+    ];
+    let cases = [
+        // (AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL, --aws-endpoint-url, expected)
+        (
+            Some("https://s3.example"),
+            Some("https://legacy.example"),
+            false,
+            Some("https://s3.example"),
+        ),
+        (
+            Some("https://s3.example"),
+            None,
+            false,
+            Some("https://s3.example"),
+        ),
+        (
+            None,
+            Some("https://legacy.example"),
+            false,
+            Some("https://legacy.example"),
+        ),
+        (
+            None,
+            Some("https://legacy.example"),
+            true,
+            Some("https://explicit.example"),
+        ),
+        (Some(""), Some("https://legacy.example"), false, Some("")),
+        (None, None, false, None),
+    ];
+    for (s3, legacy, explicit, expected) in cases {
+        let _s3 = match s3 {
+            Some(value) => EnvVarGuard::set("AWS_ENDPOINT_URL_S3", value),
+            None => EnvVarGuard::remove("AWS_ENDPOINT_URL_S3"),
+        };
+        let _legacy = match legacy {
+            Some(value) => EnvVarGuard::set("AWS_ENDPOINT_URL", value),
+            None => EnvVarGuard::remove("AWS_ENDPOINT_URL"),
+        };
+        for command in commands {
+            let mut args = command.to_vec();
+            if explicit {
+                args.extend(["--aws-endpoint-url", "https://explicit.example"]);
+            }
+            assert_eq!(
+                storage(&args).aws().aws_endpoint_url.as_deref(),
+                expected,
+                "{args:?} with AWS_ENDPOINT_URL_S3={s3:?} AWS_ENDPOINT_URL={legacy:?}"
+            );
+        }
+    }
+
+    let mut command = TestCli::command();
+    let status = command
+        .find_subcommand_mut("recovery")
+        .and_then(|recovery| recovery.find_subcommand_mut("status"))
+        .expect("recovery status");
+    let help = status.render_long_help().to_string();
+    assert!(help.contains("AWS_ENDPOINT_URL_S3"), "{help}");
+    let endpoint = status
+        .get_arguments()
+        .find(|arg| arg.get_id() == "aws_endpoint_url")
+        .expect("endpoint argument");
+    assert_eq!(
+        endpoint.get_env(),
+        Some(std::ffi::OsStr::new("AWS_ENDPOINT_URL_S3"))
+    );
 }
 
 #[test]
@@ -687,6 +784,34 @@ fn test_partitions_build_block_range_size_zero_is_rejected() {
         ],
         "--block-range-size",
     );
+}
+
+/// Like `build`, `partitions build` rejects `--stop-block 0` at parse time, before
+/// any endpoint is contacted; 1 is the smallest accepted exclusive stop.
+#[test]
+fn test_partitions_build_stop_block_zero_is_rejected() {
+    let args = |stop: &'static str| {
+        [
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "mainnet",
+            "--stop-block",
+            stop,
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+        ]
+    };
+    assert_rejected_value(&args("0"), "--stop-block");
+    match try_parse(&args("1")).unwrap().command {
+        Some(Commands::Partitions(PartitionsCommands::Build { stop_block, .. })) => {
+            assert_eq!(stop_block, Some(1));
+        }
+        _ => panic!("expected partitions build subcommand"),
+    }
 }
 
 #[test]
@@ -1108,6 +1233,87 @@ fn test_partitions_build_subcommand_parse() {
     }
 }
 
+/// Clap enforces `partitions build --output`: the usage line marks it required and a
+/// missing output fails at parse time, before the runtime check.
+#[test]
+fn test_partitions_build_requires_output_at_parse_time() {
+    let base = [
+        "test-cli",
+        "partitions",
+        "build",
+        "--network",
+        "mainnet",
+        "--stop-block",
+        "200",
+        "--partition",
+        "date",
+    ];
+    let error = try_parse(&base).expect_err("--output is required");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert!(error.to_string().contains("--output <OUTPUT>"), "{error}");
+
+    let mut args = base.to_vec();
+    args.extend(["--output", "./output"]);
+    match try_parse(&args).unwrap().command {
+        Some(Commands::Partitions(PartitionsCommands::Build { output, .. })) => {
+            assert_eq!(output.as_deref(), Some("./output"));
+        }
+        _ => panic!("expected partitions build subcommand"),
+    }
+
+    let mut command = TestCli::command();
+    let build = command
+        .find_subcommand_mut("partitions")
+        .and_then(|partitions| partitions.find_subcommand_mut("build"))
+        .expect("partitions build");
+    let usage = build.render_usage().to_string();
+    assert!(usage.contains("--output <OUTPUT>"), "{usage}");
+    assert!(!usage.contains("[--output"), "{usage}");
+}
+
+/// `partitions build --network` accepts only built-in aliases at parse time, like
+/// `build`. (Setting `NETWORK` here could race with tests that do not pass `--network`.)
+#[test]
+fn test_partitions_build_rejects_unknown_network_at_parse_time() {
+    let args = |network: &'static str| {
+        [
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            network,
+            "--stop-block",
+            "200",
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+        ]
+    };
+    for (network, listed) in [
+        ("unknown", "solana-mainnet-beta"),
+        ("arbitrum-nova", "arbitrum-one"),
+    ] {
+        let error = try_parse(&args(network)).expect_err("unknown network");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!("invalid value '{network}'")),
+            "{rendered}"
+        );
+        assert!(rendered.contains(listed), "{rendered}");
+    }
+    match try_parse(&args("solana-mainnet-beta")).unwrap().command {
+        Some(Commands::Partitions(PartitionsCommands::Build { network, .. })) => {
+            assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
+        }
+        _ => panic!("expected partitions build subcommand"),
+    }
+}
+
 #[test]
 fn test_partitions_build_subcommand_parse_overwrite() {
     let cli = parse(&[
@@ -1157,8 +1363,9 @@ fn test_partitions_build_subcommand_rejects_resume_with_overwrite() {
 }
 
 #[test]
-fn test_partitions_build_subcommand_parse_s3_bucket_without_output() {
-    let cli = parse(&[
+fn test_partitions_build_subcommand_rejects_s3_bucket_without_output() {
+    // A bucket never selects the output: without --output the command does not parse.
+    let error = try_parse(&[
         "test-cli",
         "partitions",
         "build",
@@ -1170,16 +1377,13 @@ fn test_partitions_build_subcommand_parse_s3_bucket_without_output() {
         "hour",
         "--s3-bucket",
         "my-bucket",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build {
-            output, s3_bucket, ..
-        }) => {
-            assert!(output.is_none());
-            assert_eq!(s3_bucket.as_deref(), Some("my-bucket"));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
+    ])
+    .expect_err("--output is required");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert!(error.to_string().contains("--output <OUTPUT>"), "{error}");
 }
 
 #[test]
@@ -2394,6 +2598,8 @@ fn test_partitions_auth_selectors_distinguish_default_from_explicit_legacy_name(
             "tron",
             "--stop-block",
             "100",
+            "--output",
+            "./output",
         ];
         if explicit {
             args.extend(["--api-token-envvar", "SUBSTREAMS_API_TOKEN"]);
@@ -3671,6 +3877,35 @@ fn test_resolve_s3_output_root_rejects_implicit_relative_output() {
             output
         );
     }
+}
+
+/// The default output `.` gets natural local suggestions (never `./.`); other
+/// relative outputs keep their own name in both suggestions.
+#[test]
+fn test_resolve_s3_output_root_suggests_natural_local_paths() {
+    let message = resolve_s3_output_root(Some("."), Some("bucket-name"))
+        .expect_err("`.` with a bucket is ambiguous")
+        .to_string();
+    assert!(
+        message.contains("output `.` is a relative path"),
+        "{message}"
+    );
+    assert!(message.contains("s3://bucket-name/<prefix>"), "{message}");
+    assert!(
+        message.contains("--output \"$(pwd)\" for the current directory"),
+        "{message}"
+    );
+    assert!(message.contains("such as ./output"), "{message}");
+    assert!(!message.contains("./."), "{message}");
+
+    let message = resolve_s3_output_root(Some("data/eth"), Some("bucket-name"))
+        .expect_err("relative output with a bucket is ambiguous")
+        .to_string();
+    assert!(message.contains("s3://bucket-name/data/eth"), "{message}");
+    assert!(
+        message.contains("--output ./data/eth or an absolute path"),
+        "{message}"
+    );
 }
 
 #[test]
