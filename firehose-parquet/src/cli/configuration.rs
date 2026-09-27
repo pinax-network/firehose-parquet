@@ -244,22 +244,6 @@ pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
     }
 }
 
-/// Parse a partition string into a [`Partition`] variant.
-pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partition> {
-    match s.to_lowercase().as_str() {
-        "none" => Ok(Partition::None),
-        "block_range" if block_range_size == 0 => {
-            anyhow::bail!("--block-range-size must be at least 1 when --partition block_range")
-        }
-        "block_range" => Ok(Partition::block_range(block_range_size)),
-        "date" => Ok(Partition::Date),
-        "hour" => Ok(Partition::Hour),
-        "minute" => Ok(Partition::Minute),
-        "second" => Ok(Partition::Second),
-        other => anyhow::bail!("invalid --partition '{other}': expected one of: none, block_range, date, hour, minute, second"),
-    }
-}
-
 /// Check that an exclusive stop block leaves a non-empty range after the
 /// start block. Either bound may be unknown (live mode, or a start block
 /// resolved later from a cursor or the endpoint).
@@ -360,7 +344,6 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         stop_block: args.stop_block,
         cursor_path,
         output,
-        partition: parse_partition(&args.partition, args.block_range_size)?,
         // 0 disables the row and interval triggers, matching --flush-bytes 0.
         flush_rows: args.flush_rows.filter(|rows| *rows > 0),
         flush_blocks: args.flush_blocks,

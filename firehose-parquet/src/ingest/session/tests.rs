@@ -3,12 +3,14 @@ use arrow::array::UInt64Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
 
+/// Rows of `numbers` in every table, all at the fixture time
+/// (`date=2023-11-14`).
 fn batches(numbers: &[u64]) -> HashMap<String, RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "block_num",
-        DataType::UInt64,
-        false,
-    )]));
+    let (timestamp, times) = crate::ingest::state::tests::fixture_timestamp(numbers.len());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("block_num", DataType::UInt64, false),
+        timestamp,
+    ]));
     ["blocks", "logs"]
         .into_iter()
         .map(|table| {
@@ -16,7 +18,7 @@ fn batches(numbers: &[u64]) -> HashMap<String, RecordBatch> {
                 table.into(),
                 RecordBatch::try_new(
                     schema.clone(),
-                    vec![Arc::new(UInt64Array::from(numbers.to_vec()))],
+                    vec![Arc::new(UInt64Array::from(numbers.to_vec())), times.clone()],
                 )
                 .unwrap(),
             )
@@ -38,7 +40,6 @@ fn config(root: &Path) -> Config {
     Config {
         output: root.join("chain"),
         start_block: Some(100),
-        partition: Partition::None,
         final_blocks_only: true,
         ..Default::default()
     }
@@ -66,8 +67,8 @@ fn meta(first: u64, last: u64) -> BlockMetadata {
     BlockMetadata {
         min_block_number: first,
         max_block_number: last,
-        min_timestamp: None,
-        max_timestamp: None,
+        min_timestamp: Some(crate::ingest::state::tests::FIXTURE_SECONDS),
+        max_timestamp: Some(crate::ingest::state::tests::FIXTURE_SECONDS),
     }
 }
 async fn flush(session: &mut IngestionSession<'_>, numbers: &[u64]) -> CommittedFlush {
@@ -196,6 +197,84 @@ async fn legacy_root_and_changed_semantics_never_initialize_or_rewind() {
         .unwrap();
     assert_eq!(resume.start_block, Some(100));
     assert!(resume.cursor.is_empty());
+}
+
+/// #652: a root in an older partition layout is refused before any stream is
+/// opened. Without authority (v0.x `year=/month=/date=DD`, or pre-release
+/// `year=/month=/day=` files) eligibility refuses the existing data; a
+/// pre-release protected root carries semantic mapper epoch `v1`, whose
+/// `{"kind":"date"}` meant `year=/month=/day=`, and is refused by name, so it
+/// can never be resumed into a mixed layout.
+#[tokio::test]
+async fn roots_in_an_older_partition_layout_are_refused_before_any_stream() {
+    use crate::durable_state::{ControlKey, LocalStateStore};
+    for legacy in [
+        "blocks/year=2024/month=01/date=15/part-000001.parquet",
+        "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let owner = own(&config).await;
+        let path = config.output.join(legacy);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old layout").unwrap();
+        let error = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("legacy data"), "{error:#}");
+        assert!(!config.output.join(".fireparq-ingest").exists());
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let owner = own(&config).await;
+    let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    flush(&mut session, &[100]).await;
+    drop(session);
+    // Rewrite the authority as a pre-release build left it.
+    let store = LocalStateStore::new(&config.output, owner.local().unwrap()).unwrap();
+    let record = store
+        .load::<AuthorityState>(ControlKey::State)
+        .unwrap()
+        .unwrap();
+    let mut legacy = record.payload.clone();
+    legacy.descriptor.mapper_epoch = "fireparq-mapping-v1".into();
+    store
+        .replace(ControlKey::State, &record.version, &legacy)
+        .unwrap();
+    let before = std::fs::read(config.output.join(".fireparq-ingest/state.json")).unwrap();
+    let expected = |error: &anyhow::Error| {
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("semantic mapper epoch `fireparq-mapping-v1`")
+                && error.contains("<table>/date=YYYY-MM-DD/")
+                && error.contains("new, empty output root"),
+            "{error}"
+        );
+    };
+    expected(
+        &load_authoritative_resume(&config, &owner, false)
+            .await
+            .err()
+            .unwrap(),
+    );
+    expected(
+        &IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+            .await
+            .err()
+            .unwrap(),
+    );
+    assert_eq!(
+        std::fs::read(config.output.join(".fireparq-ingest/state.json")).unwrap(),
+        before
+    );
 }
 
 /// Ownership must guard exactly the mirror that authority binds, including an
@@ -501,8 +580,7 @@ async fn restored_lookahead_routes_remaining_missing_prefix_before_source_is_rer
 #[tokio::test]
 async fn filtered_future_inherits_actual_preceding_routing_and_zero_rows_commit_without_time() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path());
-    config.partition = Partition::Hour;
+    let config = config(dir.path());
     let owner = own(&config).await;
     let mut session =
         IngestionSession::open(&config, mapper(BlockFamily::Solana), &owner, None, None)
@@ -541,8 +619,7 @@ async fn filtered_future_inherits_actual_preceding_routing_and_zero_rows_commit_
 #[tokio::test]
 async fn solana_missing_source_keeps_explicit_seed_then_observed_anchor() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = config(dir.path());
-    config.partition = Partition::Hour;
+    let config = config(dir.path());
     let owner = own(&config).await;
     let mut session =
         IngestionSession::open(&config, mapper(BlockFamily::Solana), &owner, None, None)
@@ -621,7 +698,6 @@ async fn remote_session_initializes_and_resumes_using_one_borrowed_owner() {
     let config = Config {
         output: "s3://data/chain".into(),
         start_block: Some(100),
-        partition: Partition::None,
         cursor_path: None,
         ..Default::default()
     };
@@ -647,7 +723,6 @@ fn remote_config() -> Config {
     Config {
         output: "s3://data/chain".into(),
         start_block: Some(100),
-        partition: Partition::None,
         cursor_path: None,
         ..Default::default()
     }
@@ -771,7 +846,6 @@ fn bucket_root_config(template: &str) -> Config {
             .unwrap()
             .into(),
         start_block: Some(100),
-        partition: Partition::None,
         cursor_path: Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
         ..Default::default()
     }
@@ -835,9 +909,10 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_chain_template(
         assert!(keys.iter().any(|key| key == expected), "{keys:?}");
     }
     for table in ["blocks", "logs"] {
+        let partition = crate::ingest::state::tests::FIXTURE_DATE;
         assert!(
             keys.iter()
-                .any(|key| key.starts_with(&format!("{table}/part-v1-"))),
+                .any(|key| key.starts_with(&format!("{table}/{partition}/part-v1-"))),
             "{keys:?}"
         );
     }
@@ -1110,7 +1185,7 @@ async fn non_final_rows_carry_durable_strictly_increasing_stream_ordinals() {
 /// fireparq does not own. Neither the running session (its next flush) nor a
 /// restarted one (ownership, marker and merge-journal discovery, recovery,
 /// resume) reads a committed part outside its own pending transaction, so
-/// removing every part of earlier hours changes nothing but the data. Control
+/// removing every earlier part changes nothing but the data. Control
 /// records under `.fireparq-ingest/` and the bucket owner record must stay.
 #[tokio::test]
 async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappear() {
@@ -1118,7 +1193,6 @@ async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappea
     use object_store::ObjectStore as _;
     let store = Arc::new(object_store::memory::InMemory::new());
     let config = Config {
-        partition: Partition::Hour,
         final_blocks_only: false,
         ..remote_config()
     };

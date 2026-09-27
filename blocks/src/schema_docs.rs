@@ -990,6 +990,11 @@ fn render_index(references: &[ChainReference]) -> String {
          by all chains (`firehose_parquet::traits`). `timestamp` is \
          `Timestamp(Millisecond, \"UTC\")` and `date` is `Date32`; both are nullable only \
          on chains whose blocks may lack a timestamp (Solana).\n\
+         - Every table is partitioned by UTC day: its files are \
+         `<table>/date=YYYY-MM-DD/part-*.parquet`, and a row's `date` equals its directory \
+         (a Solana row without `block_time` has a null `date` in the day of the last known \
+         block time). Hive-partition-aware readers such as DuckDB and Polars read the \
+         directory as the same `date` column and prune by it.\n\
          - `fork_step` (`Utf8`, `NEW`, `UNDO` or `FINAL`) and `stream_ordinal` (`UInt64`) \
          exist only on non-final streams (`--final-blocks-only=false`). `stream_ordinal` \
          is the accepted-event ordinal of the stream event that produced the row: strictly \

@@ -49,11 +49,6 @@ pub(super) trait PartitionMerge {
     fn check_owner(&self) -> Result<()>;
     /// Deletes the committed merge's sources, stopping at the first error.
     fn delete_sources(&self, sources: &[Self::Source], outputs: &[String]) -> Result<()>;
-    /// Whether the partition is at or below an output directory that still holds an
-    /// interrupted rollup journal; merging it could hide that rollup's outputs or sources.
-    fn rollup_pending(&self) -> bool {
-        false
-    }
     /// Logs a completed partition merge (silent by default).
     fn log_done(&self, _sources: usize, _outputs: usize, _output_bytes: u64) {}
 }
@@ -114,11 +109,6 @@ pub(super) fn merge_partition<M: PartitionMerge>(
 
     if sources.len() <= 1 {
         result.partitions_skipped += 1;
-        return Ok(());
-    }
-
-    if store.rollup_pending() {
-        record_rollup_pending(label, result);
         return Ok(());
     }
 

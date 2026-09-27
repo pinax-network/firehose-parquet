@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use super::frontier::AcceptedFrontier;
 use super::parts::{writer_plan, TransactionParts};
 use super::state::{
-    AcceptedPrefix, AuthorityState, Digest, PartCompression, PartitionPolicy, PendingTransaction,
-    StreamDescriptor, TablePlan, TransactionPhase,
+    AcceptedPrefix, AuthorityState, Digest, PartCompression, PendingTransaction, StreamDescriptor,
+    TablePlan, TransactionPhase,
 };
 use super::store::{TransactionStateStore, Versioned};
-use crate::config::{BlockMetadata, Compression, FlushConcurrency, Partition};
+use crate::config::{BlockMetadata, Compression, FlushConcurrency};
 
 mod lane;
 mod pipeline;
@@ -203,8 +203,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         }
         self.failed = true;
         let started = Instant::now();
-        let partition = runtime_partition(&self.authority.payload.descriptor.partition);
-        let routing = ParquetTableWriter::new(PathBuf::new(), partition.clone(), compression);
+        let routing = ParquetTableWriter::new(PathBuf::new(), compression);
         let tables = self
             .authority
             .payload
@@ -261,7 +260,6 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             batches,
             &inventory,
             plans,
-            partition,
             metadata,
             compression,
             file_metadata,
@@ -442,19 +440,6 @@ async fn verify_local_finals<'s>(
     first_error.map_or(Ok(()), Err)
 }
 
-fn runtime_partition(partition: &PartitionPolicy) -> Partition {
-    match partition {
-        PartitionPolicy::None => Partition::None,
-        PartitionPolicy::BlockRange { size, anchor } => Partition::BlockRange {
-            size: *size,
-            start_block: Some(*anchor),
-        },
-        PartitionPolicy::Date => Partition::Date,
-        PartitionPolicy::Hour => Partition::Hour,
-        PartitionPolicy::Minute => Partition::Minute,
-        PartitionPolicy::Second => Partition::Second,
-    }
-}
 fn part_compression(compression: Compression) -> PartCompression {
     match compression.canonical() {
         Compression::None => PartCompression::None,

@@ -247,7 +247,7 @@ impl CursorState {
     /// cursor. Returns a list of human-readable mismatch descriptions.
     ///
     /// Compares row-level fields (start_block, stop_block) and file-level metadata
-    /// (endpoint, partition, block_range_size, compression, bytes_encoding).
+    /// (endpoint, partition, compression, bytes_encoding).
     pub fn validate_params(&self, current: &CursorState) -> Vec<String> {
         let mut mismatches = Vec::new();
 
@@ -310,7 +310,6 @@ impl CursorState {
         let meta_keys = [
             "firehose-parquet.endpoint",
             "firehose-parquet.partition",
-            "firehose-parquet.block_range_size",
             "firehose-parquet.compression",
             "firehose-parquet.bytes_encoding",
         ];
@@ -751,7 +750,6 @@ mod tests {
         meta.add("firehose-parquet.bytes_encoding", "hex");
         meta.add("firehose-parquet.compression", "zstd");
         meta.add("firehose-parquet.partition", "date");
-        meta.add("firehose-parquet.block_range_size", "10000");
         meta.add(CURSOR_METADATA_EXTENDED, "true");
         meta.add(CURSOR_METADATA_FINAL_BLOCKS_ONLY, "true");
         meta.add(CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS, "false");

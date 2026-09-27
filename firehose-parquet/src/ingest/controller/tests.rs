@@ -2,7 +2,9 @@ use super::*;
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::S3Ownership;
 use crate::ingest::frontier::AcceptedFrontier;
-use crate::ingest::state::tests::{descriptor, event, routing};
+use crate::ingest::state::tests::{
+    descriptor, event, fixture_timestamp, routing, FIXTURE_DATE, FIXTURE_SECONDS,
+};
 use crate::ingest::state::{Checkpoint, RoutingPolicy, StorageIdentity};
 use crate::writer::protected::schema_sha256;
 use arrow::array::{Array, UInt64Array};
@@ -64,8 +66,10 @@ impl MirrorAction for Mirror {
 }
 
 fn data() -> HashMap<String, RecordBatch> {
+    let (timestamp, times) = fixture_timestamp(2);
     let schema = Arc::new(Schema::new(vec![
         Field::new("block_num", DataType::UInt64, false),
+        timestamp,
         Field::new("value", DataType::UInt64, false),
     ]));
     [("blocks", vec![10, 11]), ("logs", vec![20, 21])]
@@ -77,6 +81,7 @@ fn data() -> HashMap<String, RecordBatch> {
                     schema.clone(),
                     vec![
                         Arc::new(UInt64Array::from(vec![100, 101])),
+                        times.clone(),
                         Arc::new(UInt64Array::from(values)),
                     ],
                 )
@@ -86,11 +91,10 @@ fn data() -> HashMap<String, RecordBatch> {
         .collect()
 }
 fn actual_descriptor(root: &Path) -> StreamDescriptor {
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = StorageIdentity::Local {
         canonical_root: fs::canonicalize(root).unwrap().to_str().unwrap().into(),
     };
-    descriptor.partition = PartitionPolicy::None;
     descriptor.tables = data()
         .iter()
         .map(|(table, batch)| {
@@ -107,7 +111,7 @@ fn prefix(authority: &AuthorityState) -> AcceptedPrefix {
     for number in [100, 101] {
         let ordinal = frontier.receive(event(number, 1)).unwrap();
         frontier
-            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
     }
     frontier.snapshot().unwrap().unwrap()
@@ -116,8 +120,8 @@ fn metadata() -> BlockMetadata {
     BlockMetadata {
         min_block_number: 100,
         max_block_number: 101,
-        min_timestamp: None,
-        max_timestamp: None,
+        min_timestamp: Some(FIXTURE_SECONDS),
+        max_timestamp: Some(FIXTURE_SECONDS),
     }
 }
 async fn initialize(root: &Path, owner: &LocalOwnership, descriptor: &StreamDescriptor) {
@@ -597,7 +601,7 @@ async fn invalid_table_and_preexisting_planned_name_fail_before_writing() {
             table: table.clone(),
             schema_sha256: schema.clone(),
             rows: 2,
-            partition: String::new(),
+            partition: FIXTURE_DATE.into(),
         })
         .collect();
     let pending = PendingTransaction::prepare(
@@ -762,7 +766,7 @@ async fn completion_authority_before_mirror_recovers_and_same_bound_is_a_true_no
     for number in [102, 103] {
         let ordinal = frontier.receive(event(number, 1)).unwrap();
         frontier
-            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
     }
     let accepted = frontier.snapshot().unwrap().unwrap();
@@ -776,6 +780,7 @@ async fn completion_authority_before_mirror_recovers_and_same_bound_is_a_true_no
                     vec![
                         Arc::new(UInt64Array::from(vec![102, 103])),
                         batch.column(1).clone(),
+                        batch.column(2).clone(),
                     ],
                 )
                 .unwrap(),
@@ -863,7 +868,7 @@ async fn unresolved_unacknowledged_or_interrupted_frontier_cannot_mark_a_bound_c
             let ordinal = frontier.receive(event(102, 1)).unwrap();
             if case == 1 {
                 frontier
-                    .accept(ordinal, routing(RoutingPolicy::DirectV1))
+                    .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
                     .unwrap();
             }
         }

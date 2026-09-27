@@ -17,7 +17,7 @@ use super::parts::TransactionParts;
 use super::state::*;
 use super::store::TransactionStateStore;
 use crate::cli::AwsConfig;
-use crate::config::{BlockMetadata, Compression, Config, Partition};
+use crate::config::{BlockMetadata, Compression, Config};
 use crate::cursor::CursorState;
 use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
 use crate::metrics::PipelineMetrics;
@@ -79,32 +79,10 @@ fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescript
     let origin = config
         .start_block
         .context("protected ingestion requires a resolved original start")?;
-    let partition = match config.partition {
-        Partition::None => PartitionPolicy::None,
-        Partition::BlockRange { size, start_block } => {
-            ensure!(
-                start_block == Some(origin),
-                "block range routing must use the authoritative original start"
-            );
-            PartitionPolicy::BlockRange {
-                size,
-                anchor: origin,
-            }
-        }
-        Partition::Date => PartitionPolicy::Date,
-        Partition::Hour => PartitionPolicy::Hour,
-        Partition::Minute => PartitionPolicy::Minute,
-        Partition::Second => PartitionPolicy::Second,
-    };
-    let time_partition = !matches!(
-        partition,
-        PartitionPolicy::None | PartitionPolicy::BlockRange { .. }
-    );
-    let routing_policy = match (mapper.family, time_partition) {
-        (BlockFamily::Solana, true) => RoutingPolicy::SolanaLastKnownV1,
-        (BlockFamily::Solana, false) => RoutingPolicy::DirectV1,
-        // Existing non-nullable chain ingestion permits a leading timestamp
-        // bootstrap even for a block-number partition. Bind that policy too.
+    let routing_policy = match mapper.family {
+        // Solana blocks may lack a time: they route by the last known one.
+        BlockFamily::Solana => RoutingPolicy::SolanaLastKnownV1,
+        // Other chains permit a leading timestamp bootstrap at genesis.
         _ => RoutingPolicy::GenesisLookaheadV1,
     };
     let aws = aws_config(config);
@@ -122,7 +100,7 @@ fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescript
         with_votes: mapper.with_votes && mapper.family == BlockFamily::Solana,
         include_failed_transactions: mapper.include_failed_transactions,
         tables: mapper.tables,
-        partition,
+        partition: PartitionPolicy::Date,
         origin_start: origin,
         final_blocks_only: config.final_blocks_only,
         routing_policy,
@@ -481,13 +459,6 @@ impl<'a> IngestionSession<'a> {
         let event = self.frontier.received(ordinal)?.clone();
         let policy = self.authority().descriptor.routing_policy;
         let anchor = match policy {
-            RoutingPolicy::DirectV1 => {
-                ensure!(
-                    lookahead.is_none() && effective_timestamp == event.source_timestamp,
-                    "direct routing changed the received source time"
-                );
-                None
-            }
             RoutingPolicy::SolanaLastKnownV1 => {
                 ensure!(
                     lookahead.is_none(),

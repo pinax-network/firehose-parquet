@@ -6,7 +6,10 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const MAPPER_EPOCH: &str = "fireparq-mapping-v1";
+/// Semantic mapper epoch. `v2` (#652): every table is written as
+/// `<table>/date=YYYY-MM-DD/`. A `v1` dataset used another layout
+/// (`year=/month=/day=/`, and other `--partition` modes), so it is refused.
+pub const MAPPER_EPOCH: &str = "fireparq-mapping-v2";
 pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
@@ -130,21 +133,18 @@ pub enum BlockFamily {
     Beacon,
 }
 
+/// The recorded output layout. Every table is partitioned by
+/// `date=YYYY-MM-DD` ([`crate::date_partition`]); [`MAPPER_EPOCH`] fixes what
+/// that directory name means.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PartitionPolicy {
-    None,
-    BlockRange { size: u64, anchor: u64 },
     Date,
-    Hour,
-    Minute,
-    Second,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingPolicy {
-    DirectV1,
     GenesisLookaheadV1,
     SolanaLastKnownV1,
 }
@@ -220,8 +220,17 @@ pub struct StreamDescriptor {
 }
 impl StreamDescriptor {
     pub fn validate(&self) -> Result<()> {
-        if self.format_version != FORMAT_VERSION || self.mapper_epoch != MAPPER_EPOCH {
+        if self.format_version != FORMAT_VERSION {
             bail!("unsupported ingestion format or semantic mapper epoch");
+        }
+        if self.mapper_epoch != MAPPER_EPOCH {
+            bail!(
+                "this protected dataset was created with semantic mapper epoch `{}`; this \
+                 fireparq writes `{MAPPER_EPOCH}`, where every table is partitioned as \
+                 <table>/date=YYYY-MM-DD/ (#652). It cannot append to or maintain it: build \
+                 into a new, empty output root",
+                self.mapper_epoch.chars().take(64).collect::<String>()
+            );
         }
         validate_identifier(&self.chain)?;
         if !matches!(
@@ -229,11 +238,6 @@ impl StreamDescriptor {
             "binary" | "hex" | "hex_no_prefix" | "base58" | "tron_base58"
         ) {
             bail!("unsupported semantic byte encoding");
-        }
-        if let PartitionPolicy::BlockRange { size, anchor } = self.partition {
-            if size == 0 || anchor != self.origin_start {
-                bail!("invalid original block-range anchor or size");
-            }
         }
         self.output.validate()?;
         self.mirror.validate()?;
@@ -322,9 +326,6 @@ impl RoutingCheckpoint {
                 || anchor.source_block_id.len() > 4096
             {
                 bail!("invalid routing anchor provenance");
-            }
-            if self.policy == RoutingPolicy::DirectV1 {
-                bail!("direct routing cannot carry a synthetic anchor");
             }
             if anchor.provenance == AnchorProvenance::AcceptedPrefix
                 && anchor.source_ordinal > ordinal
@@ -692,6 +693,16 @@ impl PendingTransaction {
         for (index, table) in self.tables.iter().enumerate() {
             validate_table(&table.table)?;
             validate_relative_path(&table.partition, true)?;
+            // Recovery republishes at the recorded path, so it must be the
+            // stream's layout: one `date=YYYY-MM-DD` directory per table part.
+            match (table.rows, table.partition.is_empty()) {
+                (0, true) => {}
+                (0, false) => bail!("pending table without rows records a partition"),
+                (_, _) => {
+                    crate::date_partition::DatePartition::parse(&table.partition)
+                        .context("pending table partition is not a date=YYYY-MM-DD directory")?;
+                }
+            }
             if index > 0 && self.tables[index - 1].table >= table.table {
                 bail!("pending table inventory is not uniquely sorted");
             }

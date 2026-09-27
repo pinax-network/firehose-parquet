@@ -151,8 +151,10 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
                 .is_some_and(|(_, record)| {
                     let json: serde_json::Value = serde_json::from_slice(&record.bytes).unwrap();
                     let entries = json["payload"]["parts"].as_array().unwrap();
+                    // Request paths percent-encode `=` (`date=YYYY-MM-DD`).
+                    let decoded = path.replace("%3D", "=");
                     entries.iter().any(|part| {
-                        path.ends_with(part["final_relative_path"].as_str().unwrap())
+                        decoded.ends_with(part["final_relative_path"].as_str().unwrap())
                             && part["receipt"]["byte_size"].as_u64() == Some(size as u64)
                             && part["receipt"]["sha256"].as_str()
                                 == Some(hex::encode(Sha256::digest(&payload)).as_str())

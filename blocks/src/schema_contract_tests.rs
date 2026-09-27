@@ -16,7 +16,7 @@ use arrow::compute::concat_batches;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
-use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+use firehose_parquet::config::{BlockMetadata, Compression};
 use firehose_parquet::encode::{decode_base58, EncodeBytes};
 use firehose_parquet::traits::{
     timestamp_millis_utc_type, BlockIdentity, BlockMapper, StreamEvent,
@@ -402,7 +402,7 @@ fn duplicate_field_names(batch: &RecordBatch) -> Vec<String> {
 
 /// Write `batch` with the production table writer, then read it back.
 fn parquet_round_trip(dir: &Path, table: &str, batch: &RecordBatch) -> RecordBatch {
-    let mut writer = ParquetTableWriter::new(dir, Partition::None, Compression::Zstd);
+    let mut writer = ParquetTableWriter::new(dir, Compression::Zstd);
     let metadata = BlockMetadata {
         min_block_number: BLOCK_NUM,
         max_block_number: BLOCK_NUM,
@@ -605,8 +605,7 @@ fn verify_records_and_rematches_every_table_of_every_chain() {
                     .unwrap();
             }
             let chain_root = scratch.0.join(format!("{encoding:?}-{case_index}/net"));
-            let mut writer =
-                ParquetTableWriter::new(&chain_root, Partition::None, Compression::Zstd);
+            let mut writer = ParquetTableWriter::new(&chain_root, Compression::Zstd);
             let metadata = BlockMetadata {
                 min_block_number: BLOCK_NUM,
                 max_block_number: BLOCK_NUM + case.blocks.len() as u64 - 1,

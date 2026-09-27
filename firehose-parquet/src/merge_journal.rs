@@ -43,14 +43,9 @@ pub(crate) const LOCK_FILE: &str = ".fireparq-merge.lock";
 /// ([`CRASH_HOOKS`]).
 pub(crate) const CRASH_ENV: &str = "FIREPARQ_TEST_MERGE_CRASH_AT";
 
-/// Environment variable that aborts `rollup` at a named step, to test crash recovery:
-/// `after-first-part`, `after-outputs`, `after-commit`, or `after-first-delete`. Only
-/// debug builds read it ([`CRASH_HOOKS`]).
-pub(crate) const ROLLUP_CRASH_ENV: &str = "FIREPARQ_TEST_ROLLUP_CRASH_AT";
-
-/// Whether this build honors [`CRASH_ENV`] and [`ROLLUP_CRASH_ENV`]. Like
-/// `FIREPARQ_DEBUG_FAULT`, only debug builds (as built by `cargo test`) read them: a
-/// release binary never reads either variable and never aborts at a crash point.
+/// Whether this build honors [`CRASH_ENV`]. Like `FIREPARQ_DEBUG_FAULT`, only debug
+/// builds (as built by `cargo test`) read it: a release binary never reads the variable
+/// and never aborts at a crash point.
 const CRASH_HOOKS: bool = cfg!(debug_assertions);
 
 const JOURNAL_VERSION: u32 = 1;
@@ -66,12 +61,6 @@ thread_local! {
 /// aborts without any cleanup, like `kill -9`. Tests inject an error instead.
 pub(crate) fn crash_point(step: &str) -> Result<()> {
     crash_at(CRASH_ENV, step, step)
-}
-
-/// [`crash_point`] for `rollup`, driven by [`ROLLUP_CRASH_ENV`]. Tests inject
-/// `rollup-<step>` so merge and rollup steps stay distinct.
-pub(crate) fn rollup_crash_point(step: &str) -> Result<()> {
-    crash_at(ROLLUP_CRASH_ENV, step, &format!("rollup-{step}"))
 }
 
 fn crash_at(env: &str, step: &str, injected: &str) -> Result<()> {
@@ -251,8 +240,8 @@ pub(crate) fn temp_output_name(name: &str, run_id: &str) -> String {
 
 /// File operations on one partition directory, locally or on S3.
 ///
-/// Control records (the merge journal `_fireparq_merge.json` and the rollup journal
-/// `_fireparq_rollup.json`) are bounded to [`crate::durable_state::MAX_CONTROL_BYTES`],
+/// Control records (the merge journal `_fireparq_merge.json`) are bounded to
+/// [`crate::durable_state::MAX_CONTROL_BYTES`],
 /// created exclusively and replaced atomically; `what` names the record in errors.
 pub(crate) trait PartitionFiles {
     /// Human-readable location of the partition, for messages.
@@ -563,30 +552,6 @@ pub(crate) fn write_local_output(
         return Err(err);
     }
     Ok(path)
-}
-
-/// [`write_local_output`] that never replaces an existing file: the fsynced temporary file
-/// is hard-linked into place, which fails when `name` exists.
-pub(crate) fn write_local_output_exclusive(
-    dir: &Path,
-    name: &str,
-    data: &[u8],
-    run_id: &str,
-) -> Result<PathBuf> {
-    let path = dir.join(name);
-    let tmp = dir.join(temp_output_name(name, run_id));
-    let write = || -> Result<()> {
-        let mut file =
-            File::create_new(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(data)
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::hard_link(&tmp, &path)
-            .with_context(|| format!("creating output file {}", path.display()))
-    };
-    let written = write();
-    let _ = std::fs::remove_file(&tmp);
-    written.map(|()| path)
 }
 
 /// Fsyncs a directory so earlier creates, renames and deletes in it are durable.
@@ -976,7 +941,7 @@ mod tests {
         let partition = S3Partition {
             client: &store,
             bucket: "bucket",
-            key: "evm/blocks/day=15",
+            key: "evm/blocks/date=2024-01-15",
         };
         let journal = Journal::new(&run("evm/.fireparq-merge.lock"), sources(), 2);
 

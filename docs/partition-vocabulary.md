@@ -1,19 +1,23 @@
 # Partition Vocabulary
 
-This note records the CLI naming convention for partition-related flags.
+This note records the CLI naming convention for partition-related flags and
+the output directory key.
 
 ## Decision
 
-Use `--partition` for partition granularity or output layout, and keep `--partition-type` for partition-index lookup within `partitions.parquet` workflows.
+`build` has no partition flag: every table is written as
+`<table>/date=YYYY-MM-DD/part-*.parquet` (#652). `--partition` names the
+granularity of a `partitions build` index, and `--partition-type` names the
+partition dimension to query inside `partitions.parquet`. The `partitions`
+subcommands and their flags are scheduled for removal in v1.1.0 (#653).
 
 ## Terms
 
 - `--partition`
-  - Means the partition granularity being written, built, or targeted.
-  - Examples:
-    - main ingestion output layout (`--partition date`)
-    - `partitions build` granularity (`--partition date`)
-    - `rollup` destination granularity (`--partition hour`)
+  - Means the granularity of the index `partitions build` writes
+    (`--partition date`, `hour`, `minute`, `second` or `block_range`).
+  - `truncate -p` reuses the short flag for its `date=` filters
+    (`-p date=2026-01-15`, `-p "date=2026-01-*"`).
 
 - `--partition-type`
   - Means the partition dimension to query inside a canonical partition index.
@@ -35,24 +39,42 @@ Use `--partition` for partition granularity or output layout, and keep `--partit
 
 ## Output directory keys
 
-`--partition` modes write Hive-style directory keys:
+Every table has one Hive-style directory key, the UTC day of the block time:
 
-| `--partition` | Directory keys |
+| Output | Directory |
 |---|---|
-| `block_range` | `block_range=<start>-<stop>/` |
-| `date` | `year=YYYY/month=MM/day=DD/` |
-| `hour` | `year=YYYY/month=MM/day=DD/hour=HH/` |
-| `minute` | `.../hour=HH/minute=MM/` |
-| `second` | `.../minute=MM/second=SS/` |
+| every table | `<table>/date=YYYY-MM-DD/` |
 
-The mode is still called `date`, but its directory key is `day=`, never `date=`: every table has a canonical `date` data column, and Hive-partition-aware readers turn directory keys into columns. A `date=` key shadows the data column (DuckDB's default `hive_partitioning` reads it as the day-of-month number) or fails to load (Polars). Earlier releases wrote `date=DD`; `rollup` and `truncate` accept that legacy key as an alias of `day=`.
+`firehose-parquet/src/date_partition.rs` is the one place the key is
+formatted and parsed.
+
+Why a single `date=YYYY-MM-DD` key:
+
+- It has the type and the value of the `date` data column (`Date32`) that every
+  table keeps: both come from the same whole-second block time, and the writer
+  refuses a row whose `date` disagrees with its directory. A single file stays
+  self-describing, and a Hive-partition-aware reader (DuckDB, Polars) sees one
+  consistent `date` column.
+- Readers filter `date = DATE '2026-09-25'` and prune directories, instead of
+  combining `year`, `month` and `day` keys.
+- The planned Delta Lake mode (#643) partitions by `date` as well.
+
+Earlier layouts are gone, with no compatibility handling. v0.x wrote
+`year=YYYY/month=MM/date=DD/`: a `date=DD` key held only the day of the month,
+so DuckDB read the day number over the `date` column and Polars failed to load
+it. Pre-release v1.0.0 builds wrote `year=YYYY/month=MM/day=DD/` and offered
+`hour`, `minute`, `second`, `block_range` and unpartitioned layouts; they were
+removed with `rollup` before the release, because a single key leaves nothing
+to roll up. `truncate` accepts only `date=` filters, and a `date=` value that is
+not a date, such as `date=15`, is refused.
 
 ## Resulting rename decisions
 
-This convention leads to the following CLI adjustments:
+This convention led to the following CLI adjustments:
 
 - `partitions build --partition-types` → `--partition`
-- `rollup --target-partition` → `--partition`
 - `scan --rows` → `--limit`
+- `rollup --target-partition` → `--partition`, later removed with `rollup` (#652)
+- `build --partition` and `--block-range-size` removed (#652)
 
-These rename decisions are now canonical. Deprecated aliases are no longer accepted.
+These decisions are canonical. Deprecated aliases are not accepted.

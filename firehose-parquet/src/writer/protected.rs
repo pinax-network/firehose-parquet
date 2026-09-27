@@ -6,7 +6,7 @@
 //! cursor, recover a transaction, retire batches, or make independent writes atomic.
 
 use super::{local, ParquetFileMetadata, ParquetTableWriter};
-use crate::config::{BlockMetadata, Compression, Partition};
+use crate::config::{BlockMetadata, Compression};
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::{provider_rejection, usable_version, ProviderRejected, S3Ownership};
 use anyhow::{bail, ensure, Context, Result};
@@ -197,7 +197,6 @@ impl PreparedFlush {
         batches: HashMap<String, RecordBatch>,
         inventory: &BTreeMap<String, String>,
         parts: Vec<PlannedPart>,
-        partition: Partition,
         metadata: BlockMetadata,
         compression: Compression,
         file_metadata: ParquetFileMetadata,
@@ -217,7 +216,7 @@ impl PreparedFlush {
             validate_table(table)?;
             validate_digest(digest)?;
         }
-        let routing = ParquetTableWriter::new(PathBuf::new(), partition, compression);
+        let routing = ParquetTableWriter::new(PathBuf::new(), compression);
         for (table, batch) in &batches {
             let expected = inventory
                 .get(table)
@@ -327,8 +326,7 @@ impl PreparedFlush {
             .context("prepared batch is missing")?;
         let mut metadata = self.file_metadata.clone();
         metadata.entries.extend(footer_identity(plan));
-        let mut properties =
-            ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
+        let mut properties = ParquetTableWriter::new(PathBuf::new(), self.compression);
         properties.set_file_metadata(metadata);
         let mut spool = SpoolWriter::new(crate::s3::upload::MAX_PART_BYTES, reservation)?;
         let encoded = (|| -> Result<()> {
@@ -390,7 +388,7 @@ impl PreparedFlush {
             .context("prepared batch is missing")?;
         let mut metadata = self.file_metadata.clone();
         metadata.entries.extend(footer_identity(plan));
-        let mut writer = ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
+        let mut writer = ParquetTableWriter::new(PathBuf::new(), self.compression);
         writer.set_file_metadata(metadata);
         let mut output = CappedBuffer {
             bytes: Vec::new(),

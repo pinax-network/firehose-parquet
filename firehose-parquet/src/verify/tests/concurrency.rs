@@ -14,7 +14,7 @@ use crate::ingest::observe;
 use crate::ingest::parts::TransactionParts;
 use crate::ingest::state::tests::{descriptor, event, routing};
 use crate::ingest::state::{
-    AuthorityState, Digest, MirrorBinding, PartitionPolicy, RoutingPolicy, StreamDescriptor,
+    AuthorityState, Digest, MirrorBinding, RoutingPolicy, StreamDescriptor,
 };
 use crate::ingest::store::TransactionStateStore;
 use std::collections::BTreeSet;
@@ -54,8 +54,8 @@ fn tree(dir: &Path) -> BTreeSet<String> {
 
 fn legacy_fixture(root: &Path) -> std::path::PathBuf {
     let data = root.join("mainnet/blocks");
-    write_block_nums(&data.join("day=1/part-0.parquet"), &[1, 2]);
-    write_block_nums(&data.join("day=2/part-0.parquet"), &[3, 4]);
+    write_block_nums(&data.join("date=2024-01-01/part-0.parquet"), &[1, 2]);
+    write_block_nums(&data.join("date=2024-01-02/part-0.parquet"), &[3, 4]);
     data
 }
 
@@ -88,24 +88,35 @@ fn verify_writes_roots_and_reports_while_another_command_owns_every_scope() {
 }
 
 fn block_num_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![Field::new(
-        "block_num",
-        DataType::UInt64,
-        false,
-    )]))
+    Arc::new(Schema::new(vec![
+        Field::new("block_num", DataType::UInt64, false),
+        Field::new(
+            "timestamp",
+            crate::traits::timestamp_millis_utc_type(),
+            false,
+        ),
+    ]))
 }
 
-/// Initializes a protected dataset with `block_range=` partitions of ten
-/// blocks from block 100, without committing anything.
+/// Block time of a fixture block: ten blocks per UTC day from 2024-01-01, so
+/// blocks 100-109 are in `date=2024-01-01`, 110-119 in `date=2024-01-02`, ...
+fn block_seconds(block: u64) -> i64 {
+    const DAY_ONE: i64 = 1_704_067_200;
+    DAY_ONE + ((block - 100) / 10) as i64 * 86_400 + (block % 10) as i64
+}
+
+/// The `date=` partition of the `n`th fixture day (1 for blocks 100-109).
+fn day(n: u32) -> String {
+    format!("date=2024-01-{n:02}")
+}
+
+/// Initializes a protected dataset whose blocks are ten per day from block
+/// 100 ([`block_seconds`]), without committing anything.
 fn protected_root(root: &Path, final_blocks_only: bool) -> StreamDescriptor {
     use crate::writer::protected::schema_sha256;
     std::fs::create_dir_all(root).unwrap();
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.final_blocks_only = final_blocks_only;
-    descriptor.partition = PartitionPolicy::BlockRange {
-        size: 10,
-        anchor: 100,
-    };
     descriptor.output = crate::ingest::binding::resolve_output_identity(
         root.to_str().unwrap(),
         &crate::cli::AwsConfig {
@@ -167,12 +178,21 @@ fn commit_windows(root: &Path, descriptor: &StreamDescriptor, windows: &[&[u64]]
             for block in *window {
                 let ordinal = frontier.receive(event(*block, 1)).unwrap();
                 frontier
-                    .accept(ordinal, routing(RoutingPolicy::DirectV1))
+                    .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
                     .unwrap();
             }
+            let times: Vec<i64> = window.iter().map(|block| block_seconds(*block)).collect();
             let batch = RecordBatch::try_new(
                 block_num_schema(),
-                vec![Arc::new(UInt64Array::from(window.to_vec()))],
+                vec![
+                    Arc::new(UInt64Array::from(window.to_vec())),
+                    Arc::new(
+                        arrow::array::TimestampMillisecondArray::from(
+                            times.iter().map(|time| time * 1_000).collect::<Vec<_>>(),
+                        )
+                        .with_timezone("UTC"),
+                    ),
+                ],
             )
             .unwrap();
             controller
@@ -182,8 +202,8 @@ fn commit_windows(root: &Path, descriptor: &StreamDescriptor, windows: &[&[u64]]
                     BlockMetadata {
                         min_block_number: window[0],
                         max_block_number: *window.last().unwrap(),
-                        min_timestamp: None,
-                        max_timestamp: None,
+                        min_timestamp: times.iter().copied().min(),
+                        max_timestamp: times.iter().copied().max(),
                     },
                     Compression::Zstd,
                     ParquetFileMetadata::new(),
@@ -264,17 +284,14 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
     let descriptor = protected_dataset(&root, &[&[100, 101, 105], &[110, 112, 119]]);
     let data = root.join("blocks");
     let registry = root.join(default_registry());
-    let (first, last) = (
-        "block_range=100-110".to_string(),
-        "block_range=110-120".to_string(),
-    );
+    let (first, last) = (day(1), day(2));
     let written: BTreeSet<String> = tree(&data)
         .iter()
         .map(|file| file.split('/').next().unwrap().to_string())
         .collect();
     assert_eq!(written, BTreeSet::from([first.clone(), last.clone()]));
     // A running transaction already published a part after the frontier (119).
-    let pending_partition = "block_range=120-130".to_string();
+    let pending_partition = day(3);
     let pending = data.join(&pending_partition).join("part-pending.parquet");
     write_block_nums(&pending, &[120, 121]);
 
@@ -293,21 +310,19 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
         .any(|w| w.contains("authoritative ingestion state") && w.contains("block 119")));
     assert_eq!(registry_partitions(&registry), [first.clone()]);
 
-    // The request completes at stop block 120, where `block_range=110-120`
-    // ends: no longer request can add to it, so it is recorded. Only the
-    // uncommitted part stays open.
+    // The request completes at stop block 120. The day holding its last
+    // block can still receive blocks of a later, longer request, so it stays
+    // open with the uncommitted part; the earlier day is compared.
     drop(_build);
     std::fs::remove_file(&pending).unwrap();
     std::fs::remove_dir(pending.parent().unwrap()).unwrap();
     complete_request(&root, &descriptor, 120);
     write_block_nums(&pending, &[120, 121]);
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), [pending_partition.clone()]);
+    assert_eq!(partitions(&report, "open"), open);
     assert_eq!(partitions(&report, "match"), [first.clone()]);
-    assert_eq!(partitions(&report, "missing_expected"), [last.clone()]);
-    let mut recorded = vec![first.clone(), last.clone()];
-    recorded.sort();
-    assert_eq!(registry_partitions(&registry), recorded);
+    assert!(partitions(&report, "missing_expected").is_empty());
+    assert_eq!(registry_partitions(&registry), [first.clone()]);
 }
 
 #[test]
@@ -317,10 +332,10 @@ fn a_completed_request_keeps_its_last_partition_open_until_it_cannot_grow() {
     let descriptor = protected_dataset(&root, &[&[100, 101]]);
     complete_request(&root, &descriptor, 102);
     let data = root.join("blocks");
-    // `block_range=100-110` ends after stop block 102: a later, longer request
-    // appends to it, so it is not recorded.
+    // A later, longer request appends to the day of stop block 102, so it is
+    // not recorded.
     let finished = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&finished, "open"), ["block_range=100-110"]);
+    assert_eq!(partitions(&finished, "open"), [day(1)]);
     assert!(finished.findings[0]
         .error
         .as_deref()
@@ -342,11 +357,8 @@ fn a_completed_request_keeps_its_last_partition_open_until_it_cannot_grow() {
         }
     ));
     let extended = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(
-        partitions(&extended, "missing_expected"),
-        ["block_range=100-110"]
-    );
-    assert_eq!(partitions(&extended, "open"), ["block_range=110-120"]);
+    assert_eq!(partitions(&extended, "missing_expected"), [day(1)]);
+    assert_eq!(partitions(&extended, "open"), [day(2)]);
 }
 
 #[test]
@@ -355,16 +367,16 @@ fn a_rewrite_during_the_scan_fails_before_anything_is_compared_or_written() {
     let cases: [(&str, Rewrite); 3] = [
         ("was replaced", |data| {
             // A merge or truncate atomically replaces a part.
-            let path = data.join("day=1/part-0.parquet");
-            let tmp = data.join("day=1/.tmp");
+            let path = data.join("date=2024-01-01/part-0.parquet");
+            let tmp = data.join("date=2024-01-01/.tmp");
             write_block_nums(&tmp, &[1, 2]);
             std::fs::rename(tmp, path).unwrap();
         }),
         ("was added", |data| {
-            write_block_nums(&data.join("day=1/part-1.parquet"), &[2]);
+            write_block_nums(&data.join("date=2024-01-01/part-1.parquet"), &[2]);
         }),
         ("was removed", |data| {
-            std::fs::remove_file(data.join("day=2/part-0.parquet")).unwrap();
+            std::fs::remove_file(data.join("date=2024-01-02/part-0.parquet")).unwrap();
         }),
     ];
     for (expected, rewrite) in cases {
@@ -387,10 +399,10 @@ fn a_rewrite_during_the_scan_fails_before_anything_is_compared_or_written() {
     let data = legacy_fixture(&root);
     save_cursor(&root.join("mainnet"), 4, None);
     let hooked = data.clone();
-    after_scan(move || write_block_nums(&hooked.join("day=2/part-1.parquet"), &[5]));
+    after_scan(move || write_block_nums(&hooked.join("date=2024-01-02/part-1.parquet"), &[5]));
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), ["day=2"]);
-    assert_eq!(partitions(&report, "missing_expected"), ["day=1"]);
+    assert_eq!(partitions(&report, "open"), ["date=2024-01-02"]);
+    assert_eq!(partitions(&report, "missing_expected"), ["date=2024-01-01"]);
 }
 
 #[test]
@@ -398,7 +410,7 @@ fn partitions_without_block_numbers_stay_open_while_the_stream_is_live() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let data = root.join("mainnet/blocks");
-    for day in ["day=1", "day=2"] {
+    for day in ["date=2024-01-01", "date=2024-01-02"] {
         let path = data.join(day).join("part-0.parquet");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let batch = RecordBatch::try_from_iter(vec![(
@@ -414,7 +426,10 @@ fn partitions_without_block_numbers_stay_open_while_the_stream_is_live() {
     }
     save_cursor(&root.join("mainnet"), 10, None);
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), ["day=1", "day=2"]);
+    assert_eq!(
+        partitions(&report, "open"),
+        ["date=2024-01-01", "date=2024-01-02"]
+    );
     assert!(!report.summary.wrote_registry);
 
     // Once the stream reached its stop block, they are complete.
@@ -431,9 +446,9 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let data = root.join("mainnet/blocks");
-    write_block_nums(&data.join("day=1/part-a-000001.parquet"), &[1, 2]);
-    write_block_nums(&data.join("day=1/part-b-000001.parquet"), &[3]);
-    write_block_nums(&data.join("day=2/part-a-000001.parquet"), &[4]);
+    write_block_nums(&data.join("date=2024-01-01/part-a-000001.parquet"), &[1, 2]);
+    write_block_nums(&data.join("date=2024-01-01/part-b-000001.parquet"), &[3]);
+    write_block_nums(&data.join("date=2024-01-02/part-a-000001.parquet"), &[4]);
     let merge = MergeConfig {
         path: data.display().to_string(),
         compression: crate::config::Compression::Zstd,
@@ -451,7 +466,7 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
     assert!(crashed.is_err());
     let before = tree(&data);
     assert!(
-        before.contains(&format!("day=1/{JOURNAL_FILE}")),
+        before.contains(&format!("date=2024-01-01/{JOURNAL_FILE}")),
         "{before:?}"
     );
 
@@ -468,7 +483,9 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
     }
     // A single file inside the claimed partition is refused too.
     let err = verify_parquet(
-        data.join("day=1/part-a-000001.parquet").to_str().unwrap(),
+        data.join("date=2024-01-01/part-a-000001.parquet")
+            .to_str()
+            .unwrap(),
         None,
         &base_opts(),
     )
@@ -498,8 +515,9 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
 fn artifact_destinations_inside_a_protected_dataset_keep_their_guards() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
-    let descriptor = protected_dataset(&root, &[&[100, 109]]);
-    complete_request(&root, &descriptor, 110);
+    // The first day is complete once the stream moved to the second.
+    let descriptor = protected_dataset(&root, &[&[100, 109], &[110]]);
+    complete_request(&root, &descriptor, 111);
     let data = root.join("blocks");
     let partition = tree(&data)
         .into_iter()
@@ -639,7 +657,7 @@ fn remote_registry_and_report_writes_make_one_attempt_without_an_owner() {
                     store.as_ref(),
                     &location,
                     &super::super::RegistrySnapshot::default(),
-                    &[fill(registry_row("mainnet", "day=1", "aa"))],
+                    &[fill(registry_row("mainnet", "date=2024-01-01", "aa"))],
                 )
             } else {
                 super::super::write_report_to_store(store.as_ref(), &location, b"synthetic report")
@@ -725,12 +743,12 @@ fn remote_scans_are_read_only_and_detect_rewrites_and_merges() {
     let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
     put_block_nums(
         store.as_ref(),
-        "mainnet/blocks/day=1/part-0.parquet",
+        "mainnet/blocks/date=2024-01-01/part-0.parquet",
         &[1, 2],
     );
     put_block_nums(
         store.as_ref(),
-        "mainnet/blocks/day=2/part-0.parquet",
+        "mainnet/blocks/date=2024-01-02/part-0.parquet",
         &[3, 4],
     );
     let registry = dir.path().join("roots.parquet");
@@ -751,7 +769,7 @@ fn remote_scans_are_read_only_and_detect_rewrites_and_merges() {
     after_scan(move || {
         put_block_nums(
             hooked.as_ref(),
-            "mainnet/blocks/day=1/part-0.parquet",
+            "mainnet/blocks/date=2024-01-01/part-0.parquet",
             &[1, 2, 2],
         )
     });
@@ -760,7 +778,7 @@ fn remote_scans_are_read_only_and_detect_rewrites_and_merges() {
 
     // A merge journal is refused before anything is read.
     super::super::block_on_async(store.put(
-        &object_store::path::Path::from(format!("mainnet/blocks/day=2/{JOURNAL_FILE}")),
+        &object_store::path::Path::from(format!("mainnet/blocks/date=2024-01-02/{JOURNAL_FILE}")),
         object_store::PutPayload::from_static(b"{}"),
     ))
     .unwrap();
@@ -890,7 +908,7 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
             "protected recovery metadata",
         ),
         (
-            "s3://bucket/blocks/block_range=100-110/roots.parquet",
+            "s3://bucket/blocks/date=2024-01-01/roots.parquet",
             "ordinary protected data part",
         ),
         ("s3://bucket/.fireparq-ingest/roots.parquet", "control path"),
@@ -950,7 +968,7 @@ fn remote_legacy_root_registry_is_refused_instead_of_shadowed() {
             Arc::new(object_store::memory::InMemory::new());
         put_block_nums(
             store.as_ref(),
-            &format!("{table_prefix}/day=1/part-0.parquet"),
+            &format!("{table_prefix}/date=2024-01-01/part-0.parquet"),
             &[1, 2],
         );
         let join = |name: &str| {
@@ -1036,7 +1054,7 @@ fn the_frontier_is_read_before_the_scanned_listing() {
     // before it listed the files: they are in the scan, so they must be open.
     let (hooked_data, hooked_root) = (data.clone(), chain_root.clone());
     at("after-frontier", move || {
-        write_block_nums(&hooked_data.join("day=3/part-0.parquet"), &[5, 6]);
+        write_block_nums(&hooked_data.join("date=2024-01-03/part-0.parquet"), &[5, 6]);
         save_cursor(&hooked_root, 6, None);
     });
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
@@ -1045,8 +1063,11 @@ fn the_frontier_is_read_before_the_scanned_listing() {
         "{:?}",
         report.warnings
     );
-    assert_eq!(partitions(&report, "open"), ["day=2", "day=3"]);
-    assert_eq!(partitions(&report, "missing_expected"), ["day=1"]);
+    assert_eq!(
+        partitions(&report, "open"),
+        ["date=2024-01-02", "date=2024-01-03"]
+    );
+    assert_eq!(partitions(&report, "missing_expected"), ["date=2024-01-01"]);
 }
 
 #[test]
@@ -1055,7 +1076,9 @@ fn a_merge_that_starts_during_the_scan_is_refused() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let data = legacy_fixture(&root);
     let hooked = data.clone();
-    after_scan(move || std::fs::write(hooked.join("day=1").join(JOURNAL_FILE), b"{}").unwrap());
+    after_scan(move || {
+        std::fs::write(hooked.join("date=2024-01-01").join(JOURNAL_FILE), b"{}").unwrap()
+    });
     let err = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err();
     assert!(format!("{err:#}").contains("unfinished merge"), "{err:#}");
     assert!(!root.join("mainnet").join(default_registry()).exists());
@@ -1065,10 +1088,10 @@ fn a_merge_that_starts_during_the_scan_is_refused() {
 fn files_that_vanish_are_tolerated_only_in_open_partitions() {
     let fixture = |root: &Path| {
         let data = root.join("mainnet/blocks");
-        write_block_nums(&data.join("day=1/part-0.parquet"), &[1]);
-        write_block_nums(&data.join("day=1/part-1.parquet"), &[2]);
-        write_block_nums(&data.join("day=2/part-0.parquet"), &[3, 4]);
-        write_block_nums(&data.join("day=2/part-1.parquet"), &[5]);
+        write_block_nums(&data.join("date=2024-01-01/part-0.parquet"), &[1]);
+        write_block_nums(&data.join("date=2024-01-01/part-1.parquet"), &[2]);
+        write_block_nums(&data.join("date=2024-01-02/part-0.parquet"), &[3, 4]);
+        write_block_nums(&data.join("date=2024-01-02/part-1.parquet"), &[5]);
         save_cursor(&root.join("mainnet"), 4, None);
         data
     };
@@ -1079,16 +1102,16 @@ fn files_that_vanish_are_tolerated_only_in_open_partitions() {
     let data = fixture(&root);
     let hooked = data.clone();
     at("before-scan", move || {
-        std::fs::remove_file(hooked.join("day=2/part-1.parquet")).unwrap()
+        std::fs::remove_file(hooked.join("date=2024-01-02/part-1.parquet")).unwrap()
     });
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), ["day=2"]);
-    assert_eq!(partitions(&report, "missing_expected"), ["day=1"]);
+    assert_eq!(partitions(&report, "open"), ["date=2024-01-02"]);
+    assert_eq!(partitions(&report, "missing_expected"), ["date=2024-01-01"]);
     assert!(
         report
             .warnings
             .iter()
-            .any(|w| w.contains("disappeared") && w.contains("day=2/part-1.parquet")),
+            .any(|w| w.contains("disappeared") && w.contains("date=2024-01-02/part-1.parquet")),
         "{:?}",
         report.warnings
     );
@@ -1099,14 +1122,14 @@ fn files_that_vanish_are_tolerated_only_in_open_partitions() {
     let data = fixture(&root);
     let hooked = data.clone();
     at("before-scan", move || {
-        std::fs::remove_file(hooked.join("day=1/part-1.parquet")).unwrap()
+        std::fs::remove_file(hooked.join("date=2024-01-01/part-1.parquet")).unwrap()
     });
     let err = format!(
         "{:#}",
         verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err()
     );
     assert!(err.contains("changed while verify was reading"), "{err}");
-    assert!(err.contains("day=1"), "{err}");
+    assert!(err.contains("date=2024-01-01"), "{err}");
     assert!(!root.join("mainnet").join(default_registry()).exists());
 }
 
@@ -1117,10 +1140,7 @@ fn a_reversible_stream_leaves_every_partition_open_while_it_can_grow() {
     let descriptor = protected_root(&root, false);
     commit_windows(&root, &descriptor, &[&[100, 101], &[110]]);
     let report = verify_parquet(root.join("blocks").to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(
-        partitions(&report, "open"),
-        ["block_range=100-110", "block_range=110-120"]
-    );
+    assert_eq!(partitions(&report, "open"), [day(1), day(2)]);
     assert!(report.findings[0]
         .error
         .as_deref()
@@ -1136,17 +1156,55 @@ fn a_protected_dataset_without_a_committed_block_leaves_everything_open() {
     protected_root(&root, true);
     // A first transaction published a part but has not committed.
     let data = root.join("blocks");
-    write_block_nums(
-        &data.join("block_range=100-110/part-pending.parquet"),
-        &[100],
-    );
+    write_block_nums(&data.join(day(1)).join("part-pending.parquet"), &[100]);
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), ["block_range=100-110"]);
+    assert_eq!(partitions(&report, "open"), [day(1)]);
     assert!(report.findings[0]
         .error
         .as_deref()
         .unwrap()
         .contains("has no committed block yet"));
+}
+
+/// #652: a protected dataset from a pre-release build (semantic mapper epoch
+/// `v1`, whose partitions used another layout) cannot tell `verify` which
+/// partitions are open, so it is refused with the reason instead of guessed.
+#[test]
+fn a_pre_release_protected_root_is_refused_with_its_epoch() {
+    use crate::durable_state::{ControlKey, LocalStateStore};
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
+    protected_dataset(&root, &[&[100, 101]]);
+    super::super::block_on_async(async {
+        let ownership = DatasetOwnership::acquire(
+            "fixture",
+            vec![MutationScope::directory(root.to_string_lossy())],
+            None,
+        )
+        .await
+        .unwrap();
+        let store = LocalStateStore::new(&root, ownership.local().unwrap()).unwrap();
+        let record = store
+            .load::<AuthorityState>(ControlKey::State)
+            .unwrap()
+            .unwrap();
+        let mut legacy = record.payload.clone();
+        legacy.descriptor.mapper_epoch = "fireparq-mapping-v1".into();
+        store
+            .replace(ControlKey::State, &record.version, &legacy)
+            .unwrap();
+        ownership.release().await.unwrap();
+    });
+    let err = format!(
+        "{:#}",
+        verify_parquet(root.join("blocks").to_str().unwrap(), None, &base_opts()).unwrap_err()
+    );
+    assert!(
+        err.contains("semantic mapper epoch `fireparq-mapping-v1`")
+            && err.contains("date=YYYY-MM-DD"),
+        "{err}"
+    );
+    assert!(!root.join(default_registry()).exists());
 }
 
 #[test]
@@ -1170,7 +1228,10 @@ fn an_unreadable_legacy_cursor_leaves_every_partition_open() {
     let data = legacy_fixture(&root);
     std::fs::write(root.join("mainnet/cursor.parquet"), b"not parquet").unwrap();
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&report, "open"), ["day=1", "day=2"]);
+    assert_eq!(
+        partitions(&report, "open"),
+        ["date=2024-01-01", "date=2024-01-02"]
+    );
     assert!(report.warnings.iter().any(|w| w.contains("could not read")));
     assert!(!report.summary.wrote_registry);
     assert!(report.is_valid());
@@ -1191,8 +1252,10 @@ fn a_published_protocol_report_needs_every_file_it_read() {
         after_scan(move || rewrite(&hooked));
         verify_parquet(data.to_str().unwrap(), None, &opts).map(|_| ())
     };
-    let remove: fn(&Path) = |data| std::fs::remove_file(data.join("day=2/part-0.parquet")).unwrap();
-    let add: fn(&Path) = |data| write_block_nums(&data.join("day=1/part-1.parquet"), &[2]);
+    let remove: fn(&Path) =
+        |data| std::fs::remove_file(data.join("date=2024-01-02/part-0.parquet")).unwrap();
+    let add: fn(&Path) =
+        |data| write_block_nums(&data.join("date=2024-01-01/part-1.parquet"), &[2]);
     let err = format!("{:#}", run(remove, true).unwrap_err());
     assert!(err.contains("was removed"), "{err}");
     // Added files do not invalidate what was read.
@@ -1207,20 +1270,29 @@ fn a_partition_directory_or_file_is_recorded_under_its_own_partition() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let data = legacy_fixture(&root);
     let table = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&table, "missing_expected"), ["day=1", "day=2"]);
-    let partition =
-        verify_parquet(data.join("day=1").to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(partitions(&partition, "match"), ["day=1"]);
-    let file = verify_parquet(
-        data.join("day=2/part-0.parquet").to_str().unwrap(),
+    assert_eq!(
+        partitions(&table, "missing_expected"),
+        ["date=2024-01-01", "date=2024-01-02"]
+    );
+    let partition = verify_parquet(
+        data.join("date=2024-01-01").to_str().unwrap(),
         None,
         &base_opts(),
     )
     .unwrap();
-    assert_eq!(partitions(&file, "match"), ["day=2"]);
+    assert_eq!(partitions(&partition, "match"), ["date=2024-01-01"]);
+    let file = verify_parquet(
+        data.join("date=2024-01-02/part-0.parquet")
+            .to_str()
+            .unwrap(),
+        None,
+        &base_opts(),
+    )
+    .unwrap();
+    assert_eq!(partitions(&file, "match"), ["date=2024-01-02"]);
     assert_eq!(
         registry_partitions(&root.join("mainnet").join(default_registry())),
-        ["day=1", "day=2"]
+        ["date=2024-01-01", "date=2024-01-02"]
     );
 }
 
@@ -1246,12 +1318,12 @@ fn remote_reads_are_pinned_to_the_listed_object() {
     let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
     put_block_nums(
         store.as_ref(),
-        "mainnet/blocks/day=1/part-0.parquet",
+        "mainnet/blocks/date=2024-01-01/part-0.parquet",
         &[1, 2],
     );
     put_block_nums(
         store.as_ref(),
-        "mainnet/blocks/day=2/part-0.parquet",
+        "mainnet/blocks/date=2024-01-02/part-0.parquet",
         &[3, 4],
     );
 
@@ -1263,13 +1335,13 @@ fn remote_reads_are_pinned_to_the_listed_object() {
         .unwrap();
     put_block_nums(
         store.as_ref(),
-        "mainnet/blocks/day=1/part-0.parquet",
+        "mainnet/blocks/date=2024-01-01/part-0.parquet",
         &[1, 2, 2],
     );
     let scan = source.scan(&listing, &base_opts(), None).unwrap();
     assert_eq!(
         scan.vanished.keys().collect::<Vec<_>>(),
-        ["day=1"],
+        ["date=2024-01-01"],
         "the pinned read of the replaced object failed"
     );
 
@@ -1279,7 +1351,7 @@ fn remote_reads_are_pinned_to_the_listed_object() {
     at("before-scan", move || {
         put_block_nums(
             hooked.as_ref(),
-            "mainnet/blocks/day=1/part-0.parquet",
+            "mainnet/blocks/date=2024-01-01/part-0.parquet",
             &[1, 2, 2, 2],
         )
     });
@@ -1288,136 +1360,6 @@ fn remote_reads_are_pinned_to_the_listed_object() {
         verify_remote(&store, &roots_opts(&registry)).unwrap_err()
     );
     assert!(err.contains("changed while verify was reading"), "{err}");
-    assert!(err.contains("day=1"), "{err}");
+    assert!(err.contains("date=2024-01-01"), "{err}");
     assert!(!registry.exists());
-}
-
-#[test]
-fn an_unfinished_rollup_is_refused_without_recovering_anything() {
-    use crate::rollup::{run_rollup, RollupConfig, RollupTarget, ROLLUP_JOURNAL_FILE};
-    let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
-    let chain = root.join("mainnet");
-    let data = chain.join("blocks");
-    let day = data.join("year=2024/month=01/day=15");
-    let minute = day.join("hour=00/minute=00");
-    for (partition, blocks) in [
-        (minute.clone(), [1u64, 2]),
-        (day.join("hour=00/minute=01"), [3, 4]),
-    ] {
-        for (index, block) in blocks.iter().enumerate() {
-            write_block_nums(
-                &partition.join(format!("part-{:06}.parquet", index + 1)),
-                &[*block],
-            );
-        }
-    }
-    let config = RollupConfig {
-        source: chain.display().to_string(),
-        output: chain.display().to_string(),
-        target: RollupTarget::Date,
-        compression: crate::config::Compression::None,
-        flush_bytes: 0,
-        delete_source: true,
-        aws: None,
-        cache_control: String::new(),
-    };
-    // The in-place rollup dies after committing its output and before
-    // deleting any source: every row is there twice.
-    crate::merge_journal::INJECTED_CRASH
-        .with(|crash| *crash.borrow_mut() = Some("rollup-after-commit"));
-    let crashed = run_rollup(&config);
-    crate::merge_journal::INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
-    assert!(crashed.is_err());
-    assert!(day.join(ROLLUP_JOURNAL_FILE).is_file());
-    let before = tree(&data);
-
-    let registry = chain.join(default_registry());
-    let mut protocol_only = base_opts();
-    protocol_only.checks = vec![VerifyCheck::Protocol];
-    for (path, opts) in [
-        (data.clone(), base_opts()),
-        (data.clone(), protocol_only),
-        // A source partition below the target's journal, and one of its files.
-        (minute.clone(), base_opts()),
-        (minute.join("part-000001.parquet"), base_opts()),
-    ] {
-        let err = format!(
-            "{:#}",
-            verify_parquet(path.to_str().unwrap(), None, &opts).unwrap_err()
-        );
-        assert!(
-            err.contains("unfinished rollup"),
-            "{}: {err}",
-            path.display()
-        );
-        assert!(err.contains(ROLLUP_JOURNAL_FILE), "{err}");
-        assert!(err.contains("re-run the same `fireparq rollup`"), "{err}");
-        assert_eq!(tree(&data), before, "verify must not delete or add files");
-        assert!(!registry.exists());
-    }
-
-    // Re-running the same rollup finishes it; then verify records the day.
-    run_rollup(&config).unwrap();
-    assert!(!day.join(ROLLUP_JOURNAL_FILE).exists());
-    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert_eq!(
-        partitions(&report, "missing_expected"),
-        ["year=2024/month=01/day=15"]
-    );
-    assert!(report.summary.wrote_registry);
-}
-
-#[test]
-fn a_remote_rollup_journal_above_the_verified_prefix_is_refused() {
-    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    put_block_nums(
-        store.as_ref(),
-        "mainnet/blocks/day=15/hour=00/part-000001.parquet",
-        &[1, 2],
-    );
-    super::super::block_on_async(store.put(
-        &object_store::path::Path::from("mainnet/blocks/day=15/_fireparq_rollup.json"),
-        object_store::PutPayload::from_static(b"{}"),
-    ))
-    .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let opts = roots_opts(&dir.path().join("roots.parquet"));
-    for prefix in ["mainnet/blocks", "mainnet/blocks/day=15/hour=00"] {
-        let err = format!(
-            "{:#}",
-            super::super::verify_source(
-                &remote_source_at(store.clone(), prefix),
-                None,
-                &opts,
-                time::OffsetDateTime::now_utc(),
-                uuid::Uuid::new_v4().to_string(),
-            )
-            .unwrap_err()
-        );
-        assert!(err.contains("unfinished rollup"), "{prefix}: {err}");
-        assert!(
-            err.contains("s3://bucket/mainnet/blocks/day=15/_fireparq_rollup.json"),
-            "{err}"
-        );
-    }
-    assert!(!dir.path().join("roots.parquet").exists());
-}
-
-#[test]
-fn journal_ancestors_are_the_file_directory_and_the_partitions_above() {
-    use super::super::journal_ancestors;
-    assert_eq!(
-        journal_ancestors("/a/t/year=1/month=2/day=3", false),
-        ["/a/t/year=1/month=2", "/a/t/year=1"]
-    );
-    assert_eq!(journal_ancestors("/a/t/year=1", true), ["/a/t/year=1"]);
-    assert_eq!(
-        journal_ancestors("mainnet/blocks/day=15/hour=00", false),
-        ["mainnet/blocks/day=15"]
-    );
-    assert!(journal_ancestors("mainnet/blocks", false).is_empty());
-    assert_eq!(journal_ancestors("day=15/hour=00", false), ["day=15"]);
-    // A directory with `=` above the table does not count.
-    assert!(journal_ancestors("/x=y/mainnet/blocks", false).is_empty());
 }

@@ -1,8 +1,7 @@
 //! Merge small parquet part files within each partition into larger files.
 //!
-//! Unlike `rollup` which changes partition granularity (minute→hour→day),
-//! `merge` operates within each existing partition directory, consolidating
-//! many small parts into fewer larger files.
+//! `merge` operates within each existing `date=YYYY-MM-DD` partition directory,
+//! consolidating many small parts into fewer larger files.
 
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
@@ -98,9 +97,6 @@ pub struct MergeResult {
     pub merges_recovered: usize,
     /// Partitions another running merge was working on, left alone.
     pub partitions_in_use: Vec<String>,
-    /// Partitions left alone because an interrupted rollup of their directory must be
-    /// finished first.
-    pub rollups_pending: Vec<String>,
 }
 
 impl MergeResult {
@@ -123,12 +119,6 @@ impl MergeResult {
             println!(
                 "  In use by another merge: {}",
                 self.partitions_in_use.join(", ")
-            );
-        }
-        if !self.rollups_pending.is_empty() {
-            println!(
-                "  Waiting for an interrupted rollup: {}",
-                self.rollups_pending.join(", ")
             );
         }
         if !self.schema_mismatches.is_empty() {
@@ -339,13 +329,6 @@ fn merge_local_partitions(
         !reserved
     });
     all_files.sort();
-    let mut rollups = Vec::new();
-    discovery::collect_local(
-        root,
-        LocalPolicy::named(crate::rollup::ROLLUP_JOURNAL_FILE),
-        &mut rollups,
-    )?;
-    let rollup_dirs: Vec<&Path> = rollups.iter().filter_map(|path| path.parent()).collect();
 
     engine::for_each_partition(
         &root.display().to_string(),
@@ -354,7 +337,6 @@ fn merge_local_partitions(
         |dir, files, current_table| {
             let partition = LocalMerge {
                 label: local_partition_label(root, dir),
-                rollup_pending: rollup_dirs.iter().any(|rollup| dir.starts_with(rollup)),
                 dir,
                 files: LocalPartition::new(dir),
                 run,
@@ -377,23 +359,9 @@ fn record_partition_in_use(partition_label: &str, result: &mut MergeResult) {
     result.partitions_in_use.push(partition_label.to_string());
 }
 
-/// Reports a partition below an interrupted rollup, which that rollup must finish first.
-fn record_rollup_pending(partition_label: &str, result: &mut MergeResult) {
-    warn!(
-        partition = partition_label,
-        "not merging partition: an interrupted rollup must be finished first"
-    );
-    println!(
-        "  {partition_label}: skipped; an interrupted rollup must be finished first (run the same rollup again)"
-    );
-    result.partitions_skipped += 1;
-    result.rollups_pending.push(partition_label.to_string());
-}
-
 /// One local partition directory under the common directory guard and the legacy run lock.
 struct LocalMerge<'a> {
     label: String,
-    rollup_pending: bool,
     dir: &'a Path,
     files: LocalPartition,
     run: &'a RunContext,
@@ -484,7 +452,7 @@ impl engine::PartitionMerge for LocalMerge<'_> {
             let file = std::fs::File::open(file_path)
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-            encoder.write_reader(builder, publish, None)?;
+            encoder.write_reader(builder, publish)?;
         }
         Ok(())
     }
@@ -502,10 +470,6 @@ impl engine::PartitionMerge for LocalMerge<'_> {
 
     fn check_owner(&self) -> Result<()> {
         self.revalidate()
-    }
-
-    fn rollup_pending(&self) -> bool {
-        self.rollup_pending
     }
 
     fn delete_sources(&self, files: &[PathBuf], outputs: &[String]) -> Result<()> {
@@ -754,20 +718,6 @@ fn merge_s3_partitions(
 ) -> Result<()> {
     let prefix = s3.prefix;
     let objects = list_s3_objects(s3)?;
-    let rollup_dirs: Vec<String> = objects
-        .iter()
-        .filter(|obj| {
-            obj.location.filename() == Some(crate::rollup::ROLLUP_JOURNAL_FILE)
-                && !crate::artifacts::is_control_path(obj.location.as_ref())
-                && !is_reserved_artifact_path(relative_key(prefix, obj.location.as_ref()))
-        })
-        .map(|obj| {
-            obj.location
-                .as_ref()
-                .rsplit_once('/')
-                .map_or(String::new(), |(dir, _)| dir.to_string())
-        })
-        .collect();
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
@@ -798,13 +748,6 @@ fn merge_s3_partitions(
                 s3,
                 key: partition_key,
                 label,
-                rollup_pending: rollup_dirs.iter().any(|rollup| {
-                    rollup.is_empty()
-                        || partition_key == rollup
-                        || partition_key
-                            .strip_prefix(rollup.as_str())
-                            .is_some_and(|tail| tail.starts_with('/'))
-                }),
                 table: engine::table_of(label),
                 files: S3Partition {
                     client: s3.client,
@@ -843,7 +786,6 @@ struct S3PartitionMerge<'a> {
     s3: &'a S3Merge<'a>,
     key: &'a str,
     label: &'a str,
-    rollup_pending: bool,
     table: &'a str,
     files: S3Partition<'a>,
     config: &'a MergeConfig,
@@ -954,7 +896,7 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
             let data_window = read::objects(self.s3.client, window?)?;
             for data in data_window {
                 let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-                encoder.write_reader(builder, publish, None)?;
+                encoder.write_reader(builder, publish)?;
             }
         }
         Ok(())
@@ -989,10 +931,6 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
 
     fn check_owner(&self) -> Result<()> {
         self.assert_owner()
-    }
-
-    fn rollup_pending(&self) -> bool {
-        self.rollup_pending
     }
 
     fn delete_sources(
@@ -1205,7 +1143,7 @@ mod tests {
     #[test]
     fn test_merge_preserves_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
+        let partition = dir.path().join("blocks/date=2024-01-15");
         std::fs::create_dir_all(&partition).unwrap();
 
         let kvs = vec![
@@ -1264,7 +1202,7 @@ mod tests {
     #[test]
     fn test_merge_flushes_on_row_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
+        let partition = dir.path().join("blocks/date=2024-01-15");
         std::fs::create_dir_all(&partition).unwrap();
 
         for part_num in 1..=3 {
@@ -1301,7 +1239,7 @@ mod tests {
     #[test]
     fn test_merge_skips_partition_when_estimate_has_no_compaction_benefit() {
         let dir = tempfile::tempdir().unwrap();
-        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
+        let partition = dir.path().join("blocks/date=2024-01-15");
         std::fs::create_dir_all(&partition).unwrap();
 
         for part_num in 1..=3 {
@@ -1415,7 +1353,7 @@ mod tests {
         "_fireparq/other.parquet",
         "_fireparq/verify_runs/run-1/a.parquet",
     ];
-    const DAY: &str = "blocks/year=2024/month=01/date=15";
+    const DAY: &str = "blocks/date=2024-01-15";
 
     fn test_merge_config(path: &str) -> MergeConfig {
         MergeConfig {
@@ -1654,8 +1592,8 @@ mod tests {
     #[test]
     fn test_merge_skips_partition_with_reordered_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let mixed = dir.path().join("blocks/year=2024/month=01/date=15");
-        let healthy = dir.path().join("blocks/year=2024/month=01/date=16");
+        let mixed = dir.path().join("blocks/date=2024-01-15");
+        let healthy = dir.path().join("blocks/date=2024-01-16");
         write_columns_file(&mixed.join("part-000001.parquet"), &[("a", 1), ("b", 10)]);
         write_columns_file(&mixed.join("part-000002.parquet"), &[("b", 20), ("a", 2)]);
         write_columns_file(&healthy.join("part-000001.parquet"), &[("a", 3), ("b", 30)]);
@@ -1667,7 +1605,7 @@ mod tests {
         assert_eq!(result.partitions_merged, 1);
         assert_eq!(result.schema_mismatches.len(), 1, "{result:?}");
         let mismatch = &result.schema_mismatches[0];
-        assert!(mismatch.contains("date=15"), "{mismatch}");
+        assert!(mismatch.contains("date=2024-01-15"), "{mismatch}");
         assert!(
             mismatch.contains("part-000002.parquet does not match part-000001.parquet"),
             "{mismatch}"
@@ -1685,7 +1623,7 @@ mod tests {
     #[test]
     fn test_merge_skips_partition_with_extra_column() {
         let dir = tempfile::tempdir().unwrap();
-        let mixed = dir.path().join("blocks/year=2024/month=01/date=15");
+        let mixed = dir.path().join("blocks/date=2024-01-15");
         write_columns_file(&mixed.join("part-000001.parquet"), &[("a", 1), ("b", 10)]);
         write_columns_file(
             &mixed.join("part-000002.parquet"),
@@ -1705,7 +1643,7 @@ mod tests {
     #[test]
     fn test_merge_dry_run_reports_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
-        let mixed = dir.path().join("blocks/year=2024/month=01/date=15");
+        let mixed = dir.path().join("blocks/date=2024-01-15");
         write_columns_file(&mixed.join("part-000001.parquet"), &[("a", 1), ("b", 10)]);
         write_columns_file(&mixed.join("part-000002.parquet"), &[("b", 20), ("a", 2)]);
 
@@ -1720,8 +1658,8 @@ mod tests {
     #[test]
     fn test_merge_s3_skips_partition_with_mixed_schemas() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mixed = "evm/blocks/year=2024/month=01/date=15";
-        let healthy = "evm/blocks/year=2024/month=01/date=16";
+        let mixed = "evm/blocks/date=2024-01-15";
+        let healthy = "evm/blocks/date=2024-01-16";
         let put = |key: String, columns: &[(&str, u64)]| {
             put_object(&store, &key, parquet_bytes(&make_columns_batch(columns)));
         };
@@ -1807,7 +1745,7 @@ mod tests {
         }
     }
 
-    const CRASH_PARTITION: &str = "blocks/year=2024/month=01/day=15";
+    const CRASH_PARTITION: &str = "blocks/date=2024-01-15";
 
     fn make_range_batch(start: u64, rows: u64) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -2376,11 +2314,14 @@ mod tests {
     #[test]
     fn local_and_s3_merges_publish_identical_parts() {
         let layout: &[(&str, &[(u64, u64)])] = &[
-            ("blocks/day=01", &[(0, 400), (400, 350), (750, 600)]),
-            ("blocks/day=02", &[(2000, 10), (2010, 20)]),
-            ("blocks/day=03", &[(3000, 50)]),
             (
-                "logs/day=01",
+                "blocks/date=2024-01-01",
+                &[(0, 400), (400, 350), (750, 600)],
+            ),
+            ("blocks/date=2024-01-02", &[(2000, 10), (2010, 20)]),
+            ("blocks/date=2024-01-03", &[(3000, 50)]),
+            (
+                "logs/date=2024-01-01",
                 &[(0, 900), (900, 900), (1800, 100), (1900, 5)],
             ),
         ];
@@ -2466,7 +2407,7 @@ mod tests {
     #[test]
     fn s3_bucket_root_dataset_merges_tables_and_leaves_root_artifacts() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let partition = "blocks/year=2023/month=11/day=14";
+        let partition = "blocks/date=2023-11-14";
         for part in 0..2u64 {
             put_object(
                 &store,
@@ -2476,7 +2417,7 @@ mod tests {
         }
         put_object(
             &store,
-            "logs/year=2023/month=11/day=14/part-v1-0.parquet",
+            "logs/date=2023-11-14/part-v1-0.parquet",
             parquet_bytes(&make_range_batch(100, 5)),
         );
         // Parquet-named artifacts that would merge together if they were
@@ -2550,8 +2491,8 @@ mod tests {
     #[test]
     fn test_merge_skips_partition_with_different_value_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let mixed = dir.path().join("blocks/year=2024/month=01/day=15");
-        let healthy = dir.path().join("blocks/year=2024/month=01/day=16");
+        let mixed = dir.path().join("blocks/date=2024-01-15");
+        let healthy = dir.path().join("blocks/date=2024-01-16");
         std::fs::create_dir_all(&mixed).unwrap();
         std::fs::create_dir_all(&healthy).unwrap();
         write_test_parquet_with_metadata(
@@ -2597,7 +2538,7 @@ mod tests {
     #[test]
     fn test_merge_s3_skips_partition_with_different_value_metadata() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mixed = "evm/blocks/year=2024/month=01/day=15";
+        let mixed = "evm/blocks/date=2024-01-15";
         for (part, encoding) in [(1u64, "hex"), (2, "base58")] {
             put_object(
                 &store,

@@ -60,13 +60,63 @@ fn metadata() -> BlockMetadata {
         max_timestamp: Some(-1),
     }
 }
-fn plan(
-    table: &str,
-    index: u32,
-    batch: &RecordBatch,
-    partition: &Partition,
-    metadata: &BlockMetadata,
-) -> PlannedPart {
+/// `batch` routed to one `date=` partition, for encoding tests of arbitrary
+/// schemas: a canonical `timestamp` column is appended when missing (every
+/// row at 2023-11-14T22:13:20Z), a `date` column is set to the UTC day of its
+/// row's time, and the metadata spans the rows' times.
+fn routed(batch: RecordBatch) -> (RecordBatch, BlockMetadata) {
+    const SECONDS: i64 = 1_700_000_000;
+    let schema = batch.schema();
+    let mut fields = schema.fields().to_vec();
+    let mut columns = batch.columns().to_vec();
+    let time_index = schema.index_of("timestamp").unwrap_or_else(|_| {
+        fields.push(Arc::new(Field::new(
+            "timestamp",
+            crate::traits::timestamp_millis_utc_type(),
+            false,
+        )));
+        columns.push(Arc::new(
+            TimestampMillisecondArray::from(vec![SECONDS * 1_000; batch.num_rows()])
+                .with_timezone("UTC"),
+        ));
+        fields.len() - 1
+    });
+    let seconds: Vec<Option<i64>> = columns[time_index]
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .expect("canonical timestamp")
+        .iter()
+        .map(|millis| millis.map(|millis| millis.div_euclid(1_000)))
+        .collect();
+    if let Ok(date_index) = schema.index_of("date") {
+        columns[date_index] = Arc::new(arrow::array::Date32Array::from(
+            seconds
+                .iter()
+                .map(|time| {
+                    time.map(|time| crate::traits::date32_from_timestamp_seconds(time).unwrap())
+                })
+                .collect::<Vec<_>>(),
+        ));
+    }
+    let blocks: Vec<u64> = columns[0]
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .map(|blocks| blocks.iter().flatten().collect())
+        .unwrap_or_default();
+    let metadata = BlockMetadata {
+        min_block_number: blocks.iter().copied().min().unwrap_or_default(),
+        max_block_number: blocks.iter().copied().max().unwrap_or_default(),
+        min_timestamp: seconds.iter().flatten().copied().min().or(Some(SECONDS)),
+        max_timestamp: seconds.iter().flatten().copied().max().or(Some(SECONDS)),
+    };
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
+        columns,
+    )
+    .unwrap();
+    (batch, metadata)
+}
+fn plan(table: &str, index: u32, batch: &RecordBatch, metadata: &BlockMetadata) -> PlannedPart {
     let mut plan = PlannedPart {
         table: table.into(),
         final_relative_path: String::new(),
@@ -79,14 +129,14 @@ fn plan(
         entry_index: index,
         row_count: batch.num_rows() as u64,
     };
-    let writer = ParquetTableWriter::new(PathBuf::new(), partition.clone(), Compression::Zstd);
+    let writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
     let directory = writer.partition_suffix(table, metadata).unwrap();
     plan.final_relative_path = format!("{directory}/{}", final_name(&plan));
     plan.temporary_relative_path = format!("{directory}/{}", temporary_name(&plan));
     plan
 }
-fn prepare(data: RecordBatch, partition: Partition, metadata: BlockMetadata) -> PreparedFlush {
-    let plan = plan("blocks", 0, &data, &partition, &metadata);
+fn prepare(data: RecordBatch, metadata: BlockMetadata) -> PreparedFlush {
+    let plan = plan("blocks", 0, &data, &metadata);
     PreparedFlush::new(
         HashMap::from([("blocks".into(), data)]),
         &BTreeMap::from([
@@ -94,7 +144,6 @@ fn prepare(data: RecordBatch, partition: Partition, metadata: BlockMetadata) -> 
             ("zero_rows".into(), plan.schema_sha256.clone()),
         ]),
         vec![plan],
-        partition,
         metadata,
         Compression::Zstd,
         ParquetFileMetadata::new(),
@@ -102,9 +151,7 @@ fn prepare(data: RecordBatch, partition: Partition, metadata: BlockMetadata) -> 
     .unwrap()
 }
 fn encoded() -> EncodedPart {
-    prepare(data(), Partition::Date, metadata())
-        .encode(0, None)
-        .unwrap()
+    prepare(data(), metadata()).encode(0, None).unwrap()
 }
 
 #[test]
@@ -158,8 +205,8 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
         vec![Some(-1_000), Some(86_400_000), Some(-2_000)],
     );
     let parts = vec![
-        plan("aaa", 0, &valid, &Partition::Date, &metadata()),
-        plan("zzz", 1, &invalid, &Partition::Date, &metadata()),
+        plan("aaa", 0, &valid, &metadata()),
+        plan("zzz", 1, &invalid, &metadata()),
     ];
     let inventory = BTreeMap::from([
         ("aaa".into(), parts[0].schema_sha256.clone()),
@@ -170,7 +217,6 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
         batches,
         &inventory,
         parts.clone(),
-        Partition::Date,
         metadata(),
         Compression::Zstd,
         ParquetFileMetadata::new(),
@@ -216,7 +262,6 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
                 batches,
                 &inventory,
                 plans,
-                Partition::Date,
                 metadata(),
                 Compression::Zstd,
                 ParquetFileMetadata::new()
@@ -236,7 +281,6 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
         good_batches,
         &inventory,
         parts,
-        Partition::Date,
         metadata(),
         Compression::Zstd,
         ParquetFileMetadata::new()
@@ -246,7 +290,7 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
 
 #[test]
 fn encoding_is_repeatable_retains_all_batches_and_roundtrips_negative_nullable_times() {
-    let flush = prepare(data(), Partition::Date, metadata());
+    let flush = prepare(data(), metadata());
     let one = flush.encode(0, None).unwrap();
     let two = flush.encode(0, None).unwrap();
     assert_eq!(one.bytes, two.bytes);
@@ -265,23 +309,19 @@ fn encoding_is_repeatable_retains_all_batches_and_roundtrips_negative_nullable_t
         arrow::compute::concat_batches(&data().schema(), &actual).unwrap(),
         data()
     );
-    let mut metadata = metadata();
-    metadata.min_timestamp = None;
-    metadata.max_timestamp = None;
+    // Null payload times use the metadata's routing anchor; without one there
+    // is no date partition to plan.
     let nullable = batch(&[11, 10], vec![None, None]);
-    let flat = prepare(nullable.clone(), Partition::Date, metadata.clone());
-    assert!(flat.parts()[0]
+    let anchored = prepare(nullable.clone(), metadata());
+    assert!(anchored.parts()[0]
         .final_relative_path
-        .starts_with("blocks/part-v1-"));
-    let numeric = prepare(
-        nullable,
-        Partition::BlockRange {
-            size: 10,
-            start_block: Some(10),
-        },
-        metadata,
-    );
-    assert!(numeric.encode(0, None).is_ok());
+        .starts_with("blocks/date=1969-12-31/part-v1-"));
+    assert!(anchored.encode(0, None).is_ok());
+    let mut unrouted = metadata();
+    unrouted.min_timestamp = None;
+    unrouted.max_timestamp = None;
+    let writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
+    assert!(writer.partition_suffix("blocks", &unrouted).is_err());
 }
 
 #[test]
@@ -293,8 +333,8 @@ fn part_indices_include_declared_zero_row_tables_before_and_between_parts() {
         .map(|table| (table.to_owned(), digest.clone()))
         .collect();
     let parts = vec![
-        plan("blocks", 1, &data, &Partition::Date, &metadata()),
-        plan("transactions", 3, &data, &Partition::Date, &metadata()),
+        plan("blocks", 1, &data, &metadata()),
+        plan("transactions", 3, &data, &metadata()),
     ];
     let flush = PreparedFlush::new(
         HashMap::from([
@@ -303,7 +343,6 @@ fn part_indices_include_declared_zero_row_tables_before_and_between_parts() {
         ]),
         &inventory,
         parts,
-        Partition::Date,
         metadata(),
         Compression::Zstd,
         ParquetFileMetadata::new(),
@@ -322,14 +361,13 @@ fn part_indices_include_declared_zero_row_tables_before_and_between_parts() {
 #[test]
 fn reserved_footer_and_foreign_parquet_or_receipt_are_rejected() {
     let data = data();
-    let plan = plan("blocks", 0, &data, &Partition::Date, &metadata());
+    let plan = plan("blocks", 0, &data, &metadata());
     let mut footer = ParquetFileMetadata::new();
     footer.add("fireparq.ingest.stream_id", "injected");
     assert!(PreparedFlush::new(
         HashMap::from([("blocks".into(), data)]),
         &BTreeMap::from([("blocks".into(), plan.schema_sha256.clone())]),
         vec![plan],
-        Partition::Date,
         metadata(),
         Compression::Zstd,
         footer
@@ -363,7 +401,8 @@ fn historical_rich_arrow_schema_roundtrips_with_exact_digest_and_values() {
         .unwrap();
     let batches: Vec<_> = reader.map(|batch| batch.unwrap()).collect();
     let batch = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
-    let flush = prepare(batch.clone(), Partition::None, metadata());
+    let (batch, metadata) = routed(batch);
+    let flush = prepare(batch.clone(), metadata);
     let encoded = flush.encode(0, None).unwrap();
     verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).unwrap();
     let actual: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(encoded.bytes)
@@ -408,9 +447,8 @@ fn multiple_and_nested_dictionary_fields_survive_physical_schema_verification() 
         ],
     )
     .unwrap();
-    let encoded = prepare(batch.clone(), Partition::None, metadata())
-        .encode(0, None)
-        .unwrap();
+    let (batch, metadata) = routed(batch);
+    let encoded = prepare(batch.clone(), metadata).encode(0, None).unwrap();
     verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).unwrap();
     let actual: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(encoded.bytes)
         .unwrap()
@@ -844,13 +882,13 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
             ],
         )
         .unwrap();
-        let protected = prepare(batch.clone(), Partition::None, metadata())
+        let (batch, metadata) = routed(batch);
+        let protected = prepare(batch.clone(), metadata.clone())
             .encode(0, None)
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        let mut legacy =
-            ParquetTableWriter::new(directory.path(), Partition::None, Compression::Zstd);
-        let (path, _) = legacy.write_batch("blocks", &batch, &metadata()).unwrap();
+        let mut legacy = ParquetTableWriter::new(directory.path(), Compression::Zstd);
+        let (path, _) = legacy.write_batch("blocks", &batch, &metadata).unwrap();
         for (bytes, is_protected) in [
             (protected.bytes.clone(), true),
             (Bytes::from(std::fs::read(path).unwrap()), false),
@@ -892,7 +930,7 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
 
 #[test]
 fn native_spool_preserves_small_part_bytes_schema_rows_and_receipt() {
-    let prepared = prepare(data(), Partition::Date, metadata());
+    let prepared = prepare(data(), metadata());
     let memory = prepared.encode(0, None).unwrap();
     let native = prepared.encode_spooled(0, None).unwrap();
     assert!(native.bytes.is_empty());
@@ -922,9 +960,7 @@ fn native_spool_preserves_small_part_bytes_schema_rows_and_receipt() {
 
 #[test]
 fn native_spool_rejects_bad_receipt_and_bounded_footer_before_parsing() {
-    let encoded = prepare(data(), Partition::Date, metadata())
-        .encode_spooled(0, None)
-        .unwrap();
+    let encoded = prepare(data(), metadata()).encode_spooled(0, None).unwrap();
     let file = encoded.spool.as_ref().unwrap();
     let mut receipt = encoded.receipt.clone();
     receipt.sha256 = "f".repeat(64);
@@ -967,17 +1003,8 @@ fn native_spool_roundtrips_retained_parquet58_types_without_value_or_schema_chan
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
-    let input = concat_batches(&schema, &batches).unwrap();
-    let prepared = prepare(
-        input.clone(),
-        Partition::None,
-        BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 102,
-            min_timestamp: Some(1_700_000_000),
-            max_timestamp: Some(1_700_000_002),
-        },
-    );
+    let (input, metadata) = routed(concat_batches(&schema, &batches).unwrap());
+    let prepared = prepare(input.clone(), metadata);
     let encoded = prepared.encode_spooled(0, None).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
     // Default readers merge operational footer keys into schema metadata;

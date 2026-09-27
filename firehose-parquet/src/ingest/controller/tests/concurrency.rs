@@ -37,6 +37,7 @@ fn payload(table: &str, row: usize, len: usize) -> Vec<u8> {
 fn batches(tables: &[(&str, usize, usize)]) -> HashMap<String, RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("block_num", DataType::UInt64, false),
+        fixture_timestamp(0).0,
         Field::new("payload", DataType::Binary, false),
     ]));
     tables
@@ -50,6 +51,7 @@ fn batches(tables: &[(&str, usize, usize)]) -> HashMap<String, RecordBatch> {
                     schema.clone(),
                     vec![
                         Arc::new(UInt64Array::from(numbers)),
+                        fixture_timestamp(*rows).1,
                         Arc::new(BinaryArray::from_iter_values(values.iter())),
                     ],
                 )
@@ -63,9 +65,8 @@ fn descriptor_for(
     output: StorageIdentity,
     data: &HashMap<String, RecordBatch>,
 ) -> StreamDescriptor {
-    let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = output;
-    descriptor.partition = PartitionPolicy::None;
     descriptor.tables = data
         .iter()
         .map(|(table, batch)| {
@@ -747,7 +748,7 @@ async fn s3_replay_benchmark() {
             for ordinal in controller.authority().checkpoint.ordinal + 1..=*last {
                 let received = frontier.receive(event(26_049_574 + ordinal, 1)).unwrap();
                 frontier
-                    .accept(received, routing(RoutingPolicy::DirectV1))
+                    .accept(received, routing(RoutingPolicy::GenesisLookaheadV1))
                     .unwrap();
             }
             let committed = controller
@@ -757,8 +758,8 @@ async fn s3_replay_benchmark() {
                     BlockMetadata {
                         min_block_number: 26_049_574 + first,
                         max_block_number: 26_049_574 + last,
-                        min_timestamp: None,
-                        max_timestamp: None,
+                        min_timestamp: Some(FIXTURE_SECONDS),
+                        max_timestamp: Some(FIXTURE_SECONDS),
                     },
                     Compression::Zstd,
                     ParquetFileMetadata::new(),

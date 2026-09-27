@@ -32,7 +32,6 @@ fn config(output: &Path) -> Config {
     Config {
         output: output.into(),
         start_block: Some(100),
-        partition: Partition::None,
         final_blocks_only: true,
         ..Default::default()
     }
@@ -124,7 +123,7 @@ async fn session_refuses_coexisting_journals_before_either_physical_recovery() {
             table: "blocks".into(),
             rows: 1,
             schema_sha256: authority.descriptor.tables["blocks"].clone(),
-            partition: String::new(),
+            partition: crate::ingest::state::tests::FIXTURE_DATE.into(),
         }],
         PartCompression::Zstd,
     )
@@ -140,7 +139,10 @@ async fn session_refuses_coexisting_journals_before_either_physical_recovery() {
 
     // Separately create a recoverable legacy merge which would delete its new
     // duplicate. It is bound to this exact protected stream.
-    let partition = config.output.join("blocks");
+    let partition = config
+        .output
+        .join("blocks")
+        .join(crate::ingest::state::tests::FIXTURE_DATE);
     fs::write(partition.join("part-000001.parquet"), b"original").unwrap();
     fs::write(
         partition.join("part-000002.parquet"),

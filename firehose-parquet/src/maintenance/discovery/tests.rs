@@ -41,10 +41,9 @@ type Legacy = fn(&Path, &mut Vec<PathBuf>) -> std::io::Result<()>;
 /// Every policy against its frozen walker(s): same error kind/message, same
 /// append order and same selection (callers sort afterwards; order is native).
 fn compare(root: &Path) {
-    let cases: [(&str, LocalPolicy<'_>, Legacy); 5] = [
+    let cases: [(&str, LocalPolicy<'_>, Legacy); 4] = [
         ("merge", LocalPolicy::MUTATION_PARQUET, legacy_merge),
         ("truncate", LocalPolicy::MUTATION_PARQUET, legacy_truncate),
-        ("rollup", LocalPolicy::PARQUET, legacy_rollup),
         ("cli", LocalPolicy::PARQUET, legacy_cli),
         ("verify", LocalPolicy::VERIFY_PARQUET, legacy_verify),
     ];
@@ -141,10 +140,10 @@ fn journal_discovery_prunes_the_artifact_directory() {
     for name in [
         "_fireparq/partitions.parquet",
         "_fireparq/_fireparq_merge.json",
-        "_fireparq/verify_runs/run/_fireparq_rollup.json",
-        "blocks/day=1/part.parquet",
-        "blocks/day=1/_fireparq_merge.json",
-        "blocks/day=2/_fireparq_rollup.json",
+        "_fireparq/verify_runs/run/_fireparq_other.json",
+        "blocks/date=2024-01-01/part.parquet",
+        "blocks/date=2024-01-01/_fireparq_merge.json",
+        "blocks/date=2024-01-02/_fireparq_other.json",
     ] {
         write(root.path(), name);
     }
@@ -155,13 +154,13 @@ fn journal_discovery_prunes_the_artifact_directory() {
         files,
         [
             root.path().join("_fireparq/partitions.parquet"),
-            root.path().join("blocks/day=1/part.parquet"),
+            root.path().join("blocks/date=2024-01-01/part.parquet"),
         ]
     );
     let mut journals = vec![];
     collect_local(
         root.path(),
-        LocalPolicy::named_any(&["_fireparq_merge.json", "_fireparq_rollup.json"]),
+        LocalPolicy::named_any(&["_fireparq_merge.json", "_fireparq_other.json"]),
         &mut journals,
     )
     .unwrap();
@@ -169,8 +168,10 @@ fn journal_discovery_prunes_the_artifact_directory() {
     assert_eq!(
         journals,
         [
-            root.path().join("blocks/day=1/_fireparq_merge.json"),
-            root.path().join("blocks/day=2/_fireparq_rollup.json"),
+            root.path()
+                .join("blocks/date=2024-01-01/_fireparq_merge.json"),
+            root.path()
+                .join("blocks/date=2024-01-02/_fireparq_other.json"),
         ]
     );
     // Rooted at the artifact directory itself, nothing below it is pruned.
@@ -271,7 +272,7 @@ fn native_permission_errors_are_not_silently_dropped() {
 
 #[test]
 fn relative_key_matches_each_inlined_s3_copy() {
-    // Frozen from merge.rs relative_s3_key, rollup S3Root::relative, truncate_s3,
+    // Frozen from merge.rs relative_s3_key, truncate_s3,
     // validate_parquet_s3 and scan_s3_display_key (non-exact branch).
     fn legacy(prefix: &str, key: &str) -> String {
         key.strip_prefix(prefix)
@@ -357,10 +358,10 @@ fn named_any_selects_exactly_the_union_of_its_single_name_walks() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     for relative in [
-        "t/day=1/_a.json",
-        "t/day=1/hour=2/_b.json",
-        "t/day=2/_a.json.bak",
-        "t/day=2/part.parquet",
+        "t/date=2024-01-01/_a.json",
+        "t/date=2024-01-01/nested/_b.json",
+        "t/date=2024-01-02/_a.json.bak",
+        "t/date=2024-01-02/part.parquet",
         "t/.fireparq-ingest/_a.json",
     ] {
         write(root, relative);
@@ -463,20 +464,6 @@ fn legacy_truncate(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
         if path.is_dir() {
             legacy_truncate(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-// rollup.rs collect_parquet_files_recursive
-fn legacy_rollup(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            legacy_rollup(&path, out)?;
         } else if path.extension().is_some_and(|ext| ext == "parquet") {
             out.push(path);
         }

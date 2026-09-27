@@ -1,4 +1,4 @@
-//! Common Parquet schema and encoding mechanics for merge and rollup.
+//! Common Parquet schema and encoding mechanics for merge.
 //! Storage acquisition, discovery, journals, publication and deletion remain with callers.
 use crate::config::Compression;
 use anyhow::{Context, Result};
@@ -129,8 +129,8 @@ impl StreamingPartWriter {
 /// Describes how `other` differs from `reference`, or returns `None` when both have the same
 /// columns (name, type, and nullability) in the same order.
 ///
-/// Arrow writers and `concat_batches` pair columns by position, so merge and rollup only
-/// combine files when this returns `None`; otherwise columns would be dropped or swapped.
+/// Arrow writers and `concat_batches` pair columns by position, so merge only combines
+/// files when this returns `None`; otherwise columns would be dropped or swapped.
 pub(crate) fn describe_schema_mismatch(reference: &Schema, other: &Schema) -> Option<String> {
     let same_field = |a: &Field, b: &Field| {
         a.name() == b.name() && a.data_type() == b.data_type() && a.is_nullable() == b.is_nullable()
@@ -194,15 +194,9 @@ pub(crate) fn describe_schema_mismatch(reference: &Schema, other: &Schema) -> Op
     Some(problems.join("; "))
 }
 
-/// Footer key marking a rollup output written without `--delete-source`: a copy of rows
-/// whose sources were kept, which the next copy rollup of the same target replaces. It is
-/// a value key, so merge never combines copies with other files and keeps the marker on
-/// the files it writes from them.
-pub(crate) const ROLLUP_COPY_KEY: &str = "firehose-parquet.rollup_copy";
-
 /// Footer metadata keys that define what a file's values mean: its chain, the byte and
 /// block-id encodings, vote and failed-transaction coverage, synthetic timestamps, the
-/// stream mode, and whether it is a rollup copy. Files that disagree on any of them are
+/// and the stream mode. Files that disagree on any of them are
 /// never combined, even when their columns match, because the combined file could only
 /// carry one of the labels. A key present in one file and absent in another is a
 /// disagreement.
@@ -217,30 +211,7 @@ pub(crate) const VALUE_METADATA_KEYS: &[&str] = &[
     "firehose-parquet.extended",
     "firehose-parquet.final_blocks_only",
     "firehose-parquet.include_failed_transactions",
-    ROLLUP_COPY_KEY,
 ];
-
-/// Whether footer metadata carries the rollup copy marker.
-pub(crate) fn is_rollup_copy(metadata: Option<&[KeyValue]>) -> bool {
-    metadata.is_some_and(|kvs| {
-        kvs.iter()
-            .any(|kv| kv.key == ROLLUP_COPY_KEY && kv.value.as_deref() == Some("true"))
-    })
-}
-
-/// `metadata` with the rollup copy marker set.
-pub(crate) fn with_rollup_copy_marker(metadata: Option<Vec<KeyValue>>) -> Vec<KeyValue> {
-    let mut kvs: Vec<KeyValue> = metadata
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|kv| kv.key != ROLLUP_COPY_KEY)
-        .collect();
-    kvs.push(KeyValue::new(
-        ROLLUP_COPY_KEY.to_string(),
-        "true".to_string(),
-    ));
-    kvs
-}
 
 /// Values of [`VALUE_METADATA_KEYS`], in order; `None` when a key is absent.
 fn value_metadata(metadata: Option<&[KeyValue]>) -> Vec<Option<String>> {
@@ -360,8 +331,7 @@ pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBat
 }
 
 /// Merge captures the first available footer only until a nonempty batch
-/// initializes its writer. Rollup instead supplies its first-file preflight
-/// schema/metadata up front, including an empty first file.
+/// initializes its writer.
 struct DeferredStart {
     compression: Compression,
     flush_bytes: u64,
@@ -394,32 +364,11 @@ impl Encoder {
         }
     }
 
-    pub(crate) fn rollup(
-        schema: SchemaRef,
-        compression: Compression,
-        metadata: Option<&[KeyValue]>,
-        flush_bytes: u64,
-    ) -> Self {
-        let props = writer_properties(compression, schema.as_ref(), metadata);
-        Self {
-            deferred: None,
-            writer: Some(StreamingPartWriter::new(
-                schema,
-                props,
-                flush_bytes,
-                None,
-                0,
-            )),
-        }
-    }
-
-    /// Process one source reader in its existing batch order. Rollup passes its
-    /// checked group-row counter; merge retains its existing writer-only counts.
+    /// Process one source reader in its existing batch order.
     pub(crate) fn write_reader<R: ChunkReader + 'static, F>(
         &mut self,
         builder: ParquetRecordBatchReaderBuilder<R>,
         publish: &mut F,
-        mut rollup_rows: Option<&mut usize>,
     ) -> Result<()>
     where
         F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
@@ -435,11 +384,6 @@ impl Encoder {
         }
         for batch in builder.build()? {
             let batch = strip_transaction_metadata(batch?)?;
-            if let Some(rows) = rollup_rows.as_deref_mut() {
-                *rows = rows
-                    .checked_add(batch.num_rows())
-                    .context("rollup row count overflow")?;
-            }
             if batch.num_rows() == 0 {
                 continue;
             }

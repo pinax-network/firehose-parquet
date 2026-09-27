@@ -5,7 +5,7 @@ use anyhow::{ensure, Context, Result};
 use blocks::{evm::mapper::EvmBlockMapper, solana::mapper::SolanaBlockMapper};
 use clap::Parser;
 use firehose_parquet::{
-    config::{BlockMetadata, Compression, Partition},
+    config::{BlockMetadata, Compression},
     encode::EncodeBytes,
     flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger},
     traits::{BlockIdentity, BlockMapper, StreamEvent},
@@ -175,7 +175,7 @@ fn main() -> Result<()> {
         ))
     };
     let output = tempfile::tempdir()?;
-    let mut writer = ParquetTableWriter::new(output.path(), Partition::None, Compression::Zstd);
+    let mut writer = ParquetTableWriter::new(output.path(), Compression::Zstd);
     let mut windows = Vec::new();
     let mut sizing = FlushSizing::new(args.target, args.memory)?;
     let mut blocks_in_window = 0;
@@ -228,8 +228,8 @@ fn main() -> Result<()> {
                 &BlockMetadata {
                     min_block_number: min_block,
                     max_block_number: max_block,
-                    min_timestamp: None,
-                    max_timestamp: None,
+                    min_timestamp: Some(identity.timestamp),
+                    max_timestamp: Some(identity.timestamp),
                 },
             )?;
             ensure!(

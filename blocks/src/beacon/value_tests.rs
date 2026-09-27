@@ -1,7 +1,7 @@
 //! Value semantics that must survive mapping, flushing, and Parquet round trips.
 use super::*;
 use arrow::datatypes::DataType;
-use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+use firehose_parquet::config::{BlockMetadata, Compression};
 use firehose_parquet::encode::encode_bytes;
 use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
 
@@ -25,12 +25,12 @@ fn map(block: &beacon::Block, encoding: EncodeBytes) -> HashMap<String, RecordBa
 
 fn round_trip(table: &str, batch: &RecordBatch) {
     let dir = tempfile::tempdir().unwrap();
-    let mut writer = ParquetTableWriter::new(dir.path(), Partition::None, Compression::Zstd);
+    let mut writer = ParquetTableWriter::new(dir.path(), Compression::Zstd);
     let metadata = BlockMetadata {
         min_block_number: 0,
         max_block_number: 0,
-        min_timestamp: None,
-        max_timestamp: None,
+        min_timestamp: Some(1_700_000_000),
+        max_timestamp: Some(1_700_000_000),
     };
     let (path, _) = writer.write_batch(table, batch, &metadata).unwrap();
     let batches = read_parquet(&path).unwrap();

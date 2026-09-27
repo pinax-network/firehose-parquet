@@ -8,27 +8,23 @@
 
 use crate::artifacts::{is_control_path, is_reserved_artifact_path};
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
-use crate::config::{DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::dataset_lock::DatasetOwnership;
+use crate::date_partition::{is_date_value_pattern, DatePartition, DATE_KEY};
 use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::maintenance::discovery::{self, LocalPolicy};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// How many matched files the summary lists before "... and N more".
 const SUMMARY_LISTED_FILES: usize = 10;
 
-/// Group name shared by all partition-path filters (`year=2026/month=01`).
-const PATH_FILTER_GROUP: &str = "/";
-
 /// Configuration for a truncate operation.
 pub struct TruncateConfig {
     pub path: String,
-    /// Partition filters (e.g. "day=01", "month=01", or "year=2026/month=01/day=15").
-    /// Empty = delete all.
+    /// Partition filters: `date=` values or globs (e.g. "date=2026-01-15" or
+    /// "date=2026-01-*"). Empty = delete all.
     pub partitions: Vec<String>,
     pub dry_run: bool,
     /// Delete the matched files. Without it (and without `dry_run`), truncate prints a summary
@@ -92,20 +88,17 @@ pub fn run_truncate(config: &TruncateConfig) -> Result<TruncateResult> {
 // Partition filters
 // ---------------------------------------------------------------------------
 
-/// Parsed `--partition` filters.
+/// Parsed `--partition` filters: `date=` values of the `date=YYYY-MM-DD` partitions, the
+/// only partition key (#652).
 ///
-/// Filters on different keys must all match (AND), and filters on the same key match when
-/// any of them does (OR): `-p year=2026 -p month=01` selects January 2026 only, and
-/// `-p day=01 -p day=02` selects both days. A filter containing `/`, such as
-/// `year=2026/month=01/day=15`, is a partition path: it matches files whose partition
-/// directories (the `key=value` directories below the truncate path) start with exactly those
-/// segments. Several path filters match when any of them does, and must also satisfy the
-/// single-key filters. A bare key (`minute`) matches every value of that key, and each segment
-/// may contain one `*` glob. `day=` and the legacy `date=` key are aliases.
+/// A filter is a date (`date=2026-01-15`) or a glob over one with a single `*`
+/// (`date=2026-01-*` for a month, `date=2026-*` for a year, `date=*-15` for every 15th).
+/// Several filters match when any of them does. A value that is not a date or such a glob,
+/// for example `date=15`, is refused instead of silently matching nothing.
 #[derive(Debug, Default)]
 struct PartitionFilters {
-    /// Filter group → the patterns in it; each pattern is a list of normalized segments.
-    groups: BTreeMap<String, Vec<Vec<String>>>,
+    /// Glob patterns over the `YYYY-MM-DD` value.
+    dates: Vec<String>,
 }
 
 impl PartitionFilters {
@@ -116,39 +109,37 @@ impl PartitionFilters {
             if trimmed.is_empty() {
                 anyhow::bail!("invalid --partition filter '{raw}': it is empty");
             }
-            let raw_segments: Vec<&str> = trimmed.split('/').collect();
-            if raw_segments.len() > 1 {
-                if let Some(segment) = raw_segments
-                    .iter()
-                    .find(|segment| !segment.is_empty() && !segment.contains('='))
-                {
-                    anyhow::bail!(
-                        "invalid --partition filter '{raw}': `{segment}` is not a key=value \
-                         segment. Path filters are partition paths like year=2026/month=01; \
-                         to limit truncate to one table, pass the table directory as the path"
-                    );
-                }
-            }
-            let segments = raw_segments
-                .iter()
-                .map(|segment| normalize_filter_segment(segment, raw))
-                .collect::<Result<Vec<_>>>()?;
-            let group = if segments.len() == 1 {
-                filter_key(&segments[0])
-            } else {
-                PATH_FILTER_GROUP.to_string()
+            let value = match trimmed.split_once('=').filter(|_| !trimmed.contains('/')) {
+                Some((DATE_KEY, value)) => value,
+                None if trimmed == DATE_KEY => "*",
+                _ => anyhow::bail!(
+                    "invalid --partition filter '{raw}': filters select `date=YYYY-MM-DD` \
+                     partitions, the only partition key: use -p date=2026-01-15, \
+                     -p \"date=2026-01-*\" for a month or -p \"date=2026-*\" for a year. To \
+                     limit truncate to one table, pass the table directory as the path"
+                ),
             };
-            filters.groups.entry(group).or_default().push(segments);
+            if value.matches('*').count() > 1 {
+                anyhow::bail!("invalid --partition filter '{raw}': use at most one `*`");
+            }
+            if !is_date_value_pattern(value) {
+                anyhow::bail!(
+                    "invalid --partition filter '{raw}': `{value}` is not a YYYY-MM-DD date or \
+                     a glob over one, such as 2026-01-* or *-15"
+                );
+            }
+            filters.dates.push(value.to_string());
         }
         Ok(filters)
     }
 
-    /// Returns true when the file at `rel_path` (relative to the truncate path) matches.
+    /// Returns true when the file at `rel_path` (relative to the truncate path) matches:
+    /// it is below a `date=YYYY-MM-DD` directory whose date matches a filter.
     ///
     /// A partition filter selects table data only: it never matches a reserved dataset
     /// artifact, even a partition-shaped path under `_fireparq/` or `verify_runs/`.
     fn matches(&self, rel_path: &str) -> bool {
-        if self.groups.is_empty() {
+        if self.dates.is_empty() {
             return true;
         }
         if is_reserved_artifact_path(rel_path) {
@@ -156,67 +147,15 @@ impl PartitionFilters {
         }
         let mut dirs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
         dirs.pop(); // The file name is not a partition directory.
-        self.groups.iter().all(|(group, patterns)| {
-            patterns.iter().any(|pattern| {
-                if group == PATH_FILTER_GROUP {
-                    partition_path_matches(pattern, &dirs)
-                } else {
-                    dirs.iter().any(|dir| segment_matches(&pattern[0], dir))
-                }
+        dirs.iter()
+            .filter(|dir| DatePartition::parse(dir).is_ok())
+            .filter_map(|dir| dir.strip_prefix("date="))
+            .any(|value| {
+                self.dates
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, value))
             })
-        })
     }
-}
-
-/// Normalizes one filter segment: a bare key becomes `key=*`, and the legacy `date=` key is
-/// rewritten as `day=`.
-fn normalize_filter_segment(segment: &str, raw: &str) -> Result<String> {
-    if segment.is_empty() {
-        anyhow::bail!("invalid --partition filter '{raw}': it has an empty path segment");
-    }
-    if segment.matches('*').count() > 1 {
-        anyhow::bail!("invalid --partition filter '{raw}': use at most one `*` per segment");
-    }
-    let segment = if segment.contains('=') || segment.contains('*') {
-        segment.to_string()
-    } else {
-        format!("{segment}=*")
-    };
-    Ok(canonical_day_key(&segment))
-}
-
-/// The key a single-segment filter constrains, with the legacy day key folded into `day`.
-fn filter_key(segment: &str) -> String {
-    let key = segment.split(['=', '*']).next().unwrap_or(segment);
-    if key == LEGACY_DAY_PARTITION_PREFIX.trim_end_matches('=') {
-        DAY_PARTITION_PREFIX.trim_end_matches('=').to_string()
-    } else {
-        key.to_string()
-    }
-}
-
-/// Returns true when the partition directories in `dirs` (from the first `key=value`
-/// directory on) start with the segments of `pattern`.
-fn partition_path_matches(pattern: &[String], dirs: &[&str]) -> bool {
-    let Some(start) = dirs.iter().position(|dir| dir.contains('=')) else {
-        return false;
-    };
-    let partition_dirs = &dirs[start..];
-    partition_dirs.len() >= pattern.len()
-        && pattern
-            .iter()
-            .zip(partition_dirs)
-            .all(|(filter, dir)| segment_matches(filter, dir))
-}
-
-/// Match one directory against a normalized filter segment: exact, or a single `*` glob.
-/// `day=` and the legacy `date=` key are aliases.
-fn segment_matches(filter: &str, dir: &str) -> bool {
-    let filter_forms = [filter, &canonical_day_key(filter)];
-    let dir_forms = [dir, &canonical_day_key(dir)];
-    filter_forms
-        .iter()
-        .any(|filter| dir_forms.iter().any(|dir| glob_matches(filter, dir)))
 }
 
 fn glob_matches(filter: &str, segment: &str) -> bool {
@@ -227,14 +166,6 @@ fn glob_matches(filter: &str, segment: &str) -> bool {
                 && segment.ends_with(suffix)
         }
         None => segment == filter,
-    }
-}
-
-/// Rewrite the legacy `date=` day key as `day=`; other text is returned unchanged.
-fn canonical_day_key(text: &str) -> String {
-    match text.strip_prefix(LEGACY_DAY_PARTITION_PREFIX) {
-        Some(value) => format!("{DAY_PARTITION_PREFIX}{value}"),
-        None => text.to_string(),
     }
 }
 
@@ -559,7 +490,7 @@ mod tests {
         write_test_file(&root.join("cursor.parquet"), b"cursor");
         write_test_file(&root.join("_fireparq/partitions.parquet"), b"partitions");
         write_test_file(
-            &root.join("blocks/year=2024/month=01/date=15/part-0001.parquet"),
+            &root.join("blocks/date=2024-01-15/part-0001.parquet"),
             b"blocks",
         );
         write_test_file(&root.join("README.txt"), b"not parquet");
@@ -579,7 +510,7 @@ mod tests {
             rel_paths,
             vec![
                 "_fireparq/partitions.parquet".to_string(),
-                "blocks/year=2024/month=01/date=15/part-0001.parquet".to_string(),
+                "blocks/date=2024-01-15/part-0001.parquet".to_string(),
                 "cursor.parquet".to_string(),
                 "partitions.parquet".to_string(),
             ]
@@ -601,7 +532,7 @@ mod tests {
         write_test_file(&root.join("partitions.parquet"), b"partitions");
         write_test_file(&root.join("cursor.parquet"), b"cursor");
         write_test_file(
-            &root.join("blocks/year=2024/month=01/date=15/part-0001.parquet"),
+            &root.join("blocks/date=2024-01-15/part-0001.parquet"),
             b"blocks",
         );
 
@@ -611,7 +542,7 @@ mod tests {
         assert!(root.join("partitions.parquet").exists());
         assert!(root.join("cursor.parquet").exists());
         assert!(root
-            .join("blocks/year=2024/month=01/date=15/part-0001.parquet")
+            .join("blocks/date=2024-01-15/part-0001.parquet")
             .exists());
     }
 
@@ -634,103 +565,40 @@ mod tests {
     }
 
     #[test]
-    fn matches_partition_treats_day_and_legacy_date_keys_as_aliases() {
-        let current = "blocks/year=2024/month=01/day=15/part-0001.parquet";
-        let legacy = "blocks/year=2024/month=01/date=15/part-0001.parquet";
-        let other_day = "blocks/year=2024/month=01/day=16/part-0001.parquet";
+    fn date_filters_match_the_date_directory_and_its_globs() {
+        let day = "blocks/date=2024-01-15/part-0001.parquet";
+        let next_day = "blocks/date=2024-01-16/part-0001.parquet";
+        let next_year = "blocks/date=2025-01-15/part-0001.parquet";
 
-        for filter in ["day=15", "date=15", "day=1*", "date=1*", "day", "date"] {
-            assert!(matches(current, &[filter]), "{filter:?} on day=");
-            assert!(matches(legacy, &[filter]), "{filter:?} on date=");
+        for filter in [
+            "date=2024-01-15",
+            "date=2024-01-15/",
+            "date=2024-01-*",
+            "date=2024-*",
+            "date=*-15",
+            "date=*",
+            "date",
+        ] {
+            assert!(matches(day, &[filter]), "{filter:?}");
         }
-        assert!(!matches(other_day, &["day=15"]));
-        assert!(!matches(other_day, &["date=15"]));
-
-        // Globs spelled against the raw legacy key keep matching legacy trees.
-        assert!(matches(legacy, &["date*"]));
-        // Other keys are unaffected.
-        assert!(matches(current, &["month=01"]));
-        assert!(!matches(current, &["hour"]));
-        // `day` and `date` are the same key, so they are OR'd rather than AND'd.
-        assert!(matches(current, &["date=15", "day=16"]));
-    }
-
-    /// `-p year=2026 -p month=01` used to also match January 2025, because filters were OR'd.
-    #[test]
-    fn filters_are_anded_across_keys_and_ored_within_a_key() {
-        let jan_2026 = "blocks/year=2026/month=01/day=15/part-1.parquet";
-        let jan_2025 = "blocks/year=2025/month=01/day=15/part-1.parquet";
-        let feb_2026 = "blocks/year=2026/month=02/day=15/part-1.parquet";
-
-        let january_2026 = ["year=2026", "month=01"];
-        assert!(matches(jan_2026, &january_2026));
-        assert!(!matches(jan_2025, &january_2026));
-        assert!(!matches(feb_2026, &january_2026));
-
-        // Same key: either value.
-        assert!(matches(jan_2026, &["month=01", "month=02"]));
-        assert!(matches(feb_2026, &["month=01", "month=02"]));
-        assert!(!matches(jan_2026, &["month=03", "month=04"]));
-
-        // Mixed: (year=2026) AND (month=01 OR month=02).
-        let filters = ["year=2026", "month=01", "month=02"];
-        assert!(matches(jan_2026, &filters));
-        assert!(matches(feb_2026, &filters));
-        assert!(!matches(jan_2025, &filters));
-
-        // A key-only filter requires the key to be present.
-        assert!(matches(jan_2026, &["year=2026", "day"]));
-        assert!(!matches(jan_2026, &["year=2026", "hour"]));
-    }
-
-    #[test]
-    fn path_filter_matches_the_start_of_the_partition_path() {
-        let day_15 = "year=2026/month=01/day=15/hour=00/part-1.parquet";
-        let path = ["year=2026/month=01/day=15"];
-
-        // From a table root, a network root, and a parent of network roots.
-        assert!(matches(day_15, &path));
-        assert!(matches(&format!("blocks/{day_15}"), &path));
-        assert!(matches(&format!("mainnet/blocks/{day_15}"), &path));
-        // Legacy `date=` directories, and a trailing slash in the filter.
-        assert!(matches(
-            "blocks/year=2026/month=01/date=15/part-1.parquet",
-            &["year=2026/month=01/day=15/"]
-        ));
-
-        assert!(!matches(
-            "blocks/year=2026/month=01/day=16/part-1.parquet",
-            &path
-        ));
-        assert!(!matches(
-            "blocks/year=2025/month=01/day=15/part-1.parquet",
-            &path
-        ));
-        // It is anchored at the first partition directory: `month=01/day=15` is not a prefix.
-        assert!(!matches(day_15, &["month=01/day=15"]));
-        // The path is not deeper than the filter asks for.
-        assert!(!matches("blocks/year=2026/month=01/part-1.parquet", &path));
-
-        // Globs per segment.
-        assert!(matches(day_15, &["year=2026/month=01/day=*"]));
-        assert!(matches(day_15, &["year=2026/month=0*"]));
-
-        // Several path filters: any of them.
-        let two_days = ["year=2026/month=01/day=01", "year=2026/month=01/day=15"];
-        assert!(matches(day_15, &two_days));
-        assert!(!matches(
-            "year=2026/month=01/day=02/part-1.parquet",
-            &two_days
-        ));
-
-        // Path filters AND key filters.
-        assert!(matches(day_15, &["year=2026/month=01", "hour=00"]));
-        assert!(!matches(day_15, &["year=2026/month=01", "hour=01"]));
+        assert!(!matches(next_day, &["date=2024-01-15"]));
+        assert!(!matches(next_year, &["date=2024-*"]));
+        assert!(matches(next_year, &["date=*-01-15"]));
+        // Several filters: any of them.
+        let two_days = ["date=2024-01-15", "date=2024-01-16"];
+        assert!(matches(day, &two_days) && matches(next_day, &two_days));
+        assert!(!matches(next_year, &two_days));
+        // From a network root and a parent of network roots.
+        assert!(matches(&format!("mainnet/{day}"), &["date=2024-01-15"]));
+        assert!(matches(&format!("out/mainnet/{day}"), &["date=2024-01-15"]));
+        // Only a `date=YYYY-MM-DD` directory is a partition.
+        assert!(!matches("blocks/part-0001.parquet", &["date=*"]));
+        assert!(!matches("blocks/date=15/part-0001.parquet", &["date=*"]));
     }
 
     #[test]
     fn filters_never_match_root_artifacts() {
-        for filter in ["year=2026", "year", "year=2026/month=01", "*"] {
+        for filter in ["date=2026-01-15", "date", "date=*"] {
             assert!(!matches("cursor.parquet", &[filter]), "{filter}");
             assert!(!matches("partitions.parquet", &[filter]), "{filter}");
             assert!(
@@ -738,16 +606,13 @@ mod tests {
                 "{filter}"
             );
             for artifact in [
-                "_fireparq/year=2026/month=01/part-1.parquet",
-                "_fireparq/verify_runs/run/year=2026/month=01/part-1.parquet",
-                "verify_runs/run/year=2026/month=01/part-1.parquet",
+                "_fireparq/date=2026-01-15/part-1.parquet",
+                "_fireparq/verify_runs/run/date=2026-01-15/part-1.parquet",
+                "verify_runs/run/date=2026-01-15/part-1.parquet",
             ] {
                 assert!(!matches(artifact, &[filter]), "{filter} {artifact}");
             }
-            assert!(matches(
-                "blocks/year=2026/month=01/part-1.parquet",
-                &[filter]
-            ));
+            assert!(matches("blocks/date=2026-01-15/part-1.parquet", &[filter]));
         }
         // Without filters everything under the path matches, root artifacts included.
         assert!(matches("cursor.parquet", &[]));
@@ -762,58 +627,64 @@ mod tests {
         };
         assert!(parse("").contains("it is empty"));
         assert!(parse("/").contains("it is empty"));
-        assert!(parse("year=2026//day=15").contains("empty path segment"));
-        assert!(parse("day=*1*").contains("at most one `*`"));
-        let table = parse("blocks/year=2026");
-        assert!(
-            table.contains("`blocks` is not a key=value segment"),
-            "{table}"
-        );
-        assert!(
-            table.contains("pass the table directory as the path"),
-            "{table}"
-        );
+        assert!(parse("date=*1*").contains("at most one `*`"));
+        for other in [
+            "hour=14",
+            "block_range=0-100",
+            "year=2026",
+            "day=15",
+            "blocks/date=2026-01-15",
+            "date=2026-01-15/hour=14",
+        ] {
+            let error = parse(other);
+            assert!(
+                error.contains("filters select `date=YYYY-MM-DD` partitions")
+                    && error.contains("pass the table directory as the path"),
+                "{other}: {error}"
+            );
+        }
+        // A day of the month or a malformed date never silently matches nothing.
+        for value in ["date=15", "date=1*", "date=2026-1-15", "date=2026-02-30"] {
+            assert!(parse(value).contains("is not a YYYY-MM-DD date"), "{value}");
+        }
     }
 
     #[test]
-    fn run_truncate_local_day_filter_deletes_current_and_legacy_day_partitions() {
+    fn run_truncate_local_date_filter_deletes_only_that_day() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mainnet");
-        let current = root.join("blocks/year=2024/month=01/day=15/part-0001.parquet");
-        let legacy = root.join("blocks/year=2024/month=01/date=15/part-0001.parquet");
-        let kept = root.join("blocks/year=2024/month=01/day=16/part-0001.parquet");
-        for path in [&current, &legacy, &kept] {
+        let day = root.join("blocks/date=2024-01-15/part-0001.parquet");
+        let day_logs = root.join("logs/date=2024-01-15/part-0001.parquet");
+        let kept = root.join("blocks/date=2024-01-16/part-0001.parquet");
+        for path in [&day, &day_logs, &kept] {
             write_test_file(path, b"blocks");
         }
 
-        let result = run_truncate(&config(&root, &["day=15"], false, true)).unwrap();
+        let result = run_truncate(&config(&root, &["date=2024-01-15"], false, true)).unwrap();
 
         assert_eq!(result.files_deleted, 2);
-        assert!(!current.exists());
-        assert!(!legacy.exists());
+        assert!(!day.exists());
+        assert!(!day_logs.exists());
         assert!(kept.exists());
     }
 
-    /// The issue's scenario: deleting one month must not touch the same month of other years.
+    /// Deleting one month must not touch the same month of other years.
     #[test]
     fn run_truncate_local_deletes_only_the_selected_month() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mainnet");
-        let jan_2026 = root.join("blocks/year=2026/month=01/day=01/part-1.parquet");
-        let jan_2025 = root.join("blocks/year=2025/month=01/day=01/part-1.parquet");
-        let feb_2026 = root.join("blocks/year=2026/month=02/day=01/part-1.parquet");
+        let jan_2026 = root.join("blocks/date=2026-01-01/part-1.parquet");
+        let jan_2025 = root.join("blocks/date=2025-01-01/part-1.parquet");
+        let feb_2026 = root.join("blocks/date=2026-02-01/part-1.parquet");
         let cursor = root.join("cursor.parquet");
         for path in [&jan_2026, &jan_2025, &feb_2026, &cursor] {
             write_test_file(path, b"data");
         }
 
-        for partitions in [&["year=2026", "month=01"][..], &["year=2026/month=01"][..]] {
-            write_test_file(&jan_2026, b"data");
-            let result = run_truncate(&config(&root, partitions, false, true)).unwrap();
-            assert_eq!(result.files_deleted, 1, "{partitions:?}");
-            assert!(!jan_2026.exists(), "{partitions:?}");
-            assert!(jan_2025.exists() && feb_2026.exists() && cursor.exists());
-        }
+        let result = run_truncate(&config(&root, &["date=2026-01-*"], false, true)).unwrap();
+        assert_eq!(result.files_deleted, 1);
+        assert!(!jan_2026.exists());
+        assert!(jan_2025.exists() && feb_2026.exists() && cursor.exists());
     }
 
     #[test]
@@ -821,8 +692,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mainnet");
         let files = [
-            root.join("blocks/year=2026/month=01/day=01/part-1.parquet"),
-            root.join("blocks/year=2026/month=01/day=02/part-1.parquet"),
+            root.join("blocks/date=2026-01-01/part-1.parquet"),
+            root.join("blocks/date=2026-01-02/part-1.parquet"),
             root.join("cursor.parquet"),
         ];
         for path in &files {
@@ -860,21 +731,21 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut fake = DelayedStore::new(std::time::Duration::from_millis(30));
         fake.fail = Some(object_store::path::Path::from(
-            "evm/blocks/year=2026/part-000000.parquet",
+            "evm/blocks/date=2026-01-01/part-000000.parquet",
         ));
         fake.lose_response = true;
         let fake = Arc::new(fake);
         let store: Arc<dyn ObjectStore> = fake.clone();
         for part in 0..30 {
             let key = object_store::path::Path::from(format!(
-                "evm/blocks/year=2026/part-{part:06}.parquet"
+                "evm/blocks/date=2026-01-01/part-{part:06}.parquet"
             ));
             block_on_async(store.put(&key, b"selected".to_vec().into())).unwrap();
         }
         let retained = [
             "evm/cursor.parquet",
-            "evm/blocks/year=2025/part-old.parquet",
-            "other/blocks/year=2026/part-outside.parquet",
+            "evm/blocks/date=2025-01-01/part-old.parquet",
+            "other/blocks/date=2026-01-01/part-outside.parquet",
         ];
         for key in retained {
             block_on_async(store.put(
@@ -885,7 +756,7 @@ mod tests {
         }
         let config = TruncateConfig {
             path: "s3://bucket/evm".into(),
-            partitions: vec!["year=2026".into()],
+            partitions: vec!["date=2026-*".into()],
             dry_run: false,
             yes: true,
             aws: None,
@@ -917,7 +788,7 @@ mod tests {
         assert_eq!(fake.counters.completed.load(Ordering::SeqCst), 10);
         assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
         assert!(block_on_async(store.head(&object_store::path::Path::from(
-            "evm/blocks/year=2026/part-000029.parquet"
+            "evm/blocks/date=2026-01-01/part-000029.parquet"
         )))
         .is_ok());
     }
@@ -926,9 +797,9 @@ mod tests {
     fn truncate_s3_applies_filters_and_requires_yes() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let keys = [
-            "evm/mainnet/blocks/year=2026/month=01/day=15/part-1.parquet",
-            "evm/mainnet/blocks/year=2025/month=01/day=15/part-1.parquet",
-            "evm/mainnet/logs/year=2026/month=01/day=15/part-1.parquet",
+            "evm/mainnet/blocks/date=2026-01-15/part-1.parquet",
+            "evm/mainnet/blocks/date=2025-01-15/part-1.parquet",
+            "evm/mainnet/logs/date=2026-01-15/part-1.parquet",
             "evm/mainnet/cursor.parquet",
         ];
         for key in keys {
@@ -949,7 +820,7 @@ mod tests {
         let run = |yes: bool| {
             let config = TruncateConfig {
                 path: "s3://bucket/evm/mainnet".to_string(),
-                partitions: vec!["year=2026/month=01/day=15".to_string()],
+                partitions: vec!["date=2026-01-15".to_string()],
                 dry_run: false,
                 yes,
                 aws: None,
@@ -967,7 +838,7 @@ mod tests {
         assert_eq!(
             list(),
             vec![
-                "evm/mainnet/blocks/year=2025/month=01/day=15/part-1.parquet".to_string(),
+                "evm/mainnet/blocks/date=2025-01-15/part-1.parquet".to_string(),
                 "evm/mainnet/cursor.parquet".to_string(),
             ]
         );
@@ -990,7 +861,7 @@ mod tests {
             "_fireparq/verify_runs/run-1/roots.parquet",
             // A partition-shaped path inside `_fireparq/` still never matches
             // a partition filter.
-            "_fireparq/year=2026/month=01/day=15/part-3.parquet",
+            "_fireparq/date=2026-01-15/part-3.parquet",
             "cursor.parquet",
             "partitions.parquet",
             "merkle_roots.parquet",
@@ -1002,8 +873,8 @@ mod tests {
             crate::dataset_lock_s3::OWNER_KEY,
         ];
         let parts = [
-            "blocks/year=2026/month=01/day=15/part-1.parquet",
-            "logs/year=2026/month=01/day=15/part-2.parquet",
+            "blocks/date=2026-01-15/part-1.parquet",
+            "logs/date=2026-01-15/part-2.parquet",
         ];
         for key in artifacts.iter().chain(&controls).chain(&parts) {
             let path = object_store::path::Path::from(*key);
@@ -1040,7 +911,10 @@ mod tests {
             keys
         };
 
-        assert_eq!(run(vec!["day=15".into()]).files_deleted, parts.len());
+        assert_eq!(
+            run(vec!["date=2026-01-15".into()]).files_deleted,
+            parts.len()
+        );
         assert_eq!(list(), expected(&[&artifacts, &controls]));
         assert_eq!(run(vec![]).files_deleted, artifacts.len());
         assert_eq!(list(), expected(&[&controls]));
@@ -1053,17 +927,11 @@ mod tests {
         let tree = [
             ("cursor.parquet", 3usize),
             ("partitions.parquet", 5),
-            (
-                "blocks/year=2026/month=01/date=15/minute=00/part-1.parquet",
-                7,
-            ),
-            (
-                "blocks/year=2026/month=01/day=16/minute=01/part-2.parquet",
-                11,
-            ),
-            ("blocks/year=2025/month=12/day=31/part-3.parquet", 13),
-            ("logs/year=2026/month=01/day=15/part-4.parquet", 17),
-            ("logs/year=2026/month=02/day=15/notes.txt", 19),
+            ("blocks/date=2026-01-15/part-1.parquet", 7),
+            ("blocks/date=2026-01-16/part-2.parquet", 11),
+            ("blocks/date=2025-12-31/part-3.parquet", 13),
+            ("logs/date=2026-01-15/part-4.parquet", 17),
+            ("logs/date=2026-02-15/notes.txt", 19),
             (".fireparq-ingest/state.parquet", 23),
         ];
         let dir = tempfile::tempdir().unwrap();
@@ -1076,13 +944,13 @@ mod tests {
         }
         for filters in [
             vec![],
-            vec!["year=2026"],
-            vec!["day=15"],
-            vec!["date=16"],
-            vec!["minute"],
-            vec!["year=2026/month=01", "year=2025/month=12"],
-            vec!["month=0*", "day=1*"],
-            vec!["year=2027"],
+            vec!["date=2026-*"],
+            vec!["date=*-15"],
+            vec!["date=2026-01-16"],
+            vec!["date"],
+            vec!["date=2026-01-15", "date=2025-12-31"],
+            vec!["date=2026-0*"],
+            vec!["date=2027-*"],
         ] {
             let mut local = config(&root, &filters, true, false);
             let local_result = run_truncate(&local).unwrap();

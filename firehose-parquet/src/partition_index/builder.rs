@@ -355,18 +355,14 @@ mod tests {
             index.spans[2].row.partition_value
         );
         for (span, timestamp) in index.spans.iter().zip([A, B, A]) {
-            // The existing writer's routing key changes at exactly these edges.
-            let expected = crate::config::Partition::Hour
-                .partition_key(span.row.start_block, timestamp)
-                .unwrap();
+            // The hour key changes at exactly these edges: each span's routing
+            // start lies in the UTC hour of its block time.
             assert_eq!(
-                expected,
-                crate::config::Partition::Hour
-                    .partition_key(
-                        span.row.start_block,
-                        span.proof.routing_start_timestamp.unwrap()
-                    )
+                timestamp.div_euclid(3_600),
+                span.proof
+                    .routing_start_timestamp
                     .unwrap()
+                    .div_euclid(3_600)
             );
         }
     }

@@ -131,7 +131,7 @@ impl PartitionMerge for Fixture {
     type Files = Files;
 
     fn label(&self) -> &str {
-        "blocks/day=01"
+        "blocks/date=2024-01-01"
     }
     fn files(&self) -> &Files {
         &self.files
@@ -180,7 +180,7 @@ impl PartitionMerge for Fixture {
         for (index, data) in sources.iter().enumerate() {
             self.event(format!("read:{index}"));
             let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
-            encoder.write_reader(builder, publish, None)?;
+            encoder.write_reader(builder, publish)?;
         }
         Ok(())
     }
@@ -311,7 +311,7 @@ fn a_claimed_partition_is_left_to_its_owner() {
     let (outcome, result) = run(&fixture, &[parquet(2), parquet(3)], &config());
     outcome.unwrap();
     assert_eq!(fixture.events(), COMPLETE[..5]);
-    assert_eq!(result.partitions_in_use, ["blocks/day=01"]);
+    assert_eq!(result.partitions_in_use, ["blocks/date=2024-01-01"]);
     assert_eq!(result.partitions_skipped, 1);
 }
 
@@ -355,7 +355,10 @@ fn preflight_outcomes_never_claim() {
     let (outcome, result) = run(&fixture, &[parquet(2), parquet(3)], &config());
     outcome.unwrap();
     assert_eq!(fixture.events(), COMPLETE[..2]);
-    assert_eq!(result.schema_mismatches, ["blocks/day=01: column differs"]);
+    assert_eq!(
+        result.schema_mismatches,
+        ["blocks/date=2024-01-01: column differs"]
+    );
     assert_eq!(result.bytes_before, 0);
 
     // No file-count reduction expected.
@@ -410,7 +413,7 @@ fn partitions_group_consecutive_sorted_sources_and_label_tables() {
     )
     .unwrap();
     assert_eq!(calls, 0);
-    assert_eq!(table_of("blocks/year=2024/day=01"), "blocks");
+    assert_eq!(table_of("blocks/date=2024-01-01"), "blocks");
     assert_eq!(table_of("(root)"), "(root)");
     assert_eq!(table_of(""), "(root)");
 }

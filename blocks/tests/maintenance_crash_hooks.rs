@@ -1,7 +1,7 @@
-//! `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_TEST_ROLLUP_CRASH_AT` abort the real
-//! binary at a named maintenance step, for crash-recovery tests. Like
-//! `FIREPARQ_DEBUG_FAULT`, only debug builds (as built by `cargo test`) honor them. A
-//! release binary ignores both and completes; `cargo test --release` checks that side.
+//! `FIREPARQ_TEST_MERGE_CRASH_AT` aborts the real binary at a named merge step, for
+//! crash-recovery tests. Like `FIREPARQ_DEBUG_FAULT`, only debug builds (as built by
+//! `cargo test`) honor it. A release binary ignores it and completes; `cargo test
+//! --release` checks that side.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -95,11 +95,7 @@ fn logs(output: &Output) -> String {
 /// journal for the next run to recover; release builds must ignore the hook and finish.
 /// Either way, a plain run afterwards leaves no journal behind.
 fn assert_hook_follows_build(cwd: &Path, args: &[&str], hook: (&str, &str), journal_root: &Path) {
-    let journal = if hook.0.contains("ROLLUP") {
-        "_fireparq_rollup.json"
-    } else {
-        "_fireparq_merge.json"
-    };
+    let journal = "_fireparq_merge.json";
     let hooked = fireparq(cwd, args, Some(hook));
     let aborted = String::from_utf8_lossy(&hooked.stderr).contains(&format!(
         "{}={}: aborting to simulate a crash",
@@ -132,7 +128,7 @@ fn assert_hook_follows_build(cwd: &Path, args: &[&str], hook: (&str, &str), jour
 fn merge_crash_hook_is_honored_only_by_debug_builds() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
-    let partition = data.join("blocks/year=2024/month=01/day=15");
+    let partition = data.join("blocks/date=2024-01-15");
     write_part(&partition.join("part-000001.parquet"), 0, 10);
     write_part(&partition.join("part-000002.parquet"), 10, 20);
 
@@ -141,28 +137,4 @@ fn merge_crash_hook_is_honored_only_by_debug_builds() {
     assert_hook_follows_build(temp.path(), &args, hook, &data);
     assert_eq!(parquet_files(&data).len(), 1);
     assert_eq!(rows(&data), 30);
-}
-
-#[test]
-fn rollup_crash_hook_is_honored_only_by_debug_builds() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let out = temp.path().join("out");
-    let day = data.join("blocks/year=2024/month=01/day=15/hour=00");
-    write_part(&day.join("minute=00/part-000001.parquet"), 0, 10);
-    write_part(&day.join("minute=01/part-000001.parquet"), 10, 20);
-
-    let args = [
-        "rollup",
-        data.to_str().unwrap(),
-        "-o",
-        out.to_str().unwrap(),
-        "-p",
-        "date",
-    ];
-    let hook = ("FIREPARQ_TEST_ROLLUP_CRASH_AT", "after-outputs");
-    assert_hook_follows_build(temp.path(), &args, hook, &out);
-    assert_eq!(parquet_files(&out).len(), 1);
-    assert_eq!(rows(&out), 30);
-    assert_eq!(rows(&data), 30, "copy mode keeps the sources");
 }

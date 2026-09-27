@@ -6,7 +6,22 @@ fn fixture_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("block_num", DataType::UInt64, false),
         Field::new("payload", DataType::Binary, false),
+        Field::new(
+            "timestamp",
+            crate::traits::timestamp_millis_utc_type(),
+            false,
+        ),
     ]))
+}
+/// Every fixture row is at 2023-11-14T22:13:20Z.
+const FIXTURE_SECONDS: i64 = 1_700_000_000;
+fn fixture_metadata(rows: usize) -> BlockMetadata {
+    BlockMetadata {
+        min_block_number: 0,
+        max_block_number: rows as u64 - 1,
+        min_timestamp: Some(FIXTURE_SECONDS),
+        max_timestamp: Some(FIXTURE_SECONDS),
+    }
 }
 fn fixture_batch(start: usize, count: usize) -> RecordBatch {
     let mut state = 0x41a3_f793_296a_832bu64.wrapping_add(start as u64);
@@ -24,24 +39,17 @@ fn fixture_batch(start: usize, count: usize) -> RecordBatch {
                 (start..start + count).map(|n| n as u64),
             )),
             Arc::new(BinaryArray::from_iter_values(bytes.chunks_exact(1024))),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![FIXTURE_SECONDS * 1_000; count])
+                    .with_timezone("UTC"),
+            ),
         ],
     )
     .unwrap()
 }
 fn fixture_plan(rows: usize) -> PlannedPart {
     let empty = RecordBatch::new_empty(fixture_schema());
-    let mut part = plan(
-        "blocks",
-        0,
-        &empty,
-        &Partition::None,
-        &BlockMetadata {
-            min_block_number: 0,
-            max_block_number: rows as u64 - 1,
-            min_timestamp: None,
-            max_timestamp: None,
-        },
-    );
+    let mut part = plan("blocks", 0, &empty, &fixture_metadata(rows));
     part.row_count = rows as u64;
     part
 }
@@ -56,8 +64,7 @@ fn native_spool_process_qualification() {
     match mode.as_str() {
         "prepare" => {
             let mut file = File::create(&path).unwrap();
-            let mut writer =
-                ParquetTableWriter::new(PathBuf::new(), Partition::None, Compression::Zstd);
+            let mut writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
             let mut meta = ParquetFileMetadata::new();
             meta.entries.extend(footer_identity(&plan));
             writer.set_file_metadata(meta);
@@ -107,16 +114,7 @@ fn native_spool_process_qualification() {
         }
         "encode-memory" | "encode-spool" => {
             let batch = fixture_batch(0, rows);
-            let prepared = prepare(
-                batch,
-                Partition::None,
-                BlockMetadata {
-                    min_block_number: 0,
-                    max_block_number: rows as u64 - 1,
-                    min_timestamp: None,
-                    max_timestamp: None,
-                },
-            );
+            let prepared = prepare(batch, fixture_metadata(rows));
             let encoded = if mode == "encode-memory" {
                 prepared.encode(0, None).unwrap()
             } else {
@@ -201,19 +199,8 @@ fn retained_evm_tables_spool_without_schema_or_value_drift() {
                     .unwrap(),
             )
             .unwrap();
-            let numbers = input
-                .column_by_name("block_num")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap();
-            let metadata = BlockMetadata {
-                min_block_number: numbers.values().iter().copied().min().unwrap(),
-                max_block_number: numbers.values().iter().copied().max().unwrap(),
-                min_timestamp: None,
-                max_timestamp: None,
-            };
-            let prepared = prepare(input.clone(), Partition::None, metadata);
+            let (input, metadata) = routed(input);
+            let prepared = prepare(input.clone(), metadata);
             let encoded = prepared.encode_spooled(0, None).unwrap();
             let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
             assert_eq!(reader.schema().fields(), schema.fields());
