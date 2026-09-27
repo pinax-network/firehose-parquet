@@ -1,6 +1,6 @@
 # Issue #654: `--output` is the dataset root, with an opt-in `{chain}`
 
-Closes #654 (PR [#PR](https://github.com/pinax-network/firehose-parquet/pull/PR)); part of #463.
+Closes #654 (PR [#656](https://github.com/pinax-network/firehose-parquet/pull/656)); part of #463.
 
 ## Decision
 
