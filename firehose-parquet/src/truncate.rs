@@ -942,6 +942,72 @@ mod tests {
         );
     }
 
+    /// A dataset written with `--without-chain-dir` to a bucket root shares
+    /// the root with the dataset artifacts and the bucket-wide owner record.
+    /// A partition filter at the bucket root deletes only matching table
+    /// parts; even an unfiltered run, which also removes the dataset
+    /// artifacts as it does under a chain directory, never touches the
+    /// ingestion controls, the owner record or its probes. (Protected datasets
+    /// are refused before this step, wherever their root is.)
+    #[test]
+    fn truncate_s3_at_a_bucket_root_keeps_artifacts_and_controls() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let artifacts = [
+            "cursor.parquet",
+            "partitions.parquet",
+            "merkle_roots.parquet",
+            "verify_runs/run-1/roots.parquet",
+        ];
+        let controls = [
+            ".fireparq-ingest/state.parquet",
+            ".fireparq-owner-probes-v1/probe.parquet",
+            crate::dataset_lock_s3::OWNER_KEY,
+        ];
+        let parts = [
+            "blocks/year=2026/month=01/day=15/part-1.parquet",
+            "logs/year=2026/month=01/day=15/part-2.parquet",
+        ];
+        for key in artifacts.iter().chain(&controls).chain(&parts) {
+            let path = object_store::path::Path::from(*key);
+            block_on_async(store.put(&path, b"data".to_vec().into())).unwrap();
+        }
+        let list = || -> Vec<String> {
+            use futures::TryStreamExt;
+            let objects: Vec<object_store::ObjectMeta> =
+                block_on_async(store.list(None).try_collect()).unwrap();
+            let mut keys: Vec<String> = objects
+                .into_iter()
+                .map(|obj| obj.location.as_ref().to_string())
+                .collect();
+            keys.sort();
+            keys
+        };
+        let run = |partitions: Vec<String>| {
+            let config = TruncateConfig {
+                path: "s3://bucket".to_string(),
+                partitions,
+                dry_run: false,
+                yes: true,
+                aws: None,
+            };
+            let filters = PartitionFilters::parse(&config.partitions).unwrap();
+            truncate_s3(&config, &filters, &store, "bucket", "").unwrap()
+        };
+        let expected = |keys: &[&[&str]]| -> Vec<String> {
+            let mut keys: Vec<String> = keys
+                .iter()
+                .flat_map(|keys| keys.iter().map(|key| key.to_string()))
+                .collect();
+            keys.sort();
+            keys
+        };
+
+        assert_eq!(run(vec!["day=15".into()]).files_deleted, parts.len());
+        assert_eq!(list(), expected(&[&artifacts, &controls]));
+        assert_eq!(run(vec![]).files_deleted, artifacts.len());
+        assert_eq!(list(), expected(&[&controls]));
+    }
+
     /// Local and S3 truncation share one selection/confirmation step, so the same tree
     /// under the same filters selects the same files, sizes and dataset artifacts.
     #[test]

@@ -4437,6 +4437,106 @@ fn test_scan_s3_display_key_keeps_exact_object_key() {
     );
 }
 
+/// Read-only commands on a dataset written with `--without-chain-dir` to a
+/// bucket root: the index is an exact object at the root, and a table is a
+/// prefix directly below the bucket.
+#[test]
+fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
+    use bytes::Bytes;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+
+    let store = InMemory::new();
+    for key in [
+        "partitions.parquet",
+        "cursor.parquet",
+        "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
+        "blocks-archive/part-v1-b.parquet",
+        ".fireparq-ingest/state.json",
+    ] {
+        block_on_async(store.put(
+            &Path::from(key),
+            object_store::PutPayload::from(Bytes::from_static(b"parquet")),
+        ))
+        .expect("put object");
+    }
+    let (objects, exact) = block_on_async(collect_scan_s3_parquet_objects(
+        &store,
+        "partitions.parquet",
+    ))
+    .expect("collect index");
+    assert!(exact);
+    assert_eq!(objects.len(), 1);
+    assert_eq!(
+        scan_s3_display_key(objects[0].location.as_ref(), "partitions.parquet", exact),
+        "partitions.parquet"
+    );
+    let (objects, exact) =
+        block_on_async(collect_scan_s3_parquet_objects(&store, "blocks")).expect("collect table");
+    assert!(!exact);
+    let keys: Vec<_> = objects
+        .iter()
+        .map(|object| scan_s3_display_key(object.location.as_ref(), "blocks", exact))
+        .collect();
+    assert_eq!(keys, ["year=2023/month=11/day=14/part-v1-a.parquet"]);
+}
+
+/// `partitions build --without-chain-dir` puts the index, and reads the
+/// sibling cursor, at the output root itself: the same root that
+/// `build --without-chain-dir` writes. Without the flag the chain directory
+/// stays appended exactly as before.
+#[test]
+fn test_partitions_output_root_with_and_without_chain_dir() {
+    for (output, chain_root, root) in [
+        ("./output", "./output/mainnet", "./output"),
+        ("./output/", "./output/mainnet", "./output/"),
+        ("/data", "/data/mainnet", "/data"),
+        (
+            "s3://ethereum-mainnet",
+            "s3://ethereum-mainnet/mainnet",
+            "s3://ethereum-mainnet",
+        ),
+        (
+            "s3://ethereum-mainnet/",
+            "s3://ethereum-mainnet/mainnet",
+            "s3://ethereum-mainnet",
+        ),
+        (
+            "s3://bucket/v1/",
+            "s3://bucket/v1/mainnet",
+            "s3://bucket/v1",
+        ),
+    ] {
+        assert_eq!(build_partitions_output_root(output, "mainnet"), chain_root);
+        assert_eq!(
+            resolve_partitions_output_root(output, "mainnet", false),
+            chain_root
+        );
+        assert_eq!(
+            partitions_index_path_in(chain_root),
+            build_partitions_index_path(output, "mainnet")
+        );
+        assert_eq!(
+            resolve_partitions_output_root(output, "mainnet", true),
+            root
+        );
+        assert_eq!(output_root_without_chain_dir(output), root);
+    }
+    assert_eq!(
+        partitions_index_path_in("s3://ethereum-mainnet"),
+        "s3://ethereum-mainnet/partitions.parquet"
+    );
+    assert_eq!(
+        partitions_index_path_in("./output/"),
+        "./output/partitions.parquet"
+    );
+    assert_eq!(
+        build_partitions_index_path("s3://bucket", "mainnet"),
+        "s3://bucket/mainnet/partitions.parquet"
+    );
+}
+
 #[test]
 fn test_write_partitions_index_defaults_to_zstd_compression() {
     use parquet::file::reader::{FileReader, SerializedFileReader};

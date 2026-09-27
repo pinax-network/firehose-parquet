@@ -789,6 +789,112 @@ fn remote_protected_frontier_is_read_without_ownership() {
         .any(|w| w.contains("s3://bucket/mainnet") && w.contains("block 110")));
 }
 
+/// `build --without-chain-dir --output s3://bucket` puts the protected
+/// dataset at the bucket root, next to the bucket-wide owner record and the
+/// root artifacts of other commands. verify reads the authority at the bucket
+/// root and never scans those artifacts, whether it is given the table prefix
+/// or the whole bucket.
+#[test]
+fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = std::fs::canonicalize(dir.path()).unwrap().join("root");
+    protected_dataset(&local, &[&[100, 101], &[110]]);
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    for file in tree(&local) {
+        if file.ends_with(".parquet") || file == ".fireparq-ingest/state.json" {
+            super::super::block_on_async(store.put(
+                &object_store::path::Path::from(file.as_str()),
+                object_store::PutPayload::from(std::fs::read(local.join(&file)).unwrap()),
+            ))
+            .unwrap();
+        }
+    }
+    // Readable block_num files: scanning any of them would add a partition.
+    put_block_nums(store.as_ref(), "cursor.parquet", &[999]);
+    put_block_nums(store.as_ref(), "partitions.parquet", &[998]);
+    put_block_nums(store.as_ref(), "merkle_roots.parquet", &[997]);
+    put_block_nums(store.as_ref(), "verify_runs/old/roots.parquet", &[996]);
+    put_block_nums(
+        store.as_ref(),
+        ".fireparq-owner-probes-v1/probe.parquet",
+        &[995],
+    );
+    for key in [
+        crate::artifacts::OWNERSHIP_FILENAME,
+        "verify_runs/old/report.json",
+    ] {
+        super::super::block_on_async(store.put(
+            &object_store::path::Path::from(key),
+            object_store::PutPayload::from_static(b"{}"),
+        ))
+        .unwrap();
+    }
+    let registry = dir.path().join("roots.parquet");
+    let opts = roots_opts(&registry);
+    for (prefix, recorded) in [("blocks", false), ("", true)] {
+        let report = super::super::verify_source(
+            &remote_source_at(store.clone(), prefix),
+            None,
+            &opts,
+            time::OffsetDateTime::now_utc(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        assert_eq!(report.table, "blocks", "{prefix:?}");
+        assert_eq!(report.summary.partitions_scanned, 2, "{prefix:?}");
+        assert_eq!(report.summary.open_partitions, 1, "{prefix:?}");
+        assert_eq!(
+            (report.summary.missing_expected, report.summary.matches),
+            if recorded { (0, 1) } else { (1, 0) },
+            "{prefix:?}"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w
+                    .contains("the authoritative ingestion state of s3://bucket is at block 110")),
+            "{prefix:?}: {:?}",
+            report.warnings
+        );
+    }
+    // Artifact destinations inside the bucket-root dataset keep the guards
+    // they have below a chain directory. An allowed destination passes the
+    // check and only then needs AWS settings to read the registry.
+    let objects = || {
+        super::super::block_on_async(async {
+            use futures::TryStreamExt;
+            store.list(None).try_collect::<Vec<_>>().await
+        })
+        .unwrap()
+        .len()
+    };
+    for (registry, expected) in [
+        ("s3://bucket/cursor.parquet", "protected recovery metadata"),
+        (
+            "s3://bucket/blocks/block_range=100-110/roots.parquet",
+            "ordinary protected data part",
+        ),
+        ("s3://bucket/.fireparq-ingest/roots.parquet", "control path"),
+        ("s3://bucket/merkle_roots.parquet", "AWS config required"),
+    ] {
+        let mut opts = base_opts();
+        opts.checks = vec![VerifyCheck::Roots];
+        opts.registry_path = Some(registry.to_string());
+        let before = objects();
+        let err = super::super::verify_source(
+            &remote_source_at(store.clone(), "blocks"),
+            None,
+            &opts,
+            time::OffsetDateTime::now_utc(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains(expected), "{registry}: {err:#}");
+        assert_eq!(objects(), before, "{registry}");
+    }
+}
+
 #[test]
 fn protocol_only_runs_stay_read_only_while_owned() {
     let dir = tempfile::tempdir().unwrap();

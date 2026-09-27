@@ -85,13 +85,14 @@ Suggested report artifact path is deterministic and included as:
 
 - `suggested_run_report_path`
 
-Pattern, where `<chain_root>` is the network directory that holds the table directories (`<output>/<chain_name>` for `fireparq build` output):
+Pattern, where `<chain_root>` is the network directory that holds the table directories (`<output>/<chain_name>` for `fireparq build` output, or `<output>` itself for `fireparq build --without-chain-dir`):
 
 - `<chain_root>/verify_runs/<run_id>/report.json`
 
 For S3:
 
 - `s3://<bucket>/<chain_name>/verify_runs/<run_id>/report.json` (with any prefix before `<chain_name>` kept)
+- `s3://<bucket>/verify_runs/<run_id>/report.json` for a dataset written at the bucket root with `--without-chain-dir`
 
 The default registry is `<chain_root>/merkle_roots.parquet` (`registry_path`). See the dataset resolution rules in `docs/verifiability-artifact-runbook.md`.
 

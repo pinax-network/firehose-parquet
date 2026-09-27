@@ -1661,6 +1661,81 @@ mod tests {
         }
     }
 
+    /// A dataset built with `--without-chain-dir` at an S3 bucket root rolls
+    /// up from that root into another bucket's root: only the table parts
+    /// move, while the root artifacts (mirror, index, registry, reports,
+    /// ingestion authority, owner record and probes) are neither copied nor
+    /// changed.
+    #[test]
+    fn test_rollup_s3_from_a_bucket_root_copies_only_table_parts() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let export: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = memory_root(&store, "");
+        let out = S3Root {
+            client: Arc::clone(&export),
+            bucket: "export".to_string(),
+            prefix: String::new(),
+        };
+        let artifacts = [
+            "cursor.parquet",
+            "partitions.parquet",
+            "merkle_roots.parquet",
+            "verify_runs/run-1/roots.parquet",
+            ".fireparq-ingest/stray.parquet",
+            ".fireparq-owner-probes-v1/probe.parquet",
+        ];
+        for (i, key) in artifacts.iter().enumerate() {
+            put_range_object(&store, key, 1000 + i as u64, 1);
+        }
+        for key in [".fireparq-ingest/state.json", ".fireparq-owner-v1.json"] {
+            put_object(&store, key, b"{}".to_vec());
+        }
+        put_range_object(
+            &store,
+            &format!("{DAY}/hour=14/part-v1-aaaaaaaa-1.parquet"),
+            0,
+            5,
+        );
+        put_range_object(
+            &store,
+            &format!("{DAY}/hour=15/part-v1-aaaaaaaa-2.parquet"),
+            5,
+            3,
+        );
+        let before: Vec<(String, bytes::Bytes)> = s3_keys(&store, "")
+            .into_iter()
+            .map(|key| {
+                let bytes = get_object(&store, &key);
+                (key, bytes)
+            })
+            .collect();
+        let config = RollupConfig {
+            source: "s3://bucket".to_string(),
+            output: "s3://export".to_string(),
+            target: RollupTarget::Date,
+            compression: Compression::None,
+            flush_bytes: 0,
+            delete_source: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        rollup_s3(&config, &root, &out).unwrap();
+
+        let exported = s3_keys(&export, "");
+        assert_eq!(exported.len(), 1, "{exported:?}");
+        assert!(exported[0].starts_with(&format!("{DAY}/part-rollup-")));
+        assert_eq!(s3_block_numbers(&export, ""), (0..8).collect::<Vec<_>>());
+        let after: Vec<(String, bytes::Bytes)> = s3_keys(&store, "")
+            .into_iter()
+            .map(|key| {
+                let bytes = get_object(&store, &key);
+                (key, bytes)
+            })
+            .collect();
+        assert_eq!(after, before);
+    }
+
     /// Reproduction 2 on S3: a re-run without --delete-source replaces the earlier copy.
     #[test]
     fn test_rollup_s3_rerun_without_delete_source_replaces_earlier_copy() {

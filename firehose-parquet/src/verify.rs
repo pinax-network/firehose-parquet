@@ -3562,9 +3562,10 @@ mod tests {
     use super::{
         append_batch_leaves, commit_registry_local, commit_registry_to_store, file_layout,
         join_artifact_path, legacy_default_registry_path, load_registry, load_registry_from_store,
-        merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus, HashStrategy,
-        MerkleAccumulator, Prefetcher, RegistryChange, RegistryRow, VerifyCheck, VerifyOptions,
-        VerifyProfile, VerifyReport, VerifyScope, MERKLE_ROOTS_FILENAME,
+        merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus, FooterIdentity,
+        HashStrategy, MerkleAccumulator, Prefetcher, RegistryChange, RegistryRow, TargetResolver,
+        VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport, VerifyScope,
+        MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR,
     };
     use crate::cursor::{save_cursor_parquet, CursorState};
     use anyhow::Result;
@@ -3923,6 +3924,58 @@ mod tests {
             join_artifact_path("/", MERKLE_ROOTS_FILENAME),
             "/merkle_roots.parquet"
         );
+    }
+
+    /// `build --without-chain-dir` makes the output root itself the chain
+    /// root, up to a whole bucket. The layout still yields the table and the
+    /// artifact locations, and the network comes from file metadata.
+    #[test]
+    fn file_layout_of_a_root_written_without_a_chain_directory() {
+        let bucket = "s3://ethereum-mainnet/blocks/year=2023/month=11/day=14/part-v1-a.parquet";
+        let layout = file_layout(bucket);
+        assert_eq!(
+            layout,
+            FileLayout {
+                chain_root: "s3://ethereum-mainnet".to_string(),
+                table: Some("blocks".to_string()),
+                chain_root_name: None,
+            }
+        );
+        assert_eq!(
+            join_artifact_path(&layout.chain_root, MERKLE_ROOTS_FILENAME),
+            "s3://ethereum-mainnet/merkle_roots.parquet"
+        );
+        assert_eq!(
+            join_artifact_path(
+                &layout.chain_root,
+                &format!("{VERIFY_RUNS_DIR}/run/report.json")
+            ),
+            "s3://ethereum-mainnet/verify_runs/run/report.json"
+        );
+        let prefix = file_layout("s3://bucket/v1/logs/block_range=100-200/part-v1-a.parquet");
+        assert_eq!(prefix.chain_root, "s3://bucket/v1");
+        assert_eq!(prefix.table, Some("logs".to_string()));
+        let local = file_layout("/data/ethereum-mainnet/blocks/day=14/part-v1-a.parquet");
+        assert_eq!(local.chain_root, "/data/ethereum-mainnet");
+        assert_eq!(local.table, Some("blocks".to_string()));
+
+        let opts = base_opts();
+        let mut resolver = TargetResolver::new(&opts);
+        let footer = FooterIdentity {
+            block_type: Some("evm".to_string()),
+            chain_name: Some("mainnet".to_string()),
+        };
+        let target = resolver.observe(bucket, &footer).unwrap();
+        assert_eq!(target.chain_root, "s3://ethereum-mainnet");
+        assert_eq!(target.table, "blocks");
+        assert_eq!(target.network.as_deref(), Some("mainnet"));
+        // Other tables of the same root are a different verify run.
+        assert!(resolver
+            .observe(
+                "s3://ethereum-mainnet/logs/year=2023/month=11/day=14/part-v1-a.parquet",
+                &footer
+            )
+            .is_err());
     }
 
     #[test]

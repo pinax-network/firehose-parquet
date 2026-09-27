@@ -71,6 +71,33 @@ struct Stream {
     events: Arc<Vec<firehose::Response>>,
     plans: Arc<Mutex<VecDeque<Plan>>>,
     requests: Arc<Mutex<Vec<firehose::Request>>>,
+    /// Also answer the finality probes of `partitions build` (outside the
+    /// plans and never counted as ingestion requests).
+    partition_probes: bool,
+}
+impl Stream {
+    /// `partitions build` proves its finalized anchor with two Stream calls:
+    /// a near-head witness (negative start, not final-only), then the exact
+    /// finalized candidate. The last fixture event is the head and its own
+    /// LIB; ingestion requests always ask for final blocks over a range.
+    fn partition_probe(&self, request: &firehose::Request) -> Option<Vec<firehose::Response>> {
+        let head = self.events.last()?;
+        if request.start_block_num < 0 && !request.final_blocks_only {
+            return Some(vec![head.clone()]);
+        }
+        let candidate = u64::try_from(request.start_block_num).ok()?;
+        (request.final_blocks_only
+            && request.cursor.is_empty()
+            && candidate == request.stop_block_num
+            && self.plans.lock().unwrap().is_empty())
+        .then(|| {
+            self.events
+                .iter()
+                .filter(|event| event.metadata.as_ref().unwrap().num == candidate)
+                .cloned()
+                .collect()
+        })
+    }
 }
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
@@ -80,6 +107,17 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
     fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
         let request = request.into_inner();
+        if let Some(replies) = self
+            .partition_probes
+            .then(|| self.partition_probe(&request))
+            .flatten()
+        {
+            return Box::pin(async move {
+                let stream: Self::ResponseStream =
+                    Box::pin(futures::stream::iter(replies.into_iter().map(Ok)));
+                Ok(tonic::Response::new(stream))
+            });
+        }
         self.requests.lock().unwrap().push(request.clone());
         let planned = self.plans.lock().unwrap().pop_front();
         let Some(plan) = planned else {
@@ -149,8 +187,37 @@ macro_rules! service {
         }
     };
 }
+/// Block metadata by number, for the boundary probes of `partitions build`.
+#[derive(Clone)]
+struct Fetch {
+    events: Arc<Vec<firehose::Response>>,
+}
+impl tonic::server::UnaryService<firehose::SingleBlockRequest> for Fetch {
+    type Response = firehose::SingleBlockResponse;
+    type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+    fn call(&mut self, request: tonic::Request<firehose::SingleBlockRequest>) -> Self::Future {
+        let Some(firehose::single_block_request::Reference::BlockNumber(number)) =
+            request.into_inner().reference
+        else {
+            panic!("expected a block number reference")
+        };
+        let metadata = self
+            .events
+            .iter()
+            .filter_map(|event| event.metadata.clone())
+            .find(|metadata| metadata.num == number.num);
+        Box::pin(async move {
+            Ok(tonic::Response::new(firehose::SingleBlockResponse {
+                metadata: Some(metadata.ok_or_else(|| tonic::Status::not_found("missing block"))?),
+                block: None,
+            }))
+        })
+    }
+}
+
 service!(Info, "sf.firehose.v2.EndpointInfo", unary);
 service!(Stream, "sf.firehose.v2.Stream", server_streaming);
+service!(Fetch, "sf.firehose.v2.Fetch", unary);
 
 struct MockFirehose {
     endpoint: String,
@@ -160,6 +227,20 @@ struct MockFirehose {
 }
 impl MockFirehose {
     async fn start(events: Vec<firehose::Response>, plans: Vec<Plan>) -> Self {
+        Self::start_with(events, plans, false).await
+    }
+    /// Like [`Self::start`], and also serves `partitions build` probes.
+    async fn start_with_partition_probes(
+        events: Vec<firehose::Response>,
+        plans: Vec<Plan>,
+    ) -> Self {
+        Self::start_with(events, plans, true).await
+    }
+    async fn start_with(
+        events: Vec<firehose::Response>,
+        plans: Vec<Plan>,
+        partition_probes: bool,
+    ) -> Self {
         let first = events
             .first()
             .and_then(|e| e.metadata.as_ref())
@@ -171,15 +252,21 @@ impl MockFirehose {
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         let plans = Arc::new(Mutex::new(VecDeque::from(plans)));
+        let events = Arc::new(events);
+        let fetch = Fetch {
+            events: events.clone(),
+        };
         let stream = Stream {
-            events: Arc::new(events),
+            events,
             plans: plans.clone(),
             requests: requests.clone(),
+            partition_probes,
         };
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(Info { first })
                 .add_service(stream)
+                .add_service(fetch)
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
@@ -2141,5 +2228,536 @@ async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
     assert!(build.try_wait().unwrap().is_none(), "build kept running");
     build.start_kill().unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(10), build.wait()).await;
+    server.assert_drained();
+}
+
+/// A final fixture block whose time is `seconds` (the default fixture uses one time).
+fn response_at(number: u64, seconds: i64) -> firehose::Response {
+    let mut response = response(number, 3);
+    response.metadata.as_mut().unwrap().time = Some(prost_types::Timestamp { seconds, nanos: 0 });
+    response
+}
+
+/// The `fireparq` binary with a cleared environment, run from `dir`.
+fn fireparq(dir: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
+    command.kill_on_drop(true).env_clear().current_dir(dir);
+    command
+}
+
+/// An hourly-partitioned bounded build from block 100 into `<dir>/output`.
+fn hourly_build(server: &MockFirehose, dir: &Path, stop: u64) -> tokio::process::Command {
+    let mut command = fireparq(dir);
+    command
+        .args([
+            "build",
+            "--endpoint",
+            &server.endpoint,
+            "--block-type",
+            "evm",
+            "--start-block",
+            "100",
+            "--stop-block",
+            &stop.to_string(),
+            "--partition",
+            "hour",
+            "--flush-interval-secs",
+            "1000000000",
+            "--stream-idle-timeout-secs",
+            "0",
+            "--output",
+        ])
+        .arg(dir.join("output"));
+    command
+}
+
+/// Every file below `root` (relative, `/`-separated) with its bytes digest.
+fn tree_digests(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.insert(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    Sha256::digest(std::fs::read(&path).unwrap()).to_vec(),
+                );
+            }
+        }
+    }
+    files
+}
+
+fn json_output(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", logs(output)))
+}
+
+/// `fireparq <args>` from `dir` with a cleared environment; its output.
+async fn fireparq_output(dir: &Path, args: &[&str]) -> Output {
+    let mut command = fireparq(dir);
+    command.args(args);
+    run(command).await
+}
+
+/// `--without-chain-dir` writes the dataset directly into `--output` (one
+/// bucket or directory per network) instead of `<output>/<chain_name>/`. The
+/// chain name is still required and recorded, every downstream command
+/// resolves the chain-dir-less root, and switching the flag off on the
+/// existing dataset is refused before any Blocks request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_it() {
+    // 2023-11-14 22:13:20 UTC. Blocks 101 and 102 share hour 23, so the two
+    // runs leave two parts there for merge; 104 is the finalized head that
+    // `partitions build` proves.
+    const T: i64 = 1_700_000_000;
+    let server = MockFirehose::start_with_partition_probes(
+        vec![
+            response_at(100, T),
+            response_at(101, T + 3_600),
+            response_at(102, T + 3_660),
+            response_at(103, T + 7_200),
+            response_at(104, T + 7_260),
+        ],
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-101", 100, 103),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("output");
+    let (root_arg, blocks_arg) = (
+        root.to_str().unwrap().to_string(),
+        root.join("blocks").to_str().unwrap().to_string(),
+    );
+
+    // build: data, authority and the mirror sit at the root.
+    let mut first = hourly_build(&server, dir.path(), 102);
+    first.arg("--without-chain-dir");
+    let logs_first = plain_logs(&success(first).await);
+    assert!(
+        logs_first.contains(&format!(
+            "resolved write destinations output={} cursor={}",
+            root.display(),
+            root.join("cursor.parquet").display()
+        )),
+        "{logs_first}"
+    );
+    assert!(!root.join(CHAIN).exists());
+    let state = authority(&root);
+    assert_eq!(state["descriptor"]["chain"], CHAIN);
+    assert_eq!(
+        state["descriptor"]["output"]["canonical_root"],
+        std::fs::canonicalize(&root).unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        state["descriptor"]["mirror"]["absolute_path"],
+        root.join("cursor.parquet").to_str().unwrap()
+    );
+    assert_checkpoint(&root, 2, 101, 102);
+    assert_eq!(block_numbers(&root), [100, 101]);
+    let first_parts = parts(&root);
+    // <table>/year=/month=/day=/hour=/<part>, with no chain directory above.
+    assert!(first_parts.keys().all(|path| path.components().count() == 6
+        && path
+            .iter()
+            .nth(1)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("year=")));
+    let blocks_part = first_parts
+        .keys()
+        .find(|path| path.starts_with("blocks/year=2023/month=11/day=14/hour=22"))
+        .unwrap();
+    let footer = inspect_footer(&root.join(blocks_part)).await;
+    assert_eq!(footer_value(&footer, "firehose-parquet.chain_name"), CHAIN);
+
+    // Without the flag (or with WITHOUT_CHAIN_DIR=false) the same command
+    // resolves <output>/<chain_name>, inside the existing dataset: refused
+    // before Blocks, and nothing is written anywhere.
+    for env in [None, Some("false")] {
+        let before = tree_digests(&root);
+        let mut command = hourly_build(&server, dir.path(), 104);
+        if let Some(value) = env {
+            command.env("WITHOUT_CHAIN_DIR", value);
+        }
+        let output = run(command).await;
+        assert!(!output.status.success(), "{}", logs(&output));
+        assert!(
+            logs(&output).contains("overlaps another protected root")
+                && logs(&output).contains("--without-chain-dir"),
+            "{}",
+            logs(&output)
+        );
+        assert_eq!(server.calls(), 1);
+        assert!(!root.join(CHAIN).exists());
+        assert_eq!(tree_digests(&root), before);
+    }
+
+    // WITHOUT_CHAIN_DIR=true resumes the same root from its authority.
+    let mut resumed = hourly_build(&server, dir.path(), 104);
+    resumed.env("WITHOUT_CHAIN_DIR", "true");
+    success(resumed).await;
+    assert_eq!(server.calls(), 2);
+    assert_checkpoint(&root, 4, 103, 104);
+    assert_eq!(block_numbers(&root), [100, 101, 102, 103]);
+    let hour_23 = Path::new("blocks/year=2023/month=11/day=14/hour=23");
+    assert_eq!(
+        parts(&root)
+            .keys()
+            .filter(|path| path.starts_with(hour_23))
+            .count(),
+        2
+    );
+
+    // verify infers the root from the layout: registry at the root, the
+    // network from file metadata, open partitions from the root authority.
+    let verify = |report: &Path| {
+        let mut command = fireparq(dir.path());
+        command
+            .arg("verify")
+            .arg(root.join("blocks"))
+            .args(["--checks", "roots", "--report-json"])
+            .arg(report);
+        command
+    };
+    let verify_report = |name: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(dir.path().join(name)).unwrap()).unwrap()
+    };
+    let statuses = |report: &Value| -> BTreeMap<String, String> {
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|finding| {
+                (
+                    finding["partition"].as_str().unwrap().to_string(),
+                    finding["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let expected = |closed: &str| -> BTreeMap<String, String> {
+        [
+            ("year=2023/month=11/day=14/hour=22", closed),
+            ("year=2023/month=11/day=14/hour=23", closed),
+            ("year=2023/month=11/day=15/hour=00", "open"),
+        ]
+        .into_iter()
+        .map(|(partition, status)| (partition.to_string(), status.to_string()))
+        .collect()
+    };
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    success(verify(&dir.path().join("verify-1.json"))).await;
+    let report = verify_report("verify-1.json");
+    assert_eq!(
+        statuses(&report),
+        expected("missing_expected"),
+        "{report:#}"
+    );
+    assert_eq!(report["network"], CHAIN);
+    assert_eq!(report["table"], "blocks");
+    assert_eq!(
+        report["registry_path"],
+        canonical.join("merkle_roots.parquet").to_str().unwrap()
+    );
+    assert!(report["suggested_run_report_path"]
+        .as_str()
+        .unwrap()
+        .starts_with(canonical.join("verify_runs").to_str().unwrap()));
+    assert_eq!(report["summary"]["wrote_registry"], true);
+    assert!(report["warnings"][0].as_str().unwrap().contains(&format!(
+        "authoritative ingestion state of {} is at block 103",
+        canonical.display()
+    )));
+    assert!(root.join("merkle_roots.parquet").exists());
+    success(verify(&dir.path().join("verify-2.json"))).await;
+    let report = verify_report("verify-2.json");
+    assert_eq!(statuses(&report), expected("match"), "{report:#}");
+
+    // Read-only commands take the table directory under the root.
+    let scanned = json_output(&fireparq_output(dir.path(), &["scan", &blocks_arg, "--json"]).await);
+    assert_eq!(scanned["files_scanned"], 4);
+    for args in [
+        vec!["validate", &blocks_arg],
+        vec!["inspect", root.join("cursor.parquet").to_str().unwrap()],
+    ] {
+        let output = fireparq_output(dir.path(), &args).await;
+        assert!(output.status.success(), "{args:?}: {}", logs(&output));
+    }
+
+    // merge at the root compacts table partitions and never touches the
+    // root artifacts (mirror, authority, registry).
+    let artifacts = |root: &Path| -> BTreeMap<String, Vec<u8>> {
+        tree_digests(root)
+            .into_iter()
+            .filter(|(path, _)| !path.contains("/part-"))
+            .collect()
+    };
+    let artifacts_before = artifacts(&root);
+    for name in [
+        ".fireparq-ingest/state.json",
+        "cursor.parquet",
+        "merkle_roots.parquet",
+    ] {
+        assert!(artifacts_before.contains_key(name), "{artifacts_before:?}");
+    }
+    let output = fireparq_output(dir.path(), &["merge", &root_arg]).await;
+    assert!(output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("Partitions merged:  1"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(artifacts(&root), artifacts_before);
+    assert_eq!(
+        parts(&root)
+            .keys()
+            .filter(|path| path.starts_with(hour_23))
+            .count(),
+        1
+    );
+    assert_eq!(block_numbers(&root), [100, 101, 102, 103]);
+    success(verify(&dir.path().join("verify-3.json"))).await;
+    assert_eq!(statuses(&verify_report("verify-3.json")), expected("match"));
+
+    // rollup reads the root into a separate export and skips the root
+    // artifacts; in place (and truncate) stay refused for protected data,
+    // exactly as below a chain directory.
+    let export = dir.path().join("export");
+    let output = fireparq_output(
+        dir.path(),
+        &[
+            "rollup",
+            &root_arg,
+            "--output",
+            export.to_str().unwrap(),
+            "--partition",
+            "date",
+        ],
+    )
+    .await;
+    assert!(output.status.success(), "{}", logs(&output));
+    let exported: Vec<String> = tree_digests(&export).into_keys().collect();
+    assert_eq!(exported.len(), 2, "{exported:?}");
+    assert!(exported[0].starts_with("blocks/year=2023/month=11/day=14/part-rollup-"));
+    assert!(exported[1].starts_with("blocks/year=2023/month=11/day=15/part-rollup-"));
+    assert_eq!(table_block_numbers(&export, "blocks"), [100, 101, 102, 103]);
+    for (args, expected) in [
+        (
+            vec![
+                "rollup",
+                &root_arg,
+                "--partition",
+                "date",
+                "--delete-source",
+            ],
+            "overlaps a protected dataset",
+        ),
+        (
+            vec!["truncate", &root_arg, "-p", "hour=22", "--yes"],
+            "truncate is unsupported for protected datasets",
+        ),
+    ] {
+        let before = tree_digests(&root);
+        let output = fireparq_output(dir.path(), &args).await;
+        assert!(!output.status.success(), "{}", logs(&output));
+        assert!(logs(&output).contains(expected), "{}", logs(&output));
+        assert_eq!(tree_digests(&root), before);
+    }
+
+    // partitions build --without-chain-dir writes <output>/partitions.parquet
+    // and infers --start-block from the root cursor mirror (block 103 + 1).
+    let partitions_build = |extra: &[&str]| {
+        let mut command = fireparq(dir.path());
+        command
+            .args([
+                "--log-level",
+                "error",
+                "partitions",
+                "build",
+                "--endpoint",
+                &server.endpoint,
+                "--output",
+                "output",
+                "--without-chain-dir",
+                "--partition",
+                "block_range",
+                "--json",
+            ])
+            .args(extra);
+        command
+    };
+    let built = json_output(
+        &success(partitions_build(&[
+            "--block-range-size",
+            "1",
+            "--stop-block",
+            "105",
+        ]))
+        .await,
+    );
+    assert_eq!(built["partitions_index"], "output/partitions.parquet");
+    assert_eq!(built["chain"], CHAIN);
+    assert_eq!(
+        (built["start_block"].as_u64(), built["stop_block"].as_u64()),
+        (Some(104), Some(105))
+    );
+    let rebuilt = json_output(
+        &success(partitions_build(&[
+            "--block-range-size",
+            "2",
+            "--overwrite",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "104",
+        ]))
+        .await,
+    );
+    assert_eq!(rebuilt["row_count"], 2);
+    assert!(!root.join(CHAIN).exists());
+    let index = root.join("partitions.parquet");
+    let listed = json_output(
+        &fireparq_output(
+            dir.path(),
+            &[
+                "partitions",
+                "ls",
+                "--partitions-index",
+                index.to_str().unwrap(),
+                "--json",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(listed["total_matches"], 2);
+    assert_eq!(listed["rows"][0]["chain"], CHAIN);
+    let output = fireparq_output(
+        dir.path(),
+        &[
+            "partitions",
+            "validate",
+            "--partitions-index",
+            index.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("valid:            true"),
+        "{}",
+        logs(&output)
+    );
+    let resolved = json_output(
+        &fireparq_output(
+            dir.path(),
+            &[
+                "partitions",
+                "resolve",
+                "--partitions-index",
+                index.to_str().unwrap(),
+                "--partition-type",
+                "block_range",
+                "--partition-value",
+                "100",
+                "--json",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        (
+            resolved["start_block"].as_u64(),
+            resolved["stop_block"].as_u64()
+        ),
+        (Some(100), Some(102))
+    );
+
+    // The index at the root is a reserved artifact: later maintenance and
+    // verify runs leave it and every other root artifact alone.
+    let artifacts_before = artifacts(&root);
+    assert!(artifacts_before.contains_key("partitions.parquet"));
+    let output = fireparq_output(dir.path(), &["merge", &root_arg]).await;
+    assert!(output.status.success(), "{}", logs(&output));
+    assert_eq!(artifacts(&root), artifacts_before);
+    success(verify(&dir.path().join("verify-4.json"))).await;
+    assert_eq!(statuses(&verify_report("verify-4.json")), expected("match"));
+
+    // recovery reads the same root.
+    let status =
+        json_output(&fireparq_output(dir.path(), &["recovery", "status", &root_arg]).await);
+    assert_eq!(status["state"]["present"], true);
+    assert_eq!(status["pending"]["present"], false);
+    let output = fireparq_output(dir.path(), &["recovery", "recover", &root_arg]).await;
+    assert!(output.status.success(), "{}", logs(&output));
+
+    // A completed range at the root is still an authority-backed no-op.
+    let mut repeated = hourly_build(&server, dir.path(), 104);
+    repeated.arg("--without-chain-dir");
+    assert!(logs(&success(repeated).await).contains("without opening Blocks"));
+    assert_eq!(server.calls(), 2);
+    assert!(!root.join(CHAIN).exists());
+    server.assert_drained();
+}
+
+/// The default layout is unchanged (`<output>/<chain_name>/`), and turning
+/// `--without-chain-dir` on for that output afterwards points at the parent of
+/// the existing dataset, which is refused before Blocks as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_layout_is_unchanged_and_cannot_switch_to_without_chain_dir() {
+    let server = MockFirehose::start(
+        (100..103).map(|n| response(n, 3)).collect(),
+        vec![Plan::complete("", 100, 101)],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let output_dir = dir.path().join("output");
+    let chain_root = root(dir.path());
+    let logs_first = plain_logs(&success(command(&server, dir.path(), 100, 102)).await);
+    assert!(
+        logs_first.contains(&format!(
+            "resolved write destinations output={} cursor={}",
+            chain_root.display(),
+            chain_root.join("cursor.parquet").display()
+        )),
+        "{logs_first}"
+    );
+    assert_checkpoint(&chain_root, 2, 101, 102);
+    assert_eq!(
+        std::fs::read_dir(&output_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>(),
+        [std::ffi::OsString::from(CHAIN)]
+    );
+
+    let before = tree_digests(&output_dir);
+    for from_env in [false, true] {
+        let mut request = command(&server, dir.path(), 100, 103);
+        if from_env {
+            request.env("WITHOUT_CHAIN_DIR", "true");
+        } else {
+            request.arg("--without-chain-dir");
+        }
+        let output = run(request).await;
+        assert!(!output.status.success(), "{}", logs(&output));
+        assert!(
+            logs(&output).contains("overlaps another protected root"),
+            "{}",
+            logs(&output)
+        );
+        assert_eq!(server.calls(), 1);
+        assert_eq!(tree_digests(&output_dir), before);
+        assert!(!output_dir.join(CONTROL_DIRECTORY).exists());
+    }
     server.assert_drained();
 }

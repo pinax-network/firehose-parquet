@@ -95,8 +95,10 @@ impl ResolvedEndpoint {
         };
         debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
-        // Use chain_name as a subdirectory under the output path.
-        config.output = resolve_output(&config.output, &endpoint_info)?;
+        // Use chain_name as a subdirectory under the output path, unless
+        // --without-chain-dir selects the output root itself. The cursor
+        // mirror, authority, ownership and recovery all follow this root.
+        config.output = resolve_output(&config.output, &endpoint_info, args.without_chain_dir)?;
 
         // Protected authority must bind the actual mapper before opening Blocks.
         // Unknown custom endpoint metadata therefore requires an explicit family.
