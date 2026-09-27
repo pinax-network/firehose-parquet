@@ -100,8 +100,9 @@ Examples:
   fireparq build --network solana-mainnet-beta \\
     --start-block 250000000
 
-  # Resume from cursor.parquet, or fall back to the endpoint's
-  # first streamable block when no cursor exists
+  # Resume an existing output from its authoritative .fireparq-ingest/
+  # state, or start a new one at the endpoint's first streamable block
+  # (cursor.parquet is only an optional mirror; --cursor none disables it)
   fireparq build --network mainnet
 
   # See all build options
@@ -3363,6 +3364,20 @@ mod tests {
         err.to_string()
     }
 
+    /// `build` resumes from `.fireparq-ingest/` authority, not from the optional
+    /// `cursor.parquet` mirror, and only `partitions build` probes missing blocks.
+    #[test]
+    fn test_root_and_build_help_describe_authoritative_resume() {
+        let root = Cli::command().render_long_help().to_string();
+        let build = command_help(&["fireparq", "build", "--help"]);
+        for help in [&root, &build] {
+            assert!(help.contains(".fireparq-ingest/"), "{help}");
+            assert!(help.contains("--cursor none"), "{help}");
+            assert!(!help.contains("Resume from cursor"), "{help}");
+            assert!(!help.contains("probe retries"), "{help}");
+        }
+    }
+
     #[test]
     fn test_build_subcommand_parses_network_flag() {
         let cli = Cli::parse_from([
@@ -3975,10 +3990,11 @@ mod tests {
         assert!(help.contains("--network <NETWORK>"));
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
         assert!(!help.contains("--live"));
-        assert!(help.contains("existing cursor"));
+        assert!(help.contains("authoritative state"));
         assert!(help.contains("first streamable block"));
         assert!(help.contains("When omitted, the build runs in live mode"));
-        assert!(help.contains("Missing blocks are skipped automatically"));
+        // Only `partitions build` probes missing blocks.
+        assert!(!help.contains("Missing blocks are skipped automatically"));
         assert!(!help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(!help.contains("--backfill-missing-timestamps"));
         assert!(!help.contains("--backfill-missing-timestamps-buffer-bytes"));

@@ -162,9 +162,10 @@ pub struct CommonArgs {
 
     /// Start block number (inclusive).
     ///
-    /// When `--stop-block` is omitted, omitting this resumes from an existing
-    /// cursor when available, otherwise starts from the endpoint's first
-    /// streamable block.
+    /// When omitted, an existing output resumes from its authoritative state
+    /// under `.fireparq-ingest/` (never from the optional `cursor.parquet`
+    /// mirror), and a new output starts from the endpoint's first streamable
+    /// block.
     #[arg(
         short = 's',
         long,
@@ -428,7 +429,6 @@ pub struct CommonArgs {
 ///
 /// Streams blocks from a Firehose gRPC endpoint and writes Apache Parquet
 /// datasets partitioned by block range, date, hour, minute, or second.
-/// Missing blocks are skipped automatically after probe retries are exhausted.
 #[derive(clap::Args, Debug, Clone)]
 #[command(after_long_help = "\
 Examples:
@@ -462,9 +462,12 @@ Examples:
     --endpoint https://eos.firehose.pinax.network:443 \\
     --start-block 1000000 --stop-block 1001000
 
-  # Resume from cursor
-  fireparq build --network mainnet \\
-    --cursor cursor.parquet --partition date
+  # Resume: rerun the same command. Progress comes from the output's
+  # .fireparq-ingest/ state; cursor.parquet is only an optional mirror
+  fireparq build --network mainnet --partition date
+
+  # Create an output without the cursor.parquet mirror (bound at creation)
+  fireparq build --network mainnet --partition date --cursor none
 ")]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -571,9 +574,9 @@ pub enum Commands {
     /// Stream blocks from a Firehose gRPC endpoint and write Apache Parquet datasets.
     ///
     /// This is the primary ingestion workflow. Partitions output by block range,
-    /// date, hour, minute, or second. Supports live mode, cursor-based resume,
-    /// and S3 output. Missing blocks are skipped automatically after probe retries
-    /// are exhausted.
+    /// date, hour, minute, or second. Supports live mode and S3 output. A rerun
+    /// resumes from the output's authoritative state under `.fireparq-ingest/`;
+    /// `cursor.parquet` is only an optional mirror (`--cursor none` disables it).
     Build(BuildArgs),
     /// Partition index utilities (`partitions.parquet` workflows).
     #[command(subcommand)]
@@ -1140,6 +1143,7 @@ Examples:
             long,
             env = "NETWORK",
             hide_env_values = true,
+            value_parser = PossibleValuesParser::new(KNOWN_NETWORK_NAMES),
             help_heading = "Connection"
         )]
         network: Option<String>,
@@ -1183,7 +1187,12 @@ Examples:
         /// Required for bounded builds and incompatible with `--live`.
         /// When `--partition block_range` is used, explicit values must align to
         /// `--block-range-size`.
-        #[arg(long, conflicts_with = "live", help_heading = "Block Range")]
+        #[arg(
+            long,
+            conflicts_with = "live",
+            help_heading = "Block Range",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
         stop_block: Option<u64>,
         /// Keep extending `partitions.parquet` from its latest covered frontier.
         #[arg(long, default_value = "false", help_heading = "Block Range")]
@@ -1210,7 +1219,7 @@ Examples:
         /// S3 writes need an explicit `s3://` URI. When `--s3-bucket` /
         /// `S3_BUCKET` is set, a relative output is rejected as ambiguous; use
         /// `./path` or an absolute path for local output.
-        #[arg(long, help_heading = "Output")]
+        #[arg(long, required = true, help_heading = "Output")]
         output: Option<String>,
         /// Optional check that an explicit s3:// output uses this bucket; never expands relative paths
         #[arg(

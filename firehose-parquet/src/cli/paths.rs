@@ -25,17 +25,26 @@ pub fn resolve_s3_output_root(
         (Some(output), None) => Ok(output.to_string()),
         (Some(output), Some(bucket)) => {
             let prefix = output.trim_start_matches("./").trim_start_matches('/');
-            let suggestion = if prefix.is_empty() || prefix == "." {
-                format!("s3://{bucket}/<prefix>")
+            // `.` (the `build` default) names the current directory: suggest an explicit
+            // form of it rather than `./.`.
+            let (suggestion, local) = if prefix.is_empty() || prefix == "." {
+                (
+                    format!("s3://{bucket}/<prefix>"),
+                    "--output \"$(pwd)\" for the current directory or a subdirectory such as \
+                     ./output"
+                        .to_string(),
+                )
             } else {
-                format!("s3://{bucket}/{prefix}")
+                (
+                    format!("s3://{bucket}/{prefix}"),
+                    format!("--output ./{prefix} or an absolute path"),
+                )
             };
             anyhow::bail!(
                 "output `{output}` is a relative path while --s3-bucket / S3_BUCKET is set to \
                  `{bucket}`; writes no longer expand relative paths into S3_BUCKET. For S3 \
                  output pass --output {suggestion} (OUTPUT=s3://...); for local output pass \
-                 ./{prefix_or_dot} or an absolute path, or unset S3_BUCKET",
-                prefix_or_dot = if prefix.is_empty() { "." } else { prefix }
+                 {local}, or unset S3_BUCKET"
             )
         }
         (None, Some(bucket)) => anyhow::bail!(
