@@ -10,7 +10,7 @@ use object_store::{path::Path, Attribute, PutMode, PutOptions, UpdateVersion};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
-use crate::dataset_lock_s3::{usable_version, S3Ownership};
+use crate::dataset_lock_s3::{provider_rejection, usable_version, S3Ownership};
 use crate::durable_state::{
     decode_slot, encode, encode_tombstone, ControlKey, ControlVersion, CONTROL_DIRECTORY,
     MAX_CONTROL_BYTES,
@@ -247,6 +247,13 @@ impl<'a> S3StateStore<'a> {
                 .put_opts(&self.key(key), bytes.clone().into(), options),
         )
         .await;
+        if let Ok(Err(error)) = &response {
+            if let Some(rejected) = provider_rejection(error) {
+                // A refused request cannot complete later: resolved, not uncertain.
+                attempt.resolved = true;
+                return Err(anyhow::Error::new(rejected).context("writing a control record"));
+            }
+        }
         let reported = match response {
             Ok(Ok(result)) => Some(result),
             _ => None,

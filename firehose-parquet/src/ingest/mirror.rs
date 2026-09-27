@@ -7,7 +7,7 @@ use super::state::{
 };
 use crate::cursor::CursorState;
 use crate::dataset_lock::{DatasetOwnership, LocalOwnership};
-use crate::dataset_lock_s3::{usable_version, S3Ownership};
+use crate::dataset_lock_s3::{provider_rejection, usable_version, S3Ownership};
 use crate::metrics::{ErrorLabels, PipelineMetrics};
 use crate::writer::ParquetFileMetadata;
 use anyhow::{bail, ensure, Context, Result};
@@ -281,9 +281,29 @@ impl<'a> ProtectedMirror<'a> {
                     failures,
                     resolved: false,
                 };
-                let result = tokio::time::timeout(REQUEST_TIMEOUT, owner.object_store().put_opts(&ObjectPath::from(key.as_str()), bytes.clone().into(), options)).await
-                    .map_err(|_| anyhow::anyhow!("protected mirror upload timed out"))?
-                    .map_err(|_| anyhow::anyhow!("protected mirror conditional upload failed; retain owner for quiescent recovery"))?;
+                let result = match tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    owner.object_store().put_opts(
+                        &ObjectPath::from(key.as_str()),
+                        bytes.clone().into(),
+                        options,
+                    ),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("protected mirror upload timed out"))?
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(rejected) = provider_rejection(&error) {
+                            // A refused request cannot complete later: resolved,
+                            // not uncertain. FailureCount still records the save.
+                            attempt.resolved = true;
+                            return Err(anyhow::Error::new(rejected)
+                                .context("publishing the protected cursor mirror"));
+                        }
+                        bail!("protected mirror conditional upload failed; retain owner for quiescent recovery")
+                    }
+                };
                 let version = UpdateVersion {
                     e_tag: result.e_tag,
                     version: result.version,

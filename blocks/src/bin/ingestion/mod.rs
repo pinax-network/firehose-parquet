@@ -1,5 +1,5 @@
 //! Ingestion orchestration. Dataset ownership outlives the session and runtime;
-//! successful release remains explicit after all work has completed.
+//! every exit after acquisition ends it through `DatasetOwnership::finish`.
 use super::*;
 
 mod runtime;
@@ -56,8 +56,35 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
         return Ok(());
     };
     // Keep ownership outside all session/runtime borrows and acquire before resume.
-    let mut ownership = endpoint.acquire_ownership().await?;
-    let setup = setup::IngestionSetup::resolve(args, endpoint, ownership.as_ref()).await?;
+    let ownership = endpoint.acquire_ownership().await?;
+    let result = run_owned(
+        args,
+        endpoint,
+        ownership.as_ref(),
+        &shutdown,
+        &cursor_shutdown,
+    )
+    .await;
+    // Every exit after acquisition ends here, and every borrow of the guard
+    // (setup, session, runtime and their requests) ended with `run_owned`.
+    // Success and graceful shutdown release. A failure releases each S3 owner
+    // whose requests all had a definite outcome and keeps (and names) any other.
+    // A panic unwinds past this point and keeps S3 ownership (logged on drop);
+    // a second signal exits the process without running destructors.
+    match ownership {
+        Some(ownership) => ownership.finish(result).await,
+        None => result,
+    }
+}
+
+async fn run_owned(
+    args: &BuildArgs,
+    endpoint: setup::ResolvedEndpoint,
+    ownership: Option<&DatasetOwnership>,
+    shutdown: &CancellationToken,
+    cursor_shutdown: &AtomicBool,
+) -> Result<()> {
+    let setup = setup::IngestionSetup::resolve(args, endpoint, ownership).await?;
 
     let (mut metrics_registry, pipeline_metrics) = metrics::init();
     let _pipeline_activity = pipeline_metrics.begin_pipeline();
@@ -79,7 +106,7 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
     client.set_metrics(pipeline_metrics.clone());
 
     let mut state = runtime::MapperState::new(args, &setup)?;
-    let mut session = if let Some(owner) = &ownership {
+    let mut session = if let Some(owner) = ownership {
         let semantics = state.semantics(&setup)?;
         Some(
             IngestionSession::open(
@@ -87,7 +114,7 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
                 semantics,
                 owner,
                 Some(&pipeline_metrics),
-                Some(&cursor_shutdown),
+                Some(cursor_shutdown),
             )
             .await?,
         )
@@ -103,10 +130,6 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
     };
     if already_complete {
         info!(stop_block=?setup.config.stop_block, "requested range is already complete; recovered authority and cursor mirror without opening Blocks");
-        drop(session);
-        if let Some(owner) = ownership.take() {
-            owner.release().await?;
-        }
         return Ok(());
     }
 
@@ -116,27 +139,22 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
         state,
         session.as_mut(),
         &pipeline_metrics,
-        &shutdown,
+        shutdown,
     )?;
     let resume_cursor = runtime.resume_cursor();
     let stream_result = client
         .stream_blocks(
             resume_cursor,
-            &shutdown,
+            shutdown,
             |payload, type_url, cursor, identity, step| {
                 runtime.observe(payload, type_url, cursor, identity, step)
             },
         )
         .await;
-    runtime.finish(stream_result).await?;
+    // All synchronous writes have resolved when `finish` returns; the caller
+    // decides what happens to ownership.
+    let result = runtime.finish(stream_result).await;
     drop(runtime);
-
     drop(session);
-
-    // All synchronous writes have resolved by this point. Any earlier error or
-    // cancellation of this future drops the guard and retains remote ownership.
-    if let Some(ownership) = ownership {
-        ownership.release().await?;
-    }
-    Ok(())
+    result
 }

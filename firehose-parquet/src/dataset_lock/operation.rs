@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::AwsConfig;
-use crate::dataset_lock_s3::S3Ownership;
+use crate::dataset_lock_s3::{OwnershipError, S3Ownership};
 
 use super::LocalOwnership;
 
@@ -47,12 +47,119 @@ impl MutationScope {
     }
 }
 
-/// Owns all local scopes and remote buckets for one command. A successful caller
-/// must explicitly release it. Dropping it after an error/cancellation releases
-/// local OS locks but deliberately retains remote Owned records.
+/// Owns all local scopes and remote buckets for one command. A caller ends it
+/// with [`DatasetOwnership::finish`], or with `release` after success. Dropping
+/// it without either (a panic, a cancelled future, or a command that keeps
+/// ownership after any error) releases local OS locks but deliberately retains
+/// remote Owned records, and logs the recovery commands for each one.
 pub struct DatasetOwnership {
     local: Option<LocalOwnership>,
     remote: BTreeMap<String, S3Ownership>,
+}
+
+/// Why `finish` or a drop kept one bucket owner.
+enum RetainReason {
+    /// The latch is set: a request's outcome was never proven.
+    UncertainMutation,
+    /// Every request was resolved, but the owner record's own release failed.
+    ReleaseFailed(OwnershipError),
+    /// The guard was dropped without `finish`, so nothing was proven.
+    Unfinished,
+}
+
+struct RetainedOwner {
+    uri: String,
+    owner_id: String,
+    generation: u64,
+    reason: RetainReason,
+}
+
+impl RetainedOwner {
+    fn new(bucket: &str, owner: &S3Ownership, reason: RetainReason) -> Self {
+        let record = owner.record();
+        // The first sorted scope is the dataset root for build output (its
+        // cursor key sorts after it); status and release accept any prefix.
+        let uri = match record.scopes().first().filter(|scope| !scope.is_empty()) {
+            Some(scope) => format!("s3://{bucket}/{scope}"),
+            None => format!("s3://{bucket}"),
+        };
+        Self {
+            uri,
+            owner_id: record.owner_id().to_owned(),
+            generation: record.generation(),
+            reason,
+        }
+    }
+}
+
+/// Operator guidance for retained S3 owners. It names only public owner
+/// metadata and bucket-relative scopes, never credentials or cursor values.
+struct RetainedOwnership(Vec<RetainedOwner>);
+
+impl std::fmt::Display for RetainedOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "S3 bucket ownership was retained; every other writing command on the bucket \
+             fails with \"bucket ownership is held\" until it is released",
+        )?;
+        for owner in &self.0 {
+            let RetainedOwner {
+                uri,
+                owner_id,
+                generation,
+                reason,
+            } = owner;
+            write!(
+                f,
+                "\n- {uri}: owner {owner_id}, generation {generation}, kept because "
+            )?;
+            match reason {
+                RetainReason::UncertainMutation => f.write_str(
+                    "a request to this bucket had an uncertain outcome (it timed out, lost its \
+                     acknowledgement, was interrupted, or its result could not be verified) and \
+                     may still take effect",
+                )?,
+                RetainReason::ReleaseFailed(error) => write!(
+                    f,
+                    "releasing the owner record failed ({error}); every data and control request \
+                     had a definite outcome, so only the owner record is in doubt"
+                )?,
+                RetainReason::Unfinished => f.write_str(
+                    "the command ended without proving that every request it sent had finished \
+                     (a panic, an interrupted run, or a command that keeps ownership after any \
+                     error)",
+                )?,
+            }
+            write!(
+                f,
+                ".\n  Inspect: fireparq recovery status {uri}\n  Release: fireparq recovery \
+                 release {uri} --expected-owner {owner_id} --expected-generation {generation} \
+                 --stopped-writer-evidence <reference> --provider-quiescence-evidence <reference>"
+            )?;
+        }
+        f.write_str(
+            "\nRun the release only after confirming that this process has exited and that the \
+             provider has completed or permanently revoked every request it sent; elapsed time \
+             or process exit alone is not that evidence. Use the same AWS credential and \
+             endpoint settings. The next build then recovers any pending transaction before it \
+             streams.",
+        )
+    }
+}
+
+impl Drop for DatasetOwnership {
+    fn drop(&mut self) {
+        if self.remote.is_empty() {
+            return;
+        }
+        // Dropping a guard sends nothing: each record stays Owned.
+        let retained = std::mem::take(&mut self.remote)
+            .iter()
+            .rev()
+            .map(|(bucket, owner)| RetainedOwner::new(bucket, owner, RetainReason::Unfinished))
+            .collect();
+        tracing::warn!("{}", RetainedOwnership(retained));
+    }
 }
 
 impl DatasetOwnership {
@@ -224,6 +331,50 @@ impl DatasetOwnership {
         self.release_remote().await
     }
 
+    /// End the command holding this ownership and return its result.
+    ///
+    /// Success releases every remote owner, as `release` does. After a failure
+    /// each remote owner is released only when its uncertainty latch is clear.
+    /// That is provable: every S3 mutation site arms a drop guard that sets the
+    /// latch unless the request's outcome was proven (a verified readback, or a
+    /// 401/403 refusal), mutation clients make one attempt with transport
+    /// retries disabled, and this call consumes the guard, so no borrowed
+    /// request can still be running. A clear latch therefore means no request
+    /// this command sent can take effect later, the condition a successful
+    /// release relies on. Pending transaction state stays for the next owner's
+    /// mandatory startup recovery, which rolls Writing back or Committed
+    /// forward exactly as after an operator release.
+    ///
+    /// An owner whose latch is set, or whose release request fails, is kept.
+    /// The returned error then wraps the command's error with each kept owner,
+    /// why it was kept, and the exact `fireparq recovery status`/`recovery
+    /// release` commands. Local OS locks are released when this returns.
+    pub async fn finish<T>(mut self, result: Result<T>) -> Result<T> {
+        let failed = result.is_err();
+        let mut retained = Vec::new();
+        while let Some((bucket, owner)) = self.remote.pop_last() {
+            let summary = RetainedOwner::new(&bucket, &owner, RetainReason::UncertainMutation);
+            // `release` checks the latch first and then sends nothing.
+            match owner.release().await {
+                Ok(()) if failed => tracing::info!(
+                    bucket = %bucket,
+                    "no request to this bucket had an uncertain outcome; released S3 bucket ownership after the failure"
+                ),
+                Ok(()) => {}
+                Err(OwnershipError::DataMutationUncertain) => retained.push(summary),
+                Err(error) => retained.push(RetainedOwner {
+                    reason: RetainReason::ReleaseFailed(error),
+                    ..summary
+                }),
+            }
+        }
+        match (result, retained.is_empty()) {
+            (result, true) => result,
+            (Ok(_), false) => Err(anyhow::anyhow!("{}", RetainedOwnership(retained))),
+            (Err(error), false) => Err(error.context(RetainedOwnership(retained).to_string())),
+        }
+    }
+
     pub fn release_blocking(self) -> Result<()> {
         if self.remote.is_empty() {
             return Ok(());
@@ -283,6 +434,9 @@ fn block_storage<T>(future: impl std::future::Future<Output = Result<T>>) -> Res
             .block_on(future),
     }
 }
+
+#[cfg(test)]
+mod finish_tests;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {

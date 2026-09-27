@@ -514,3 +514,110 @@ async fn remote_session_initializes_and_resumes_using_one_borrowed_owner() {
     assert_eq!((first.files, first.rows), (2, 2));
     assert!(!owner.remote("data").unwrap().is_mutation_uncertain());
 }
+
+fn remote_config() -> Config {
+    Config {
+        output: "s3://data/chain".into(),
+        start_block: Some(100),
+        partition: Partition::None,
+        cursor_path: None,
+        ..Default::default()
+    }
+}
+
+async fn remote_owner(store: &Arc<object_store::memory::InMemory>) -> DatasetOwnership {
+    let remote =
+        crate::dataset_lock_s3::S3Ownership::acquire(store.clone(), "build", vec!["chain".into()])
+            .await
+            .unwrap();
+    DatasetOwnership::from_remote_for_test("data", remote)
+}
+
+async fn remote_owner_record(
+    store: &Arc<object_store::memory::InMemory>,
+) -> crate::dataset_lock_s3::OwnerRecord {
+    let store: Arc<dyn object_store::ObjectStore> = store.clone();
+    crate::dataset_lock_s3::S3Ownership::status(&store)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// `build` on a new S3 root: open initializes authority (a verified control
+/// write), one block is buffered, then the Blocks stream is rejected before
+/// the first flush. Ownership is released on exit and the next command
+/// acquires the bucket immediately and resumes from the same authority.
+#[tokio::test]
+async fn remote_stream_failure_before_first_flush_releases_bucket_for_the_next_command() {
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let config = remote_config();
+    let owner = remote_owner(&store).await;
+    let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    let initial = session.authority().checkpoint.id.clone();
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    drop(session);
+    let stream_error = anyhow::Error::new(tonic::Status::unauthenticated("rejected API key"))
+        .context("Firehose Blocks stream failed");
+    let error = owner.finish::<()>(Err(stream_error)).await.unwrap_err();
+    assert!(error.chain().any(|cause| cause.is::<tonic::Status>()));
+    assert!(!format!("{error:#}").contains("retained"), "{error:#}");
+    let released = remote_owner_record(&store).await;
+    assert_eq!(
+        released.state(),
+        crate::dataset_lock_s3::OwnerState::Released
+    );
+
+    let owner = remote_owner(&store).await;
+    assert_eq!(
+        owner.remote("data").unwrap().record().generation(),
+        released.generation() + 1
+    );
+    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    assert_eq!(session.authority().checkpoint.id, initial);
+    drop(session);
+    owner.finish(Ok(())).await.unwrap();
+}
+
+/// A first signal ends the stream with `ShutdownRequested`; the runtime
+/// discards the buffered window and returns success. Committed flushes stay,
+/// ownership is released, and the next run resumes after the last commit.
+#[tokio::test]
+async fn remote_graceful_shutdown_keeps_commits_and_releases() {
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let config = remote_config();
+    let owner = remote_owner(&store).await;
+    let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    flush(&mut session, &[100]).await;
+    let committed = session.authority().checkpoint.id.clone();
+    let ordinal = receive(&mut session, 101, 1_700_000_001, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_001), None)
+        .unwrap();
+    drop(session);
+    owner.finish(Ok(())).await.unwrap();
+    assert_eq!(
+        remote_owner_record(&store).await.state(),
+        crate::dataset_lock_s3::OwnerState::Released
+    );
+
+    let owner = remote_owner(&store).await;
+    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    assert_eq!(session.authority().checkpoint.id, committed);
+    drop(session);
+    owner.finish(Ok(())).await.unwrap();
+}

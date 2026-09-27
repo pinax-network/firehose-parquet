@@ -20,6 +20,10 @@ pub(crate) enum Fault {
     CorruptBody,
     TruncatedBody,
     OversizeHeaders,
+    /// Refuse every part PUT with HTTP 403 without storing it.
+    ForbiddenPart,
+    /// Refuse every control-record PUT with HTTP 403 without storing it.
+    ForbiddenControl,
 }
 #[derive(Clone)]
 pub(crate) struct Stored {
@@ -177,7 +181,14 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
             },
             "PUT" => {
                 let existing = state.objects.get(&path);
-                if headers.get("if-none-match").is_some_and(|s|s=="*" && existing.is_some())
+                let forbidden = match state.fault {
+                    Fault::ForbiddenPart => is_part,
+                    Fault::ForbiddenControl => path.contains("/.fireparq-ingest/"),
+                    _ => false,
+                };
+                if forbidden {
+                    (403, error("AccessDenied"), None, Fault::None)
+                } else if headers.get("if-none-match").is_some_and(|s|s=="*" && existing.is_some())
                     || headers.get("if-match").is_some_and(|s|existing.is_none_or(|o|s!=&o.etag)) {
                     (412, error("PreconditionFailed"), None, Fault::None)
                 } else {

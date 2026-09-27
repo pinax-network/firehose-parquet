@@ -316,7 +316,9 @@ fn spawn_ingestion_shutdown_handler(shutdown: CancellationToken, cursor_shutdown
         shutdown.cancel();
 
         signals.next().await;
-        warn!("second shutdown signal received, exiting immediately; in-flight writes may be interrupted");
+        // No destructor or release runs: an interrupted request may still take
+        // effect, so any S3 bucket ownership stays held for operator recovery.
+        warn!("second shutdown signal received, exiting immediately; in-flight writes may be interrupted and any S3 bucket ownership is retained (inspect it with `fireparq recovery status <output>`)");
         std::process::exit(130);
     });
 }
