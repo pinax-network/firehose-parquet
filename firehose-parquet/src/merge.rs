@@ -2447,6 +2447,68 @@ mod tests {
         assert_eq!(s3_values(&store, ""), (0..30).collect::<Vec<_>>());
     }
 
+    /// `build --without-chain-dir --output s3://bucket` keeps a dataset at the
+    /// bucket root, where the table prefixes sit beside the cursor mirror, the
+    /// partition index, the verify registry and reports, the ingestion
+    /// authority and the bucket-wide owner record. Merging the bucket root
+    /// compacts only table partitions and leaves every one of those alone.
+    #[test]
+    fn s3_bucket_root_dataset_merges_tables_and_leaves_root_artifacts() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let partition = "blocks/year=2023/month=11/day=14";
+        for part in 0..2u64 {
+            put_object(
+                &store,
+                &format!("{partition}/part-v1-{part}.parquet"),
+                parquet_bytes(&make_range_batch(100 + part * 10, 10)),
+            );
+        }
+        put_object(
+            &store,
+            "logs/year=2023/month=11/day=14/part-v1-0.parquet",
+            parquet_bytes(&make_range_batch(100, 5)),
+        );
+        // Parquet-named artifacts that would merge together if they were
+        // treated as one root partition of table data.
+        let artifacts = [
+            "cursor.parquet",
+            "partitions.parquet",
+            "merkle_roots.parquet",
+            "verify_runs/run/report.json",
+            ".fireparq-ingest/state.json",
+            ".fireparq-ingest/stray.parquet",
+            ".fireparq-owner-probes-v1/probe.parquet",
+        ];
+        for (index, key) in artifacts.iter().enumerate() {
+            put_object(
+                &store,
+                key,
+                parquet_bytes(&make_range_batch(1_000 + index as u64 * 10, 10)),
+            );
+        }
+        let before: Vec<_> = artifacts
+            .iter()
+            .map(|key| get_object(&store, key))
+            .collect();
+
+        let result = merge_s3(&test_merge_config("s3://bucket"), &store, "bucket", "").unwrap();
+
+        assert_eq!((result.partitions_merged, result.files_written), (1, 1));
+        assert!(result.schema_mismatches.is_empty());
+        let after: Vec<_> = artifacts
+            .iter()
+            .map(|key| get_object(&store, key))
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(list_keys(&store, partition).len(), 1);
+        assert_eq!(s3_values(&store, "blocks"), (100..120).collect::<Vec<_>>());
+        assert_eq!(s3_values(&store, "logs"), (100..105).collect::<Vec<_>>());
+        // The merge released its owner record at the bucket root.
+        assert!(list_keys(&store, "")
+            .iter()
+            .any(|key| key == crate::dataset_lock_s3::OWNER_KEY));
+    }
+
     fn encoding_metadata(encoding: &str) -> Vec<KeyValue> {
         vec![
             KeyValue::new("firehose-parquet.block_type".to_string(), "evm".to_string()),

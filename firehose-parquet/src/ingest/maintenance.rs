@@ -22,6 +22,11 @@ use crate::dataset_lock::{DatasetOwnership, MutationScope};
 use crate::durable_state::{ControlKey, LocalStateStore, CONTROL_DIRECTORY};
 use crate::durable_state_s3::S3StateStore;
 
+/// A protected dataset encloses, or is nested in, the selected ingestion root.
+/// Switching `--without-chain-dir` on an existing dataset always lands here:
+/// `<output>` and `<output>/<chain_name>` overlap. No path is echoed.
+const OVERLAPPING_INGESTION_ROOT: &str = "selected ingestion output overlaps another protected root: an enclosing or nested directory already holds a protected dataset. `build` writes to <output>/<chain_name>, or to <output> itself with --without-chain-dir; rerun with the choice the existing dataset was created with, or use a separate output root";
+
 const MAX_ROOTS: usize = 256;
 const MAX_EXPANSIONS: usize = 8;
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -552,7 +557,7 @@ pub(crate) async fn prepare_ingestion(
     let markers = discover_markers(ownership, &targets).await?;
     ensure!(
         markers.iter().all(|root| *root == path),
-        "selected ingestion output overlaps another protected root"
+        OVERLAPPING_INGESTION_ROOT
     );
     let roots = load_roots(ownership, &markers, aws).await?;
     let protected = roots.first().map(|root| root.descriptor.id()).transpose()?;
@@ -742,7 +747,7 @@ pub(crate) async fn validate_ingestion_target(
     let markers = discover_markers(ownership, &targets).await?;
     ensure!(
         markers.iter().all(|root| root == &path),
-        "selected ingestion output overlaps another protected root"
+        OVERLAPPING_INGESTION_ROOT
     );
     Ok(())
 }

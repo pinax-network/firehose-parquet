@@ -621,3 +621,156 @@ async fn remote_graceful_shutdown_keeps_commits_and_releases() {
     drop(session);
     owner.finish(Ok(())).await.unwrap();
 }
+
+async fn bucket_keys(store: &Arc<object_store::memory::InMemory>) -> Vec<String> {
+    use futures::TryStreamExt;
+    use object_store::ObjectStore;
+    let mut keys: Vec<String> = store
+        .list(None)
+        .map_ok(|object| object.location.to_string())
+        .try_collect()
+        .await
+        .unwrap();
+    keys.sort();
+    keys
+}
+
+fn bucket_root_config(output: &str) -> Config {
+    Config {
+        output: output.into(),
+        start_block: Some(100),
+        partition: Partition::None,
+        cursor_path: Some("cursor.parquet".into()),
+        ..Default::default()
+    }
+}
+
+async fn bucket_owner(store: &Arc<object_store::memory::InMemory>) -> DatasetOwnership {
+    let remote =
+        crate::dataset_lock_s3::S3Ownership::acquire(store.clone(), "build", vec![String::new()])
+            .await
+            .unwrap();
+    DatasetOwnership::from_remote_for_test("data", remote)
+}
+
+/// `build --without-chain-dir --output s3://data` keeps the whole dataset at
+/// the bucket root: authority under `.fireparq-ingest/`, parts under the
+/// table prefixes and the mirror at `cursor.parquet`, beside the bucket-wide
+/// owner record, which does not make the root ineligible. The default layout
+/// of the same stream, `s3://data/<chain>`, is nested in it and refused.
+#[tokio::test]
+async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_root() {
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let owner = bucket_owner(&store).await;
+    let config = bucket_root_config("s3://data");
+    assert_eq!(
+        ingestion_mutation_scopes(&config).unwrap(),
+        [
+            MutationScope::directory("s3://data"),
+            MutationScope::file("s3://data/cursor.parquet"),
+        ]
+    );
+    let mut session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    match &session.authority().descriptor.output {
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            assert_eq!((bucket.as_str(), prefix.as_str()), ("data", ""))
+        }
+        StorageIdentity::Local { .. } => panic!("expected an S3 output identity"),
+    }
+    assert!(matches!(
+        &session.authority().descriptor.mirror,
+        MirrorBinding::S3 { bucket, key, .. } if bucket == "data" && key == "cursor.parquet"
+    ));
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    let committed = flush(&mut session, &[100]).await;
+    assert_eq!((committed.files, committed.rows), (2, 2));
+    let checkpoint = session.authority().checkpoint.id.clone();
+    drop(session);
+
+    let keys = bucket_keys(&store).await;
+    for expected in [
+        crate::dataset_lock_s3::OWNER_KEY,
+        ".fireparq-ingest/state.json",
+        "cursor.parquet",
+    ] {
+        assert!(keys.iter().any(|key| key == expected), "{keys:?}");
+    }
+    for table in ["blocks", "logs"] {
+        assert!(
+            keys.iter()
+                .any(|key| key.starts_with(&format!("{table}/part-v1-"))),
+            "{keys:?}"
+        );
+    }
+    assert!(
+        keys.iter().all(|key| !key.starts_with("mainnet/")),
+        "{keys:?}"
+    );
+
+    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    assert_eq!(session.authority().checkpoint.id, checkpoint);
+    drop(session);
+
+    let nested = bucket_root_config("s3://data/mainnet");
+    let error = IngestionSession::open(&nested, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .err()
+        .expect("a chain directory inside the bucket-root dataset is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("overlaps another protected root"),
+        "{error:#}"
+    );
+    assert_eq!(bucket_keys(&store).await, keys);
+    assert!(!owner.remote("data").unwrap().is_mutation_uncertain());
+}
+
+/// The reverse switch: a dataset built with the default layout at
+/// `s3://data/mainnet` cannot be shadowed by a new bucket-root dataset at
+/// `s3://data`.
+#[tokio::test]
+async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let owner = bucket_owner(&store).await;
+    let nested = bucket_root_config("s3://data/mainnet");
+    let mut session = IngestionSession::open(&nested, mapper(BlockFamily::Evm), &owner, None, None)
+        .await
+        .unwrap();
+    let ordinal = receive(&mut session, 100, 1_700_000_000, 1);
+    session
+        .accept_mapped(ordinal, Some(1_700_000_000), None)
+        .unwrap();
+    flush(&mut session, &[100]).await;
+    drop(session);
+    let keys = bucket_keys(&store).await;
+    assert!(
+        keys.iter().any(|key| key == "mainnet/cursor.parquet"),
+        "{keys:?}"
+    );
+
+    let error = IngestionSession::open(
+        &bucket_root_config("s3://data"),
+        mapper(BlockFamily::Evm),
+        &owner,
+        None,
+        None,
+    )
+    .await
+    .err()
+    .expect("a bucket-root dataset above an existing chain root is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("overlaps another protected root"),
+        "{error:#}"
+    );
+    assert_eq!(bucket_keys(&store).await, keys);
+}

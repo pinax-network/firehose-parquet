@@ -155,6 +155,16 @@ cargo build --release --workspace
   --output s3://my-bucket/v1 \
   --partition date
 
+# One bucket per network: write the dataset at the bucket root
+# (s3://ethereum-mainnet/blocks/... instead of s3://ethereum-mainnet/mainnet/blocks/...)
+./target/release/fireparq build \
+  --network mainnet \
+  --start-block 20000000 \
+  --stop-block 20001000 \
+  --output s3://ethereum-mainnet \
+  --without-chain-dir \
+  --partition date
+
 # Stream Antelope blocks
 ./target/release/fireparq build \
   --block-type antelope \
@@ -259,7 +269,8 @@ docker run --rm \
 ## Cursor & Resume
 
 `fireparq build` stores an authoritative checkpoint and an all-table transaction
-journal under `<output>/<chain>/.fireparq-ingest/`. Every flush either recovers
+journal under `<output>/<chain>/.fireparq-ingest/` (`<output>/.fireparq-ingest/`
+with [`--without-chain-dir`](#single-network-buckets)). Every flush either recovers
 its complete committed output or removes its owned uncommitted parts before
 replay. The optional `cursor.parquet` file mirrors this authority; deleting the
 mirror cannot rewind ingestion. These controls contain opaque source cursors
@@ -384,6 +395,7 @@ When output is written locally or to S3, the default cursor file is automaticall
 | `./output` | *(default)* | `./output/<chain>/cursor.parquet` |
 | `s3://bucket/prefix` | *(default)* | `s3://bucket/prefix/<chain>/cursor.parquet` |
 | `s3://bucket/prefix` | `my-cursor.parquet` | `s3://bucket/prefix/<chain>/my-cursor.parquet` |
+| `s3://bucket` with `--without-chain-dir` | *(default)* | `s3://bucket/cursor.parquet` |
 | `s3://bucket/prefix` | `s3://other/path.parquet` | `s3://other/path.parquet` |
 | `./output` | `s3://other/path.parquet` | `s3://other/path.parquet` |
 
@@ -586,7 +598,7 @@ recovery knobs to dedicated advanced sections.
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
 | Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `cursor.parquet`, or `none`) |
-| Output | `--output <OUTPUT>` (default `.`; an explicit `s3://bucket/prefix` for S3), `--partition <PARTITION>` (default `none`), `--compression <COMPRESSION>` (default `zstd`) |
+| Output | `--output <OUTPUT>` (default `.`; an explicit `s3://bucket/prefix` for S3), `--partition <PARTITION>` (default `none`), `--compression <COMPRESSION>` (default `zstd`), `--without-chain-dir` (`WITHOUT_CHAIN_DIR`, default `false`: write into `<output>` itself instead of `<output>/<chain_name>`, see [single-network buckets](#single-network-buckets)) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
 | Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
@@ -740,6 +752,7 @@ only needed for custom deployment environments:
 | Flag (environment) | Purpose |
 |---|---|
 | `--s3-bucket` (`S3_BUCKET`) | Optional check that an explicit `s3://` output uses this bucket; a relative output is then rejected, never expanded |
+| `--without-chain-dir` (`WITHOUT_CHAIN_DIR`) | Write the dataset at `--output` itself, for example a bucket root, instead of `<output>/<chain_name>` ([single-network buckets](#single-network-buckets)); also on `partitions build` |
 | `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`) | S3 credentials and region |
 | `--aws-endpoint-url` (`AWS_ENDPOINT_URL_S3`) | Target S3-compatible object stores |
 | `--cache-control` (`CACHE_CONTROL`) | Cache-Control header for S3 uploads, default `public, max-age=31536000, immutable`; an empty string sends no header |
@@ -870,7 +883,7 @@ fireparq partitions build \
 
 Behavior:
 
-- Writes a v2 finalized snapshot to `/<chain>/partitions.parquet`, with `zstd` compression by default. Chain and partition type are stored in file metadata.
+- Writes a v2 finalized snapshot to `<output>/<chain>/partitions.parquet` (`<output>/partitions.parquet` with `--without-chain-dir`), with `zstd` compression by default. Chain and partition type are stored in file metadata.
 - Time indexes traverse every finalized block in the requested interval and check canonical parent links. They preserve the existing raw-timestamp routing: timestamps `[A, B, A]` produce three contiguous runs, including two separate runs for A.
 - `--start-block` is inclusive and `--stop-block` is exclusive. Bounds are never expanded. Clipped first/last spans and the current finalized-head time span carry `complete=false`.
 - A complete span has both natural boundaries established within the declared snapshot. It does **not** establish globally complete calendar coverage: the same date can recur elsewhere or later.
@@ -894,6 +907,7 @@ parent context, skipped-slot handling and endpoint requirements.
 | `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
 | `--poll-interval-secs` | `30` | Wait between live finalized-head checks |
 | `--output` | required | Local output root or explicit `s3://bucket/prefix`; with a bucket option set, a relative path is rejected |
+| `--without-chain-dir` | `false` | Write the index at `<output>/partitions.parquet` instead of `<output>/<chain>/partitions.parquet`, and infer `--start-block` from `<output>/cursor.parquet`: the root of a dataset built with `build --without-chain-dir` (`WITHOUT_CHAIN_DIR`) |
 | `--compression` | `zstd` | Codec for `partitions.parquet`: zstd (level 3), `zstd:<level>`, snappy, gzip, none |
 | `--s3-bucket` | none | Optional check that an explicit `s3://` output uses this bucket; never supplies the output |
 | `--resume` | `false` | Extend an existing verified v2 index |
@@ -1201,7 +1215,7 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 
 Verifies deterministic partition Merkle roots and optional protocol checks under one command surface, one table of one network per run. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs for the data path.
 
-The chain and table are inferred from the data: the chain from the `firehose-parquet.block_type` file metadata, the table from the directory layout (`<output>/<chain_name>/<table>/...`). The registry defaults to `<output>/<chain_name>/merkle_roots.parquet`, one per network, and published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`.
+The chain and table are inferred from the data: the chain from the `firehose-parquet.block_type` file metadata, the table from the directory layout (`<output>/<chain_name>/<table>/...`). The registry defaults to `<output>/<chain_name>/merkle_roots.parquet`, one per network, and published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`. For a dataset built with `--without-chain-dir` the output root is the chain root: point `verify` at `<output>/<table>` (for example `s3://ethereum-mainnet/blocks`), and the registry and reports go to `<output>/merkle_roots.parquet` and `<output>/verify_runs/`; the network still comes from the `firehose-parquet.chain_name` file metadata.
 
 ```bash
 # Standard profile (default): roots + protocol
@@ -2042,6 +2056,9 @@ with a supporting version before downgrading. See the
 
 ## Output Directory Layout
 
+`build` writes one dataset per network under `<output>/<chain_name>/`, or
+directly under `<output>/` with [`--without-chain-dir`](#single-network-buckets):
+
 ```
 <output>/<chain_name>/
 ├── .fireparq-ingest/          # authoritative checkpoint and transaction journal (do not edit)
@@ -2077,6 +2094,40 @@ FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is
 GROUP BY ALL;
 -- date: DATE (the canonical data column); year/month/day/hour: partition columns
 ```
+
+### Single-network buckets
+
+`build` appends the endpoint's `chain_name` to `--output`, so a bucket named
+after its network repeats the name: `s3://ethereum-mainnet/mainnet/blocks/...`.
+`--without-chain-dir` (`WITHOUT_CHAIN_DIR=true`) writes the same tree directly
+into `--output` instead, for example at the bucket root:
+
+```bash
+OUTPUT=s3://<bucket> WITHOUT_CHAIN_DIR=true fireparq build --network mainnet --partition date
+# s3://<bucket>/.fireparq-ingest/, s3://<bucket>/cursor.parquet,
+# s3://<bucket>/<table>/year=YYYY/month=MM/day=DD/part-*.parquet
+```
+
+- EndpointInfo must still report a chain name. It stays in the
+  `firehose-parquet.chain_name` file metadata and in the protected dataset
+  identity; only the directory level goes away.
+- The choice is bound when the dataset is created. A later run that switches it
+  points at `<output>/<chain_name>` inside the dataset, or at the parent of an
+  existing one, and is refused before any Blocks request
+  (`selected ingestion output overlaps another protected root`).
+- Pass `--without-chain-dir` to `partitions build` as well, so its index lands
+  at `s3://<bucket>/partitions.parquet` and a missing `--start-block` is
+  inferred from `s3://<bucket>/cursor.parquet`.
+- Other commands take the root or its tables directly:
+  `verify s3://<bucket>/blocks` (registry at
+  `s3://<bucket>/merkle_roots.parquet`), `merge s3://<bucket>`,
+  `recovery status s3://<bucket>`, and `scan` / `validate` / `inspect` on
+  `s3://<bucket>/<table>/...`. They skip the root artifacts and the bucket's
+  owner records as they do below a chain directory.
+- The first `build` needs an empty bucket; only the bucket owner record and a
+  same-chain `partitions.parquet` may already exist there. S3 ownership is
+  bucket-wide in any case, so a bucket per network also gives each concurrently
+  running `build` its own owner.
 
 ## Canonical Identity Columns
 

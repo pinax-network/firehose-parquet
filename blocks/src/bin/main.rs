@@ -2,14 +2,15 @@ use anyhow::{anyhow, Context, Result};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
-    build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
-    list_partitions_from_index, load_env_file, parse_partition_build_types,
-    parse_partition_shard_strategy, read_verified_partitions_index_at, resolve_cursor_template,
-    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
-    validate_partitions_index, validate_s3_output_credentials, write_verified_partitions_index,
-    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
-    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionListRequest,
-    PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    build_config, init_tracing, list_partitions_from_index, load_env_file,
+    output_root_without_chain_dir, parse_partition_build_types, parse_partition_shard_strategy,
+    partitions_index_path_in, read_verified_partitions_index_at, resolve_cursor_template,
+    resolve_partition_command, resolve_partitions_output_root, resolve_s3_output_root,
+    shard_partitions_from_index, validate_partitions_index, validate_s3_output_credentials,
+    write_verified_partitions_index, AwsConfig, BuildArgs, Commands, CursorTemplateContext,
+    PartitionBoundsRequest, PartitionBuildResult, PartitionBuildRow, PartitionBuildType,
+    PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
+    PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -34,7 +35,7 @@ use firehose_parquet::partition_index::{
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::ParquetFileMetadata;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1054,10 +1055,24 @@ fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
 
 /// Resolve the output only after a successful metadata lookup. Neither a
 /// network alias nor a block family proves the endpoint's canonical suffix.
-fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> Result<PathBuf> {
+///
+/// The dataset root is `<output>/<chain_name>`, or `<output>` itself with
+/// `--without-chain-dir`. Both require the same nonempty `chain_name`, which
+/// stays in file metadata and in the protected dataset identity.
+fn resolve_output(
+    base: &Path,
+    endpoint_info: &Option<EndpointInfo>,
+    without_chain_dir: bool,
+) -> Result<PathBuf> {
     let info = endpoint_info.as_ref().filter(|info| !info.chain_name.trim().is_empty())
         .ok_or_else(|| anyhow!("EndpointInfo with a nonempty chain_name is required before resolving output and cursor paths"))?;
-    Ok(base.join(&info.chain_name))
+    if !without_chain_dir {
+        return Ok(base.join(&info.chain_name));
+    }
+    Ok(match base.to_str() {
+        Some(uri) if uri.starts_with("s3://") => PathBuf::from(output_root_without_chain_dir(uri)),
+        _ => base.to_path_buf(),
+    })
 }
 
 async fn ensure_endpoint_available(
@@ -1291,6 +1306,7 @@ async fn run_partitions_build(
     block_range_size: Option<u64>,
     compression: Compression,
     output: Option<&str>,
+    without_chain_dir: bool,
     s3_bucket: Option<&str>,
     resume: bool,
     overwrite: bool,
@@ -1393,8 +1409,10 @@ async fn run_partitions_build(
         &endpoint_info,
         block_range_size,
     );
-    let partitions_index = build_partitions_index_path(&output_root, &chain);
-    let chain_output_root = build_partitions_output_root(&output_root, &chain);
+    // `<output>/<chain>`, or `<output>` itself with --without-chain-dir: the
+    // index and the sibling cursor used to infer --start-block both live there.
+    let chain_output_root = resolve_partitions_output_root(&output_root, &chain, without_chain_dir);
+    let partitions_index = partitions_index_path_in(&chain_output_root);
 
     // Prove the requested bound before acquiring remote ownership or reading
     // an existing index. No failed probe can create or replace an index.
@@ -2449,6 +2467,7 @@ async fn main() -> Result<()> {
                     block_range_size,
                     compression,
                     output,
+                    without_chain_dir,
                     s3_bucket,
                     resume,
                     overwrite,
@@ -2481,6 +2500,7 @@ async fn main() -> Result<()> {
                         *block_range_size,
                         compression,
                         output.as_deref(),
+                        *without_chain_dir,
                         s3_bucket.as_deref(),
                         *resume,
                         *overwrite,
@@ -4061,6 +4081,78 @@ mod tests {
         assert!(!help.contains("--skip-missing-blocks"));
     }
 
+    /// `--without-chain-dir` is an opt-in flag on `build` and `partitions
+    /// build` (default false, so the chain directory stays appended), read
+    /// from `WITHOUT_CHAIN_DIR` like the other `--without-*` toggles.
+    #[test]
+    fn test_without_chain_dir_parses_on_build_and_partitions_build() {
+        let build = |extra: &[&str]| {
+            let mut args = vec![
+                "fireparq",
+                "build",
+                "--network",
+                "mainnet",
+                "--start-block",
+                "100",
+                "--stop-block",
+                "200",
+            ];
+            args.extend_from_slice(extra);
+            match Cli::try_parse_from(args).unwrap().command {
+                Some(Commands::Build(build_args)) => build_args.without_chain_dir,
+                _ => panic!("expected Commands::Build"),
+            }
+        };
+        assert!(!build(&[]));
+        assert!(build(&["--without-chain-dir"]));
+        assert!(build(&["--without-chain-dir", "--without-extended"]));
+
+        let partitions = |extra: &[&str]| {
+            let mut args = vec![
+                "fireparq",
+                "partitions",
+                "build",
+                "--network",
+                "mainnet",
+                "--stop-block",
+                "200",
+                "--partition",
+                "date",
+                "--output",
+                "./output",
+            ];
+            args.extend_from_slice(extra);
+            match Cli::try_parse_from(args).unwrap().command {
+                Some(Commands::Partitions(PartitionsCommands::Build {
+                    without_chain_dir, ..
+                })) => without_chain_dir,
+                _ => panic!("expected partitions build"),
+            }
+        };
+        assert!(!partitions(&[]));
+        assert!(partitions(&["--without-chain-dir"]));
+
+        // A flag takes no value; `--without-chain-dir=false` is not a spelling.
+        let error = Cli::try_parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--without-chain-dir=false",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::TooManyValues);
+
+        for args in [
+            &["fireparq", "build", "--help"][..],
+            &["fireparq", "partitions", "build", "--help"][..],
+        ] {
+            let help = command_help(args);
+            assert!(help.contains("--without-chain-dir"), "{help}");
+            assert!(help.contains("WITHOUT_CHAIN_DIR"), "{help}");
+        }
+    }
+
     #[test]
     fn test_utility_subcommand_help_uses_grouped_headings() {
         for (name, headings, snippets) in [
@@ -4874,41 +4966,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_output_with_chain_name() {
-        let base = PathBuf::from(".");
-        let ei = Some(EndpointInfo {
-            chain_name: "mainnet".to_string(),
+    fn endpoint_info_named(chain_name: &str) -> Option<EndpointInfo> {
+        Some(EndpointInfo {
+            chain_name: chain_name.to_string(),
             chain_name_aliases: vec![],
             first_streamable_block_num: 0,
             first_streamable_block_id: String::new(),
             block_id_encoding: 0,
             block_features: vec![],
-        });
+        })
+    }
+
+    #[test]
+    fn test_resolve_output_with_chain_name() {
+        let base = PathBuf::from(".");
+        let ei = endpoint_info_named("mainnet");
         assert_eq!(
-            resolve_output(&base, &ei).unwrap(),
+            resolve_output(&base, &ei, false).unwrap(),
             PathBuf::from("./mainnet")
         );
+    }
+
+    /// The default keeps appending `<chain_name>` exactly as before
+    /// `--without-chain-dir` existed, for local paths and S3 URIs alike.
+    #[test]
+    fn test_resolve_output_default_appends_chain_name_unchanged() {
+        let ei = endpoint_info_named("mainnet");
+        for (base, expected) in [
+            (".", "./mainnet"),
+            ("./output", "./output/mainnet"),
+            ("./output/", "./output/mainnet"),
+            ("/data/output", "/data/output/mainnet"),
+            ("s3://ethereum-mainnet", "s3://ethereum-mainnet/mainnet"),
+            ("s3://ethereum-mainnet/", "s3://ethereum-mainnet/mainnet"),
+            ("s3://bucket/v1", "s3://bucket/v1/mainnet"),
+        ] {
+            let resolved = resolve_output(&PathBuf::from(base), &ei, false).unwrap();
+            assert_eq!(resolved.to_str(), Some(expected), "{base}");
+            assert_eq!(resolved, PathBuf::from(base).join("mainnet"), "{base}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_output_without_chain_dir_uses_the_output_root() {
+        let ei = endpoint_info_named("mainnet");
+        for (base, expected) in [
+            (".", "."),
+            ("./output", "./output"),
+            ("./output/", "./output/"),
+            ("/data/output", "/data/output"),
+            ("s3://ethereum-mainnet", "s3://ethereum-mainnet"),
+            ("s3://ethereum-mainnet/", "s3://ethereum-mainnet"),
+            ("s3://bucket/v1", "s3://bucket/v1"),
+            ("s3://bucket/v1/", "s3://bucket/v1"),
+        ] {
+            let resolved = resolve_output(&PathBuf::from(base), &ei, true).unwrap();
+            assert_eq!(resolved.to_str(), Some(expected), "{base}");
+        }
     }
 
     #[test]
     fn test_resolve_output_without_endpoint_info() {
         let base = PathBuf::from(".");
-        assert!(resolve_output(&base, &None).is_err());
+        for without_chain_dir in [false, true] {
+            assert!(resolve_output(&base, &None, without_chain_dir).is_err());
+        }
     }
 
+    /// `--without-chain-dir` only drops the directory suffix: EndpointInfo
+    /// with a nonempty chain name stays mandatory.
     #[test]
     fn test_resolve_output_empty_chain_name() {
         let base = PathBuf::from(".");
-        let ei = Some(EndpointInfo {
-            chain_name: String::new(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-        assert!(resolve_output(&base, &ei).is_err());
+        for chain_name in ["", "   "] {
+            for without_chain_dir in [false, true] {
+                let error =
+                    resolve_output(&base, &endpoint_info_named(chain_name), without_chain_dir)
+                        .unwrap_err()
+                        .to_string();
+                assert!(error.contains("nonempty chain_name"), "{error}");
+            }
+        }
     }
 
     #[test]

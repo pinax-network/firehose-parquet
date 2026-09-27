@@ -316,6 +316,57 @@ async fn cli_records_all_backward_runs_and_resumes_by_source_frontier() {
         .exists());
 }
 
+/// `--without-chain-dir` (or `WITHOUT_CHAIN_DIR=true`) writes and resumes the
+/// index directly under `--output`, where `build --without-chain-dir` keeps
+/// its dataset; the chain name is still recorded in the rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_without_chain_dir_writes_and_resumes_the_index_at_the_output_root() {
+    let root = tempfile::tempdir().unwrap();
+    let server = spawn_server(Fixture::regular()).await;
+    let output = run(
+        root.path(),
+        &server.url,
+        &[
+            "--partition",
+            "hour",
+            "--start-block",
+            "10",
+            "--stop-block",
+            "13",
+            "--without-chain-dir",
+        ],
+    )
+    .await;
+    assert_ok(&output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["partitions_index"], "output/partitions.parquet");
+    assert_eq!(json["chain"], "test-chain");
+    let path = root.path().join("output/partitions.parquet");
+    let first = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert_eq!(first.spans.len(), 3);
+    assert!(first
+        .spans
+        .iter()
+        .all(|span| span.row.chain.as_deref() == Some("test-chain")));
+    assert!(!root.path().join("output/test-chain").exists());
+
+    let mut resumed = command(
+        root.path(),
+        &server.url,
+        &["--partition", "hour", "--resume", "--stop-block", "16"],
+    );
+    resumed.env("WITHOUT_CHAIN_DIR", "true");
+    let output = tokio::time::timeout(Duration::from_secs(10), resumed.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ok(&output);
+    let next = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert_eq!(next.coverage.stop_block, 16);
+    assert_eq!(next.spans[..3], first.spans);
+    assert!(!root.path().join("output/test-chain").exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_future_stop_or_omitted_block_preserves_index_and_cursor() {
     for missing in [false, true] {

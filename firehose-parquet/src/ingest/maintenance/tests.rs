@@ -188,6 +188,61 @@ async fn remote_discovery_uses_components_and_includes_ancestors_descendants() {
     owner.release().await.unwrap();
 }
 
+/// A dataset written with `--without-chain-dir` to `s3://bucket` has its
+/// marker at the bucket root. A table or partition below it resolves to the
+/// bucket root, and a second dataset nested in it (for example the default
+/// `s3://bucket/<chain>` layout) is refused as conflicting authority.
+#[tokio::test]
+async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
+    use crate::dataset_lock_s3::S3Ownership;
+    use object_store::ObjectStore;
+    let store: std::sync::Arc<dyn ObjectStore> =
+        std::sync::Arc::new(object_store::memory::InMemory::new());
+    let put = |key: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .put(
+                    &object_store::path::Path::from(key),
+                    bytes::Bytes::from_static(b"marker only").into(),
+                )
+                .await
+                .unwrap();
+        }
+    };
+    put(".fireparq-ingest/state.json").await;
+    put("blocks/day=1/part-v1-a.parquet").await;
+    let remote = S3Ownership::acquire(store.clone(), "fixture", vec![String::new()])
+        .await
+        .unwrap();
+    let owner = DatasetOwnership::from_remote_for_test("bucket", remote);
+    for selected in [
+        "s3://bucket",
+        "s3://bucket/blocks",
+        "s3://bucket/blocks/day=1",
+    ] {
+        let targets = BTreeSet::from([MaintenanceTarget::directory(selected)]);
+        assert_eq!(
+            discover_markers(&owner, &targets).await.unwrap(),
+            BTreeSet::from(["s3://bucket".to_string()]),
+            "{selected}"
+        );
+    }
+    put("mainnet/.fireparq-ingest/state.json").await;
+    for selected in ["s3://bucket", "s3://bucket/mainnet"] {
+        let targets = BTreeSet::from([MaintenanceTarget::directory(selected)]);
+        assert!(
+            discover_markers(&owner, &targets)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("nested protected datasets"),
+            "{selected}"
+        );
+    }
+    owner.release().await.unwrap();
+}
+
 #[tokio::test]
 async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
     let temp = tempfile::tempdir().unwrap();
@@ -623,6 +678,18 @@ async fn public_truncate_and_rollup_refuse_a_selected_protected_table() {
 
 #[tokio::test]
 async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_session() {
+    remote_merge_recovery_at("data").await;
+}
+
+/// `build --without-chain-dir --output s3://bucket` puts the protected root at
+/// the bucket root: its authority, marker discovery and merge recovery use the
+/// empty prefix exactly like a chain directory.
+#[tokio::test]
+async fn native_remote_merge_recovery_at_the_bucket_root() {
+    remote_merge_recovery_at("").await;
+}
+
+async fn remote_merge_recovery_at(prefix: &str) {
     use crate::{
         dataset_lock_s3::{S3Ownership, OWNER_KEY},
         merge_journal::{Journal, RunContext, JOURNAL_FILE},
@@ -630,15 +697,27 @@ async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_ses
     use object_store::{path::Path as ObjectPath, ObjectStore};
     use std::sync::Arc;
     let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    let owner = S3Ownership::acquire(store.clone(), "fixture", vec!["data".into()])
+    let owner = S3Ownership::acquire(store.clone(), "fixture", vec![prefix.into()])
         .await
         .unwrap();
     let ownership = DatasetOwnership::from_remote_for_test("bucket", owner);
-    let identity = resolve_output_identity("s3://bucket/data", &empty_aws()).unwrap();
+    let root = if prefix.is_empty() {
+        "s3://bucket".to_string()
+    } else {
+        format!("s3://bucket/{prefix}")
+    };
+    let identity = resolve_output_identity(&root, &empty_aws()).unwrap();
+    let key = |relative: &str| {
+        ObjectPath::from(if prefix.is_empty() {
+            relative.to_string()
+        } else {
+            format!("{prefix}/{relative}")
+        })
+    };
     let mut descriptor = descriptor(RoutingPolicy::DirectV1);
     descriptor.output = identity.clone();
     let remote = ownership.remote("bucket").unwrap();
-    S3StateStore::new(remote, "data")
+    S3StateStore::new(remote, prefix)
         .unwrap()
         .create(
             ControlKey::State,
@@ -662,7 +741,7 @@ async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_ses
     ] {
         store
             .put(
-                &ObjectPath::from(format!("data/blocks/block_range=100-200/{name}")),
+                &key(&format!("blocks/block_range=100-200/{name}")),
                 bytes.into(),
             )
             .await
@@ -677,23 +756,17 @@ async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_ses
         .unwrap();
     assert!(matches!(
         store
-            .head(&ObjectPath::from(
-                "data/blocks/block_range=100-200/part-000002.parquet"
-            ))
+            .head(&key("blocks/block_range=100-200/part-000002.parquet"))
             .await,
         Err(object_store::Error::NotFound { .. })
     ));
     assert!(store
-        .head(&ObjectPath::from(
-            "data/blocks/block_range=100-200/part-000001.parquet"
-        ))
+        .head(&key("blocks/block_range=100-200/part-000001.parquet"))
         .await
         .is_ok());
     assert!(matches!(
         store
-            .head(&ObjectPath::from(format!(
-                "data/blocks/block_range=100-200/{JOURNAL_FILE}"
-            )))
+            .head(&key(&format!("blocks/block_range=100-200/{JOURNAL_FILE}")))
             .await,
         Err(object_store::Error::NotFound { .. })
     ));

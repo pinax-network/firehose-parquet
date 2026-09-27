@@ -310,8 +310,27 @@ pub fn build_partitions_output_root(output_root: &str, chain: &str) -> String {
     }
 }
 
+/// The chain root that `partitions build` writes its index into and reads a
+/// sibling `cursor.parquet` from: `<output>/<chain>`, or the output root itself
+/// with `--without-chain-dir` (see [`output_root_without_chain_dir`]).
+pub fn resolve_partitions_output_root(
+    output_root: &str,
+    chain: &str,
+    without_chain_dir: bool,
+) -> String {
+    if without_chain_dir {
+        output_root_without_chain_dir(output_root)
+    } else {
+        build_partitions_output_root(output_root, chain)
+    }
+}
+
 pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
-    let chain_root = build_partitions_output_root(output_root, chain);
+    partitions_index_path_in(&build_partitions_output_root(output_root, chain))
+}
+
+/// `partitions.parquet` directly under a chain root (local path or S3 URI).
+pub fn partitions_index_path_in(chain_root: &str) -> String {
     if chain_root.starts_with("s3://") {
         format!("{chain_root}/partitions.parquet")
     } else {

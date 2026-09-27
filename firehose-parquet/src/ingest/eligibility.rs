@@ -388,6 +388,73 @@ mod tests {
             .unwrap();
         assert!(remote_contents(&store, "").await.is_err());
     }
+    /// `partitions build --without-chain-dir --output s3://data` can run
+    /// before the first `build --without-chain-dir` into the same bucket: the
+    /// bucket root then holds only the owner record and a same-chain index,
+    /// and stays eligible. Another chain's index or any other object is not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bucket_root_with_owner_record_and_same_chain_index_is_eligible() {
+        use object_store::ObjectStore;
+        let dir = tempfile::tempdir().unwrap();
+        let index_bytes = |chain: &str| {
+            let path = dir.path().join(format!("{chain}.parquet"));
+            crate::cli::write_verified_partitions_index(
+                path.to_str().unwrap(),
+                &index(chain),
+                Compression::Zstd,
+                None,
+                None,
+            )
+            .unwrap();
+            bytes::Bytes::from(std::fs::read(path).unwrap())
+        };
+        let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+        let key = object_store::path::Path::from(PARTITIONS_INDEX_FILENAME);
+        store
+            .put(&key, index_bytes("mainnet").into())
+            .await
+            .unwrap();
+        let remote = crate::dataset_lock_s3::S3Ownership::acquire(
+            store.clone(),
+            "build",
+            vec![String::new()],
+        )
+        .await
+        .unwrap();
+        let owner = DatasetOwnership::from_remote_for_test("data", remote);
+        assert!(store
+            .head(&object_store::path::Path::from(OWNERSHIP_FILENAME))
+            .await
+            .is_ok());
+        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        descriptor.output = resolve_output_identity("s3://data", &aws()).unwrap();
+        let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
+        require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap();
+
+        store.put(&key, index_bytes("other").into()).await.unwrap();
+        assert!(require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("another chain"));
+        store
+            .put(&key, index_bytes("mainnet").into())
+            .await
+            .unwrap();
+        store
+            .put(
+                &"mainnet/blocks/part-1.parquet".into(),
+                bytes::Bytes::from_static(b"legacy").into(),
+            )
+            .await
+            .unwrap();
+        assert!(require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .is_err());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn remote_index_eligibility_uses_native_owned_store_and_bounded_get() {
         use object_store::ObjectStore;

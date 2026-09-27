@@ -9,7 +9,10 @@ It complements:
 
 ## Dataset Layout and Resolution
 
-`fireparq build` writes one directory per network, the **chain root**:
+`fireparq build` writes one directory per network, the **chain root**. With
+`--without-chain-dir` the output root itself is the chain root (for example a
+bucket per network, `s3://ethereum-mainnet/blocks/...`), and the artifacts below
+sit directly in it:
 
 ```
 <output>/<chain_name>/                 chain root (for example output/mainnet, output/sepolia)
@@ -272,6 +275,11 @@ Recommended layout (the defaults for data written by `fireparq build --output s3
 
 - `s3://<bucket>/<chain_name>/merkle_roots.parquet`
 - `s3://<bucket>/<chain_name>/verify_runs/<run_id>/report.json`
+
+For a bucket per network written with `fireparq build --output s3://<bucket> --without-chain-dir`:
+
+- `s3://<bucket>/merkle_roots.parquet`
+- `s3://<bucket>/verify_runs/<run_id>/report.json`
 
 ### Retention
 

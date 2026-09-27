@@ -468,6 +468,11 @@ Examples:
 
   # Create an output without the cursor.parquet mirror (bound at creation)
   fireparq build --network mainnet --partition date --cursor none
+
+  # One bucket per network: write the dataset at the bucket root instead of
+  # s3://ethereum-mainnet/mainnet/ (bound at creation)
+  fireparq build --network mainnet --partition date \\
+    --output s3://ethereum-mainnet --without-chain-dir
 ")]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -518,6 +523,22 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub without_votes: bool,
+
+    /// Write the dataset directly into `--output` instead of `<output>/<chain_name>`.
+    ///
+    /// For one bucket or directory per network, for example
+    /// `--output s3://ethereum-mainnet --without-chain-dir`. EndpointInfo must
+    /// still report a chain name; it stays in file metadata and in the
+    /// protected dataset identity. The resolved root is bound when the dataset
+    /// is created, so later runs must pass the same value: switching it points
+    /// at a directory that overlaps the existing dataset and is refused.
+    #[arg(
+        long,
+        env = "WITHOUT_CHAIN_DIR",
+        hide_env_values = true,
+        help_heading = "Output"
+    )]
+    pub without_chain_dir: bool,
 
     /// Include failed/reverted transactions on non-EVM chains (default: false).
     /// Deprecated for EVM, which includes them by default; it has no effect there.
@@ -1221,6 +1242,18 @@ Examples:
         /// `./path` or an absolute path for local output.
         #[arg(long, required = true, help_heading = "Output")]
         output: Option<String>,
+        /// Write `partitions.parquet` directly into `--output` instead of `<output>/<chain_name>/`.
+        ///
+        /// Use it with a dataset that `build --without-chain-dir` writes into
+        /// the same output root; a sibling `cursor.parquet` is then read from
+        /// that root too.
+        #[arg(
+            long,
+            env = "WITHOUT_CHAIN_DIR",
+            hide_env_values = true,
+            help_heading = "Output"
+        )]
+        without_chain_dir: bool,
         /// Optional check that an explicit s3:// output uses this bucket; never expands relative paths
         #[arg(
             long,

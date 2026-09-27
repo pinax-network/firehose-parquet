@@ -1,7 +1,9 @@
 # Partitions Build Defaults
 
 `fireparq partitions build` creates one verified v2 snapshot in
-`<output>/<chain>/partitions.parquet`. It does not change normal ingestion or
+`<output>/<chain>/partitions.parquet`, or in `<output>/partitions.parquet` with
+`--without-chain-dir` (the root that `build --without-chain-dir` writes, whose
+`cursor.parquet` then supplies a missing `--start-block`). It does not change normal ingestion or
 writer timestamp routing. See [the file contract](partitions-parquet-contract.md)
 and [the correctness decision and tests](audit/486-partition-index-design.md).
 

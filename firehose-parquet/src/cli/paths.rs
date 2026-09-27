@@ -74,6 +74,20 @@ pub fn reject_implicit_s3_write(
     Ok(())
 }
 
+/// The dataset root selected by `--without-chain-dir` (`build` and
+/// `partitions build`): the output root itself instead of
+/// `<output>/<chain_name>`.
+///
+/// An S3 root loses its trailing `/` separators, so `s3://bucket/` and
+/// `s3://bucket` both name the bucket-root dataset. A local path is returned as
+/// given; path components already ignore a trailing separator.
+pub fn output_root_without_chain_dir(output_root: &str) -> String {
+    match output_root.strip_prefix("s3://") {
+        Some(rest) => format!("s3://{}", rest.trim_end_matches('/')),
+        None => output_root.to_string(),
+    }
+}
+
 /// Human-readable absolute destination for startup logs: S3 URIs as given,
 /// local paths made absolute against the current directory (not canonicalized,
 /// so a path that does not exist yet is still reported).

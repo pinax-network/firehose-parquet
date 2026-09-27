@@ -356,6 +356,34 @@ mod tests {
         assert!(objects.is_empty());
     }
 
+    /// `recovery status s3://bucket` reads a dataset written with
+    /// `build --without-chain-dir` at the bucket root; its control records are
+    /// not visible from a chain directory below it.
+    #[tokio::test]
+    async fn remote_status_reads_the_control_records_of_a_bucket_root_dataset() {
+        for path in ["s3://bucket", "s3://bucket/"] {
+            assert_eq!(
+                remote_path(path).unwrap(),
+                ("bucket".to_string(), String::new())
+            );
+        }
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let owner = S3Ownership::acquire(store.clone(), "build", vec![String::new()])
+            .await
+            .unwrap();
+        crate::durable_state_s3::S3StateStore::new(&owner, "")
+            .unwrap()
+            .create(ControlKey::State, &serde_json::json!({ "fixture": true }))
+            .await
+            .unwrap();
+        owner.release().await.unwrap();
+        let status = remote_status(store.clone(), "").await.unwrap();
+        assert!(status.state.present);
+        assert!(!status.pending.present);
+        assert_eq!(status.ownership, "released");
+        assert!(!remote_status(store, "mainnet").await.unwrap().state.present);
+    }
+
     #[test]
     fn release_cli_requires_both_evidence_references_and_exact_target() {
         use clap::Parser;
