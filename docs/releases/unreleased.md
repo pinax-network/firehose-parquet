@@ -156,6 +156,21 @@ Rows of failed receipts are still always written, whatever the failed-transactio
 flags; filter `receipt_status <> 'Failure'` for actions that took effect. Values
 and row selection are otherwise unchanged. Rebuild into a fresh output root.
 
+### NEAR final-outcome link and rebuilt state changes (#507)
+
+`transactions.status` is the transaction's own outcome, almost always
+`SuccessReceiptId`, and not the result of its contract calls; the schema and
+README now say so. `receipts` appends `success_receipt_id`, the receipt a
+`SuccessReceiptId` outcome hands its result to, and the README computes NEAR's
+final transaction outcome across blocks from it. `state_changes` is rebuilt with
+`state_change_index`, dictionary `type`/`cause`, `cause_tx_hash` /
+`cause_receipt_hash`, `account_id`, `data_key` / `data_value` (in the identifier
+encoding, NULL when absent, replacing base64 `key_base64` / `value_base64`) and
+`AccountUpdate` `amount`, `locked`, `storage_usage` and `code_hash`. Every known
+StreamingFast NEAR producer leaves the block's state changes empty, so this table
+stays empty on its output. Rebuild into a fresh output root. See the
+[record](../audit/507-near-status-state-changes.md).
+
 ### Bitcoin amounts and input metadata (#511)
 
 Bitcoin-family outputs add `value_sats: UInt64`; the original floating coin
@@ -779,7 +794,7 @@ Receipt actions (method, arguments, deposit, gas) and execution logs, the channe
 
 Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, like `receipts` (see the breaking change above). They cover failed receipts too, labeled by `receipt_status` (#550). The README has a NEP-141 event query.
 
-`state_changes` is unchanged. The pinned StreamingFast NEAR producer emits an empty block-level state-change list and omits the indexer's per-shard state changes. This producer limitation does not establish behavior for every provider; #507 remains separately tracked.
+`state_changes` was not part of this change; #507 later rebuilt it (see the breaking change above). The StreamingFast NEAR producer emits an empty block-level state-change list and omits the indexer's per-shard state changes.
 
 ## Fixes
 

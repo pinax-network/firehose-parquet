@@ -4,8 +4,8 @@ Status: merged in [PR #559](https://github.com/pinax-network/firehose-parquet/pu
 as `c6db643` on 2026-09-25 after the single approved public capture, the
 independent offline comparison, full repository validation and PR CI passed;
 #506 is closed. The earlier single Firehose request remains quota-blocked and
-was not retried. #507 (status semantics and state-change attribution) remains
-open. #550's NEAR receipt-outcome labels reuse this capture offline; see
+was not retried. #507 (status semantics and state-change attribution) reuses
+this capture offline; see [its record](507-near-status-state-changes.md). #550's NEAR receipt-outcome labels reuse this capture offline; see
 [the #550 record](550-non-evm-failed-transactions.md).
 
 ## Recovery and current compatibility

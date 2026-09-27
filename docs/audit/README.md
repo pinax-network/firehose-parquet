@@ -37,6 +37,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#503: Binary Solana payloads and account-index lists](503-solana-binary-payloads.md)
 - [#550: Solana parent transaction outcome context](550-solana-execution-context.md)
 - [#550: Tron, Antelope and NEAR failed-transaction rules and qualification](550-non-evm-failed-transactions.md)
+- [#507: NEAR status semantics, state-change attribution and encoding](507-near-status-state-changes.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#474: append-only non-final streams and query limits](474-non-final-streams.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)

@@ -55,6 +55,9 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("shard_id", DataType::UInt64, false),
         Field::new("nonce", DataType::UInt64, false),
         Field::new("actions", DataType::Utf8, false),
+        // The transaction's own outcome: its inclusion and conversion into a
+        // receipt. `SuccessReceiptId` does not mean the contract calls succeeded;
+        // the final outcome follows `receipts.success_receipt_id` (#507, README).
         Field::new("status", DataType::Utf8, false),
         Field::new("gas_burnt", DataType::UInt64, false),
         // yoctoNEAR, as a decimal string.
@@ -79,7 +82,7 @@ pub fn receipts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
         Field::new("receipt_index", DataType::UInt32, false),
         // The originating transaction, when it is in the same block; null
         // otherwise (see `mapper::ReceiptOrigins`).
-        Field::new("tx_hash", bd, true),
+        Field::new("tx_hash", bd.clone(), true),
         Field::new("predecessor_id", DataType::Utf8, false),
         Field::new("receiver_id", DataType::Utf8, false),
         // `ReceiptAction.signer_id`: the signer of the transaction that started
@@ -95,6 +98,9 @@ pub fn receipts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
         Field::new("receipt_ids", BytesListColumn::data_type(encoding), false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // For a `SuccessReceiptId` outcome, the receipt whose outcome becomes this
+    // receipt's result; null otherwise (#507). Appended after every earlier column.
+    fields.push(Field::new("success_receipt_id", bd, true));
     Schema::new(fields)
 }
 
@@ -153,14 +159,31 @@ pub fn execution_logs_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
     Schema::new(fields)
 }
 
+/// One row per entry of the block's `state_changes` (#507). The pinned producer
+/// never fills that list, so this table is empty on its output.
 pub fn state_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
-        Field::new("type", DataType::Utf8, false),
-        Field::new("cause", DataType::Utf8, false),
+        // Position in the block's `state_changes`, counting skipped entries.
+        Field::new("state_change_index", DataType::UInt32, false),
+        Field::new("type", enum_data_type(), false),
+        Field::new("cause", enum_data_type(), false),
+        // `TransactionProcessing` causes only.
+        Field::new("cause_tx_hash", bd.clone(), true),
+        // Receipt causes: ActionReceiptProcessingStarted, ActionReceiptGasReward,
+        // ReceiptProcessing and PostponedReceipt. Joins `receipts.receipt_id`.
+        Field::new("cause_receipt_hash", bd.clone(), true),
         Field::new("account_id", DataType::Utf8, false),
-        Field::new("key_base64", DataType::Utf8, false),
-        Field::new("value_base64", DataType::Utf8, false),
+        // `DataUpdate` and `DataDeletion`: the storage key.
+        Field::new("data_key", bd.clone(), true),
+        // `DataUpdate`: the stored value.
+        Field::new("data_value", bd.clone(), true),
+        // `AccountUpdate`: yoctoNEAR balances as decimal strings, storage in bytes.
+        Field::new("amount", DataType::Utf8, true),
+        Field::new("locked", DataType::Utf8, true),
+        Field::new("storage_usage", DataType::UInt64, true),
+        Field::new("code_hash", bd, true),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
