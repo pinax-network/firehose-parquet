@@ -46,6 +46,13 @@ pub(crate) struct State {
     pub requests: Vec<Request>,
     pub fault: Fault,
     revision: u64,
+    /// Injected round trip per request (#658 benchmark): half before the
+    /// request is applied and half before the response is written.
+    pub latency: Duration,
+    /// Every `slow_every`th request (by arrival) takes `slow` instead.
+    pub slow_every: u64,
+    pub slow: Duration,
+    arrivals: u64,
 }
 pub(crate) struct Server {
     pub state: Arc<Mutex<State>>,
@@ -139,6 +146,17 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
         input.extend_from_slice(&buffer[..n]);
     }
     let payload = input[end..end + size].to_vec();
+    let arrived = tokio::time::Instant::now();
+    let delay = {
+        let mut state = state.lock().unwrap();
+        state.arrivals += 1;
+        if state.slow_every > 0 && state.arrivals % state.slow_every == 0 {
+            state.slow
+        } else {
+            state.latency
+        }
+    };
+    tokio::time::sleep_until(arrived + delay / 2).await;
     let is_part = path.ends_with(".parquet");
     let listing = query.get("list-type").is_some_and(|s| s == "2");
     let (status, mut body, stored, fault) = {
@@ -211,6 +229,7 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
         let _ = socket.shutdown().await;
         return;
     }
+    tokio::time::sleep_until(arrived + delay).await;
     let actual_size = body.len();
     let mut extra = String::new();
     if let Some(stored) = stored {

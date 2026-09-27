@@ -61,7 +61,7 @@ fn batches(tables: &[(&str, usize, usize)]) -> HashMap<String, RecordBatch> {
         .collect()
 }
 
-fn descriptor_for(
+pub(super) fn descriptor_for(
     output: StorageIdentity,
     data: &HashMap<String, RecordBatch>,
 ) -> StreamDescriptor {
@@ -619,76 +619,12 @@ async fn s3_replay_benchmark() {
     let settings =
         std::env::var("FIREPARQ_516_SETTINGS").unwrap_or_else(|_| "1:1:1,1:1,2:4,4:4,8:8".into());
 
-    // Group parts by transaction: part-v1-<stream>-<first>-<last>-<tx>-<index>.
-    let mut transactions: BTreeMap<(u64, u64, String), HashMap<String, RecordBatch>> =
-        BTreeMap::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if !path.file_name().unwrap().to_string_lossy().starts_with('.') {
-                    stack.push(path);
-                }
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let Some(rest) = name
-                .strip_prefix("part-v1-")
-                .and_then(|rest| rest.strip_suffix(".parquet"))
-            else {
-                continue;
-            };
-            let fields: Vec<_> = rest.split('-').collect();
-            let (first, last, transaction) = (
-                fields[1].parse::<u64>().unwrap(),
-                fields[2].parse::<u64>().unwrap(),
-                fields[3].to_string(),
-            );
-            let table = path
-                .strip_prefix(&root)
-                .unwrap()
-                .components()
-                .next()
-                .unwrap()
-                .as_os_str()
-                .to_string_lossy()
-                .into_owned();
-            let batches: Vec<RecordBatch> =
-                ParquetRecordBatchReaderBuilder::try_new(fs::File::open(&path).unwrap())
-                    .unwrap()
-                    .build()
-                    .unwrap()
-                    .map(|batch| batch.unwrap())
-                    .collect();
-            // Drop footer keys the reader merges into schema metadata.
-            let schema = Arc::new(Schema::new(batches[0].schema().fields().clone()));
-            let batch = arrow::compute::concat_batches(
-                &schema,
-                &batches
-                    .iter()
-                    .map(|batch| batch.clone().with_schema(schema.clone()).unwrap())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
-            transactions
-                .entry((first, last, transaction))
-                .or_default()
-                .insert(table, batch);
-        }
-    }
+    let transactions = super::live_flush::protected_transactions(&root);
     assert!(
         !transactions.is_empty(),
         "no protected parts under {root:?}"
     );
-    let mut inventory: HashMap<String, RecordBatch> = HashMap::new();
-    for batches in transactions.values() {
-        for (table, batch) in batches {
-            inventory
-                .entry(table.clone())
-                .or_insert_with(|| batch.slice(0, 0));
-        }
-    }
+    let inventory = super::live_flush::inventory(&transactions);
     let descriptor = descriptor_for(s3_output(), &inventory);
     let parts: usize = transactions.values().map(HashMap::len).sum();
     let bytes: u64 = transactions
