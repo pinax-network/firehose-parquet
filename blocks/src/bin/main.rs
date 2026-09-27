@@ -9,7 +9,10 @@ use firehose_parquet::config::{BlockMetadata, Compression, Config};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::dataset_lock::DatasetOwnership;
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger};
+use firehose_parquet::flush::{
+    FlushSizing, MapperBufferEstimate, PaceCause, PaceDetector, PaceTiming, PaceTransition,
+    SizeFlushTrigger, StreamPace,
+};
 use firehose_parquet::grpc::{
     is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo, FirehoseClient,
     ShutdownRequested,
@@ -170,21 +173,27 @@ impl MapperFlushTrigger {
     }
 }
 
+/// The trigger that flushes the open window after a block, if any. Pure: the
+/// caller passes the window's age and the stream pace, so tests inject both.
 fn next_mapper_flush_trigger(
     flush_rows: Option<usize>,
     max_table_rows: usize,
     flush_blocks: Option<u64>,
     blocks_since_flush: u64,
     flush_interval_secs: Option<u64>,
-    last_flush_time: Instant,
+    window_age: Duration,
+    pace: StreamPace,
     sizing: &FlushSizing,
     estimate: MapperBufferEstimate,
 ) -> Option<MapperFlushTrigger> {
     // Zero disables the row and interval triggers, like `--flush-bytes 0`;
     // `rows >= 0` or `elapsed >= 0` would otherwise flush after every block.
-    let time_to_flush = flush_interval_secs
-        .filter(|secs| *secs > 0)
-        .is_some_and(|secs| last_flush_time.elapsed().as_secs() >= secs);
+    // The interval bounds how long rows wait at the chain head; while the
+    // stream replays history only the size, row and block triggers apply (#659).
+    let time_to_flush = !pace.is_catching_up()
+        && flush_interval_secs
+            .filter(|secs| *secs > 0)
+            .is_some_and(|secs| window_age >= Duration::from_secs(secs));
 
     let rows_to_flush = flush_rows
         .filter(|limit| *limit > 0)
@@ -207,6 +216,50 @@ fn next_mapper_flush_trigger(
         Some(MapperFlushTrigger::Interval)
     } else {
         None
+    }
+}
+
+/// Log one pace switch (#659) with the evidence that decided it.
+fn log_pace_transition(
+    transition: &PaceTransition,
+    block_num: u64,
+    flush_interval_secs: Option<u64>,
+) {
+    let pace = transition.pace.as_str();
+    let ratio = transition
+        .ratio
+        .map_or_else(|| "unknown".to_string(), |ratio| format!("{ratio:.1}"));
+    let blocks_per_sec = format!("{:.1}", transition.blocks_per_sec);
+    let evidence_secs = format!("{:.1}", transition.evidence.as_secs_f64());
+    let interval = flush_interval_secs.filter(|secs| *secs > 0);
+    match (transition.pace, transition.cause, interval) {
+        (StreamPace::CatchingUp, _, Some(flush_interval_secs)) => info!(
+            pace, block_num, block_time_ratio = %ratio, blocks_per_sec = %blocks_per_sec,
+            evidence_secs = %evidence_secs, flush_interval_secs,
+            "catching up: block time advances faster than wall-clock time, so --flush-interval-secs is suspended and the size, row and block triggers flush"
+        ),
+        (StreamPace::CatchingUp, _, None) => info!(
+            pace, block_num, block_time_ratio = %ratio, blocks_per_sec = %blocks_per_sec,
+            evidence_secs = %evidence_secs,
+            "catching up: block time advances faster than wall-clock time"
+        ),
+        (StreamPace::CaughtUp, PaceCause::MissingTimestamps, _) => {
+            info!(
+                pace, block_num, block_time_ratio = %ratio, blocks_per_sec = %blocks_per_sec,
+                evidence_secs = %evidence_secs, flush_interval_secs = ?interval,
+                "caught up: no block timestamp to measure the pace, so the stream is treated as following the chain head"
+            )
+        }
+        (StreamPace::CaughtUp, _, Some(flush_interval_secs)) => info!(
+            pace, block_num, block_time_ratio = %ratio, blocks_per_sec = %blocks_per_sec,
+            evidence_secs = %evidence_secs, flush_interval_secs,
+            "caught up: block time advances at about wall-clock speed, so --flush-interval-secs applies again"
+        ),
+        (StreamPace::CaughtUp, _, None) => info!(
+            pace, block_num, block_time_ratio = %ratio, blocks_per_sec = %blocks_per_sec,
+            evidence_secs = %evidence_secs,
+            "caught up: block time advances at about wall-clock speed"
+        ),
     }
 }
 
@@ -1774,7 +1827,8 @@ mod tests {
             Some(3),
             3,
             Some(60),
-            Instant::now(),
+            Duration::ZERO,
+            StreamPace::CaughtUp,
             &FlushSizing::new(1_000_000, u64::MAX).unwrap(),
             MapperBufferEstimate {
                 largest_table_bytes: 128,
@@ -1793,7 +1847,8 @@ mod tests {
             None,
             3,
             None,
-            Instant::now(),
+            Duration::ZERO,
+            StreamPace::CaughtUp,
             &FlushSizing::new(1_000_000, u64::MAX).unwrap(),
             MapperBufferEstimate {
                 largest_table_bytes: 128,
@@ -1814,7 +1869,8 @@ mod tests {
                 None,
                 1,
                 None,
-                Instant::now(),
+                Duration::ZERO,
+                StreamPace::CaughtUp,
                 &FlushSizing::new(0, u64::MAX).unwrap(),
                 MapperBufferEstimate {
                     largest_table_bytes: estimated_bytes,
@@ -1831,7 +1887,8 @@ mod tests {
             Some(1),
             1,
             None,
-            Instant::now(),
+            Duration::ZERO,
+            StreamPace::CaughtUp,
             &FlushSizing::new(0, u64::MAX).unwrap(),
             MapperBufferEstimate {
                 largest_table_bytes: 128,
@@ -1844,7 +1901,8 @@ mod tests {
     #[test]
     fn test_next_mapper_flush_trigger_zero_rows_and_interval_are_disabled() {
         // `rows >= 0` and `elapsed >= 0` used to flush after every block.
-        let long_ago = Instant::now() - Duration::from_secs(3_600);
+        let long_ago = Duration::from_secs(3_600);
+        let caught_up = StreamPace::CaughtUp;
         for max_table_rows in [0, 1, usize::MAX] {
             let trigger = next_mapper_flush_trigger(
                 Some(0),
@@ -1853,6 +1911,7 @@ mod tests {
                 1,
                 Some(0),
                 long_ago,
+                caught_up,
                 &FlushSizing::new(0, u64::MAX).unwrap(),
                 MapperBufferEstimate {
                     largest_table_bytes: 128,
@@ -1869,11 +1928,31 @@ mod tests {
         };
         let sizing = FlushSizing::new(0, u64::MAX).unwrap();
         assert_eq!(
-            next_mapper_flush_trigger(Some(1), 1, None, 1, None, long_ago, &sizing, estimate),
+            next_mapper_flush_trigger(
+                Some(1),
+                1,
+                None,
+                1,
+                None,
+                long_ago,
+                caught_up,
+                &sizing,
+                estimate
+            ),
             Some(MapperFlushTrigger::Rows)
         );
         assert_eq!(
-            next_mapper_flush_trigger(None, 1, None, 1, Some(1), long_ago, &sizing, estimate),
+            next_mapper_flush_trigger(
+                None,
+                1,
+                None,
+                1,
+                Some(1),
+                long_ago,
+                caught_up,
+                &sizing,
+                estimate
+            ),
             Some(MapperFlushTrigger::Interval)
         );
         assert_eq!(
@@ -1883,11 +1962,77 @@ mod tests {
                 None,
                 1,
                 Some(60),
-                Instant::now(),
+                Duration::ZERO,
+                caught_up,
                 &sizing,
                 estimate
             ),
             None
+        );
+    }
+
+    /// #659: the interval applies only while caught up; every other trigger
+    /// keeps working while the stream catches up.
+    #[test]
+    fn test_next_mapper_flush_trigger_suspends_only_the_interval_while_catching_up() {
+        let small = MapperBufferEstimate {
+            largest_table_bytes: 128,
+            total_bytes: 128,
+        };
+        let sizing = FlushSizing::new(1_000_000, 1_000_000_000).unwrap();
+        let trigger = |rows, blocks, interval, age: u64, pace, estimate| {
+            next_mapper_flush_trigger(
+                rows,
+                10,
+                blocks,
+                10,
+                interval,
+                Duration::from_secs(age),
+                pace,
+                &sizing,
+                estimate,
+            )
+        };
+        let (catching_up, caught_up) = (StreamPace::CatchingUp, StreamPace::CaughtUp);
+        // The window is an hour older than the one-second interval.
+        assert_eq!(
+            trigger(None, None, Some(1), 3_600, caught_up, small),
+            Some(MapperFlushTrigger::Interval)
+        );
+        assert_eq!(
+            trigger(None, None, Some(1), 3_600, catching_up, small),
+            None
+        );
+        // The interval boundary is inclusive at the head.
+        assert_eq!(
+            trigger(None, None, Some(60), 60, caught_up, small),
+            Some(MapperFlushTrigger::Interval)
+        );
+        assert_eq!(trigger(None, None, Some(60), 59, caught_up, small), None);
+        // Size, memory, rows and blocks still flush while catching up.
+        let target = MapperBufferEstimate {
+            largest_table_bytes: 1_000_000,
+            total_bytes: 1_000_000,
+        };
+        let memory = MapperBufferEstimate {
+            largest_table_bytes: 1,
+            total_bytes: 1_000_000_000,
+        };
+        assert_eq!(
+            trigger(None, None, Some(1), 3_600, catching_up, target),
+            Some(MapperFlushTrigger::Bytes)
+        );
+        assert_eq!(
+            trigger(None, None, Some(1), 3_600, catching_up, memory),
+            Some(MapperFlushTrigger::Memory)
+        );
+        assert_eq!(
+            trigger(Some(10), None, Some(1), 3_600, catching_up, small),
+            Some(MapperFlushTrigger::Rows)
+        );
+        assert_eq!(
+            trigger(None, Some(10), Some(1), 3_600, catching_up, small),
+            Some(MapperFlushTrigger::Blocks)
         );
     }
 

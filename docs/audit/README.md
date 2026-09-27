@@ -97,6 +97,7 @@ All of them are closed.
 | [#652](https://github.com/pinax-network/firehose-parquet/issues/652) | - | - | [#660](https://github.com/pinax-network/firehose-parquet/pull/660) | Every table is `<table>/date=YYYY-MM-DD/`, equal to its `date` column; `build --partition` and `rollup` are removed, the mapper epoch refuses pre-release protected roots before Blocks, and CI reads real output with DuckDB and Polars ([record](652-date-partition-key.md)). |
 | [#653](https://github.com/pinax-network/firehose-parquet/issues/653) | - | - | [#662](https://github.com/pinax-network/firehose-parquet/pull/662) | The `partitions` subcommands, `_fireparq/partitions.parquet`, the finality and Fetch probes that only the index used, and `--cursor-template` are removed with no compatibility path; Delta log metadata (#643) replaces the index, and a new `build` root must be empty ([record](653-remove-partitions.md)). |
 | [#654](https://github.com/pinax-network/firehose-parquet/issues/654) | - | - | [#656](https://github.com/pinax-network/firehose-parquet/pull/656) | `--output` is the dataset root, used exactly as given: `build` no longer appends `<chain_name>`, and the opt-in `{chain}` placeholder names a directory after the network; a template that resolves to another root is refused before Blocks ([record](654-output-template.md)). |
+| [#659](https://github.com/pinax-network/firehose-parquet/issues/659) | - | - | [#664](https://github.com/pinax-network/firehose-parquet/pull/664) | `--flush-interval-secs` applies only at the chain head: a pace detector (block time against the wall clock, with hysteresis) suspends it while `build` catches up, so a catch-up flushes by size; `firehose_parquet_catching_up` and a `pace` label on `flushes_total`, with no new flag ([record](659-adaptive-flush.md)). |
 
 ### Validation follow-up PRs
 
@@ -215,6 +216,7 @@ Docker runs before a release.
 - [#515: adaptive compressed flush sizing and summed mapper limit](515-adaptive-flush-sizing.md)
 - [#516: bounded ingestion concurrency design and stage B follow-up](516-concurrency-design.md)
 - [#516: stage A bounded flush concurrency, tests and benchmark](516-bounded-flush-concurrency.md)
+- [#659: adaptive flush interval: size-based flushes while catching up](659-adaptive-flush.md)
 - [#517: measured gRPC receive transport](517-grpc-transport.md)
 - [#518: owned protobuf byte buffers](518-owned-protobuf-bytes.md)
 - [#519: Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md)

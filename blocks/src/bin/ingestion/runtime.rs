@@ -181,6 +181,8 @@ pub(super) struct IngestionRuntime<'run, 'owner> {
     buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock>,
     start_block_filter: StartBlockFilter,
     cursor_state_template: CursorState,
+    /// Catch-up detection: `--flush-interval-secs` applies only while caught up (#659).
+    pace: PaceDetector,
 }
 
 impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
@@ -211,7 +213,17 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             buffered_bootstrap_blocks: Vec::new(),
             start_block_filter: StartBlockFilter::new(setup.config.start_block),
             cursor_state_template: CursorState::default(),
+            pace: PaceDetector::new(PaceTiming::for_ingestion()),
         };
+        let timing = runtime.pace.timing();
+        debug!(
+            sample_ms = timing.sample.as_millis() as u64,
+            enter_ms = timing.enter.as_millis() as u64,
+            exit_ms = timing.exit.as_millis() as u64,
+            unknown_ms = timing.unknown.as_millis() as u64,
+            "catch-up detection windows"
+        );
+        pipeline_metrics.catching_up.set(0);
         runtime.cursor_state_template = runtime.dry_run_cursor_template()?;
         Ok(runtime)
     }
@@ -323,6 +335,9 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             }
             return Ok(());
         }
+        // Measure the pace on arrival, with the block's own time only: a
+        // synthesized routing or bootstrap time is not evidence.
+        self.observe_pace(&identity);
 
         // Transfer the owned gRPC payload without copying. Buffered routing
         // and chain decoding share slices of this allocation.
@@ -668,7 +683,8 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             self.setup.config.flush_blocks,
             self.window.blocks,
             self.setup.config.flush_interval_secs,
-            self.window.last_flush,
+            self.window.last_flush.elapsed(),
+            self.pace.pace(),
             &self.state.sizing,
             mapper_estimate,
         ) {
@@ -676,6 +692,8 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             let flush = self.prepare_flush(Some(mapper_estimate))?;
             info!(
                 trigger = flush_trigger,
+                pace = self.pace.pace().as_str(),
+                blocks = self.window.blocks,
                 tables = flush.tables,
                 rows = flush.rows,
                 "mapper flush emitted record batches"
@@ -684,6 +702,22 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         }
 
         Ok(())
+    }
+
+    fn observe_pace(&mut self, identity: &BlockIdentity) {
+        let block_time_millis = (identity.timestamp != 0)
+            .then(|| identity.timestamp_millis().ok())
+            .flatten();
+        if let Some(transition) = self.pace.observe(Instant::now(), block_time_millis) {
+            self.pipeline_metrics
+                .catching_up
+                .set(i64::from(transition.pace.is_catching_up()));
+            log_pace_transition(
+                &transition,
+                identity.block_num,
+                self.setup.config.flush_interval_secs,
+            );
+        }
     }
 
     fn log_progress(&self, block_number: u64, ts: i64) {
@@ -777,6 +811,14 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
     }
 
     fn commit_blocking(&mut self, flush: MapperFlush, trigger: &str) -> Result<()> {
+        // The stream waits while this commit runs; that is not the chain's pace.
+        let started = Instant::now();
+        let result = self.commit_window(flush, trigger);
+        self.pace.exclude_pause(started.elapsed());
+        result
+    }
+
+    fn commit_window(&mut self, flush: MapperFlush, trigger: &str) -> Result<()> {
         if !self.setup.config.dry_run {
             let committed = self
                 .session
@@ -815,11 +857,13 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         committed: &firehose_parquet::ingest::CommittedFlush,
         trigger: &str,
     ) {
-        record_committed_flush_sizing(&mut self.state.sizing, estimate, committed, trigger);
+        let pace = self.pace.pace();
+        record_committed_flush_sizing(&mut self.state.sizing, estimate, committed, trigger, pace);
         self.pipeline_metrics
             .flushes_total
             .get_or_create(&metrics::FlushLabels {
                 trigger: trigger.into(),
+                pace: pace.as_str().into(),
             })
             .inc();
     }

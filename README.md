@@ -82,7 +82,7 @@ the upgrade guide.
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Date partitions** — every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`, read by DuckDB and Polars as the table's `date` column ([engine compatibility](#engine-compatibility))
-- **File rollover** — flush by row count, byte size, or time interval
+- **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
@@ -614,7 +614,7 @@ recovery knobs to dedicated advanced sections.
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
 | Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](#output-directory-layout)); every table is written as `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
-| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
+| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
 
 ### Non-final streams and reorgs
@@ -790,7 +790,7 @@ bucket). Query them with the [two-bucket union](#two-bucket-union).
 | `FINAL_BLOCKS_ONLY` | `true` (the default) | `false` |
 | Partitions | `<table>/date=YYYY-MM-DD/` | `<table>/date=YYYY-MM-DD/` |
 | Range | Bounded daily runs: the same `START_BLOCK` on every run, `STOP_BLOCK` at the first block of the next UTC day | Live: no `STOP_BLOCK` |
-| Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` and/or `FLUSH_BLOCKS` |
+| Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` (at the head; [size-based while catching up](#flush-interval-and-catch-up)) and/or `FLUSH_BLOCKS` |
 | After each run | `merge`, then `verify` | Nothing: no `merge` or `truncate` |
 | Retention | Kept | S3 lifecycle expiration, for example after 2 days (48 hours), on table prefixes only |
 | `verify` | Yes | Not applicable |
@@ -813,15 +813,18 @@ Rows reach the bucket at the next flush: `FLUSH_INTERVAL_SECS=N` flushes when a
 block arrives at least N seconds after the previous flush, `FLUSH_BLOCKS=K`
 after K blocks, whichever comes first (day boundaries and the size triggers,
 `FLUSH_BYTES` and `FLUSH_MEMORY_BYTES`, also flush). Lower values mean fresher
-data and more objects. Do not run `merge` or `truncate` on the live
+data and more objects. The interval applies once the writer has caught up
+with the head: after a restart or an outage it catches up with size-based
+flushes first ([flush interval and catch-up](#flush-interval-and-catch-up)).
+Do not run `merge` or `truncate` on the live
 bucket: they need its owner, which the running `build` holds, and the live
 parts are expired rather than compacted.
 
 **Expected objects per day.** Each flush writes one part per table that has rows
 in it.
 
-- Live: about (flushes per day) × (tables with rows). Flushes per day are the
-  larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
+- Live: about (flushes per day) × (tables with rows). At the head, flushes per
+  day are the larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
   per day / `FLUSH_BLOCKS`, plus the day boundary and any size-triggered
   flushes. Ethereum (7,200 blocks a day) with
   `FLUSH_INTERVAL_SECS=60` makes about 1,460 flushes a day: with 15 tables with
@@ -984,12 +987,55 @@ threshold before the next check. Compared with the former 32 MiB largest-table
 trigger, adaptive windows may use substantially more memory; lower this separate
 threshold to constrain estimated accumulation.
 
-`--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, UTC day changes, the
+`--flush-rows`, `--flush-blocks`, `--flush-interval-secs` (at the chain head
+only, see below), UTC day changes, the
 memory threshold and clean end of input can all force files below the size
 target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
 like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
 threshold; increasing the file target does not bypass that threshold. `merge`
 uses its own streaming writer and memory policy.
+
+#### Flush interval and catch-up
+
+`--flush-interval-secs` bounds how long rows wait for a commit while `build`
+follows the chain head. While it replays history instead (a first start, a
+restart after an outage, or a `--stop-block` backfill far behind the head),
+nobody is waiting for those rows, so the interval is suspended. The size
+triggers (`--flush-bytes`, `--flush-memory-bytes`), `--flush-rows`,
+`--flush-blocks`, day boundaries and the end of the stream still flush, and
+files reach the 32 MiB target instead of holding an interval's worth of
+historical blocks. No flag controls this: `build` measures its pace from the
+stream, for final-only and non-final streams and any block time.
+
+- **Catching up**: three samples in a row, covering at least 30 seconds, in
+  which block time advanced more than 2× faster than the wall clock. A sample
+  lasts at least 5 seconds and ends at a block with a timestamp.
+- **Caught up**: samples at no more than 1.25× the wall clock covering 20
+  seconds (the writer's own commits do not count toward them), or 60 seconds
+  without a block timestamp. Samples between 1.25× and 2× change nothing.
+- Block age is not used: a final-only stream stays about the finality lag
+  behind the tip even at the head (measured on 2026-09-27: 15.8 minutes on
+  Ethereum, 6.7 on Base, 1.0 on Arbitrum, 0.4 on Robinhood). Finality bursts,
+  such as an Ethereum epoch of 32 blocks every 6.4 minutes, do not look like a
+  catch-up: a wait longer than one sample between two blocks is measured on
+  its own, so the gap after each burst reads as real time.
+- Every run starts caught up, which is also the answer when in doubt. Missing,
+  repeated or backward timestamps (such as Solana slots without a block time)
+  never count as catching up, and a catch-up slower than 2× the chain's rate
+  keeps the interval.
+- After a catch-up reaches the head, the first block after 20 seconds of
+  real-time pace flushes the open window on the interval. On a bursty
+  final-only chain that is the first block after the finality gap, the first
+  block that could flush anyway. A stall of more than 20 seconds during a
+  catch-up (a reconnect, for example) also reads as caught up, so the next block
+  can flush a smaller file; the replay switches back 30 seconds after it
+  resumes.
+
+Each switch is logged once at `info`, as `catching up: ...` or `caught up: ...`
+with `block_time_ratio`, `blocks_per_sec` and `evidence_secs`. The
+`firehose_parquet_catching_up` gauge is 1 while catching up, and
+`firehose_parquet_flushes_total` counts flushes by `trigger` and `pace`. See
+[the implementation record](docs/audit/659-adaptive-flush.md).
 
 Within one flush, tables are encoded and published concurrently but under
 explicit bounds. `--flush-encode-concurrency` (default 2, 1-64) caps Parquet
@@ -1804,7 +1850,8 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_last_message_age_seconds` | Gauge | — | Monotonic seconds since the last valid message; `NaN` before one; refreshed on scrape |
 | `firehose_parquet_files_written_total` | Counter | `table` | Parquet files written |
 | `firehose_parquet_file_bytes_total` | Counter | `table` | Total compressed bytes written |
-| `firehose_parquet_flushes_total` | Counter | `trigger` | Flush count by trigger type |
+| `firehose_parquet_flushes_total` | Counter | `trigger`, `pace` | Committed flushes by trigger (`bytes`, `memory`, `rows`, `blocks`, `interval`, `partition_boundary`, `stream_end`) and by the stream pace at the flush (`catching_up` or `caught_up`) |
+| `firehose_parquet_catching_up` | Gauge | — | 1 while the stream replays history faster than real time, which suspends `--flush-interval-secs`; 0 at the head or when the pace is unknown ([details](#flush-interval-and-catch-up)) |
 | `firehose_parquet_buffer_estimated_bytes` | Gauge | — | Writer-owned buffers, estimated compressed bytes |
 | `firehose_parquet_buffer_rows` | Gauge | `table` | Writer-owned rows, including failed/unattempted tables |
 | `firehose_parquet_mapper_buffer_rows` | Gauge | — | Mapper-owned rows summed across tables |

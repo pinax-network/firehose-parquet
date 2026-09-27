@@ -48,6 +48,7 @@ Related docs:
     - `src/writer/protected.rs`, `src/writer/protected/verification.rs`: prepared complete parts, publication and exact receipt/schema verification; `src/writer/protected/budget.rs`: the `--flush-inflight-bytes` encoded-byte budget.
     - `src/writer/local.rs`: atomic, synced publication of one local part; `src/writer/properties.rs`: bounded Bloom filters, row-group limits and sort metadata shared by ingestion and maintenance.
     - `src/flush.rs`: adaptive compressed `--flush-bytes` targets and the summed `--flush-memory-bytes` trigger.
+    - `src/flush/pace.rs`: catch-up detection (#659): a pure `PaceDetector` that compares block time with the wall clock, so `--flush-interval-secs` applies only at the chain head.
     - `src/cursor.rs`: cursor Parquet row format and legacy inspection.
     - `src/encode.rs`, `src/encode/fixed_base58.rs`: byte encodings (`hex`, `hex_no_prefix`, `base58`, `tron_base58`, `binary`) and the fixed-width Base58 fast path.
     - `src/traits.rs`: `BlockMapper`, canonical identity columns, timestamp helpers, and the shared enum helpers and non-final event helpers (`StreamEvent`: the `fork_step` and `stream_ordinal` columns).
@@ -79,7 +80,7 @@ Related docs:
   - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet.
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*` including `bench_ingestion_concurrency`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`).
-  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
+  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`, and `adaptive_flush.rs`, which paces its mock faster than or at real time), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
 - `spikes/delta-lake/`: the #643 Delta Lake spike, a standalone crate outside the workspace (its own `[workspace]`, `Cargo.lock` and `rust-toolchain.toml`, because `deltalake-core` 1.0.0 needs Rust 1.94.1 and Arrow 59). It commits pre-written Parquet 60 parts to Delta tables (`src/{mapping,part,delta,storage}.rs`, `tests/spike.rs`), and `run.sh` adds loopback S3 (`py/loopback_s3.py`), `deltalake` maintenance beside the writer (`py/concurrent_maintenance.py`) and DuckDB/Polars reads (`py/read_check.py`). Nothing in `fireparq` depends on it; see `docs/design/delta-lake.md`.
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
@@ -123,7 +124,7 @@ Related docs:
   - `blocks/tests/engine_compat.rs` reads real output with DuckDB and Polars.
   - Artifact locations (`_fireparq/`) and what walkers reserve: `firehose-parquet/src/artifacts.rs` only; the dataset root must hold only table directories, `_fireparq/` and dot-prefixed control state (`assert_dataset_root_layout` in `blocks/tests/ingestion_transactions.rs`).
   - `firehose-parquet/src/ingest/state.rs` (deterministic `part-v1-*` and `.fireparq-txn-*.tmp` names) and `firehose-parquet/src/writer/protected.rs` (staging, publication, receipt verification).
-  - `blocks/src/bin/ingestion/runtime.rs` (flush windows and partition-boundary flushes) and `firehose-parquet/src/flush.rs` (size and memory triggers).
+  - `blocks/src/bin/ingestion/runtime.rs` (flush windows and partition-boundary flushes), `firehose-parquet/src/flush.rs` (size and memory triggers) and `firehose-parquet/src/flush/pace.rs` (when the interval applies); the trigger order is `next_mapper_flush_trigger` in `blocks/src/bin/main.rs`.
   - `firehose-parquet/src/ingest/controller/pipeline.rs` and `firehose-parquet/src/writer/protected/budget.rs` for flush concurrency and the in-flight byte budget.
   - `firehose-parquet/src/writer/properties.rs` for row groups, Bloom filters and sort metadata.
 - Change resume, cursor or recovery behavior:
@@ -172,7 +173,7 @@ Related docs:
 - CI entrypoint: `.github/workflows/ci.yml` (`build-and-test`, the `delta-spike` job and the `advisories` job, which calls `advisories.yml`)
 - Delta Lake spike (#643): the `delta-spike` CI job runs `spikes/delta-lake/run.sh` with DuckDB 1.1.1 and 1.5.5 and the hash-pinned `spikes/delta-lake/requirements.txt`. Locally, `cd spikes/delta-lake && cargo test --locked` (local disk and in-memory store; the directory's toolchain file applies), or `run.sh` with `DELTA_SPIKE_PYTHON`, `DELTA_SPIKE_DUCKDB` and `DELTA_SPIKE_DUCKDB_SIGNED` for everything, as in `docs/design/delta-lake.md` §1.11
 - Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
-- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests. Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
+- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests, and `FIREPARQ_DEBUG_PACE_SAMPLE_MS` shortens the catch-up detection windows (`blocks/tests/adaptive_flush.rs`). Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
 - Docker publish workflow: `.github/workflows/docker-publish.yml` (supports a build-only manual run)
 - Release assets workflow: `.github/workflows/release.yml` (supports a dry-run dispatch)
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`
