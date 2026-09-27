@@ -3,6 +3,9 @@ name: Docker
 on:
   push:
     tags: ["v*"]
+  # Manual runs only build the image (Dockerfile check before a release);
+  # images are pushed only for version tags.
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -34,7 +37,7 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
