@@ -33,20 +33,44 @@ pub fn duckdb_cli() -> Option<PathBuf> {
                 .find(|path| path.is_file())
         })
         .unwrap_or_else(|| PathBuf::from("duckdb"));
-    let available = Command::new(&candidate)
+    let required = std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_some();
+    let version = Command::new(&candidate)
         .env_clear()
         .arg("-version")
         .output()
-        .is_ok_and(|output| output.status.success());
-    if available {
-        return Some(candidate);
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    let Some(version) = version else {
+        assert!(
+            !required,
+            "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
+        );
+        eprintln!("skipping the DuckDB check: no DuckDB CLI ({candidate:?})");
+        return None;
+    };
+    // The checks read Delta tables with S3 checkpoints and `EXPLAIN ANALYZE`
+    // file counts, which need DuckDB 1.5 (CI pins 1.5.5). An older local CLI
+    // is skipped rather than failed; a required one must be new enough.
+    if duckdb_version(&version) < Some((1, 5)) {
+        assert!(
+            !required,
+            "FIREPARQ_REQUIRE_DUCKDB is set but {candidate:?} is {}; 1.5 or later is required",
+            version.trim()
+        );
+        eprintln!(
+            "skipping the DuckDB check: {candidate:?} is {}, older than 1.5",
+            version.trim()
+        );
+        return None;
     }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
-        "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
-    );
-    eprintln!("skipping the DuckDB check: no DuckDB CLI ({candidate:?})");
-    None
+    Some(candidate)
+}
+
+/// `(major, minor)` from `duckdb -version` output such as `v1.5.5 3b7c56d…`.
+fn duckdb_version(output: &str) -> Option<(u32, u32)> {
+    let mut parts = output.trim().trim_start_matches('v').split(['.', ' ']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
 /// The Python with Polars and `deltalake`, or `None` locally when missing.
