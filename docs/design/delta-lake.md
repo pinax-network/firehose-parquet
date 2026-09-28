@@ -163,6 +163,12 @@ daemon was available.
   whose response is lost could come back as a 412, be misread as a lost race,
   and be retried at the next version. With a single attempt the outcome
   surfaces as an error, and recovery resolves it through `txn` (§3.5).
+  Since v1.0.2 (#680), idempotent reads are the exception: an HTTP layer
+  under object_store (`delta/store/read_retry.rs`) sends a `GET` or `HEAD`
+  (log objects, checkpoints, listings, snapshot loads) up to 3 times on a
+  transport error, 408, 429 or 5xx, with jittered exponential backoff and a
+  warning per retry. Every other method still goes out once. See the
+  [#680 record](../audit/680-delta-read-retries.md).
 - `BlindDeltaTable` (the lazy, append-only handle) is not usable. It keeps only
   `numRecords` of `add.stats` and exposes no `txn`. The `CommitBuilder` path
   needs an `EagerSnapshot`, which materializes the active files. See §8 for
@@ -464,7 +470,10 @@ Tables are created after authority is initialized, never before: eligibility
 refuses any non-empty root, including a `_delta_log/`
 ([`eligibility.rs`](../../firehose-parquet/src/ingest/eligibility.rs)). Every
 startup ensures each table in the descriptor exists. It creates missing ones
-with commit 0 (`protocol` + `metaData`) and validates existing ones. Creation
+with commit 0 (`protocol` + `metaData`) and validates existing ones. While
+tables may be created, it lists each table's log first and creates a table
+without one directly: opening it would make delta-rs's kernel log
+`No files in log segment` at ERROR for every new table (#680). Creation
 is idempotent under conditional puts: a lost race at version 0 reloads the
 table and validates it. Every table exists from the first run, even one that
 never gets rows, so readers never hit a missing table.
@@ -499,7 +508,8 @@ a crash in step 4 that lasts until recovery runs. Two guarantees hold:
   (measured). This is the safety net that makes every ambiguous case below
   resolve to exactly one copy.
 - **Ambiguous PUT** (timeout, 5xx, connection reset): with `max_retries: 0` the
-  commit fails with a transport error. The controller is poisoned and the
+  commit fails with a transport error. The log client's read retries (#680,
+  §1.3) never apply to it: only `GET` and `HEAD` are sent again. The controller is poisoned and the
   process stops, as for any unresolved mutation today. On restart, recovery
   reads the table's `txn` version:
   - If the commit landed, `txn == L`: skip.
@@ -995,7 +1005,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L0** (PR #663; the spike and its CI job were removed in L8/L9, §1.11) | design, spike, `delta-spike` CI job | spike suite | — | — | all |
 | **L1** deps | toolchain 1.93 → 1.98 (`rust-toolchain.toml`, `Dockerfile`); `deltalake-core =1.0.0` (no default features, `rustls`); `deny.toml` ignore reasons also naming object_store 0.13; recheck for a newer delta-rs on Arrow ≥ 60 first | full suite, `cargo deny` | S | — | #655, #658, #659 |
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
-| **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
+| **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt (since v1.0.2, #680: a single attempt per write, and up to 3 per idempotent read, [record](../audit/680-delta-read-retries.md)); the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
 | **L4** recovery and ownership (done: PR #675, [record](../audit/643-l4-delta-recovery.md), [#636 record](../audit/636-delta-ownership.md)) | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
 | **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #672, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (deferred to #666, after the launch) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |

@@ -259,7 +259,8 @@ pub struct S3Ownership {
     store: Arc<dyn ObjectStore>,
     native_upload: Option<crate::s3::upload::NativeS3Upload>,
     /// The Delta log store's client of this bucket (#643 L3): object_store
-    /// 0.13, one attempt per request. Only `build`'s output bucket has one.
+    /// 0.13, one attempt per write and a bounded few per idempotent read
+    /// (#680). Only `build`'s output bucket has one.
     delta_log: Option<Arc<dyn object_store_delta::ObjectStore>>,
     owned: OwnerRecord,
     version: UpdateVersion,

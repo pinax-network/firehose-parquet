@@ -83,7 +83,7 @@ spec:
               # scripts/delta_maintenance.py with its pinned deltalake
               # preinstalled (deploy/maintenance/Dockerfile). Pin the digest of
               # the release's image in production.
-              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.1
+              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
               envFrom:
                 - configMapRef:
                     name: delta-maintenance-settings
@@ -147,7 +147,7 @@ spec:
               # scripts/delta_maintenance.py with its pinned deltalake
               # preinstalled (deploy/maintenance/Dockerfile). Pin the digest of
               # the release's image in production.
-              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.1
+              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
               env:
                 - name: FULL_VACUUM
                   value: "1"

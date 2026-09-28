@@ -49,7 +49,10 @@ without rewriting them and without weakening the #468 transaction.
   60 s request timeout and **`max_retries: 0`**. On local disk, fireparq syncs
   each new commit file and its `_delta_log/` directory (and, at creation, the
   table directory and the root) before the commit counts, because
-  object_store's local store does not.
+  object_store's local store does not. Update (#680, v1.0.2): the client's
+  HTTP connector now resends idempotent reads (`GET`, `HEAD`) up to 3 times
+  on a transient failure; every write still has one attempt
+  ([record](680-delta-read-retries.md)).
 - `stats.rs`: each part's `add.stats`, computed from the batch it encodes.
 - `commit.rs`: `DeltaTables` (open, create, validate, commit) and `PartAdd`.
 

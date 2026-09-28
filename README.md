@@ -25,6 +25,11 @@ them on several Solana, Antelope, NEAR and Tron tables.
 
 ## What's new in v1.0.0
 
+**v1.0.2** is a patch release: reads of the Delta logs on S3 retry transient
+errors, and a new dataset no longer logs `No files in log segment` at ERROR
+while its tables are created
+([v1.0.2 release notes](docs/releases/v1.0.2.md)).
+
 **v1.0.1** is a patch release: S3 ownership now works on Ceph RGW 19.2.x,
 which compares `If-Match` ETags without their quotes
 ([v1.0.1 release notes](docs/releases/v1.0.1.md)).
@@ -123,7 +128,7 @@ Each GitHub release attaches `fireparq` binaries for Linux and macOS
 (`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
-curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.1/fireparq-linux-x86_64.tar.gz
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.2/fireparq-linux-x86_64.tar.gz
 tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
@@ -281,17 +286,17 @@ fails at startup with an error.
 ### Docker
 
 The image is published to GitHub Container Registry for each release tag; this
-release is tagged `1.0.1`, `1.0`, `1` and `latest`. The image path stays
+release is tagged `1.0.2`, `1.0`, `1` and `latest`. The image path stays
 `ghcr.io/pinax-network/firehose-parquet`, and the container entrypoint runs
 `fireparq`.
 
 ```bash
-docker pull ghcr.io/pinax-network/firehose-parquet:1.0.1
+docker pull ghcr.io/pinax-network/firehose-parquet:1.0.2
 
 docker run --rm \
   -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
-  ghcr.io/pinax-network/firehose-parquet:1.0.1 \
+  ghcr.io/pinax-network/firehose-parquet:1.0.2 \
   build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -623,8 +628,12 @@ reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
 panic, and its error then says why and prints the exact `recovery status` and
 `recovery release` commands. A Delta log commit is the exception: the next
 start reads the table's `txn` to learn whether it landed, so an uncertain one
-does not keep the owner. `recovery` keeps S3 ownership after any error and
-logs the same guidance.
+does not keep the owner. A commit is never resent, but reads of the Delta logs
+(GET, HEAD and listings of log objects and checkpoints) are: up to 3 attempts
+on a transport error, 408, 429 or 5xx, each retry logged as a warning
+(`retrying an idempotent Delta log read after a transient error`; v1.0.2,
+[#680](docs/audit/680-delta-read-retries.md)). `recovery` keeps S3 ownership
+after any error and logs the same guidance.
 `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
@@ -1758,7 +1767,7 @@ Every Parquet file `build` writes embeds key-value metadata in the file footer u
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `1.0.1` |
+| `firehose-parquet.version` | `1.0.2` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
@@ -2181,7 +2190,7 @@ script and its hash-pinned `deltalake`, so a pod needs no package index:
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.1
+  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
 ```
 
 On Kubernetes,

@@ -6,8 +6,9 @@
 //!
 //! - [`types`] maps each flush onto Delta data file types (L2);
 //! - [`stats`] computes each part's `add.stats`, journaled with its receipt;
-//! - [`store`] is where the tables live: local disk, or S3 through a
-//!   single-attempt object_store 0.13 client and conditional-put commits;
+//! - [`store`] is where the tables live: local disk, or S3 through an
+//!   object_store 0.13 client that sends each write once and retries only
+//!   idempotent reads, and conditional-put commits;
 //! - [`commit`] opens, creates and validates the tables, and commits each
 //!   Committed transaction to them with a `txn` action, `blocks` last.
 //!

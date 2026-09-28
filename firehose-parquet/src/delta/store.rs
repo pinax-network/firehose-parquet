@@ -16,7 +16,10 @@
 //!   commit whose response is lost could come back as a 412, be read as a
 //!   lost race and be committed again at the next version. With one attempt
 //!   the outcome surfaces as an error instead, and the `txn` action resolves
-//!   it (design §3.5).
+//!   it (design §3.5). Idempotent reads (`GET`, `HEAD`: log objects,
+//!   checkpoints, listings) are the exception: [`read_retry`] sends them
+//!   again, a bounded number of times, after a transient failure, below
+//!   object_store, while every write still goes out once (#680).
 //!
 //! Without `deltalake-aws` (and its AWS SDK) delta-rs has no log store for
 //! `s3://` URLs; [`DeltaStore::log_store`] registers the default one.
@@ -36,6 +39,10 @@ use object_store_delta::{ClientOptions, ObjectStore, RetryConfig};
 use url::Url;
 
 use crate::s3::AwsConfig;
+
+mod read_retry;
+
+pub use read_retry::READ_ATTEMPTS;
 
 /// Per-request timeout of the log store's S3 client. A Delta commit or log
 /// read is a small object; the same bound as fireparq's part requests.
@@ -226,16 +233,27 @@ fn register_s3_log_store() {
 }
 
 /// The log store's S3 client for `bucket`: object_store 0.13 (delta-rs's
-/// major), one attempt per request, conditional creates with
-/// `If-None-Match: *`, and the credentials, region and endpoint of `aws`.
-/// Without an access key it uses the AWS provider chain, like fireparq's
-/// other ingestion clients.
+/// major), one attempt per write, up to [`READ_ATTEMPTS`] per idempotent
+/// read, conditional creates with `If-None-Match: *`, and the credentials,
+/// region and endpoint of `aws`. Without an access key it uses the AWS
+/// provider chain, like fireparq's other ingestion clients.
 pub fn s3_log_client(aws: &AwsConfig, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
-    Ok(Arc::new(s3_builder(aws, bucket)?.build().with_context(
-        || format!("building the Delta log client for bucket {bucket}"),
-    )?))
+    Ok(Arc::new(
+        s3_log_builder(aws, bucket)?
+            .build()
+            .with_context(|| format!("building the Delta log client for bucket {bucket}"))?,
+    ))
 }
 
+/// [`s3_builder`] with the log client's read retries
+/// ([`read_retry::ReadRetryConnector`]).
+pub(crate) fn s3_log_builder(aws: &AwsConfig, bucket: &str) -> Result<AmazonS3Builder> {
+    Ok(s3_builder(aws, bucket)?.with_http_connector(read_retry::ReadRetryConnector))
+}
+
+/// An object_store 0.13 S3 builder for `bucket`, from `aws`, with conditional
+/// creates and object_store's own retries off for every request (writes
+/// included).
 pub(crate) fn s3_builder(aws: &AwsConfig, bucket: &str) -> Result<AmazonS3Builder> {
     let mut builder = AmazonS3Builder::new()
         .with_bucket_name(bucket)

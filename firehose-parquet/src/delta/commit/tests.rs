@@ -4,7 +4,8 @@
 //! `txn`, `txn` read-back from a fresh handle, blind appends rebasing over
 //! other writers, a same-`appId` conflict, concurrent writers, and the table
 //! validation, on local disk, an in-memory store and a loopback S3 endpoint
-//! (conditional puts, one attempt per request). #643 L4 adds recovery's
+//! (conditional puts, one attempt per write, through the log client's
+//! connector with its read retries, #680). #643 L4 adds recovery's
 //! reads: an interrupted table creation completed, existing tables opened for
 //! `recovery recover`, and a roll-forward that commits each part once in
 //! every arrival order of a delayed commit.
@@ -126,7 +127,7 @@ impl Lake {
             aws_endpoint_url: Some(server.endpoint.clone()),
         };
         let client: Arc<dyn ObjectStore> = Arc::new(
-            crate::delta::store::s3_builder(&aws, loopback_s3::BUCKET)
+            crate::delta::store::s3_log_builder(&aws, loopback_s3::BUCKET)
                 .unwrap()
                 .with_allow_http(true)
                 .build()
