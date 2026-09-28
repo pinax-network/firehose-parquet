@@ -1,7 +1,9 @@
 # Delta Lake output (#643): design, spike and plan
 
 Status: design of 2026-09-27, implemented lane by lane (§11): since L3 every
-`build` writes Delta tables. The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
+`build` writes Delta tables, and since L5b/L7 nothing writes a table file
+outside the protected transaction or reads a table other than through its log.
+The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
 runs in CI as the `delta-spike` job. Refs #643, #636, #653, #655, #658, #659;
 part of #463.
 
@@ -682,6 +684,14 @@ Update (L5a): `merge`, `truncate` and `verify` and everything only they used
 are removed (the plain-Parquet `OutputWriter` goes in L5b, after L3). See
 [the L5a record](../audit/643-l5a-removals.md).
 
+Update (L5b): the plain-Parquet output is removed: `OutputWriter` and
+`ParquetTableWriter` (the unprotected local and S3 writers of standalone table
+files) and the atomic single-file publication only they used. The routing and
+encoding the transaction shares are functions (`writer::partition_suffix`,
+`validate_partition`, `encode_parquet`). With `scan` removed and `validate` on
+snapshots (§7.3), the directory walkers that read tables are gone too. See
+[the L5b/L7 record](../audit/643-l5b-l7-readers.md).
+
 ### 7.2 `verify` over Delta snapshots
 
 The launch ships without `verify` (L5a removes it); #666 implements this
@@ -729,6 +739,22 @@ What changes, following the subagent audit of `verify.rs`:
   the date range per table), or is dropped in favor of documented DuckDB
   queries. It is a small lane either way.
 - Walkers that remain (`discovery.rs`) skip `_delta_log/`.
+
+Update (L7): done. `scan` is removed, the smaller of the two options: DuckDB
+`delta_scan` and Polars `scan_delta` read rows and schemas, and the README's
+`deltalake` program summarizes a table from its log (files, rows from
+`numRecords`, bytes, first and last day), tested against a real `build`.
+`validate <table>` opens the table's latest version and reads exactly its
+active files (their `partitionValues.date` group the partitions); a missing
+active file fails the run. It keeps the gap, duplicate, parent-hash and
+timestamp-reversal checks, and drops the file-to-file schema comparison, the
+empty-partition warnings and the ordering count, which only a directory walk
+needed. `inspect` reads one file and refuses a directory. The one walker left
+over table trees is the protected-root discovery of `recovery` and of `build`'s
+overlap check (`ingest/maintenance.rs`, over `discovery::visit_objects` on S3);
+it skips `_delta_log/`. A test runs `validate` after a simulated OPTIMIZE and
+after a real `deltalake` OPTIMIZE and checkpoint, with the same result. See
+[the L5b/L7 record](../audit/643-l5b-l7-readers.md).
 
 ## 8. Resume cost independent of data size (#655)
 
@@ -884,9 +910,9 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
 | **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
 | **L4** recovery and ownership | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
-| **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b**: the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
+| **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #TBD, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (post-launch, #666) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
-| **L7** validate, scan, inspect | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
+| **L7** validate, scan, inspect (done with L5b: PR #TBD, [record](../audit/643-l5b-l7-readers.md); `scan` removed) | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
 | **L8** engine CI | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |
 | **L9** maintenance job | `scripts/delta_maintenance.py`, a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |
 | **L10** docs and release | README (outputs, readers, maintenance, ownership, frontier rule), `docs/releases/v1.0.0.md` (breaking changes, and "JVM engines are not a target" replacing "the planned Delta mode covers them"), `docs/repo-navigation.md`, k8s-parquet examples moved to `delta_scan`/`scan_delta` | doc drift tests | M | L2–L9 | — |

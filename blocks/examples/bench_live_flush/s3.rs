@@ -219,7 +219,9 @@ impl Server {
     }
 
     /// Every stored object under `prefix`, with its exact bytes, sorted by
-    /// key (`blocks/tests/delta_tables.rs` copies a written dataset out).
+    /// key (`blocks/tests/delta_tables.rs` copies a written dataset out; the
+    /// benchmark itself does not use it).
+    #[allow(dead_code)]
     pub fn objects(&self, prefix: &str) -> Vec<(String, Bytes)> {
         let objects = self.state.objects.lock().unwrap();
         objects

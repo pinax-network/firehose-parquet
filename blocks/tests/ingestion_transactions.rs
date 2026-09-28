@@ -1357,7 +1357,7 @@ async fn blocks_served_below_start_are_skipped_and_never_written() {
     server.assert_drained();
 }
 
-/// Replaces a unit test that routed through the test-only `OutputWriter`: a
+/// Replaces a unit test that routed through the former `OutputWriter`: a
 /// Solana payload without `block_time` keeps a null row timestamp, while the
 /// protected commit routes it by the received Firehose source time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2384,16 +2384,17 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
 
     let canonical = std::fs::canonicalize(&root).unwrap();
 
-    // Read-only commands take the table directory under the root.
-    let scanned = json_output(&fireparq_output(dir.path(), &["scan", &blocks_arg, "--json"]).await);
-    assert_eq!(scanned["files_scanned"], 3);
-    for args in [
-        vec!["validate", &blocks_arg],
-        vec!["inspect", root.join(MIRROR).to_str().unwrap()],
-    ] {
-        let output = fireparq_output(dir.path(), &args).await;
-        assert!(output.status.success(), "{args:?}: {}", logs(&output));
-    }
+    // Read-only commands take the table directory under the root: `validate`
+    // reads the three active files of the blocks table's latest snapshot.
+    let validated = fireparq_output(dir.path(), &["validate", &blocks_arg]).await;
+    assert!(validated.status.success(), "{}", logs(&validated));
+    assert!(String::from_utf8_lossy(&validated.stdout).contains("Files scanned:     3"));
+    let inspected = fireparq_output(
+        dir.path(),
+        &["inspect", root.join(MIRROR).to_str().unwrap()],
+    )
+    .await;
+    assert!(inspected.status.success(), "{}", logs(&inspected));
 
     // The root holds table directories, `_fireparq/` (the mirror) and
     // dot-prefixed control state only, and a per-table glob is unaffected by
@@ -2410,8 +2411,8 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
         &tables.iter().map(String::as_str).collect::<Vec<_>>(),
         &["cursor.parquet"],
     );
-    // The same with DuckDB: the per-table glob the README recommends reads
-    // every block row and no artifact. DuckDB does not skip `_` paths, so a
+    // The same with DuckDB: a per-table glob of the data files reads every
+    // block row and no artifact. DuckDB does not skip `_` paths, so a
     // dataset-wide glob would also match `_fireparq/`.
     if let Some(duckdb) = duckdb() {
         let blocks_files = parts(&root)

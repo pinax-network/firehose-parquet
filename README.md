@@ -42,10 +42,15 @@ the upgrade guide.
   access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
   Beacon Electra requests and Tron contracts. See the
   [schema reference](docs/schemas/README.md).
-- **Removed: `merge`, `truncate` and `verify`.** Compaction is the job of an
-  off-the-shelf `deltalake` maintenance CronJob (#643), `truncate` has no safe
-  Delta equivalent (rebuild into a new root instead), and `verify` returns over
-  Delta snapshots in #666.
+- **Delta Lake tables only.** Every table is a Delta table, read through its
+  log with DuckDB `delta_scan` or Polars `scan_delta`; there is no plain-Parquet
+  output and no reader that walks table directories (#643). `validate` reads
+  the active files of a pinned Delta snapshot. See
+  [Reading the tables](#reading-the-tables).
+- **Removed: `merge`, `truncate`, `verify` and `scan`.** Compaction is the job
+  of an off-the-shelf `deltalake` maintenance CronJob (#643), `truncate` has no
+  safe Delta equivalent (rebuild into a new root instead), `verify` returns over
+  Delta snapshots in #666, and DuckDB, Polars and the Delta log replace `scan`.
 - **Engine-friendly layout.** A dataset root holds only its table directories,
   `_fireparq/` (the cursor mirror) and dot-prefixed control state, so engines that skip `_` and `.`
   paths never read fireparq's own files as table data. `--output` is that
@@ -82,7 +87,7 @@ the upgrade guide.
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
-- **Date partitions** — every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`, read by DuckDB and Polars as the table's `date` column ([engine compatibility](#engine-compatibility))
+- **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](#reading-the-tables))
 - **Delta Lake types** — every part is a Delta data file: checked signed integers, `decimal(20,0)` for currency amounts and other unchecked 64-bit values, `string` enums and microsecond timestamps, mapped once per flush before anything is written ([type mapping](docs/schemas/README.md))
 - **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
@@ -484,8 +489,7 @@ resume verification applies the same limits. Connections have a 10-second timeou
 upload and complete readback each have a 15-minute deadline. A write whose
 outcome is uncertain (timed out, cancelled, lost or unverifiable acknowledgement)
 retains ownership for provider-quiescent recovery; an HTTP 401/403 refusal is
-definite and does not. The generic `ParquetTableWriter::new_s3` API keeps its
-existing buffering and endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
+definite and does not. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
 
 ### Parameter Validation on Resume
 
@@ -616,8 +620,8 @@ flushes the remaining buffers and saves the final cursor.
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
-under the subcommands `scan`, `inspect`, `validate`, `recovery` and
-`completions`. The global flags
+under the subcommands `inspect`, `validate`, `recovery` and `completions`;
+engines read the tables ([Reading the tables](#reading-the-tables)). The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
 
@@ -633,7 +637,7 @@ recovery knobs to dedicated advanced sections.
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
 | Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
-| Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](#output-directory-layout)); every table is written as `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
+| Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](#output-directory-layout)); every table is a Delta table at `<table>/`, with its data files in `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
 | Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
@@ -1082,60 +1086,32 @@ the initial span and updated whenever a real block timestamp is observed.
 
 ## Subcommands
 
-### `scan` — Inspect Parquet Files
-
-Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table in ascending row order; use `--order desc` to inspect the latest rows first, `--vertical` for row-by-row output, or `--json` for machine-readable output. When scanning multiple files, `--limit` and `--offset` apply across the full scan result set, so scanning stops once enough rows have been collected. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs. A directory scan skips `_fireparq/`, the legacy root artifacts and control state below it; scan an artifact file directly, or the `_fireparq/` directory itself, to read one.
-
-```bash
-fireparq scan ./output/blocks/
-S3_BUCKET=my-bucket fireparq scan evm/blocks/
-fireparq scan s3://my-bucket/evm/blocks/
-fireparq scan s3://my-bucket/evm/_fireparq/cursor.parquet
-fireparq scan ./output/blocks/part-000001.parquet --vertical
-fireparq scan ./output/blocks/part-000001.parquet --json
-fireparq scan ./output/blocks/ --limit 10
-fireparq scan ./output/blocks/part-000001.parquet --order desc --limit 20
-fireparq scan ./output/blocks/part-000001.parquet --order desc --offset 20 --limit 20
-fireparq scan ./output/blocks/ --schema-only
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `-n, --limit` | `20` | Sample rows across the full scan (`0` = schema only) |
-| `--offset` | `0` | Rows to skip before displaying |
-| `--order` | `asc` | Row order for pagination and previews: `asc` or `desc` |
-| `--schema-only` | `false` | Show file metadata (schema, row count, size) without data |
-| `--vertical` | `false` | Row-by-row display instead of a boxed table |
-| `--json` | `false` | Machine-readable file info, schema and sampled rows |
-
-Lookup order:
-
-1. Explicit `s3://bucket/...` URIs are used as-is.
-2. Non-URI paths use the local filesystem when the path exists.
-3. Otherwise, if `S3_BUCKET` is set, relative paths fall back to `s3://<bucket>/<path>`.
+`scan` was removed in v1.0.0: DuckDB and Polars read the tables, and a
+table's files, rows, bytes and days come from its Delta log (see
+[Reading the tables](#reading-the-tables)).
 
 ### `inspect` — Display File Metadata
 
-Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). Supports local paths, shorthand S3 keys via `S3_BUCKET`, and explicit S3 URIs.
+Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). It reads one file, such as a table's data file, a Delta checkpoint or the cursor mirror, and refuses a directory. Supports local paths, shorthand S3 keys via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
-# Inspect a local file
-fireparq inspect ./output/blocks/date=2026-01-15/part-000001.parquet
+# Inspect a data file of a local table
+fireparq inspect ./output/mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet
 
 # Resolve a shorthand key against S3_BUCKET when no local path matches
-S3_BUCKET=my-bucket fireparq inspect evm/_fireparq/cursor.parquet
+S3_BUCKET=ethereum-mainnet fireparq inspect _fireparq/cursor.parquet
 
-# Inspect an S3 file
-fireparq inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
+# Inspect a data file of an S3 table
+fireparq inspect s3://ethereum-mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet
 
 # Show only schema fields, including explicit nullability
-fireparq inspect s3://my-bucket/evm/_fireparq/cursor.parquet --schema-only
+fireparq inspect s3://ethereum-mainnet/_fireparq/cursor.parquet --schema-only
 
 # Emit machine-readable schema JSON for a single parquet artifact
-fireparq inspect s3://my-bucket/evm/_fireparq/cursor.parquet --schema-only --json
+fireparq inspect s3://ethereum-mainnet/_fireparq/cursor.parquet --schema-only --json
 ```
 
-Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+Lookup order: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 **Output includes:**
 
@@ -1147,22 +1123,24 @@ Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths 
 | **Row groups** | Per-group row count, compressed/uncompressed size, compression ratio |
 | **Column details** | Per-column encoding, compression codec, compressed/uncompressed size, ratio |
 
-### `validate` — Check Partition Integrity
+### `validate` — Check Block Continuity
 
-Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues or warnings are printed; clean ones are silently counted. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs. Like `scan`, a directory walk skips `_fireparq/` and control state.
+Validates a Delta `blocks` table for gaps, duplicates, parent hash mismatches and timestamp reversals, per `date` partition and across the whole table (`--cross-partition` also checks each pair of adjacent partitions). It pins the table's latest version and reads exactly the active data files that snapshot lists, from the log. It never lists a directory, so a file that the maintenance job's OPTIMIZE replaced but VACUUM has not deleted yet is not counted twice, and the log's checkpoint Parquet files are never read as data. If an active file of the pinned version has disappeared (a VACUUM removed it during the run), the run fails; run it again. Only partitions with issues or warnings are printed; clean ones are silently counted. Pass the table, normally `<dataset root>/blocks`: a local path, a shorthand S3 key via `S3_BUCKET`, or an explicit S3 URI.
 
-Timestamp reversals (a block whose `timestamp` is earlier than the previous block that has one) are reported as warnings and do not change the exit code, because some chains (for example Bitcoin) allow non-monotonic block times. The `timestamp` column may use any Arrow timestamp unit or legacy `Int64` epoch seconds, and null timestamps are skipped.
+Timestamp reversals (a block whose `timestamp` is earlier than the previous block that has one) are reported as warnings and do not change the exit code, because some chains (for example Bitcoin) allow non-monotonic block times. Null timestamps are skipped.
 
 ```bash
-fireparq validate ./output/blocks/
-S3_BUCKET=my-bucket fireparq validate evm/blocks/
-fireparq validate s3://my-bucket/evm/blocks/
+fireparq validate ./output/mainnet/blocks
+S3_BUCKET=ethereum-mainnet fireparq validate blocks
+fireparq validate s3://ethereum-mainnet/blocks
 
 # Solana: allow skipped slots (normal chain behavior, not data corruption)
-fireparq validate s3://my-bucket/solana/blocks/ --allow-gaps
+fireparq validate s3://solana-mainnet-beta/blocks --allow-gaps
 ```
 
-Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+The output starts with the pinned version (`Validating blocks in <table> at version <N>`), and the exit code is 1 when a check fails.
+
+Lookup order matches `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1866,7 +1844,10 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 ├── .fireparq-ingest/          # authoritative checkpoint and transaction journal (do not edit)
 ├── _fireparq/                 # fireparq's artifacts, never table data
 │   └── cursor.parquet         # optional mirror of the checkpoint (absent with --cursor none)
-├── blocks/
+├── blocks/                    # one Delta table
+│   ├── _delta_log/            # its log: the table's only file index
+│   │   ├── 00000000000000000000.json
+│   │   └── ...
 │   ├── date=2026-02-25/
 │   │   ├── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
 │   │   └── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
@@ -1885,49 +1866,56 @@ The dataset root holds only the table directories, `_fireparq/` and
 dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
 `.fireparq-owner-v1.json` record and `.fireparq-owner-probes-v1/`). Spark,
 Trino, Hive and Delta skip paths that start with `_` or `.`, so a table
-location or a dataset-wide read never picks up fireparq's files; DuckDB does
-not skip them, so glob per table (`<root>/<table>/**/*.parquet`), as below.
-Releases before v1.0.0 wrote `cursor.parquet` at the dataset root. That name
-stays reserved, and a dataset whose mirror was bound at the old default keeps
-`--cursor cursor.parquet`.
+location or a dataset-wide read never picks up fireparq's files. Read each
+table through its Delta log, as below.
+Releases before v1.0.0 wrote `cursor.parquet` at the dataset root; a dataset
+whose mirror was bound at that old default keeps `--cursor cursor.parquet`.
 
-Every table is partitioned by UTC day: `build` writes
-`<table>/date=YYYY-MM-DD/part-*.parquet`, and there is no other layout. The
-`date=` directory is the table's `date` column: the Delta partition column,
-which the data files do not store (#643). It comes from the same whole-second
+Every table is partitioned by UTC day: `build` writes its data files to
+`<table>/date=YYYY-MM-DD/part-*.parquet`, and there is no other layout. `date`
+is the table's Delta partition column: the log records it for every file, and
+the data files do not store it (#643). It comes from the same whole-second
 block time as each row's `timestamp`, and `build` refuses to write a row whose
-time is in another day. A Hive-partition-aware reader sees one `date` column
-that it can prune by; a plain file read has no `date`. (Earlier releases wrote `year=YYYY/month=MM/` and a `date=DD`
-or `day=DD` day of the month; a `date=DD` directory was read over the `date`
-column by DuckDB and failed to parse in Polars. v1.0.0 reads and maintains only
+time is in another day. (Earlier releases wrote `year=YYYY/month=MM/` and a
+`date=DD` or `day=DD` day of the month. v1.0.0 writes only
 `date=YYYY-MM-DD`.)
 
-### Querying with DuckDB and Polars
+### Reading the tables
 
-Glob one table: DuckDB does not skip `_` and `.` paths, and the tables have
-different schemas.
+Read every table through its Delta log, never by globbing its files or
+listing its directories. The log is the table's only file index: a glob or a
+listing also finds the files that the maintenance job's OPTIMIZE replaced but
+VACUUM has not deleted yet (their rows twice), files of a transaction that is
+not committed yet, and the log's own checkpoint Parquet files. DuckDB (its
+`delta` extension) and Polars read the `date` partition column from the log
+and prune by it.
 
 ```sql
--- DuckDB. hive_partitioning turns date=YYYY-MM-DD into the DATE column `date`.
-SELECT date, count(*) AS blocks
-FROM read_parquet('output/mainnet/blocks/**/*.parquet', hive_partitioning = true)
-WHERE date = DATE '2026-02-25'   -- reads only blocks/date=2026-02-25/
-GROUP BY date;
+-- DuckDB
+INSTALL delta; LOAD delta;
+-- Rows, blocks and days of one table
+SELECT count(*) AS rows, min(block_num) AS first_block, max(block_num) AS last_block,
+       min(date) AS first_day, max(date) AS last_day
+FROM delta_scan('output/mainnet/blocks');
+-- Its schema, and the latest rows
+DESCRIBE SELECT * FROM delta_scan('output/mainnet/blocks');
+SELECT * FROM delta_scan('output/mainnet/blocks') ORDER BY block_num DESC LIMIT 20;
+-- One day: pruned by the partition, then by the block_num statistics
+SELECT count(*) FROM delta_scan('output/mainnet/blocks') WHERE date = DATE '2026-02-25';
 ```
 
 ```python
-# Polars, from a local dataset root
+# Polars (with deltalake installed), from a local dataset root
 import datetime
 import polars as pl
 
-blocks = pl.scan_parquet("output/mainnet/blocks/**/*.parquet", hive_partitioning=True)
+blocks = pl.scan_delta("output/mainnet/blocks")
 day = blocks.filter(pl.col("date") == datetime.date(2026, 2, 25)).collect()
 
-# Polars, from a bucket with anonymous public read (no credentials, unsigned
+# From a bucket with anonymous public read (no credentials, unsigned
 # requests); set the endpoint and region of the S3-compatible service
-remote = pl.scan_parquet(
-    "s3://ethereum-mainnet/blocks/**/*.parquet",
-    hive_partitioning=True,
+remote = pl.scan_delta(
+    "s3://ethereum-mainnet/blocks",
     storage_options={
         "aws_endpoint_url": "https://storage.example.com",
         "aws_region": "us-east-1",
@@ -1936,36 +1924,36 @@ remote = pl.scan_parquet(
 )
 ```
 
-PyArrow infers a Hive key as a string; give it the partition schema to read
-`date` as a date:
+A table's files, rows (each file's `numRecords`), bytes and days come from
+its log alone, without reading any data file. This is what `fireparq scan`
+reported before v1.0.0:
 
 ```python
-import pyarrow as pa
-import pyarrow.dataset as ds
+# Table summary from the Delta log
+import polars as pl
+from deltalake import DeltaTable
 
-dataset = ds.dataset(
-    "output/mainnet/blocks",
-    format="parquet",
-    partitioning=ds.partitioning(pa.schema([("date", pa.date32())]), flavor="hive"),
+table = DeltaTable("output/mainnet/blocks")
+files = pl.DataFrame(table.get_add_actions(flatten=True))
+summary = files.select(
+    files=pl.len(),
+    rows=pl.col("num_records").sum(),
+    bytes=pl.col("size_bytes").sum(),
+    first_day=pl.col("partition.date").min(),
+    last_day=pl.col("partition.date").max(),
 )
+print(f"version {table.version()}", summary)
 ```
+
+`fireparq validate <root>/blocks` checks block continuity over the same
+snapshot of the log, and `fireparq inspect` reads the footer of one file.
 
 #### Block range of a day
 
 fireparq keeps no partition index (`partitions.parquet` and the `partitions`
-subcommands were removed in #653): the `date=` directory and the files'
-`block_num` values answer the lookup. The block range of one UTC day is:
-
-```sql
--- DuckDB, plain Parquet output
-SELECT min(block_num), max(block_num)
-FROM read_parquet('<root>/blocks/date=2026-09-25/*.parquet');
-```
-
-Every table is also a Delta table
-([#643](https://github.com/pinax-network/firehose-parquet/issues/643)): its log
-records each file's `date` partition and `block_num` statistics, so the same
-answer comes from the log:
+subcommands were removed in #653): each table's log records every file's
+`date` partition and `block_num` statistics, which answer the lookup. The
+block range of one UTC day is:
 
 ```sql
 -- DuckDB delta extension
@@ -1991,7 +1979,7 @@ pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
 | `array<T>` | `T[]`, for example `SMALLINT[]` | `List(T)`, for example `List(Int16)` | |
 | `binary` | `BLOB` | `Binary` | |
 
-- Both engines read `date` from the directory when Hive partitioning is on; the
+- Both engines read `date` from the Delta log (`delta_scan`, `scan_delta`); the
   data files do not contain it.
 - Non-final output adds `fork_step` (`VARCHAR` / `String`) and `stream_ordinal`
   (`BIGINT` / `Int64`).
@@ -2014,13 +2002,12 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
 ```
 
 - Other commands take the root or its tables directly:
-  `recovery status s3://<bucket>`, and `scan` / `validate` / `inspect` on
-  `s3://<bucket>/<table>/...`. They skip `_fireparq/` and the bucket's owner
-  records.
+  `recovery status s3://<bucket>`, `validate s3://<bucket>/blocks`, and
+  `inspect` on one file such as `s3://<bucket>/_fireparq/cursor.parquet`.
 - The bucket root then lists only the table prefixes, `_fireparq/` and the
   dot-prefixed control state, so a Spark, Trino, Hive or Delta table location
   at `s3://<bucket>/<table>/` or a hidden-path-aware scan of the whole bucket
-  reads table data only; with DuckDB, read `s3://<bucket>/<table>/**/*.parquet`.
+  reads table data only; with DuckDB, read `delta_scan('s3://<bucket>/<table>')`.
 - The first `build` needs an empty bucket; only the bucket owner record may
   already exist there. S3 ownership is
   bucket-wide in any case, so a bucket per network also gives each concurrently
@@ -2417,11 +2404,12 @@ firehose-parquet/
 │       │                                   #   inspect and validate helpers
 │       ├── ingest/                         # all-table transactions, output authority, cursor mirror, recovery
 │       ├── date_partition.rs               # the date=YYYY-MM-DD key, formatted and parsed in one place
-│       ├── writer.rs, writer/              # Arrow -> Parquet encoding, partition routing, protected parts
+│       ├── writer.rs, writer/              # Arrow -> Parquet part encoding, partition routing, protected parts
+│       ├── delta/                          # Delta tables: type mapping, log stores, stats, commits
 │       ├── dataset_lock/, dataset_lock_s3.rs  # local directory and bucket-wide S3 ownership
 │       ├── durable_state.rs, durable_state_s3.rs  # versioned control records
 │       ├── recovery.rs                     # `fireparq recovery`
-│       ├── maintenance/                    # shared read-only discovery (scan, validate, startup checks)
+│       ├── maintenance/                    # shared read-only listings (startup and recovery checks)
 │       ├── grpc.rs, grpc/                  # Firehose stream client, auth, reconnects
 │       ├── s3.rs, s3/                      # AWS config, bounded uploads
 │       ├── auth.rs                         # provider-scoped credential selection

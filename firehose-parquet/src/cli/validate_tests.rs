@@ -1,5 +1,8 @@
 use super::*;
-use arrow::array::{ArrayRef, BinaryArray, Int64Array, StringArray, StructArray, UInt64Array};
+use arrow::array::{
+    ArrayRef, BinaryArray, Int64Array, StringArray, StructArray, TimestampMillisecondArray,
+    UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -10,7 +13,7 @@ use parquet::file::{
 };
 use std::sync::Arc;
 
-fn fixture(binary_ids: bool, timestamp: bool, numeric_payload: bool) -> Bytes {
+fn fixture(binary_ids: bool, timestamp: bool) -> Bytes {
     // Two physical leaves precede canonical roots, so root and leaf indices differ.
     let nested = StructArray::from(vec![
         (
@@ -33,12 +36,9 @@ fn fixture(binary_ids: bool, timestamp: bool, numeric_payload: bool) -> Bytes {
         }
     };
     columns.push(ids(&["p0", "id1", "id2"]));
-    columns.push(if numeric_payload {
-        Arc::new(UInt64Array::from(vec![42; 3]))
-    } else {
-        Arc::new(StringArray::from(vec!["unused"; 3]))
-    });
-    columns.push(Arc::new(UInt64Array::from(vec![1, 2, 3])));
+    columns.push(Arc::new(StringArray::from(vec!["unused"; 3])));
+    // A Delta `long`.
+    columns.push(Arc::new(Int64Array::from(vec![1, 2, 3])));
     columns.push(ids(&["id1", "id2", "id3"]));
     let mut names = vec![
         "nested_payload",
@@ -49,7 +49,10 @@ fn fixture(binary_ids: bool, timestamp: bool, numeric_payload: bool) -> Bytes {
     ];
     if timestamp {
         names.push("timestamp");
-        columns.push(Arc::new(Int64Array::from(vec![Some(100), None, Some(90)])));
+        columns.push(Arc::new(
+            TimestampMillisecondArray::from(vec![Some(100_000), None, Some(90_000)])
+                .with_timezone("UTC"),
+        ));
     }
     let schema = Arc::new(Schema::new(
         names
@@ -108,7 +111,7 @@ impl ChunkReader for RejectPayloadReads {
 fn projected_validation_skips_payload_pages_and_remaps_reordered_roots() {
     for binary in [false, true] {
         for timestamp in [false, true] {
-            let data = fixture(binary, timestamp, false);
+            let data = fixture(binary, timestamp);
             let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone()).unwrap();
             let full_schema = builder.schema().as_ref().clone();
             let indices = find_canonical_indices(&full_schema).unwrap();
@@ -131,24 +134,21 @@ fn projected_validation_skips_payload_pages_and_remaps_reordered_roots() {
                 indices.timestamp,
             )
             .unwrap();
-            let (schema, tuples, rows) = read_validation_columns(RejectPayloadReads {
-                data: data.clone(),
-                forbidden,
-            })
-            .unwrap();
-            assert_eq!(schema, full_schema);
+            let tuples = read_validation_columns(RejectPayloadReads { data, forbidden }).unwrap();
             assert_eq!(tuples, expected);
-            assert_eq!(rows, 3);
+            assert_eq!(tuples.len(), 3);
             assert_eq!(tuples[1].3, None);
             assert_eq!(
                 check_tuples(&tuples).timestamp_reversals.len(),
                 usize::from(timestamp)
             );
-            // Exercise the actual file-backed entry point as well as the Bytes/S3 path.
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("blocks.parquet");
-            std::fs::write(&path, &data).unwrap();
-            let result = validate_parquet_local(&path, &ValidateOptions::default()).unwrap();
+            let result = validate_from_files(
+                vec![FileInfo {
+                    partition: "date=1970-01-01".into(),
+                    tuples,
+                }],
+                &ValidateOptions::default(),
+            );
             assert!(result.is_valid());
             assert_eq!(result.total_blocks, 3);
             assert_eq!(result.timestamp_reversals.len(), usize::from(timestamp));
@@ -156,26 +156,9 @@ fn projected_validation_skips_payload_pages_and_remaps_reordered_roots() {
     }
 }
 
-#[test]
-fn projected_validation_still_compares_unselected_schema_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.parquet"), fixture(false, true, false)).unwrap();
-    std::fs::write(dir.path().join("b.parquet"), fixture(false, true, true)).unwrap();
-    let result =
-        validate_parquet_local(&dir.path().to_path_buf(), &ValidateOptions::default()).unwrap();
-    assert_eq!(result.schema_mismatches.len(), 1);
-    assert!(result.schema_mismatches[0]
-        .details
-        .iter()
-        .any(|s| s.contains("type mismatch: payload")));
-}
-
 fn file(partition: &str, tuples: &[(u64, &str, &str)]) -> FileInfo {
     FileInfo {
-        path: format!("{partition}/blocks.parquet"),
         partition: partition.into(),
-        schema: Schema::new(vec![Field::new("block_num", DataType::UInt64, false)]),
-        row_count: tuples.len() as u64,
         tuples: tuples
             .iter()
             .map(|(n, id, parent)| (*n, (*id).into(), (*parent).into(), None))
@@ -216,7 +199,7 @@ fn cross_partition_uses_own_endpoints_despite_overlapping_heights() {
 }
 
 #[test]
-fn cross_partition_preserves_gaps_empty_partitions_and_options() {
+fn cross_partition_preserves_gaps_and_options() {
     for allow_gaps in [false, true] {
         for cross_partition in [false, true] {
             let result = validate_from_files(
@@ -232,8 +215,9 @@ fn cross_partition_preserves_gaps_empty_partitions_and_options() {
             );
             assert_eq!(result.files_scanned, 3);
             assert_eq!(result.total_blocks, 2);
-            assert_eq!(result.empty_partitions.len(), 1);
-            assert_eq!(result.empty_partitions[0].partition, "part=b");
+            // A file without rows adds no block and no boundary.
+            assert_eq!(result.partitions.len(), 3);
+            assert_eq!(result.partitions[1].total_blocks, 0);
             assert_eq!(
                 result.cross_partition_issues.len(),
                 usize::from(cross_partition && !allow_gaps)

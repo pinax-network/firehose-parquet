@@ -5,11 +5,11 @@ to it.
 
 ## Decision
 
-Every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet` (#652). No
-command selects another layout. fireparq keeps no partition index: the
-`partitions` subcommands and `_fireparq/partitions.parquet` were removed in
-#653, and the Delta Lake output (#643) records the files of each `date`
-partition in its log.
+Every table is a Delta table whose data files are
+`<table>/date=YYYY-MM-DD/part-*.parquet` (#652, #643). No command selects
+another layout. fireparq keeps no partition index: the `partitions`
+subcommands and `_fireparq/partitions.parquet` were removed in #653, and each
+table's Delta log records the files of each `date` partition.
 
 ## Output directory key
 
@@ -24,14 +24,14 @@ formatted and parsed.
 
 Why a single `date=YYYY-MM-DD` key:
 
-- It has the type and the value of the `date` data column (`Date32`) that every
-  table keeps: both come from the same whole-second block time, and the writer
-  refuses a row whose `date` disagrees with its directory. A single file stays
-  self-describing, and a Hive-partition-aware reader (DuckDB, Polars) sees one
-  consistent `date` column.
-- Readers filter `date = DATE '2026-09-25'` and prune directories, instead of
-  combining `year`, `month` and `day` keys.
-- The Delta Lake output (#643) partitions by `date` as well.
+- It is the table's `date` partition column (`date` in Delta, `Date32` in the
+  mapper), which the Delta log records for every file (#643); the data files do
+  not store it. It comes from the same whole-second block time as each row's
+  `timestamp`, and the writer refuses a row whose mapper `date` disagrees with
+  its partition.
+- Readers (DuckDB `delta_scan`, Polars `scan_delta`) filter
+  `date = DATE '2026-09-25'` and prune by the log, instead of combining `year`,
+  `month` and `day` keys.
 
 Earlier layouts are gone, with no compatibility handling. v0.x wrote
 `year=YYYY/month=MM/date=DD/`: a `date=DD` key held only the day of the month,
@@ -43,12 +43,12 @@ to roll up.
 
 ## CLI terms
 
-- `validate --cross-partition` checks block continuity between adjacent `date=`
-  directories.
+- `validate --cross-partition` checks block continuity between adjacent `date`
+  partitions of a Delta snapshot.
 
 ## Resulting rename decisions
 
-- `scan --rows` → `--limit`
+- `scan` removed (#643); DuckDB, Polars and the Delta log read the tables
 - `build --partition` and `--block-range-size` removed (#652)
 - `rollup` removed (#652)
 - `partitions build/ls/validate/resolve/shard` and their flags (`--partition`,

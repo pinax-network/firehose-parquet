@@ -54,11 +54,12 @@ const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
     version,
     subcommand_required = true,
     arg_required_else_help = true,
-    about = "Build Apache Parquet datasets from Firehose gRPC streams",
+    about = "Build Delta Lake tables from Firehose gRPC streams",
     after_long_help = "\
 Primary workflow:
   Use `fireparq build` to run the ingestion pipeline.
-  Utility workflows live under subcommands such as `scan`, `inspect`, `validate`, and `recovery`.
+  Utility workflows live under subcommands such as `inspect`, `validate`, and `recovery`.
+  Read the tables with DuckDB (`delta_scan`) or Polars (`scan_delta`).
 
 Examples:
   # Run a bounded historical ingestion
@@ -1469,29 +1470,6 @@ async fn main() -> Result<()> {
                 run_ingestion(build_args, &cli.global).await?;
                 return Ok(());
             }
-            Commands::Scan {
-                path,
-                limit,
-                offset,
-                order,
-                schema_only,
-                vertical,
-                json,
-                aws,
-            } => {
-                let aws = AwsConfig::from(aws);
-                firehose_parquet::cli::scan_parquet(
-                    path,
-                    *limit,
-                    *offset,
-                    *order,
-                    *schema_only,
-                    *vertical,
-                    *json,
-                    Some(&aws),
-                )?;
-                return Ok(());
-            }
             Commands::Inspect {
                 path,
                 schema_only,
@@ -1513,7 +1491,7 @@ async fn main() -> Result<()> {
                     cross_partition: *cross_partition,
                     allow_gaps: *allow_gaps,
                 };
-                let result = firehose_parquet::cli::validate_parquet(path, Some(&aws), &opts)?;
+                let result = firehose_parquet::cli::validate_table(path, Some(&aws), &opts)?;
                 result.print(path);
                 if !result.is_valid() {
                     std::process::exit(1);
@@ -2826,20 +2804,33 @@ mod tests {
         }
     }
 
+    /// `scan` is removed (#643): DuckDB `delta_scan` and Polars `scan_delta`
+    /// read the tables, and `deltalake` summarizes a table's log (README).
+    /// `validate` reads a pinned Delta snapshot, `inspect` one file.
+    #[test]
+    fn test_scan_is_removed_and_readers_follow_the_delta_log() {
+        let err = Cli::try_parse_from(["fireparq", "scan", "./output/blocks"])
+            .expect_err("scan is not a subcommand");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(Cli::command().find_subcommand("scan").is_none());
+        let root = command_help(&["fireparq", "--help"]);
+        assert!(root.contains("`delta_scan`"), "{root}");
+        assert!(!root.contains("`scan`"), "{root}");
+        let validate = command_help(&["fireparq", "validate", "--help"]);
+        for snippet in [
+            "latest Delta snapshot",
+            "never a directory listing",
+            "fireparq validate s3://ethereum-mainnet/blocks",
+        ] {
+            assert!(validate.contains(snippet), "{snippet}: {validate}");
+        }
+        let inspect = command_help(&["fireparq", "inspect", "--help"]);
+        assert!(inspect.contains("a Delta checkpoint"), "{inspect}");
+    }
+
     #[test]
     fn test_utility_subcommand_help_uses_grouped_headings() {
         for (name, headings, snippets) in [
-            (
-                "scan",
-                vec!["Selection:", "Display:", "AWS / S3:", "Runtime / Logging:"],
-                vec![
-                    "<PATH>",
-                    "--limit",
-                    "--vertical",
-                    "--aws-region",
-                    "--log-level",
-                ],
-            ),
             (
                 "validate",
                 vec![

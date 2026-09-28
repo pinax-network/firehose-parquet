@@ -64,15 +64,13 @@ fn native_spool_process_qualification() {
     match mode.as_str() {
         "prepare" => {
             let mut file = File::create(&path).unwrap();
-            let mut writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
             let mut meta = ParquetFileMetadata::new();
             meta.entries.extend(footer_identity(&plan));
-            writer.set_file_metadata(meta);
             let batch = fixture_batch(0, 4096.min(rows));
             let mut parquet = ArrowWriter::try_new(
                 &mut file,
                 fixture_schema(),
-                Some(writer.writer_properties(&batch).unwrap()),
+                Some(crate::writer::writer_properties(Compression::Zstd, &batch, &meta).unwrap()),
             )
             .unwrap();
             for start in (0..rows).step_by(4096) {

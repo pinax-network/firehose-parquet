@@ -150,6 +150,59 @@ async fn remote_discovery_uses_components_and_includes_ancestors_descendants() {
     owner.release().await.unwrap();
 }
 
+/// The protected-root walker skips every Delta log (#643 L7): a table's
+/// `_delta_log/` holds commits and checkpoints, never control state. A
+/// marker-named entry inside one would otherwise be a nested dataset and
+/// refuse the selection, locally and on S3.
+#[tokio::test]
+async fn protected_root_discovery_skips_delta_logs() {
+    use crate::dataset_lock_s3::S3Ownership;
+    use object_store::ObjectStore;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("one");
+    protected(&root, MirrorBinding::Disabled);
+    let log = root.join("blocks/_delta_log");
+    fs::create_dir_all(log.join(CONTROL_DIRECTORY)).unwrap();
+    fs::write(log.join("00000000000000000000.json"), b"{}").unwrap();
+    let prepared = acquire(
+        "fixture",
+        vec![MaintenanceTarget::directory(temp.path().to_string_lossy())],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.roots.len(), 1);
+    prepared.ownership.release().await.unwrap();
+
+    let store: std::sync::Arc<dyn ObjectStore> =
+        std::sync::Arc::new(object_store::memory::InMemory::new());
+    for key in [
+        "one/.fireparq-ingest/state.json",
+        "one/blocks/_delta_log/00000000000000000000.json",
+        "one/blocks/_delta_log/.fireparq-ingest/state.json",
+    ] {
+        store
+            .put(
+                &object_store::path::Path::from(key),
+                bytes::Bytes::from_static(b"marker only").into(),
+            )
+            .await
+            .unwrap();
+    }
+    let remote = S3Ownership::acquire(store.clone(), "fixture", vec!["one".into()])
+        .await
+        .unwrap();
+    let owner = DatasetOwnership::from_remote_for_test("bucket", remote);
+    let parent = BTreeSet::from([MaintenanceTarget::directory("s3://bucket")]);
+    assert_eq!(
+        discover_markers(&owner, &parent, MarkerScope::Tree, &ListingStats::default())
+            .await
+            .unwrap(),
+        BTreeSet::from(["s3://bucket/one".into()])
+    );
+    owner.release().await.unwrap();
+}
+
 /// A dataset written with `--output s3://bucket` has its
 /// marker at the bucket root. A table or partition below it resolves to the
 /// bucket root, and a second dataset nested in it (for example
