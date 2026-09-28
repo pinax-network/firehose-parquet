@@ -1,6 +1,6 @@
 # firehose-parquet
 
-A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`fireparq`) supports multiple blockchain types with automatic chain detection.
+A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Delta Lake** tables: one table per chain table, with Parquet data files and a `_delta_log/`, that DuckDB and Polars read directly from local disk or S3. A single unified binary (`fireparq`) supports multiple blockchain types with automatic chain detection.
 
 ## Supported Chains
 
@@ -18,7 +18,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
 The generated [schema reference](docs/schemas/README.md) lists every table,
-column, Arrow type and nullability. The sections below explain semantics, joins
+column, Delta type and nullability. The sections below explain semantics, joins
 and queries. Select columns by name, not position: the non-final `fork_step` and
 `stream_ordinal` are not always the last columns, because later additions follow
 them on several Solana, Antelope, NEAR and Tron tables.
@@ -29,36 +29,43 @@ v1.0.0 is a breaking release that follows the v0.7 series. The
 [v1.0.0 release notes](docs/releases/v1.0.0.md) list every change and include
 the upgrade guide.
 
-- **Data-integrity hardening.** `build` commits every table of a flush in one
-  transaction. The authoritative checkpoint is stored under
-  `<output>/.fireparq-ingest/`, and `_fireparq/cursor.parquet` is now an
-  optional mirror. `build` and `recovery` take dataset ownership, which
-  `fireparq recovery` can inspect.
-- **One consistent schema across chains.** Canonical `timestamp` is a UTC
-  timestamp with millisecond values on every table, and every table is
-  partitioned by UTC day as `<table>/date=YYYY-MM-DD/`, which is its `date`
-  column. Every part is a Delta data file with Delta column types (#643).
-  Most chains gain columns and tables, for example EVM withdrawals,
-  access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
-  Beacon Electra requests and Tron contracts. See the
-  [schema reference](docs/schemas/README.md).
-- **Delta Lake tables only.** Every table is a Delta table, read through its
-  log with DuckDB `delta_scan` or Polars `scan_delta`; there is no plain-Parquet
-  output and no reader that walks table directories (#643). `validate` reads
-  the active files of a pinned Delta snapshot. See
+- **Delta Lake tables only.** Every table is a Delta table at
+  `<root>/<table>/`, partitioned by `date` (`date=YYYY-MM-DD`), with no
+  format flag and no plain-Parquet output. Each flush's parts are committed to
+  the logs as they are, with a `txn` marker per table and `blocks` last.
+  DuckDB `delta_scan` (1.5 or later) and Polars `scan_delta` read them through
+  the log; JVM engines are not a target. See
   [Reading the tables](#reading-the-tables).
-- **Removed: `merge`, `truncate`, `verify` and `scan`.** Compaction is the job
-  of an off-the-shelf `deltalake` maintenance CronJob (#643,
-  [Delta maintenance](#delta-maintenance)), `truncate` has no
-  safe Delta equivalent (rebuild into a new root instead), `verify` returns over
-  Delta snapshots in #666, and DuckDB, Polars and the Delta log replace `scan`.
-- **Engine-friendly layout.** A dataset root holds only its table directories,
-  `_fireparq/` (the cursor mirror) and dot-prefixed control state, so engines that skip `_` and `.`
-  paths never read fireparq's own files as table data. `--output` is that
-  root, used exactly as given; `{chain}` opts into a directory named after the
-  network (`--output 's3://datasets/{chain}'`). v0.7.x appended the chain
-  name, so add `/{chain}` to keep that layout. See
-  [Output Directory Layout](#output-directory-layout).
+- **Exactly-once crash recovery.** `build` commits every table of a flush in
+  one transaction, with its authority under `<root>/.fireparq-ingest/`, and
+  recovery rolls an interrupted transaction forward exactly once into each
+  Delta table whose `txn` lacks it. `_fireparq/cursor.parquet` is an optional
+  mirror. See [Cursor & Resume](#cursor--resume).
+- **Maintenance beside the writer.** fireparq's dataset ownership guards only
+  its writer and its state (`.fireparq-ingest/`, `_fireparq/`). An
+  off-the-shelf `deltalake` job compacts, vacuums and checkpoints the tables
+  beside it: [`scripts/delta_maintenance.py`](scripts/delta_maintenance.py) and
+  the example CronJobs in [`deploy/examples/`](deploy/examples/). See
+  [Delta maintenance](#delta-maintenance).
+- **One consistent schema across chains, in Delta types.** Signed integers
+  with checked casts, `decimal(20,0)` for currency amounts, `string` enums,
+  UTC `timestamp` columns in microseconds that keep millisecond block times,
+  and `date` as a partition value only. Most chains gain columns and tables,
+  for example EVM withdrawals, access lists and EIP-7702 authorizations, NEAR
+  receipt actions and logs, Beacon Electra requests and Tron contracts. See
+  the [schema reference](docs/schemas/README.md).
+- **A final-only lake per network.** `--output` is the dataset root as given,
+  with an opt-in `{chain}` (v0.7.x appended the chain name, so add `/{chain}`
+  to keep that layout). The recommended deployment is one bucket and one
+  continuous final-only writer per network. The writer commits every
+  `--flush-interval-secs` at the chain head and by size while it catches up,
+  and a restart lists no data. See
+  [Recommended deployment](#recommended-deployment).
+- **Removed:** `merge`, `truncate`, `scan`, `rollup`, the `partitions`
+  subcommands and `partitions.parquet`, `verify` (it returns over Delta
+  snapshots in #666), `--partition` and its finer layouts, and
+  `--cursor-template`. The
+  [release notes](docs/releases/v1.0.0.md#removed) list what replaces each.
 - **Explicit credentials and destinations.** Firehose credentials are scoped to
   the provider (`PINAX_*`, `STREAMINGFAST_*`). S3 writes need an explicit
   `s3://bucket/prefix` output, and `.env` is read only from the working
@@ -69,13 +76,13 @@ the upgrade guide.
 - **Performance.** Identifier columns are encoded once per block without
   per-value allocations, and EVM decimals are written directly into Arrow.
   Each `build` flush encodes and publishes its tables concurrently within
-  explicit bounds. File sizes
-  follow an adaptive compressed-size target. Firehose receive windows are 16 MiB
-  and accept zstd replies.
+  explicit bounds. File sizes follow an adaptive compressed-size target.
+  Firehose receive windows are 16 MiB and accept zstd replies.
 - **Existing datasets must be rebuilt into a new output root.** v1.0.0 does not
-  adopt output written by earlier releases, and the schemas changed. Rebuild
-  into a new empty output root and keep old datasets only for read-only tools.
-  See the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first).
+  adopt output written by earlier releases, and the format and schemas
+  changed. Rebuild into a new empty output root and keep old datasets only for
+  read-only tools. See the
+  [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first).
 
 ## Features
 
@@ -86,7 +93,7 @@ the upgrade guide.
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; restarts from the authoritative output checkpoint
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
-- **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
+- **Crash recovery** — all-table transactions and an authoritative output checkpoint; an interrupted transaction is rolled forward exactly once into each Delta table, gated by its `txn`; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](#reading-the-tables), [engine compatibility](#engine-compatibility))
 - **Delta maintenance** — an off-the-shelf `deltalake` job compacts closed days, vacuums and checkpoints beside the writer, with a reference script and Kubernetes CronJob ([Delta maintenance](#delta-maintenance))
@@ -94,13 +101,13 @@ the upgrade guide.
 - **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
-- **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
+- **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads are `binary` and account indices `array<short>`
 - **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
 - **Graceful shutdown** — SIGINT/SIGTERM and write/stream errors never save the cursor past unwritten data; the next run resumes from the last committed flush
 - **Docker support** — multi-stage Dockerfile, published to GHCR
-- **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet
+- **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet parts, committed to the Delta tables as they are
 
 ## Quick Start
 
@@ -128,7 +135,7 @@ The other archives are `fireparq-linux-aarch64`, `fireparq-macos-x86_64` and
 # Build
 cargo build --release --workspace
 
-# Stream Solana blocks to Parquet (auto-detect chain). --output is the dataset
+# Stream Solana blocks to Delta tables (auto-detect chain). --output is the dataset
 # root; {chain} names a directory after the endpoint's chain_name, so these
 # examples write ./output/solana-mainnet-beta/, ./output/mainnet/, ...
 ./target/release/fireparq build \
@@ -208,6 +215,15 @@ cargo build --release --workspace
   --verbose
 ```
 
+Read what a run wrote with DuckDB 1.5 or later, through each table's Delta log
+([Reading the tables](#reading-the-tables) has Polars and S3 too):
+
+```bash
+duckdb -c "INSTALL delta; LOAD delta;
+  SELECT count(*), min(block_num), max(block_num), min(date), max(date)
+  FROM delta_scan('output/solana-mainnet-beta/blocks')"
+```
+
 ### Authentication
 
 Credentials are selected from the **resolved endpoint host**, including any
@@ -279,6 +295,51 @@ docker run --rm \
   --output /output
 ```
 
+## Recommended Deployment
+
+The recommended deployment is a **final-only lake**: one bucket per network,
+with the dataset at the bucket root, and one continuous final-only `build` per
+network beside the hourly maintenance job. There is no live bucket: non-final
+output is a [CLI capability](#non-final-streams-and-reorgs), not part of this
+deployment.
+
+```bash
+# One continuous writer per network, at its bucket root, following finalized
+# blocks. The first run starts at the endpoint's first streamable block (or
+# pass --start-block); every later run resumes from the output authority.
+OUTPUT=s3://ethereum-mainnet \
+FLUSH_INTERVAL_SECS=60 \
+FLUSH_BYTES=33554432 \
+FLUSH_MEMORY_BYTES=268435456 \
+METRICS_PORT=9102 \
+fireparq build --network mainnet
+```
+
+| Setting | Recommended | Why |
+|---|---|---|
+| `--output` / `OUTPUT` | `s3://<network bucket>` | The bucket root is the dataset root, and one bucket per network gives each writer its own bucket-wide owner ([single-network buckets](#single-network-buckets)) |
+| `--final-blocks-only` | `true` (the default) | Only finalized blocks, so readers need no reorg rule |
+| `--stop-block` | unset | One continuous writer; a restart resumes from authority ([startup cost](#startup-cost)) |
+| `--flush-interval-secs` | `60` (60–120) | The commit cadence at the chain head. It is suspended while the writer catches up, so a backfill or a restart after an outage writes full-size files ([details](#flush-interval-and-catch-up)) |
+| `--flush-bytes` | 32 MiB (the default) | The compressed size target of the largest table's file while catching up |
+| `--flush-memory-bytes` | 256 MiB (the default); 1 GiB on fast chains | The summed mapper estimate that forces a flush. On Robinhood (10 blocks/s) the default fires about every 27 s, before a 60 s interval. 1 GiB makes catch-up 2.5–3.5× faster and writes 4× fewer objects per block, at about 2.8 GiB peak RSS instead of 1.0 GiB |
+| Memory limit | Headroom above the peak RSS | For example 2 GiB with the default memory trigger and 4 GiB with 1 GiB, plus temporary disk for the S3 upload spool ([S3-aware cursor](#s3-aware-cursor)) |
+| Maintenance | Hourly (`17 * * * *`) and a weekly full VACUUM | [`deploy/examples/delta-maintenance-cronjob.yaml`](deploy/examples/delta-maintenance-cronjob.yaml), with its own S3 user ([Delta maintenance](#delta-maintenance)) |
+| Alerts | `firehose_parquet_delta_log_tail_commits`, a writer down for more than a day, `/ready` | The maintenance job stopped checkpointing; a committed transaction must not stay pending past the VACUUM retention; the stream stalled ([metrics](#prometheus-metrics)) |
+
+These numbers come from the #658 benchmark on Robinhood and Arbitrum One blocks
+(local disk and a loopback S3 at 0–80 ms per request). It was measured before
+the Delta commits, which add about one PUT and one LIST per table with rows to
+each flush. At a 60–120 s cadence a commit takes 1–21% of the window, and a
+catch-up runs at 4.8× the chain rate or more. See the
+[benchmark record](docs/audit/658-live-flush-benchmark.md) and the
+[adaptive flush record](docs/audit/659-adaptive-flush.md).
+
+On Kubernetes, give the writer an `emptyDir` at `/tmp` when its root
+filesystem is read-only (the S3 upload spool), point readiness at `/ready` and
+liveness at `/health` on `METRICS_PORT`, and run one replica: a second writer on
+the bucket fails with `bucket ownership is held`.
+
 ## Cursor & Resume
 
 `fireparq build` stores an authoritative checkpoint and an all-table transaction
@@ -297,13 +358,19 @@ for read-only tools. See the
 ### Startup cost
 
 A restart costs the same however large the dataset has grown (#655). When
-`--output` already holds a dataset, `build` reads its control records only:
-the S3 owner record, `.fireparq-ingest/` (the authority and a pending
-transaction) and the `_fireparq/cursor.parquet` mirror. It lists no
-data objects and walks no data directory. The only other requests are one LIST
-of a control prefix (`<ancestor>/.fireparq-ingest/`) per directory above the
-dataset root, which is none for a dataset at the bucket root, and after a crash
-the GETs of the pending transaction's own parts.
+`--output` already holds a dataset, `build` reads:
+
+- its control records: the S3 owner record, `.fireparq-ingest/` (the authority
+  and a pending transaction) and the `_fireparq/cursor.parquet` mirror;
+- each table's Delta log from its last checkpoint: `_delta_log/_last_checkpoint`,
+  the checkpoint, and the commits after it (one LIST of `_delta_log/` and one
+  GET per commit). The hourly [maintenance](#delta-maintenance) checkpoint
+  keeps that tail short; `firehose_parquet_delta_log_tail_commits` reports it.
+
+It lists no data objects and walks no data directory. The only other requests
+are one LIST of a control prefix (`<ancestor>/.fireparq-ingest/`) per directory
+above the dataset root, which is none for a dataset at the bucket root, and
+after a crash the GETs of the pending transaction's own parts.
 
 The whole root is listed only when the dataset is created, when the root must
 be empty anyway: `build` then checks the root, every directory above it and
@@ -318,46 +385,6 @@ every 10 seconds.
 and the `protected dataset startup checks finished` log line gives the same
 counts. See [the implementation record](docs/audit/655-resume-cost.md).
 
-## Network Aliases
-
-`fireparq` can resolve a checked-in set of built-in Firehose network names instead of requiring `--endpoint` every time.
-
-Examples:
-
-- `mainnet` → `https://eth.firehose.pinax.network:443`
-- `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
-- `tron` → `https://mainnet.tron.streamingfast.io:443`
-- `tron-evm` → `https://mainnet-evm.tron.streamingfast.io:443`
-
-Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
-
-Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
-
-Resolution precedence:
-
-1. `--endpoint` or `ENDPOINT`
-2. `--network` with `FIREHOSE_ENDPOINT_*` override lookup
-3. `--network` built-in default endpoint
-
-Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
-
-Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
-
-`build` requires EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
-
-```bash
-# Built-in alias
-fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
-
-# Per-network override
-export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
-fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
-
-# Hyphens in the network name become underscores in the override variable
-export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
-fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
-```
-
 ### How It Works
 
 1. **Receive and map** — assign source-event order before filtering or timestamp
@@ -367,12 +394,44 @@ fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-bloc
    transaction, and publish complete parts with deterministic owned names.
    Record each file's size, checksum and schema before publication.
 3. **Commit and mirror** — after verifying every part, record the transaction's
-   commit, advance output authority, repair the cursor mirror, and clear pending.
+   commit, commit each table's part to its Delta log with a `txn` marker (the
+   other tables first, `blocks` last), advance output authority, repair the
+   cursor mirror, and clear pending.
 4. **Recover before streaming** — roll back a Writing transaction or finish a
    Committed transaction before opening Firehose Blocks: commit it to each
    Delta table whose `txn` lacks it, `blocks` last, then advance authority.
    Never infer progress from the greatest block number, a filename, or an
    external cursor alone.
+
+### Crash recovery
+
+A crash at any point leaves a journal under `.fireparq-ingest/` that the next
+`build`, or `fireparq recovery recover <root>` offline, finishes before any
+Blocks request:
+
+- **Before the journal is Committed** the transaction is rolled back: its own
+  parts are removed, no log references them, and its window is replayed under
+  the same deterministic part names.
+- **After it is Committed** the transaction is rolled forward exactly once.
+  Every start first reads each table's `txn` and refuses a log ahead of the
+  authority (an authority restored from an older copy, or another writer using
+  the stream's `appId`) before it changes anything. The transaction is then
+  committed only to the tables whose `txn` lacks it, `blocks` last, after only
+  those tables' parts are verified against the journal, and authority
+  advances. A roll-forward that is itself interrupted finishes the same way.
+- Tables that already hold the transaction are not read again, so a restart
+  works after the [maintenance job](#delta-maintenance) compacted and vacuumed
+  their files. Only a full VACUUM with a retention shorter than the outage can
+  delete a part that no log references yet; recovery then stops with a message
+  naming the part and the tables that hold it, keeps the journal, and the
+  dataset is rebuilt into a new root.
+- A Delta commit whose outcome is unknown (a timeout, a lost response) does not
+  keep the S3 owner: the next start reads the table's `txn` and commits only
+  what did not land.
+
+The [crash matrix](docs/design/delta-lake.md#4-crash-matrix) lists every
+interruption point and its test, and the
+[recovery record](docs/audit/643-l4-delta-recovery.md) the implementation.
 
 ### Local part publication
 
@@ -384,7 +443,7 @@ partial transaction or accepting a committed file. Canonical and lexical output
 ancestry are both synced, preserving explicit output-root symlink aliases.
 
 The staging names are `.fireparq-txn-<transaction>-<index>.tmp` next to each
-final part; plain `*.parquet` globs ignore them. After an ordinary error (a
+final part; no Delta log references them. After an ordinary error (a
 failed write, publish, journal update or mirror save) the build removes its own
 staging names before exiting, on a best-effort basis, and leaves the journal for
 recovery. If that cleanup itself fails, for example because the directory is no
@@ -394,13 +453,13 @@ next `build` or `fireparq recovery recover <root>` removes it from the journal p
 This requires atomic same-directory hard links, file and directory sync, readable
 directory ancestry, and macOS/Linux inode locking. Unsupported operations fail
 closed. Nested symlink entries inside guarded trees are refused. External writers
-that bypass ownership are unsupported. The unprotected low-level writer keeps its
-own naming rules.
+that bypass ownership are unsupported.
 
-Final `.parquet` files are individually complete. Concurrent readers using plain
-globs can still see only some tables during publication; this protocol does not
-provide atomic multi-table query snapshots. Do not remove control records or
-another active writer's temporary files. See the
+A published part is complete, but readers see it only once its table's log
+commits it. The tables commit one after another, `blocks` last, so there is no
+atomic multi-table snapshot: use the
+[frontier rule](#consistent-reads-across-tables) for a consistent read. Do not
+remove control records or another active writer's temporary files. See the
 [local publication tests](docs/audit/578-atomic-local-parquet.md) and
 [transaction recovery contract](docs/audit/468-ingestion-runtime.md).
 
@@ -532,6 +591,8 @@ S3 mirror updates use one conditional Create/Update with transport retries disab
 then exact readback. Failed or cancelled saves preserve pending recovery state;
 a shutdown during local retry backoff still reports the durability failure.
 
+### Ownership
+
 `build` and `recovery` hold common ownership over the output and an external
 cursor location. Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
@@ -554,7 +615,7 @@ the exact owner/generation and evidence that both the writer and all prior remot
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
 
-#### Delta tables and the maintenance job
+#### What the owner guards: the Delta tables and the maintenance job
 
 The owner guards one fireparq writer (`build`, or `recovery recover`) and the
 state only it changes: `.fireparq-ingest/` (authority and the pending
@@ -653,6 +714,46 @@ flushes the remaining buffers and saves the final cursor.
   proxy closes the stream cleanly, the run reconnects from the last cursor with
   the usual back-off.
 
+## Network Aliases
+
+`fireparq` can resolve a checked-in set of built-in Firehose network names instead of requiring `--endpoint` every time.
+
+Examples:
+
+- `mainnet` → `https://eth.firehose.pinax.network:443`
+- `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
+- `tron` → `https://mainnet.tron.streamingfast.io:443`
+- `tron-evm` → `https://mainnet-evm.tron.streamingfast.io:443`
+
+Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
+
+Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
+
+Resolution precedence:
+
+1. `--endpoint` or `ENDPOINT`
+2. `--network` with `FIREHOSE_ENDPOINT_*` override lookup
+3. `--network` built-in default endpoint
+
+Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
+
+Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
+
+`build` requires EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
+
+```bash
+# Built-in alias
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
+
+# Per-network override
+export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
+
+# Hyphens in the network name become underscores in the override variable
+export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
+fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
+```
+
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
@@ -680,19 +781,21 @@ recovery knobs to dedicated advanced sections.
 
 ### Non-final streams and reorgs
 
-Finalized-only output is the default. Use `--final-blocks-only=false` to receive
-reversible blocks, or set `FINAL_BLOCKS_ONLY=false`. An explicit CLI value takes
-precedence over the environment. The bare `--final-blocks-only` flag still means
-`true`; optional values use `=` so the flag cannot consume a following command.
-Whether a run is live (no `--stop-block`) is independent of whether blocks must
-be final.
+Finalized-only output is the default and the [recommended
+deployment](#recommended-deployment). Non-final output is a CLI capability for
+datasets that must show the reversible chain head: use
+`--final-blocks-only=false`, or set `FINAL_BLOCKS_ONLY=false`. An explicit CLI
+value takes precedence over the environment. The bare `--final-blocks-only`
+flag still means `true`; optional values use `=` so the flag cannot consume a
+following command. Whether a run is live (no `--stop-block`) is independent of
+whether blocks must be final.
 
 Non-final output is an **append-only event history**. Every mapped envelope adds
 its block's rows (to `blocks` and to every other table the block has rows in),
 with two extra columns that final-only output does not have, `stream_ordinal`
 directly after `fork_step`:
 
-- `fork_step` (`Utf8`): `NEW` adds a block, `UNDO` records its removal from the
+- `fork_step` (`string`): `NEW` adds a block, `UNDO` records its removal from the
   chain (the undone block's rows are written again, marked `UNDO`), and `FINAL`
   is an explicit final event if the endpoint sends it. The usual non-final
   protocol sends `NEW` and occasional `UNDO`, not a later `FINAL` for every
@@ -711,8 +814,9 @@ directly after `fork_step`:
 A block identity can return as `NEW` after an `UNDO`, and a replay or reconnect
 can deliver the same block again; every delivery is a new event with a new
 ordinal. Block height, block time, `lib_num`, file names and row order are not
-delivery-order keys, and neither the steps alone nor counting NEW minus UNDO
-gives the current state: `NEW(A), UNDO(A), NEW(A)` ends with A present, while
+delivery-order keys (the maintenance job's OPTIMIZE rewrites files and their
+row order), and neither the steps alone nor counting NEW minus UNDO gives the
+current state: `NEW(A), UNDO(A), NEW(A)` ends with A present, while
 `NEW(A), NEW(A), UNDO(A)` ends with A absent despite the same unordered rows.
 `stream_ordinal` is the order that decides.
 
@@ -734,21 +838,22 @@ remain, and after `NEW(A), UNDO(A), NEW(A)` only the rows of the second
 `NEW(A)`.
 
 ```sql
--- DuckDB views over one live (non-final) chain root. Replace live/mainnet
--- with that root, for example s3://live-bucket/v1/mainnet.
+-- DuckDB 1.5 or later (INSTALL delta; LOAD delta) views over one non-final
+-- dataset root. Replace live/mainnet with that root, for example
+-- s3://ethereum-mainnet-live.
 CREATE OR REPLACE VIEW live_head AS
 SELECT block_num, block_id, stream_ordinal
 FROM (
   SELECT block_num, block_id, fork_step, stream_ordinal,
          row_number() OVER (PARTITION BY block_num ORDER BY stream_ordinal DESC) AS latest
-  FROM read_parquet('live/mainnet/blocks/**/*.parquet', hive_partitioning = false)
+  FROM delta_scan('live/mainnet/blocks')
 ) events
 WHERE latest = 1 AND fork_step IN ('NEW', 'FINAL');
 
 -- One view per table, blocks included: the rows of each height's latest event.
 CREATE OR REPLACE VIEW live_blocks AS
 SELECT t.*
-FROM read_parquet('live/mainnet/blocks/**/*.parquet', hive_partitioning = false) t
+FROM delta_scan('live/mainnet/blocks') t
 WHERE EXISTS (
   SELECT 1 FROM live_head h
   WHERE h.block_num = t.block_num
@@ -758,7 +863,7 @@ WHERE EXISTS (
 
 CREATE OR REPLACE VIEW live_transactions AS
 SELECT t.*
-FROM read_parquet('live/mainnet/transactions/**/*.parquet', hive_partitioning = false) t
+FROM delta_scan('live/mainnet/transactions') t
 WHERE EXISTS (
   SELECT 1 FROM live_head h
   WHERE h.block_num = t.block_num
@@ -768,157 +873,24 @@ WHERE EXISTS (
 ```
 
 `live_head` reads only the `blocks` table, which has exactly one row per event.
-`hive_partitioning = false` keeps the partition directories out of the columns,
-so every view has the table's own schema.
+Each view has the table's own columns, `date` included. `blocks` commits last,
+so a child table can briefly lack the rows of the newest events in `blocks`:
+apply the [frontier rule](#consistent-reads-across-tables) when that matters.
+The window subquery and the `EXISTS` semi-join are standard SQL (DuckDB's
+`QUALIFY` is avoided); only `delta_scan` is DuckDB's. CI runs this exact SQL
+against real non-final output (`blocks/tests/non_final_stream.rs`).
 
-**Spark and Trino.** The window subquery and the `EXISTS` semi-join are standard
-SQL and run unchanged there (DuckDB's `QUALIFY` is avoided because Spark and
-Trino lack it); replace `read_parquet(...)` with a table or path over the same
-files, for example `` parquet.`s3a://live-bucket/v1/mainnet/blocks/` `` with
-`recursiveFileLookup` in Spark, or an external Hive table in Trino. Engines
-without unsigned integers may read `block_num` and `stream_ordinal` as
-`DECIMAL(20,0)` (Spark) or as a signed 64-bit integer; ordinals stay far below
-2^63, so ordering and equality are unaffected. The union below uses DuckDB's
-`SELECT * EXCLUDE` and `UNION ALL BY NAME`: in Spark use
-`DataFrame.drop("fork_step", "stream_ordinal")` and `unionByName`, in Trino list
-the columns.
-
-#### Two-bucket union
-
-A live view shows the reversible head, but the separately built final-only
-dataset is the source of truth (see
-[Live + final two-bucket deployment](#live--final-two-bucket-deployment)). Read
-every table from the final bucket up to its **final frontier**, the highest
-`block_num` in its `blocks` table, and from the live view above it:
-
-```sql
--- DuckDB, after the live views above. Replace final/mainnet with the final
--- dataset's chain root, for example s3://final-bucket/v1/mainnet.
-CREATE OR REPLACE VIEW final_frontier AS
-SELECT max(block_num) AS block_num
-FROM read_parquet('final/mainnet/blocks/**/*.parquet', hive_partitioning = false);
-
-CREATE OR REPLACE VIEW canonical_blocks AS
-SELECT *
-FROM read_parquet('final/mainnet/blocks/**/*.parquet', hive_partitioning = false)
-WHERE block_num <= (SELECT block_num FROM final_frontier)
-UNION ALL BY NAME
-SELECT * EXCLUDE (fork_step, stream_ordinal)
-FROM live_blocks
-WHERE block_num > (SELECT block_num FROM final_frontier)
-   OR (SELECT block_num FROM final_frontier) IS NULL;
-
-CREATE OR REPLACE VIEW canonical_transactions AS
-SELECT *
-FROM read_parquet('final/mainnet/transactions/**/*.parquet', hive_partitioning = false)
-WHERE block_num <= (SELECT block_num FROM final_frontier)
-UNION ALL BY NAME
-SELECT * EXCLUDE (fork_step, stream_ordinal)
-FROM live_transactions
-WHERE block_num > (SELECT block_num FROM final_frontier)
-   OR (SELECT block_num FROM final_frontier) IS NULL;
-```
-
-- The result has the final-only schema. Both datasets must be the same chain
-  with the same byte encoding and table options (for example both with or both
-  without `--without-extended`).
-- Every table is cut at the frontier of `blocks`, so a table never mixes both
-  buckets at one height. A final flush publishes its tables one after another:
-  a query that runs while the final writer publishes can briefly see a new
-  `blocks` part before its child parts. Query between final runs, or accept
-  that short gap.
-- The live bucket must still hold every height above the final frontier. Size
-  its expiration so that the frontier's worst lag (a day, plus the time the
-  daily job takes) stays well inside it.
-
-Use different output roots/cursors for final-only and non-final captures;
-resuming a cursor with a different mode is incompatible. A bounded non-final
-run warns on successful completion because reaching its stop does not prove
-that its tail is final, and later UNDO events will not be received after it
-stops. A saved cursor or successful exit is not a finality certificate. See the
+Use a separate dataset root for a non-final stream: final-only and non-final
+modes cannot share a root, and resuming a root in the other mode is refused. On
+S3 give it its own bucket, since ownership is bucket-wide. Its history is
+append-only (`delta.appendOnly`) and only grows; the maintenance job compacts
+and checkpoints it like any other table, and nothing expires old events
+(deleting data files outside the log breaks readers). A bounded non-final run
+warns on successful completion because reaching its stop does not prove that
+its tail is final, and later UNDO events will not be received after it stops.
+A saved cursor or successful exit is not a finality certificate. See the
 [`stream_ordinal` and live view record](docs/audit/648-stream-ordinal.md) and the
 [original non-final implementation](docs/audit/474-non-final-streams.md).
-
-### Live + final two-bucket deployment
-
-A dataset that shows the chain head while keeping a canonical history uses two
-writers, each with its own bucket (S3 ownership is bucket-wide, so a live
-`build` that never stops would block every other mutating command in its
-bucket). Query them with the [two-bucket union](#two-bucket-union).
-
-| Setting | Final writer (source of truth) | Live writer (chain head) |
-|---|---|---|
-| `FINAL_BLOCKS_ONLY` | `true` (the default) | `false` |
-| Partitions | `<table>/date=YYYY-MM-DD/` | `<table>/date=YYYY-MM-DD/` |
-| Range | Bounded daily runs: the same `START_BLOCK` on every run, `STOP_BLOCK` at the first block of the next UTC day | Live: no `STOP_BLOCK` |
-| Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` (at the head; [size-based while catching up](#flush-interval-and-catch-up)) and/or `FLUSH_BLOCKS` |
-| Compaction | The `deltalake` maintenance CronJob (#643) | None: live parts expire |
-| Retention | Kept | S3 lifecycle expiration, for example after 2 days (48 hours), on table prefixes only |
-
-**Final writer.** One protected stream per root: each run repeats the original
-`START_BLOCK` and extends `STOP_BLOCK` (exclusive) to the first block of the
-next UTC day, for example the live bucket's first block of that day (see
-[block range of a day](#block-range-of-a-day)). A repeated bound opens no Blocks request;
-a larger one resumes from the output authority. `build` exits at the bound, and
-a run that stops early resumes from the same authority the next day.
-
-**Live writer.** One unbounded `build` with `FINAL_BLOCKS_ONLY=false`. For the
-first run, set `START_BLOCK` at or below the final
-dataset's frontier so the union has no gap; later runs resume from authority.
-Rows reach the bucket at the next flush: `FLUSH_INTERVAL_SECS=N` flushes when a
-block arrives at least N seconds after the previous flush, `FLUSH_BLOCKS=K`
-after K blocks, whichever comes first (day boundaries and the size triggers,
-`FLUSH_BYTES` and `FLUSH_MEMORY_BYTES`, also flush). Lower values mean fresher
-data and more objects. The interval applies once the writer has caught up
-with the head: after a restart or an outage it catches up with size-based
-flushes first ([flush interval and catch-up](#flush-interval-and-catch-up)).
-The live parts are expired rather than compacted.
-
-**Expected objects per day.** Each flush writes one part per table that has rows
-in it.
-
-- Live: about (flushes per day) × (tables with rows). At the head, flushes per
-  day are the larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
-  per day / `FLUSH_BLOCKS`, plus the day boundary and any size-triggered
-  flushes. Ethereum (7,200 blocks a day) with
-  `FLUSH_INTERVAL_SECS=60` makes about 1,460 flushes a day: with 15 tables with
-  rows, about 22,000 objects a day. `FLUSH_BLOCKS=1` instead makes about 108,000.
-  Because S3 rounds each expiry up to the next midnight UTC, a 48-hour rule
-  keeps two to three days of objects.
-- Final: about one part per table per flush, where flushes follow the 32 MiB
-  target of the largest table plus one per day boundary.
-
-A `build` start lists the dataset only when it creates it
-([startup cost](#startup-cost)), so the number of retained objects does not
-slow a restart.
-
-**Lifecycle expiration.** S3 lifecycle filters select objects by prefix, tag or
-size and cannot exclude a path, so create one expiration rule per table prefix:
-`<prefix>/<table>/` below the dataset root (`<table>/` at a bucket root), for
-every table the chain writes ([schema reference](docs/schemas/README.md)). A rule
-must never match control state:
-
-- `.fireparq-ingest/` in the dataset root: the output authority, checkpoint and
-  transaction journal;
-- the `.fireparq-owner*` records at the bucket root: the owner record and its
-  probes;
-- `_fireparq/`, which holds the cursor mirror.
-
-If bucket versioning is enabled, an expiration only adds a delete marker: add a
-noncurrent-version expiration (and expired delete marker cleanup) to reclaim the
-space.
-
-Expiring committed parts is safe for the live writer. `build` never reads a
-committed part outside its own pending transaction: a running build and its
-next flushes, a restart (recovery and resume from authority, which read only
-control records, [startup cost](#startup-cost)), the cursor mirror, `recovery status` and
-`recovery recover` are unaffected when every part of earlier hours disappears.
-The one exception is a writer that crashes with a committed but unfinished
-transaction and then stays down longer than the expiration: its next start
-verifies that transaction's parts and refuses if they expired
-(`committed transaction is missing a required final part`). Live data is
-disposable: start a new live dataset (a new prefix or an emptied bucket) at or
-below the final frontier.
 
 ### Advanced authentication
 
@@ -998,7 +970,7 @@ Most operators point `--output` at a local path or an explicit
 `s3://bucket/prefix`. S3 output or an S3 cursor for `build` requires both an
 access key ID and a secret access key, from the flags or `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`. `build` never
-fall back to profile or instance-metadata credentials. The remaining flags are
+falls back to profile or instance-metadata credentials. The remaining flags are
 only needed for custom deployment environments:
 
 | Flag (environment) | Purpose |
@@ -1106,17 +1078,17 @@ output. On graceful shutdown or failure, remaining mapper data is not written
 and authority is not advanced. An interrupted transaction is reconciled before
 replay; a storage error stops ingestion and retains recovery evidence.
 
-When a partition boundary is detected during ingestion, the mapper flush for the
-old partition is written immediately, and the same
-writer outcome logs are emitted for that boundary-triggered flush.
+When a block starts a new UTC day (a new `date` partition), the mapper flush of
+the previous day is committed first, with the same writer outcome logs, so a
+part never spans two days.
 
 When the first streamable block is missing timestamp metadata, fireparq now
 automatically preserves those leading bootstrap blocks in output and
 synthesizes their timestamps from the first later block that includes timestamp
 metadata.
 
-For Solana date partitions, missing `block_time` values keep canonical
-`timestamp` / `date` null. Partition routing uses the last known timestamp only,
+For Solana, a missing `block_time` keeps canonical `timestamp` null, and the
+row's `date` is its routing day. Routing uses the last known timestamp only,
 seeded from the Solana first-streamable anchor (`2020-03-16 14:29:00 UTC`) for
 the initial span and updated whenever a real block timestamp is observed.
 
@@ -1225,7 +1197,8 @@ endpoint from `--aws-endpoint-url` / `AWS_ENDPOINT_URL_S3`, and also accepts
 Per-chain schema references are generated from the mapper schemas and list
 every table, column, Delta type and nullability, and each chain's mapping from
 the mapper's Arrow types onto the Delta types of the files (#643). The chain
-sections of this README name the mapper's Arrow types:
+sections of this README name the Delta types too, and their queries read the
+tables with DuckDB's `delta_scan`:
 
 - [Schema reference index](docs/schemas/README.md)
 - [EVM](docs/schemas/evm.md), [Solana](docs/schemas/solana.md),
@@ -1234,8 +1207,9 @@ sections of this README name the mapper's Arrow types:
   [Antelope](docs/schemas/antelope.md), [NEAR](docs/schemas/near.md)
 
 The README keeps the semantics that a column list cannot show: failed-transaction
-rules, join keys, ordering and example queries. `fireparq inspect <file> --schema-only`
-prints the schema of an existing file. Select columns by name: `fork_step` and
+rules, join keys, ordering and example queries. `DESCRIBE SELECT * FROM
+delta_scan('<root>/<table>')` prints a table's schema, and
+`fireparq inspect <file> --schema-only` the schema of one data file. Select columns by name: `fork_step` and
 `stream_ordinal` (non-final streams only) are followed by later columns on
 several Solana, Antelope, NEAR and Tron tables.
 
@@ -1268,7 +1242,7 @@ A failed transaction still pays fees on every chain. The outcome columns describ
 
 java-tron sets the transaction wrapper `result`/`code` to true/`SUCCESS` for every transaction it includes in a block, so `transactions.result` and `code` never report a failed TVM call. The outcome comes from `TransactionInfo`: `result = FAILED` (set with a runtime error such as `REVERT opcode executed`) or a receipt result other than `DEFAULT` (non-VM contracts) or `SUCCESS`. Unknown enum values count as failures. Before #550 the filter used the wrapper, so reverted calls were written by default.
 
-A failed call still pays its fee, energy and bandwidth: `fee` and the `receipt_*` columns keep them. The VM discards the logs of a reverted call and marks its internal transactions `rejected = true`. `contracts` rows are the submitted contracts, not executed transfers. Every row of `transactions`, `logs`, `internal_transactions`, `contracts` and `internal_call_values` carries the parent's non-null Boolean `transaction_success`. `transactions.contract_address` is the smart contract created or called; it is NULL when `TransactionInfo` has none (plain transfers and other system contracts).
+A failed call still pays its fee, energy and bandwidth: `fee` and the `receipt_*` columns keep them. The VM discards the logs of a reverted call and marks its internal transactions `rejected = true`. `contracts` rows are the submitted contracts, not executed transfers. Every row of `transactions`, `logs`, `internal_transactions`, `contracts` and `internal_call_values` carries the parent's non-null `boolean` `transaction_success`. `transactions.contract_address` is the smart contract created or called; it is NULL when `TransactionInfo` has none (plain transfers and other system contracts).
 
 ### Antelope: deferred transactions and onerror
 
@@ -1282,11 +1256,11 @@ Receipt statuses other than `EXECUTED` come from deferred (scheduled) transactio
 | `HARDFAIL` | the deferred transaction failed and its `onerror` handler failed or none ran; nothing persisted | no |
 | `EXPIRED` | the deferred transaction expired unexecuted | no |
 
-`transactions.transaction_success` and the `transaction_success` of `actions` and `db_ops` say whether the trace's effects persisted. `actions` and `db_ops` also carry the parent receipt status as `transaction_status` (`Dictionary(Int32, Utf8)`, the labels of `transactions.status`). Before #550 only `EXECUTED` traces were selected by default, which dropped successful `onerror` handlers and scheduled transactions.
+`transactions.transaction_success` and the `transaction_success` of `actions` and `db_ops` say whether the trace's effects persisted. `actions` and `db_ops` also carry the parent receipt status as `transaction_status` (`string`, the labels of `transactions.status`). Before #550 only `EXECUTED` traces were selected by default, which dropped successful `onerror` handlers and scheduled transactions.
 
 ### NEAR: failed receipts
 
-NEAR fails per receipt, not per transaction. A failed receipt's actions do not take effect, but its `gas_burnt` and `tokens_burnt` persist, and the logs it emitted before failing stay in its outcome. `receipts`, `receipt_actions` and `execution_logs` are written for every executed receipt whatever the failed-transaction flags say. `receipt_actions` and `execution_logs` carry the receipt's own outcome as `receipt_status` (`Dictionary(Int32, Utf8)`: `SuccessValue`, `SuccessReceiptId`, `Failure` or `Unknown`, the values of `receipts.status`); keep `receipt_status <> 'Failure'` for actions that took effect. The transaction filter only drops a transaction whose own outcome is `Failure`. A transaction's outcome is almost always `SuccessReceiptId` and says nothing about the receipts it later spawned; see [final transaction outcome](#near-final-transaction-outcome).
+NEAR fails per receipt, not per transaction. A failed receipt's actions do not take effect, but its `gas_burnt` and `tokens_burnt` persist, and the logs it emitted before failing stay in its outcome. `receipts`, `receipt_actions` and `execution_logs` are written for every executed receipt whatever the failed-transaction flags say. `receipt_actions` and `execution_logs` carry the receipt's own outcome as `receipt_status` (`string`: `SuccessValue`, `SuccessReceiptId`, `Failure` or `Unknown`, the values of `receipts.status`); keep `receipt_status <> 'Failure'` for actions that took effect. The transaction filter only drops a transaction whose own outcome is `Failure`. A transaction's outcome is almost always `SuccessReceiptId` and says nothing about the receipts it later spawned; see [final transaction outcome](#near-final-transaction-outcome).
 
 When failed transactions are included, chain-specific fields like Solana's `err` bytes and `success` flag reflect the actual transaction status.
 
@@ -1295,14 +1269,14 @@ When failed transactions are included, chain-specific fields like Solana's `err`
 Cosmos transactions with missing `TxResult` have null `code`, gas and result text
 fields. They remain included as unknown; `WHERE code = 0` selects only confirmed
 source success. `decode_success` reports decoding of the supported SDK envelope
-and metadata fields, not valid signatures or successful execution. Exact Binary
-`raw_tx` remains available, and `blocks.tx_decode_failures` counts malformed
+and metadata fields, not valid signatures or successful execution. The exact
+`binary` `raw_tx` remains available, and `blocks.tx_decode_failures` counts malformed
 transactions across the full source block, including filtered failed rows.
 
-Events retain `event_index` and nullable UInt32 `attribute_index`. An event without
+Events retain `event_index` and nullable `long` `attribute_index`. An event without
 attributes has one row with null attribute index/key/value. Empty source strings
 are present values. Block events have null `tx_index` and `tx_hash`; transaction
-events and messages use the same UInt32 source index as `transactions.index`.
+events and messages use the same source index as `transactions.index`.
 
 Memo, timeout height, fee gas limit/payer/granter, ordered fee coins, signer infos
 and signatures live on `transactions`. Coin amounts are exact strings. Missing
@@ -1310,13 +1284,13 @@ body/auth/fee is null; a present empty value or list remains empty. Public keys
 are optional, and signer/signature arrays keep their independent source order
 and lengths. Signer `mode_info` retains the opaque embedded protobuf payload
 (concatenated in source order if repeated); it is not semantically validated.
-All raw payloads are Binary regardless of identifier encoding.
+All raw payloads are `binary` regardless of identifier encoding.
 
 ```sql
 SELECT m.block_num, m.tx_index, m.message_index, m.type_url,
        t.memo, t.fee_amount, t.signer_infos
-FROM read_parquet('output/cosmos/messages/**/*.parquet') m
-JOIN read_parquet('output/cosmos/transactions/**/*.parquet') t
+FROM delta_scan('output/cosmos/messages') m
+JOIN delta_scan('output/cosmos/transactions') t
   ON m.block_num = t.block_num AND m.block_id = t.block_id
  AND m.tx_index = t."index"
 WHERE t.code = 0;
@@ -1353,17 +1327,17 @@ The transaction-scoped change tables (`balance_changes`, `nonce_changes`, `code_
 
 | Column | Type | Meaning |
 |---|---|---|
-| `tx_index` | `UInt32` | The transaction's index in the block. Joins `transactions.index`. |
-| `call_index` | `UInt32` | The recording call's Firehose index (starts at 1). Joins `calls.call_index` with `tx_hash`. |
-| `state_reverted` | `Boolean` | The recording call's `state_reverted` flag, the same value as in `calls`. |
-| `persisted` | `Boolean` | Whether the change is part of chain state after the transaction. Not on `gas_changes`: gas is consumed even in reverted calls. |
+| `tx_index` | `long` | The transaction's index in the block. Joins `transactions.index`. |
+| `call_index` | `long` | The recording call's Firehose index (starts at 1). Joins `calls.call_index` with `tx_hash`. |
+| `state_reverted` | `boolean` | The recording call's `state_reverted` flag, the same value as in `calls`. |
+| `persisted` | `boolean` | Whether the change is part of chain state after the transaction. Not on `gas_changes`: gas is consumed even in reverted calls. |
 
 `persisted` is `NOT state_reverted` for successful transactions. For failed or reverted transactions it is always `true`: only their persistent changes are written, and those come from the root call, whose `state_reverted` is `true`. To rebuild state from the change tables, filter on `persisted`:
 
 ```sql
 -- Balance of each address at the end of the range
 SELECT address, new_value AS balance
-FROM read_parquet('output/mainnet/balance_changes/**/*.parquet')
+FROM delta_scan('output/mainnet/balance_changes')
 WHERE persisted
 QUALIFY row_number() OVER (PARTITION BY address ORDER BY block_number DESC, ordinal DESC) = 1;
 ```
@@ -1374,8 +1348,8 @@ The `system_*` change tables have a nullable `call_index`: the index of the syst
 
 ```sql
 SELECT c.*, s.address AS system_contract
-FROM read_parquet('output/mainnet/system_storage_changes/**/*.parquet') c
-JOIN read_parquet('output/mainnet/system_calls/**/*.parquet') s
+FROM delta_scan('output/mainnet/system_storage_changes') c
+JOIN delta_scan('output/mainnet/system_calls') s
   ON s.block_number = c.block_number AND s.call_index = c.call_index
  AND c.ordinal BETWEEN s.begin_ordinal AND s.end_ordinal;
 ```
@@ -1405,7 +1379,7 @@ SELECT block_id, tx_hash,
        block_index AS rpc_log_index,
        tx_index AS rpc_transaction_index,
        log_index AS firehose_transaction_log_index
-FROM read_parquet('output/mainnet/logs/**/*.parquet');
+FROM delta_scan('output/mainnet/logs');
 ```
 
 `fireparq` preserves the indices supplied by Firehose and does not renumber logs
@@ -1427,10 +1401,11 @@ a guarantee about every network, provider or block version.
   not mean zero gas usage; transaction/receipt gas fields provide separate data.
 - `--without-extended` disables both tables regardless of source contents.
 
-The ingestion writer skips zero-row batches, so an empty table usually has no
-Parquet file or directory. A DuckDB glob for such a table reports no matching
-files; it does not automatically produce an empty relation. Enumerate available
-files before querying optional tables. No placeholder files are synthesized.
+`build` creates every table of the stream at its first start, so a table
+without rows is an empty Delta table: `delta_scan` returns an empty relation,
+and the table has no data files or `date=` directories. With
+`--without-extended` the extended tables are not part of the stream and do
+not exist.
 
 ### EVM: withdrawals, access lists and EIP-7702 authorizations
 
@@ -1458,14 +1433,14 @@ Three tables hold block and transaction data that is not a column of `blocks` or
 ## Tron Contracts, Receipts and Internal Values
 
 `contracts` retains every source contract with `transaction_index`, `tx_hash`,
-`contract_index`, enum label/number, permission ID and raw Binary Any payload.
+`contract_index`, enum label/number, permission ID and raw `binary` Any payload.
 TransferContract, TransferAssetContract and TriggerSmartContract expose typed
 owner/recipient/amount or target/data/call-value fields. Unsupported types keep
 their raw payload with null decoded fields. `transactions.contract_type` remains
 the first-contract projection and is null when the contract list is empty.
 
 `transactions` includes nullable `receipt_*` energy/net fees, usage and result,
-receipt `contract_address` (NULL when absent), and Binary `res_message`. Missing receipts are null;
+receipt `contract_address` (NULL when absent), and `binary` `res_message`. Missing receipts are null;
 present zero/empty values remain values. `internal_call_values` retains each
 ordered source `(call_value, token_id)` pair, including repeated or empty token
 IDs, joined by block identity, transaction index/hash and `internal_index`.
@@ -1479,8 +1454,8 @@ described under [failed transaction filtering](#tron-failed-smart-contract-calls
 SELECT t.block_num, t.txid, c.contract_index, c.contract_type,
        c.owner_address, c.to_address, c.amount, c.contract_address,
        hex(c.data) AS call_data_hex, c.call_value, t.receipt_energy_fee
-FROM read_parquet('output/**/transactions/*.parquet') t
-JOIN read_parquet('output/**/contracts/*.parquet') c
+FROM delta_scan('output/tron/transactions') t
+JOIN delta_scan('output/tron/contracts') c
   ON t.block_num = c.block_num AND t.block_id = c.block_id
  AND t.transaction_index = c.transaction_index AND t.txid = c.tx_hash;
 ```
@@ -1519,7 +1494,7 @@ does not remove existing rows or guarantee deduplication.
 ## Solana Transaction Outcome Context
 
 Solana `messages`, `instructions`, `token_balances`, and `account_lookups` append
-a non-null Boolean `transaction_success`. It describes the parent transaction:
+a non-null `boolean` `transaction_success`. It describes the parent transaction:
 `false` means its source metadata contains nonempty error bytes; absent or empty
 error bytes mean `true`. Transactions without metadata remain omitted. The
 existing failed-transaction and vote filters still select exactly the same rows.
@@ -1545,38 +1520,38 @@ a separate dataset and preserve unknown historical context. See the
 ## Solana Payloads and Account Indices
 
 Opaque `instructions.data`, `transactions.err` / `return_data` and
-`vote_transactions.err` / `return_data` are native Binary, independently of the
+`vote_transactions.err` / `return_data` are `binary`, independently of the
 identifier encoding. Signatures, hashes, keys and `return_data_program_id` retain
 the selected identifier format (base58 by default). Missing return data is null;
 a present empty payload stays empty. Absent or empty errors remain null.
 
 `instructions.accounts`, `account_lookups.writable_indexes` and
-`account_lookups.readonly_indexes` are non-null lists of non-null UInt8. They retain
+`account_lookups.readonly_indexes` are `array<non-null short>`, never null. They retain
 source order, duplicates and empty lists. These are indices, not resolved keys.
 
 ```sql
 -- Inspect payload bytes without requiring base58 conversion.
 SELECT block_num, block_id, transaction_index, instruction_index,
        is_inner, inner_instruction_index, hex(data) AS data_hex, accounts
-FROM read_parquet('output/**/instructions/*.parquet');
+FROM delta_scan('output/solana-mainnet-beta/instructions');
 
 -- Expand instruction account indices while preserving their source positions.
 SELECT block_num, block_id, transaction_index, instruction_index,
        is_inner, inner_instruction_index,
        generate_subscripts(accounts, 1) - 1 AS account_position,
        unnest(accounts) AS account_index
-FROM read_parquet('output/**/instructions/*.parquet');
+FROM delta_scan('output/solana-mainnet-beta/instructions');
 ```
 
-This changes older output schemas, including Binary-mode index columns. Start a
-new output root and rebuild, or explicitly convert into a separate dataset; do
-not append these types into an old dataset. Verification roots change with the
-schema. See the [migration and measured validation](docs/audit/503-solana-binary-payloads.md).
+This changes older output schemas, including the index columns of the
+`binary` byte encoding. Start a new output root and rebuild, or explicitly
+convert into a separate dataset; do not append these types into an old
+dataset. See the [migration and measured validation](docs/audit/503-solana-binary-payloads.md).
 
 ## Solana Instruction Order
 
 The `instructions` table preserves the upstream order inside each top-level
-instruction's inner set with two nullable `UInt32` columns:
+instruction's inner set with two nullable `long` columns:
 
 | Column | Top-level instruction | Inner instruction |
 |---|---|---|
@@ -1592,7 +1567,7 @@ For one transaction in one block event, order its instructions as follows:
 
 ```sql
 SELECT *
-FROM read_parquet('instructions/*.parquet')
+FROM delta_scan('output/solana-mainnet-beta/instructions')
 WHERE block_id = '<block id>' AND transaction_index = 0
 ORDER BY coalesce(parent_instruction_index, instruction_index),
          is_inner,
@@ -1652,9 +1627,9 @@ Each Beacon table gets rows from the fork that introduced its data. Blocks from 
 `execution_payload.base_fee_per_gas` is an exact unsigned decimal string in wei
 per gas. It is independent of the selected byte encoding; use a checked numeric cast for
 arithmetic (the full uint256 range needs up to 78 decimal digits).
-`blob_sidecars.blob` is always Binary; hashes, roots, commitments, and proofs
-retain the selected byte encoding. `blocks.spec` uses generated enum names in
-an Arrow string dictionary, with `UNKNOWN` for unrecognized numeric values.
+`blob_sidecars.blob` is always `binary`; hashes, roots, commitments, and proofs
+retain the selected byte encoding. `blocks.spec` is a `string` of generated enum
+names, with `UNKNOWN` for unrecognized numeric values.
 Missing nested messages produce null descendants, while present zero values
 and empty byte/list values remain present. Absent bodies or execution payloads
 produce no child rows.
@@ -1671,11 +1646,11 @@ Amounts (`amount`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.w
 - **Deposits after Electra.** New deposits reach the chain as `deposit_requests`, whose `deposit_index` is the deposit contract index (the `index` of EIP-6110). `deposits` only holds deposits from the Eth1 bridge, which stop once its backlog is processed. `deposits.deposit_index` is the position within the block.
 - **Withdrawal requests.** `amount` `0` requests a full exit; any other value is a partial withdrawal.
 - **Consolidation requests.** A request whose `source_pubkey` equals its `target_pubkey` switches the validator to compounding withdrawal credentials.
-- **Attester slashings.** `attestation_1_attesting_indices` and `attestation_2_attesting_indices` (`List<UInt64>`) are the two conflicting attestations' validators. The slashed validators are in both lists:
+- **Attester slashings.** `attestation_1_attesting_indices` and `attestation_2_attesting_indices` (`array<long>`) are the two conflicting attestations' validators. The slashed validators are in both lists:
 
   ```sql
   SELECT block_slot, list_intersect(attestation_1_attesting_indices, attestation_2_attesting_indices) AS slashed
-  FROM read_parquet('output/mainnet-cl/attester_slashings/**/*.parquet');
+  FROM delta_scan('output/mainnet-cl/attester_slashings');
   ```
 
 - **Graffiti.** `blocks.graffiti` is the proposer's raw 32 bytes, usually zero-padded text. It is null only for a block without a body.
@@ -1764,7 +1739,7 @@ curl http://localhost:9090/metrics
 
 ## Parquet File Metadata
 
-Every Parquet file written by the pipeline embeds key-value metadata in the file footer under the `firehose-parquet.*` namespace. This allows consumers to identify the source pipeline, encoding, and chain without external sidecar files.
+Every Parquet file `build` writes embeds key-value metadata in the file footer under the `firehose-parquet.*` namespace. This allows consumers to identify the source pipeline, encoding, and chain without external sidecar files. The files that the [maintenance job](#delta-maintenance)'s OPTIMIZE writes do not carry it: a table's identity is in its Delta table properties (`fireparq.descriptor`, `fireparq.chain`, `fireparq.blockType`), which every `build` start checks.
 
 | Key | Example Value |
 |---|---|
@@ -1791,10 +1766,10 @@ records `extended`, `final_blocks_only` and `include_failed_transactions`. `with
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
 
-For Solana date partitions, the `firehose-parquet.synthetic_*` metadata
-keys mark routing as using a synthetic last-known timestamp anchor while
-canonical `timestamp` / `date` remain chain-sourced and nullable when
-`block_time` is missing.
+On Solana, the `firehose-parquet.synthetic_*` metadata keys mark routing as
+using a synthetic last-known timestamp anchor: canonical `timestamp` stays
+chain-sourced and null when `block_time` is missing, and such a row's `date` is
+its routing day.
 
 Endpoint `block_id_encoding` remains a fallback only when the chain does not resolve to a known block-type/profile contract.
 
@@ -1803,7 +1778,7 @@ Endpoint `block_id_encoding` remains a fallback only when the chain does not res
 ```python
 import pyarrow.parquet as pq
 
-meta = pq.read_metadata("output/blocks/date=2026-01-15/part-000001.parquet")
+meta = pq.read_metadata("output/mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet")
 for i in range(meta.metadata.count()):
     key = meta.metadata.keys()[i]
     if key.startswith("firehose-parquet."):
@@ -1811,9 +1786,9 @@ for i in range(meta.metadata.count()):
 ```
 
 ```sql
--- DuckDB
+-- DuckDB: one data file, named by the table's log (never a glob)
 SELECT key, value
-FROM parquet_kv_metadata('output/blocks/date=2026-01-15/part-000001.parquet')
+FROM parquet_kv_metadata('output/mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet')
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
@@ -1830,7 +1805,10 @@ lookups; readers without Bloom pruning may only see the storage overhead.
 
 Complete ingestion parts declare ascending `block_num` only when every observed
 height proves that order. Ingestion neither sorts nor reconstructs
-reversible-chain history.
+reversible-chain history. The maintenance job's compacted files keep neither the
+Bloom filters nor the sort metadata unless its `WriterProperties` enable them;
+the `add.stats` of every file (`block_num` and `timestamp` bounds) still prune
+reads.
 
 Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
 `zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default
@@ -1900,10 +1878,11 @@ accepted event of its transaction, the transaction ID and the part index.
 
 The dataset root holds only the table directories, `_fireparq/` and
 dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
-`.fireparq-owner-v1.json` record and `.fireparq-owner-probes-v1/`). Spark,
-Trino, Hive and Delta skip paths that start with `_` or `.`, so a table
-location or a dataset-wide read never picks up fireparq's files. Read each
-table through its Delta log, as below.
+`.fireparq-owner-v1.json` record and `.fireparq-owner-probes-v1/`). Readers
+open one table at a time through its Delta log, so fireparq's own files are
+never read as table data. Each table directory holds its `_delta_log/`, the
+`date=` directories of its data files and, while a flush is in progress,
+hidden `.fireparq-txn-*.tmp` staging files that no log references.
 Releases before v1.0.0 wrote `cursor.parquet` at the dataset root; a dataset
 whose mirror was bound at that old default keeps `--cursor cursor.parquet`.
 
@@ -1968,16 +1947,6 @@ remote = pl.scan_delta(
 )
 ```
 
-Each transaction commits to one table after another, `blocks` last. A block
-visible in `blocks` has all of its rows in every other table, so bound other
-tables by the newest `blocks` row for a consistent cut:
-
-```sql
-WITH f AS (SELECT max(block_num) AS b FROM delta_scan('s3://ethereum-mainnet/blocks'))
-SELECT count(*) FROM delta_scan('s3://ethereum-mainnet/logs'), f
-WHERE date >= DATE '2026-09-25' AND block_num <= f.b;
-```
-
 Use DuckDB 1.5 or later for S3: DuckDB 1.1's `delta` extension fails
 anonymous reads once a table has a checkpoint, which the maintenance job
 writes every hour.
@@ -2005,6 +1974,46 @@ print(f"version {table.version()}", summary)
 
 `fireparq validate <root>/blocks` checks block continuity over the same
 snapshot of the log, and `fireparq inspect` reads the footer of one file.
+
+#### Consistent reads across tables
+
+Each flush is one fireparq transaction, but its tables commit to their logs one
+after another: every other table first, `blocks` last. A reader can therefore
+see a flush in some tables before others, never in `blocks` before the rest.
+That gives the **frontier rule**:
+
+- The **frontier** is the newest `block_num` of `blocks`. Every block up to it
+  has all of its rows in every table.
+- Read `blocks` first, then read every other table up to the frontier. A table
+  read after `blocks` holds at least every row up to the frontier; it may
+  already hold rows of the next flush, which the bound leaves out.
+- In a final-only dataset, a `date` is **closed** once `blocks` holds a later
+  date: every table then has all of that day's rows, and only compaction
+  rewrites its files. The maintenance job compacts closed dates only.
+
+```sql
+-- DuckDB: the frontier first, then the other tables up to it
+SET VARIABLE frontier = (SELECT max(block_num) FROM delta_scan('s3://ethereum-mainnet/blocks'));
+SELECT count(*) FROM delta_scan('s3://ethereum-mainnet/logs')
+WHERE date >= DATE '2026-09-25' AND block_num <= getvariable('frontier');
+```
+
+```python
+# Polars: collect the frontier before opening the other tables
+import datetime
+import polars as pl
+
+frontier = pl.scan_delta("output/mainnet/blocks").select(pl.col("block_num").max()).collect().item()
+logs = pl.scan_delta("output/mainnet/logs").filter(
+    pl.col("date") >= datetime.date(2026, 9, 25), pl.col("block_num") <= frontier
+)
+```
+
+For a final-only dataset this cut is the canonical chain up to the frontier.
+Non-final output applies the same rule with `stream_ordinal` in place of
+`block_num` (heights repeat in its event history): bound every other table by
+the newest `stream_ordinal` of `blocks`, then apply the
+[canonical live view](#canonical-live-view).
 
 #### Block range of a day
 
@@ -2075,16 +2084,15 @@ With one bucket per network, the bucket root is the dataset root:
 ```bash
 OUTPUT=s3://<bucket> fireparq build --network mainnet
 # s3://<bucket>/.fireparq-ingest/, s3://<bucket>/_fireparq/cursor.parquet,
-# s3://<bucket>/<table>/date=YYYY-MM-DD/part-*.parquet
+# s3://<bucket>/<table>/_delta_log/, s3://<bucket>/<table>/date=YYYY-MM-DD/part-*.parquet
 ```
 
 - Other commands take the root or its tables directly:
   `recovery status s3://<bucket>`, `validate s3://<bucket>/blocks`, and
   `inspect` on one file such as `s3://<bucket>/_fireparq/cursor.parquet`.
 - The bucket root then lists only the table prefixes, `_fireparq/` and the
-  dot-prefixed control state, so a Spark, Trino, Hive or Delta table location
-  at `s3://<bucket>/<table>/` or a hidden-path-aware scan of the whole bucket
-  reads table data only; with DuckDB, read `delta_scan('s3://<bucket>/<table>')`.
+  dot-prefixed control state. Read each table with
+  `delta_scan('s3://<bucket>/<table>')` or `pl.scan_delta`.
 - The first `build` needs an empty bucket; only the bucket owner record may
   already exist there. S3 ownership is
   bucket-wide in any case, so a bucket per network also gives each concurrently
@@ -2196,8 +2204,8 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 |---|---|---|---|---|
 | `evm` | `hex_0x` | `hex` | `hex` | `block_id` is `0x`-prefixed hex. Transaction hashes, log topics, and addresses are `0x`-prefixed hex. |
 | `bitcoin` | `hex_0x` | Upstream text | Upstream text | Canonical IDs use `0x`-prefixed hex. Native hashes/txids/scripts/witnesses remain the original protobuf strings, normally Bitcoin Core hex without `0x`; addresses keep their native text format. |
-| `solana` | `base58` | `base58` | Identifiers: `base58`; payloads: Binary; indices: List(UInt8) | Block IDs and binary identifiers stay base58. Instruction/error/return payloads and account-index lists have fixed types; see [Solana Payloads](#solana-payloads-and-account-indices). |
-| `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. `receipt_actions.args` is raw `Binary` under every encoding. |
+| `solana` | `base58` | `base58` | Identifiers: `base58`; payloads: `binary`; indices: `array<short>` | Block IDs and binary identifiers stay base58. Instruction/error/return payloads and account-index lists have fixed types; see [Solana Payloads](#solana-payloads-and-account-indices). |
+| `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. `receipt_actions.args` is raw `binary` under every encoding. |
 | `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
 | `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
@@ -2206,8 +2214,8 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 
 ### Bitcoin amounts, input joins and missing fields
 
-Use `outputs.value_sats` (`UInt64`) for exact sums. The original `value` column
-remains a `Float64` coin amount for compatibility. When the protobuf includes
+Use `outputs.value_sats` (`long`) for exact sums. The original `value` column
+remains a `double` coin amount for compatibility. When the protobuf includes
 `Transaction.hex`, `value_sats` comes directly from its serialized integer
 outputs; output counts, indices and the decoded coin amounts must agree. Older
 payloads without raw transaction bytes use a strict conversion only when one
@@ -2218,7 +2226,7 @@ is appended. The mapper is shared with Litecoin, so it does not impose Bitcoin's
 
 ```sql
 SELECT SUM(value_sats) AS total_sats
-FROM read_parquet('output/btc/outputs/**/*.parquet');
+FROM delta_scan('output/btc/outputs');
 ```
 
 `inputs.tx_index` joins to `transactions.tx_index` within the same canonical
@@ -2237,22 +2245,21 @@ empty. Native protobuf strings are copied verbatim without adding prefixes or
 reversing display-order hashes. Encoding settings apply to canonical ID columns.
 
 These additions and nullable-field changes affect the Bitcoin table schemas.
-Use a new output dataset or rebuild the affected tables when upgrading; merging
-old and new files requires explicit schema reconciliation. Readers such as
-DuckDB may use `union_by_name=true` when intentionally comparing versions, with
-new columns null for older files.
+Use a new output dataset when upgrading; comparing old and new data needs
+explicit schema reconciliation (see the
+[upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first)).
 
 ### Antelope database-operation joins
 
-`db_ops` includes `tx_hash` (the enclosing trace ID), `tx_index` (`UInt64`, the
-original trace index), and `db_op_index` (`UInt32`, zero-based within that trace).
+`db_ops` includes `tx_hash` (the enclosing trace ID), `tx_index` (`long`, the
+original trace index), and `db_op_index` (`long`, zero-based within that trace).
 Filtering can leave transaction-index gaps. Operation positions restart for each
 transaction and remain stable across flushes. Scope joins to the canonical block:
 
 ```sql
 SELECT d.block_id, d.tx_hash, d.db_op_index, d.operation, t.status
-FROM read_parquet('output/eos/db_ops/**/*.parquet') d
-JOIN read_parquet('output/eos/transactions/**/*.parquet') t
+FROM delta_scan('output/eos/db_ops') d
+JOIN delta_scan('output/eos/transactions') t
   ON d.block_id = t.block_id
  AND d.tx_hash = t.tx_hash
  AND d.tx_index = t."index";
@@ -2276,16 +2283,16 @@ A NEAR transaction's own outcome records its inclusion and conversion into a rec
 
 | Table | Column | Type | Meaning |
 |---|---|---|---|
-| `transactions` | `transaction_index` | `UInt32` | Position in the block: chunks in shard order, then each chunk's transactions. Failed transactions left out by the filter keep their index. |
-| `transactions` | `receipt_ids` | list of bytes | The outcome's `receipt_ids`. |
-| `transactions` | `converted_into_receipt_id` | bytes, nullable | The receipt the transaction was converted into. Joins `receipts.receipt_id`. Null when the outcome has no receipt. |
-| `transactions` | `status` | `Utf8` | The transaction's **own** outcome: `SuccessReceiptId` once it was converted into a receipt, `Failure` if it failed inclusion. It is not the final result of the contract calls ([final outcome](#near-final-transaction-outcome)). |
-| `receipts` | `success_receipt_id` | bytes, nullable | For a `SuccessReceiptId` outcome, the receipt whose outcome becomes this receipt's result (the next link of NEAR's result chain). Null for other outcomes. |
-| `transactions`, `receipts` | `tokens_burnt` | `Utf8` | yoctoNEAR burnt for gas, as a decimal string. |
-| `receipts` | `receipt_index` | `UInt32` | Position of the execution outcome in the block: shards in order, then each shard's receipts. |
-| `receipts` | `tx_hash` | bytes, nullable | The originating transaction, when it is in the same block (see below). |
-| `receipts` | `signer_id` | `Utf8`, nullable | Signer of the transaction that started the receipt chain (`ReceiptAction.signer_id`). |
-| `receipts` | `receipt_ids` | list of bytes | Receipts created by this execution. |
+| `transactions` | `transaction_index` | `long` | Position in the block: chunks in shard order, then each chunk's transactions. Failed transactions left out by the filter keep their index. |
+| `transactions` | `receipt_ids` | `array<string>` (base58) | The outcome's `receipt_ids`. |
+| `transactions` | `converted_into_receipt_id` | `string` (base58), nullable | The receipt the transaction was converted into. Joins `receipts.receipt_id`. Null when the outcome has no receipt. |
+| `transactions` | `status` | `string` | The transaction's **own** outcome: `SuccessReceiptId` once it was converted into a receipt, `Failure` if it failed inclusion. It is not the final result of the contract calls ([final outcome](#near-final-transaction-outcome)). |
+| `receipts` | `success_receipt_id` | `string` (base58), nullable | For a `SuccessReceiptId` outcome, the receipt whose outcome becomes this receipt's result (the next link of NEAR's result chain). Null for other outcomes. |
+| `transactions`, `receipts` | `tokens_burnt` | `string` | yoctoNEAR burnt for gas, as a decimal string. |
+| `receipts` | `receipt_index` | `long` | Position of the execution outcome in the block: shards in order, then each shard's receipts. |
+| `receipts` | `tx_hash` | `string` (base58), nullable | The originating transaction, when it is in the same block (see below). |
+| `receipts` | `signer_id` | `string`, nullable | Signer of the transaction that started the receipt chain (`ReceiptAction.signer_id`). |
+| `receipts` | `receipt_ids` | `array<string>` (base58) | Receipts created by this execution. |
 
 Two tables hold what each executed receipt did:
 
@@ -2293,11 +2300,11 @@ Two tables hold what each executed receipt did:
 
   | Column | Type | Set for |
   |---|---|---|
-  | `action_kind` | `Dictionary(Int32, Utf8)` | every row: `CreateAccount`, `DeployContract`, `FunctionCall`, `Transfer`, `Stake`, `AddKey`, `DeleteKey`, `DeleteAccount`, `Delegate` (the labels of `transactions.actions`) |
-  | `method_name` | `Utf8` | `FunctionCall` |
-  | `args` | `Binary` | `FunctionCall`. Raw bytes, usually JSON: `decode(args)` in DuckDB |
-  | `gas` | `UInt64` | `FunctionCall`: the gas attached |
-  | `deposit` | `Utf8` | `FunctionCall`, `Transfer`: yoctoNEAR, as a decimal string |
+  | `action_kind` | `string` | every row: `CreateAccount`, `DeployContract`, `FunctionCall`, `Transfer`, `Stake`, `AddKey`, `DeleteKey`, `DeleteAccount`, `Delegate` (the labels of `transactions.actions`) |
+  | `method_name` | `string` | `FunctionCall` |
+  | `args` | `binary` | `FunctionCall`. Raw bytes, usually JSON: `decode(args)` in DuckDB |
+  | `gas` | `long` | `FunctionCall`: the gas attached |
+  | `deposit` | `string` | `FunctionCall`, `Transfer`: yoctoNEAR, as a decimal string |
 
   The payload columns are null for the other kinds. A `Delegate` row (NEP-366 meta-transaction) only records the kind: the delegated actions run in a receipt of their own and appear as that receipt's rows.
 - **`execution_logs`**: one row per line of the outcome's `logs`, keyed by `(receipt_id, log_index)`, with `receipt_index`, `tx_hash`, `shard_id`, `executor_id` (the account whose code logged), `predecessor_id` and `log`. NEP-297 events such as NEP-141 (fungible tokens) and NEP-171 (NFTs) are the lines that start with `EVENT_JSON:`. Transaction outcomes have no logs: converting a transaction runs no contract code.
@@ -2309,7 +2316,7 @@ Both tables cover every receipt in `receipts`, including failed ones, and end wi
 WITH events AS (
   SELECT block_num, executor_id AS token,
          TRY_CAST(substr(log, 12) AS JSON) AS event  -- the text after 'EVENT_JSON:'
-  FROM read_parquet('output/near-mainnet/execution_logs/**/*.parquet')
+  FROM delta_scan('output/near-mainnet/execution_logs')
   WHERE log LIKE 'EVENT_JSON:%'
     AND receipt_status <> 'Failure'
 )
@@ -2323,22 +2330,22 @@ WHERE event->>'standard' = 'nep141';
 ```sql
 WITH RECURSIVE origin(receipt_id, tx_hash) AS (
   SELECT converted_into_receipt_id, hash
-  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  FROM delta_scan('output/near-mainnet/transactions')
   WHERE converted_into_receipt_id IS NOT NULL
   UNION
   SELECT child.receipt_id, origin.tx_hash
   FROM origin
   JOIN (
     SELECT receipt_id AS parent_id, unnest(receipt_ids) AS receipt_id
-    FROM read_parquet('output/near-mainnet/receipts/**/*.parquet')
+    FROM delta_scan('output/near-mainnet/receipts')
   ) AS child ON child.parent_id = origin.receipt_id
 )
 SELECT r.receipt_id, origin.tx_hash
-FROM read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+FROM delta_scan('output/near-mainnet/receipts') AS r
 LEFT JOIN origin USING (receipt_id);
 ```
 
-Receipts whose transaction or any intermediate lineage link is outside the available range stay unresolved. These queries assume a finalized dataset; append-only non-final events need the finalized-reference handling described above.
+Receipts whose transaction or any intermediate lineage link is outside the available range stay unresolved. These queries assume a finalized dataset; on non-final output, read the [canonical live view](#canonical-live-view) of each table instead.
 
 ### NEAR final transaction outcome
 
@@ -2348,12 +2355,12 @@ A transaction's result is decided by later receipts, usually in later blocks, so
 -- Final outcome of each NEAR transaction: follow SuccessReceiptId links
 WITH RECURSIVE chain(tx_hash, receipt_id, depth) AS (
   SELECT hash, converted_into_receipt_id, 0
-  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  FROM delta_scan('output/near-mainnet/transactions')
   WHERE status = 'SuccessReceiptId'
   UNION ALL
   SELECT chain.tx_hash, r.success_receipt_id, chain.depth + 1
   FROM chain
-  JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+  JOIN delta_scan('output/near-mainnet/receipts') AS r
     ON r.receipt_id = chain.receipt_id
   WHERE r.status = 'SuccessReceiptId'
 ),
@@ -2366,9 +2373,9 @@ SELECT t.hash,
        CASE WHEN t.status <> 'SuccessReceiptId' THEN t.status
             WHEN r.status IS NULL THEN 'Pending'  -- the chain continues past the range
             ELSE r.status END AS final_status
-FROM read_parquet('output/near-mainnet/transactions/**/*.parquet') AS t
+FROM delta_scan('output/near-mainnet/transactions') AS t
 LEFT JOIN last ON last.tx_hash = t.hash
-LEFT JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+LEFT JOIN delta_scan('output/near-mainnet/receipts') AS r
   ON r.receipt_id = last.receipt_id;
 ```
 
@@ -2378,19 +2385,19 @@ To find transactions with a failed receipt anywhere in their receipt tree, inclu
 -- Transactions with a failed receipt anywhere in their tree
 WITH RECURSIVE origin(receipt_id, tx_hash) AS (
   SELECT converted_into_receipt_id, hash
-  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  FROM delta_scan('output/near-mainnet/transactions')
   WHERE converted_into_receipt_id IS NOT NULL
   UNION
   SELECT child.receipt_id, origin.tx_hash
   FROM origin
   JOIN (
     SELECT receipt_id AS parent_id, unnest(receipt_ids) AS receipt_id
-    FROM read_parquet('output/near-mainnet/receipts/**/*.parquet')
+    FROM delta_scan('output/near-mainnet/receipts')
   ) AS child ON child.parent_id = origin.receipt_id
 )
 SELECT origin.tx_hash, count(*) AS failed_receipts
 FROM origin
-JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r USING (receipt_id)
+JOIN delta_scan('output/near-mainnet/receipts') AS r USING (receipt_id)
 WHERE r.status = 'Failure'
 GROUP BY origin.tx_hash;
 ```
@@ -2403,16 +2410,16 @@ Both need the whole chain in the range; a chain that continues past its end is `
 
 | Column | Type | Meaning |
 |---|---|---|
-| `state_change_index` | `UInt32` | Position in the block's list (entries without a value or cause are skipped but keep their position) |
-| `type`, `cause` | `Dictionary(Int32, Utf8)` | Change kind (`AccountUpdate`, `DataUpdate`, `AccessKeyUpdate`, ...) and cause (`TransactionProcessing`, `ReceiptProcessing`, `ActionReceiptGasReward`, ...) |
-| `cause_tx_hash` | bytes, nullable | The transaction of a `TransactionProcessing` cause |
-| `cause_receipt_hash` | bytes, nullable | The receipt of an `ActionReceiptProcessingStarted`, `ActionReceiptGasReward`, `ReceiptProcessing` or `PostponedReceipt` cause; joins `receipts.receipt_id` |
-| `account_id` | `Utf8` | The changed account |
-| `data_key`, `data_value` | bytes, nullable | `DataUpdate` key and value; `DataDeletion` key |
-| `amount`, `locked` | `Utf8`, nullable | `AccountUpdate` balances in yoctoNEAR, as decimal strings |
-| `storage_usage`, `code_hash` | `UInt64` / bytes, nullable | `AccountUpdate` storage in bytes and contract code hash |
+| `state_change_index` | `long` | Position in the block's list (entries without a value or cause are skipped but keep their position) |
+| `type`, `cause` | `string` | Change kind (`AccountUpdate`, `DataUpdate`, `AccessKeyUpdate`, ...) and cause (`TransactionProcessing`, `ReceiptProcessing`, `ActionReceiptGasReward`, ...) |
+| `cause_tx_hash` | `string` (base58), nullable | The transaction of a `TransactionProcessing` cause |
+| `cause_receipt_hash` | `string` (base58), nullable | The receipt of an `ActionReceiptProcessingStarted`, `ActionReceiptGasReward`, `ReceiptProcessing` or `PostponedReceipt` cause; joins `receipts.receipt_id` |
+| `account_id` | `string` | The changed account |
+| `data_key`, `data_value` | `string` (base58), nullable | `DataUpdate` key and value; `DataDeletion` key |
+| `amount`, `locked` | `string`, nullable | `AccountUpdate` balances in yoctoNEAR, as decimal strings |
+| `storage_usage`, `code_hash` | `long` / `string` (base58), nullable | `AccountUpdate` storage in bytes and contract code hash |
 
-Bytes columns follow the identifier encoding. Columns that do not apply to a row's change kind are NULL. Access-key permissions and contract code are not materialized.
+The base58 columns hold bytes in the identifier encoding. Columns that do not apply to a row's change kind are NULL. Access-key permissions and contract code are not materialized.
 
 **The table is empty with the StreamingFast NEAR producer.** Every published version of `near-firehose-indexer` (checked from 2021-08 to 2026-07) writes an empty `Block.state_changes`, and the Firehose protobuf has no per-shard state-change field. The columns above are mapped and tested, including on a projection of real NEAR state changes, so they fill in if a producer supplies the list ([#625](https://github.com/pinax-network/firehose-parquet/issues/625)).
 
@@ -2447,7 +2454,7 @@ PINAX_API_KEY=your-pinax-api-key-here
 # INCLUDE_FAILED_TRANSACTIONS=true   # include failed txs on non-EVM chains
 
 # AWS S3 output (optional): an explicit URI plus both keys
-# OUTPUT=s3://my-bucket/v1
+# OUTPUT=s3://ethereum-mainnet
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
 # AWS_REGION=us-east-1
@@ -2510,7 +2517,7 @@ use firehose_parquet::cli::{build_config, init_tracing, Commands};
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>, // Build(BuildArgs), Scan, Validate, Recovery, ...
+    command: Option<Commands>, // Build(BuildArgs), Validate, Inspect, Recovery, Completions
 
     #[command(flatten)]
     global: GlobalArgs, // --log-level, --verbose, --env-file
@@ -2549,13 +2556,13 @@ firehose-parquet/
 ├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks)
 ├── Dockerfile                              # multi-stage Docker build
 ├── .env.example                            # environment variables template (drift-tested against the CLI)
-├── .github/workflows/                      # ci, docker-publish, release, network-endpoints
+├── .github/workflows/                      # ci, advisories, docker-publish, release, network-endpoints
 ├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
 ├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
 ├── scripts/                                # generate_networks.rs, check_network_endpoints.sh,
 │                                           #   delta_maintenance.py (the Delta maintenance job)
 ├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJob)
-├── docs/                                   # contracts, runbooks, schema reference, release notes, audit records
+├── docs/                                   # design, schema reference, release notes, audit records
 ├── firehose-parquet/                       # core library
 │   └── src/
 │       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
@@ -2574,7 +2581,7 @@ firehose-parquet/
 │       ├── networks.rs, networks_generated.rs  # built-in --network names (generated)
 │       ├── config.rs, flush.rs, cursor.rs  # config model, flush sizing, cursor Parquet format
 │       ├── encode.rs, encode/              # identifier encodings
-│       └── artifacts.rs, metrics.rs, traits.rs  # reserved names, Prometheus, BlockMapper trait
+│       └── artifacts.rs, metrics.rs, traits.rs  # artifact names, Prometheus, BlockMapper trait
 ├── blocks/                                 # chain mappers + unified binary
 │   ├── src/
 │   │   ├── bin/main.rs                     # `fireparq` entrypoint and command dispatch
