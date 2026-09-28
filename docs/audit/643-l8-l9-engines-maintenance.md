@@ -1,6 +1,6 @@
 # Engine CI and the Delta maintenance job (#643, lanes L8 and L9)
 
-Refs #643; part of #463. Design:
+Refs #643; part of #463. PR: [#673](https://github.com/pinax-network/firehose-parquet/pull/673). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §1.7, §1.8, §1.11,
 §4.1, §9, §10 and the L8 and L9 rows of §11. Index: the #643 rows of the
 [audit index](README.md).
@@ -233,7 +233,8 @@ harmless, and it does not happen at the default retention.
 - `cargo fmt --all` and `cargo test --workspace --locked` pass with
   `FIREPARQ_REQUIRE_DUCKDB=1` (DuckDB 1.5.5, `delta` `45c4087`) and
   `FIREPARQ_REQUIRE_POLARS=1` (Polars 1.44.2, `deltalake` 1.6.6): 982 passed,
-  14 ignored, on origin/main `d79ce49` plus this change. Six tests are new:
+  14 ignored, on origin/main `d79ce49` plus this change, and 941 passed, 13
+  ignored after rebasing onto `bd02f6a` (#672, L5b/L7, which removed tests). Six tests are new:
   five in `delta_maintenance.rs` and the opt-in check in `engine_compat.rs`
   (skipped without its variables).
 - The opt-in anonymous check was run once against a loopback moto 5.2.3
