@@ -1,5 +1,7 @@
 # #529 maintenance engine consolidation
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `merge`, `truncate` and `verify` are removed, and with them the engines this record consolidated; `scan` and `validate` keep the shared local walker and S3 listing. This record is kept as history.
+
 Baseline: `origin/main` `9372f99`, after the merged schema checks (#479/#542),
 merge journal (#480/#561), dataset ownership (#591), streaming rollup (#522/#604),
 bounded S3 maintenance concurrency (#523/#609), shared AWS configuration

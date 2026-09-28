@@ -1542,7 +1542,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
- "tiny-keccak",
  "tokio",
  "tokio-util",
  "tonic",

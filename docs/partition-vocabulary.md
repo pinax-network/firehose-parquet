@@ -43,14 +43,8 @@ to roll up.
 
 ## CLI terms
 
-- `truncate -p` / `--partition` takes `date=` filters: a date
-  (`-p date=2026-01-15`) or one `*` glob over it (`-p "date=2026-01-*"`). A
-  `date=` value that is not a date, such as `date=15`, and any other key are
-  refused.
 - `validate --cross-partition` checks block continuity between adjacent `date=`
   directories.
-- `verify` reports roots per `date=` partition (`date=2026-01-15`), and marks the
-  partitions `build` may still write as `open`.
 
 ## Resulting rename decisions
 
@@ -60,5 +54,7 @@ to roll up.
 - `partitions build/ls/validate/resolve/shard` and their flags (`--partition`,
   `--partition-type`, `--partition-value`, `--partition-chain`, `--from`,
   `--to`, `--all-spans`, ...) removed (#653)
+- `truncate` and its `-p date=` filters, and `verify` with its per-`date=`
+  roots, removed (#643)
 
 These decisions are canonical. Deprecated aliases are not accepted.

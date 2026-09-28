@@ -1,5 +1,6 @@
-//! Common protected-root discovery and recovery before maintenance reads.
-//! This module never adopts legacy data or infers authority from a mirror.
+//! Protected-root discovery and recovery for `recovery recover`, and the
+//! overlapping-root check `build` runs at startup. This module never adopts
+//! legacy data or infers authority from a mirror.
 
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::BTreeSet;
@@ -34,8 +35,8 @@ const MAX_EXPANSIONS: usize = 8;
 /// How far marker discovery looks around a selected directory.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MarkerScope {
-    /// Ancestors, the directory itself and every descendant: maintenance, and
-    /// `build` creating a dataset.
+    /// Ancestors, the directory itself and every descendant: `recovery
+    /// recover`, and `build` creating a dataset.
     Tree,
     /// Strict ancestors only, O(depth) requests and no data listing: `build`
     /// resuming a dataset whose authority it already read (#655).
@@ -52,20 +53,10 @@ pub(crate) enum IngestionTarget {
     Resume,
 }
 
-/// Where the ingestion recovery-order check looks for merge journals.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MergeJournals {
-    /// The whole dataset: maintenance commands.
-    Everywhere,
-    /// Only a dataset with a merge intent record: `build` (#655).
-    IfIntended,
-}
-
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct MaintenanceTarget {
     path: String,
     file: bool,
-    artifact_output: bool,
 }
 impl MaintenanceTarget {
     pub(crate) fn input(path: impl Into<String>) -> Result<Self> {
@@ -74,24 +65,19 @@ impl MaintenanceTarget {
             && fs::metadata(&path)
                 .context("maintenance input cannot be inspected")?
                 .is_file();
-        Ok(Self {
-            path,
-            file,
-            artifact_output: false,
-        })
+        Ok(Self { path, file })
     }
     pub(crate) fn directory(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             file: false,
-            artifact_output: false,
         }
     }
-    pub(crate) fn file(path: impl Into<String>) -> Self {
+    /// A protected root's cursor mirror, owned beside the root.
+    fn file(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             file: true,
-            artifact_output: true,
         }
     }
     fn scope(&self) -> MutationScope {
@@ -103,12 +89,6 @@ impl MaintenanceTarget {
     }
 }
 
-pub(crate) enum MaintenancePolicy {
-    Merge,
-    Recover,
-    Truncate,
-}
-
 // No Debug: the descriptor may carry private storage bindings in future versions.
 pub(crate) struct ProtectedRoot {
     pub identity: StorageIdentity,
@@ -117,7 +97,6 @@ pub(crate) struct ProtectedRoot {
 pub(crate) struct PreparedMaintenance {
     pub ownership: DatasetOwnership,
     pub roots: Vec<ProtectedRoot>,
-    pub recovered_merges: usize,
 }
 
 /// Acquire selected scopes, discover markers under that capability, then enlarge
@@ -126,7 +105,6 @@ pub(crate) struct PreparedMaintenance {
 pub(crate) async fn acquire(
     operation: &str,
     targets: Vec<MaintenanceTarget>,
-    policy: MaintenancePolicy,
     aws: Option<&AwsConfig>,
 ) -> Result<PreparedMaintenance> {
     let default_aws = empty_aws();
@@ -147,7 +125,6 @@ pub(crate) async fn acquire(
                 &ListingStats::default(),
             )
             .await?;
-            enforce_policy(&markers, &policy)?;
             let mut expanded = all_targets.clone();
             expanded.extend(
                 markers
@@ -193,36 +170,12 @@ pub(crate) async fn acquire(
             continue;
         }
         let roots = roots.context("maintenance root plan did not stabilize")?;
-        let recovered_merges = recover_roots(&ownership, &roots, runtime_aws).await?
-            + if matches!(policy, MaintenancePolicy::Merge) {
-                0
-            } else {
-                recover_selected_legacy_merges(&ownership, &targets, &roots, runtime_aws).await?
-            };
-        return Ok(PreparedMaintenance {
-            ownership,
-            roots,
-            recovered_merges,
-        });
+        recover_roots(&ownership, &roots, runtime_aws).await?;
+        return Ok(PreparedMaintenance { ownership, roots });
     }
     bail!(
         "maintenance ownership scope did not stabilize; no recovery or data mutation was attempted"
     )
-}
-
-/// A synchronous command bridge for ordinary CLI and multi-thread runtimes.
-/// Current-thread runtime callers use the async entry point.
-pub(crate) fn acquire_blocking(
-    operation: &str,
-    targets: Vec<MaintenanceTarget>,
-    policy: MaintenancePolicy,
-    aws: Option<&AwsConfig>,
-) -> Result<PreparedMaintenance> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| handle.block_on(acquire(operation,targets,policy,aws))),
-        Ok(_) => bail!("synchronous maintenance requires a multi-thread runtime; use the async maintenance API"),
-        Err(_) => tokio::runtime::Builder::new_current_thread().enable_all().build().context("creating maintenance storage runtime")?.block_on(acquire(operation,targets,policy,aws)),
-    }
 }
 
 async fn discover_markers(
@@ -456,16 +409,6 @@ fn reject_nested(roots: &BTreeSet<String>) -> Result<()> {
     }
     Ok(())
 }
-fn enforce_policy(roots: &BTreeSet<String>, policy: &MaintenancePolicy) -> Result<()> {
-    if matches!(policy, MaintenancePolicy::Truncate) {
-        ensure!(
-            roots.is_empty(),
-            "truncate is unsupported for protected datasets; it would invalidate the authoritative ingestion frontier"
-        );
-    }
-    Ok(())
-}
-
 async fn load_roots(
     ownership: &DatasetOwnership,
     markers: &BTreeSet<String>,
@@ -513,19 +456,7 @@ async fn recover_roots(
     ownership: &DatasetOwnership,
     roots: &[ProtectedRoot],
     aws: &AwsConfig,
-) -> Result<usize> {
-    let stats = ListingStats::default();
-    // Validate every state/pending pair before recovering the first dataset.
-    for root in roots {
-        validate_ingestion_recovery_order(
-            &root.identity,
-            ownership,
-            MergeJournals::Everywhere,
-            &stats,
-        )
-        .await?;
-    }
-    let mut recovered = 0;
+) -> Result<()> {
     for root in roots {
         let service = mirror_service(&root.descriptor.mirror, aws)?;
         let mirror = ProtectedMirror::new(ownership, &root.descriptor.mirror, service.as_ref())?;
@@ -537,17 +468,8 @@ async fn recover_roots(
         )
         .await?;
         drop(controller);
-        recovered += crate::merge::recover_guarded_for_ingestion(
-            &root.identity,
-            ownership,
-            Some(&root.descriptor.id()?),
-            &stats,
-        )
-        .await?;
-        // Every journal of this root was just recovered: none can remain.
-        crate::merge_journal::clear_merge_intent(&root.identity, ownership).await?;
     }
-    Ok(recovered)
+    Ok(())
 }
 fn state_store<'a>(
     identity: &StorageIdentity,
@@ -585,33 +507,6 @@ fn part_store<'a>(
     }
 }
 
-/// Called before protected ingestion opens Blocks, after its transaction
-/// recovery. It acquires no second owner or session permit. A merge journal can
-/// exist only in a dataset with a merge intent record, so without one this
-/// reads a single control record and lists nothing (#655). With one, it
-/// finishes the recognized journals of the whole dataset, then clears the
-/// record. `protected` is the dataset's stream digest.
-pub(crate) async fn prepare_ingestion(
-    output: &StorageIdentity,
-    ownership: &DatasetOwnership,
-    protected: &super::state::Digest,
-    stats: &ListingStats,
-) -> Result<()> {
-    if !crate::merge_journal::merge_intent_recorded(output, ownership).await? {
-        return Ok(());
-    }
-    tracing::info!(
-        "an earlier merge may have left journals in this dataset; recovering them before streaming"
-    );
-    // `build` acquired without the whole-tree symlink walk; journal discovery
-    // walks the tree, so it needs that check first.
-    let started = Instant::now();
-    let reads = ownership.validate_local_trees()?;
-    stats.record(reads, 0, started.elapsed());
-    crate::merge::recover_guarded_for_ingestion(output, ownership, Some(protected), stats).await?;
-    crate::merge_journal::clear_merge_intent(output, ownership).await
-}
-
 #[cfg(test)]
 mod tests;
 
@@ -623,198 +518,6 @@ fn empty_aws() -> AwsConfig {
         aws_region: None,
         aws_endpoint_url: None,
     }
-}
-
-fn normalize_file(path: &str, aws: &AwsConfig) -> Result<String> {
-    if path.starts_with("s3://") {
-        return Ok(output_path(&resolve_output_identity(path, aws)?));
-    }
-    let path = absolute_path(Path::new(path))?;
-    Ok(
-        canonical_directory(path.parent().context("artifact has no parent")?)?
-            .join(path.file_name().context("artifact has no filename")?)
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-/// Artifact outputs may not replace a protected cursor mirror, recovery
-/// metadata or an ordinary data part of any given protected root.
-pub(crate) fn validate_artifact_destinations(
-    targets: &[MaintenanceTarget],
-    roots: &[ProtectedRoot],
-    aws: &AwsConfig,
-) -> Result<()> {
-    for target in targets.iter().filter(|target| target.artifact_output) {
-        let path = normalize_file(&target.path, aws)?;
-        for root in roots {
-            let mirror = match &root.descriptor.mirror {
-                MirrorBinding::Disabled => None,
-                MirrorBinding::Local { absolute_path } => Some(normalize_file(absolute_path, aws)?),
-                MirrorBinding::S3 { bucket, key, .. } => Some(format!("s3://{bucket}/{key}")),
-            };
-            ensure!(
-                mirror.as_ref() != Some(&path),
-                "artifact destination would overwrite a protected cursor mirror"
-            );
-            let base = output_path(&root.identity);
-            if path_contains(&base, &path) {
-                let name = path.rsplit('/').next().unwrap_or("");
-                ensure!(
-                    name != crate::cursor::CURSOR_PARQUET_FILENAME
-                        && name != crate::merge_journal::JOURNAL_FILE
-                        && !name.starts_with(".fireparq-"),
-                    "artifact destination would overwrite protected recovery metadata"
-                );
-                ensure!(
-                    !path.ends_with(".parquet")
-                        || crate::artifacts::is_reserved_artifact_path(&path),
-                    "artifact destination is an ordinary protected data part"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn has_merge_journal(
-    identity: &StorageIdentity,
-    ownership: &DatasetOwnership,
-    stats: &ListingStats,
-) -> Result<bool> {
-    match identity {
-        StorageIdentity::Local { canonical_root } => {
-            let started = Instant::now();
-            let mut counts = (0, 0);
-            let found = local_merge_journal(Path::new(canonical_root), &mut counts);
-            stats.record(counts.0, counts.1, started.elapsed());
-            found
-        }
-        StorageIdentity::S3 { bucket, prefix, .. } => {
-            let owner = ownership
-                .remote(bucket)
-                .context("merge discovery bucket is not owned")?;
-            let key = (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix.as_str()));
-            let found = visit_objects(
-                owner.object_store().as_ref(),
-                key.as_ref(),
-                "merge journal discovery",
-                LIST_REQUEST_TIMEOUT,
-                stats,
-                |object| {
-                    let journal = contains_remote(prefix, object.location.as_ref())
-                        && object.location.filename() == Some(crate::merge_journal::JOURNAL_FILE)
-                        && !crate::artifacts::is_control_path(object.location.as_ref())
-                        && !crate::artifacts::is_reserved_artifact_path(
-                            crate::maintenance::discovery::relative_key(
-                                prefix,
-                                object.location.as_ref(),
-                            ),
-                        );
-                    Ok(if journal {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    })
-                },
-            )
-            .await?;
-            Ok(found.is_some())
-        }
-    }
-}
-/// Whether a merge journal lies anywhere under the local `root`.
-fn local_merge_journal(root: &Path, (reads, entries): &mut (u64, u64)) -> Result<bool> {
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        *reads += 1;
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            *entries += 1;
-            let kind = entry.file_type()?;
-            ensure!(
-                !kind.is_symlink(),
-                "nested symlink discovered during recovery"
-            );
-            if entry.file_name() == crate::merge_journal::JOURNAL_FILE {
-                return Ok(true);
-            }
-            if kind.is_dir()
-                && !crate::artifacts::is_control_path(&entry.path().to_string_lossy())
-                && entry.file_name() != crate::artifacts::ARTIFACTS_DIR
-            {
-                pending.push(entry.path());
-            }
-        }
-    }
-    Ok(false)
-}
-
-async fn recover_selected_legacy_merges(
-    ownership: &DatasetOwnership,
-    targets: &[MaintenanceTarget],
-    roots: &[ProtectedRoot],
-    aws: &AwsConfig,
-) -> Result<usize> {
-    let mut paths = BTreeSet::new();
-    for target in targets.iter().filter(|target| !target.artifact_output) {
-        let source = if target.file {
-            Path::new(&target.path)
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."))
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            target.path.clone()
-        };
-        let identity = resolve_output_identity(&source, aws)?;
-        let path = output_path(&identity);
-        if roots
-            .iter()
-            .any(|root| path_contains(&output_path(&root.identity), &path))
-        {
-            continue;
-        }
-        paths.insert(path);
-    }
-    // Protected descendants were already fully recovered. Any journals left in
-    // an enclosing legacy tree must be unbound legacy journals; foreign stream
-    // bindings still fail closed instead of being treated as ordinary files.
-    let mut recovered = 0;
-    let stats = ListingStats::default();
-    for path in paths {
-        let identity = resolve_output_identity(&path, aws)?;
-        recovered +=
-            crate::merge::recover_guarded_for_ingestion(&identity, ownership, None, &stats).await?;
-    }
-    Ok(recovered)
-}
-
-/// Prove disjoint recovery protocols before either one changes public files.
-/// Session calls this while its permit is held, before opening its controller.
-/// `journals` says where merge journals are looked for; `build` passes
-/// [`MergeJournals::IfIntended`], so without a pending transaction or a merge
-/// intent record this reads control records only (#655).
-pub(crate) async fn validate_ingestion_recovery_order(
-    output: &StorageIdentity,
-    ownership: &DatasetOwnership,
-    journals: MergeJournals,
-    stats: &ListingStats,
-) -> Result<()> {
-    let snapshot = state_store(output, ownership)?.load().await?;
-    if snapshot.pending.is_some() {
-        let look = match journals {
-            MergeJournals::Everywhere => true,
-            MergeJournals::IfIntended => {
-                crate::merge_journal::merge_intent_recorded(output, ownership).await?
-            }
-        };
-        ensure!(
-            !(look && has_merge_journal(output, ownership, stats).await?),
-            "ingestion and merge journals coexist; refusing ambiguous recovery ordering"
-        );
-    }
-    Ok(())
 }
 
 /// Before eligibility or initialization, reject overlapping protected roots using

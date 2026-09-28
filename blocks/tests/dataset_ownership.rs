@@ -71,7 +71,7 @@ fn assert_ownership_conflict(result: std::process::Output) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn build_and_maintenance_commands_conflict_with_a_descendant_owner() {
+async fn build_and_recovery_conflict_with_a_descendant_owner() {
     let temp = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -112,8 +112,7 @@ async fn build_and_maintenance_commands_conflict_with_a_descendant_owner() {
             "--output",
             output,
         ],
-        vec!["merge", root_str],
-        vec!["truncate", root_str, "--yes"],
+        vec!["recovery", "recover", root_str],
     ] {
         assert_ownership_conflict(run(temp.path(), &args).await);
         assert_eq!(

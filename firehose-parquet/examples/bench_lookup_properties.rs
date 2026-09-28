@@ -61,11 +61,10 @@ struct Probe {
     value: Option<Vec<u8>>,
     expected: usize,
 }
-const VARIANTS: [&str; 5] = [
+const VARIANTS: [&str; 4] = [
     "original",
     "control_65536",
     "for_batch",
-    "for_schema",
     "identity_dictionary_off",
 ];
 fn sha(bytes: &[u8]) -> String {
@@ -360,7 +359,6 @@ fn writer_properties(variant: &str, corpus: &Corpus) -> Result<WriterProperties>
             .set_max_row_group_row_count(Some(65_536))
             .build(),
         "for_batch" => properties::for_batch(Compression::Zstd, &corpus.batch, None)?,
-        "for_schema" => properties::for_schema(Compression::Zstd, &corpus.batch.schema(), None),
         "identity_dictionary_off" => {
             let mut builder =
                 properties::for_batch(Compression::Zstd, &corpus.batch, None)?.into_builder();

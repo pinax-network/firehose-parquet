@@ -1,5 +1,7 @@
 # #523: bounded S3 maintenance concurrency
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `merge` and `truncate` are removed, and with them the maintenance deletes and merge read windows. This record is kept as history.
+
 Issue: [#523](https://github.com/pinax-network/firehose-parquet/issues/523).
 The implementation is split into independently reviewable deletion and read
 stages. Deletion landed locally as `e83ebe2`; the following stage adds ordered,

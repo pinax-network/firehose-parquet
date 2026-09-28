@@ -61,25 +61,6 @@ pub fn resolve_s3_output_root(
     }
 }
 
-/// Fail when a write destination came only from the read-only `S3_BUCKET`
-/// shorthand, i.e. `original` is not an explicit `s3://` URI but resolved to
-/// one. `writes` says whether this invocation writes at all.
-pub fn reject_implicit_s3_write(
-    command: &str,
-    original: &str,
-    resolved: &str,
-    writes: bool,
-) -> anyhow::Result<()> {
-    if writes && resolved.starts_with("s3://") && !original.trim().starts_with("s3://") {
-        anyhow::bail!(
-            "{command} writes artifacts or takes dataset ownership next to its data, but \
-             `{original}` was resolved to {resolved} only through the read-only S3_BUCKET \
-             shorthand. Pass the S3 URI explicitly ({resolved}) to write there"
-        );
-    }
-    Ok(())
-}
-
 /// The `--output` variable of `build`: the endpoint's canonical `chain_name`.
 pub const OUTPUT_CHAIN_VARIABLE: &str = "chain";
 
@@ -277,25 +258,6 @@ pub fn resolve_parquet_input_path_string(path: &str) -> String {
     match resolve_parquet_input_path(path) {
         ParquetInputPath::S3(path) => path,
         ParquetInputPath::Local(path) => path.to_string_lossy().into_owned(),
-    }
-}
-
-/// Resolves the path argument of a command that deletes or rewrites files (`truncate`,
-/// `merge`).
-///
-/// Unlike [`resolve_parquet_input_path_string`], a relative path that does not exist locally
-/// is never turned into `s3://$S3_BUCKET/<path>` (with `.env` auto-loaded, a typo would
-/// otherwise target a bucket). S3 must be requested with an explicit `s3://` URI.
-pub fn resolve_destructive_input_path(path: &str) -> anyhow::Result<String> {
-    if path.starts_with("s3://") || Path::new(path).exists() {
-        return Ok(path.to_string());
-    }
-    match resolve_parquet_input_path(path) {
-        ParquetInputPath::S3(url) => anyhow::bail!(
-            "path does not exist: {path}. Commands that delete or rewrite files do not fall \
-             back to S3_BUCKET; to use S3, pass the URI explicitly: {url}"
-        ),
-        ParquetInputPath::Local(_) => anyhow::bail!("path does not exist: {path}"),
     }
 }
 

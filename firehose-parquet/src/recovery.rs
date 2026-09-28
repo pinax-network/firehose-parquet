@@ -19,7 +19,7 @@ use crate::durable_state::{
 pub enum RecoveryCommands {
     /// Read ownership and control-record summaries without changing S3 objects.
     Status(RecoveryStorageArgs),
-    /// Recover protected ingestion/mirror and recognized merge journals under one owner.
+    /// Recover protected ingestion and its cursor mirror under one owner.
     /// An S3 owner must first be released with provider-quiescence evidence.
     Recover(RecoveryStorageArgs),
     /// Release one exact S3 owner after provider-confirmed request quiescence.
@@ -144,16 +144,14 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
                 vec![crate::ingest::maintenance::MaintenanceTarget::input(
                     storage.path.clone(),
                 )?],
-                crate::ingest::maintenance::MaintenancePolicy::Recover,
                 Some(&aws),
             )
             .await?;
             let roots = prepared.roots.len();
-            let merges = prepared.recovered_merges;
             prepared.ownership.release().await?;
             println!(
                 "{}",
-                serde_json::json!({"recovered_protected_roots":roots,"recovered_merge_journals":merges})
+                serde_json::json!({ "recovered_protected_roots": roots })
             );
             return Ok(());
         }

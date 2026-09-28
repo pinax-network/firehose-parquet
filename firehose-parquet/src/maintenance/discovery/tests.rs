@@ -1,6 +1,6 @@
-//! Equivalence of the shared walker with the six native walkers it replaced.
-//! Each `legacy_*` function is frozen verbatim from `origin/main` 9372f99
-//! (only its name and error type were adapted).
+//! Equivalence of the shared walker with the native walker it replaced.
+//! `legacy_cli` is frozen verbatim from `origin/main` 9372f99 (only its name
+//! and error type were adapted).
 use super::*;
 use std::collections::BTreeSet;
 
@@ -17,13 +17,12 @@ fn fixture(root: &Path) {
         "mixed.Parquet",
         "notes.txt",
         "nested/part.parquet",
-        "nested/_fireparq_merge.json",
-        "nested/_fireparq_merge.json.parquet",
+        "nested/journal.json",
+        "nested/journal.json.parquet",
         "cursor.parquet",
-        "merkle_roots.parquet",
-        "verify_runs/run/artifact.parquet",
+        "_fireparq/other.parquet",
         ".fireparq-ingest/hidden.parquet",
-        ".fireparq-ingest/_fireparq_merge.json",
+        ".fireparq-ingest/journal.json",
         ".fireparq-owner-probes-v1/probe.parquet",
         ".fireparq-owner-v1.json/record.parquet",
         ".fireparq-ingest-old/retained.parquet",
@@ -35,159 +34,55 @@ fn fixture(root: &Path) {
     }
 }
 
-type Legacy = fn(&Path, &mut Vec<PathBuf>) -> std::io::Result<()>;
-
-/// Every policy against its frozen walker(s): same error kind/message, same
-/// append order and same selection (callers sort afterwards; order is native).
+/// The same error kind/message, append order and selection as the frozen
+/// walker (callers sort afterwards; order is native).
 fn compare(root: &Path) {
-    let cases: [(&str, LocalPolicy<'_>, Legacy); 4] = [
-        ("merge", LocalPolicy::MUTATION_PARQUET, legacy_merge),
-        ("truncate", LocalPolicy::MUTATION_PARQUET, legacy_truncate),
-        ("cli", LocalPolicy::PARQUET, legacy_cli),
-        ("verify", LocalPolicy::VERIFY_PARQUET, legacy_verify),
-    ];
-    for (name, policy, legacy) in cases {
-        let mut expected = vec![PathBuf::from("already collected")];
-        let mut actual = expected.clone();
-        let before = legacy(root, &mut expected);
-        let after = collect_local(root, policy, &mut actual);
-        assert_eq!(
-            before.as_ref().err().map(|e| (e.kind(), e.to_string())),
-            after.as_ref().err().map(|e| (e.kind(), e.to_string())),
-            "{name}"
-        );
-        assert_eq!(actual, expected, "{name}");
-    }
-    let mut expected = vec![];
-    let mut actual = vec![];
-    let before = legacy_named(root, "_fireparq_merge.json", &mut expected);
-    let after = collect_local(
-        root,
-        LocalPolicy::named("_fireparq_merge.json"),
-        &mut actual,
-    );
+    let mut expected = vec![PathBuf::from("already collected")];
+    let mut actual = expected.clone();
+    let before = legacy_cli(root, &mut expected);
+    let after = collect_local(root, &mut actual);
     assert_eq!(
-        before.err().map(|e| (e.kind(), e.to_string())),
-        after.err().map(|e| (e.kind(), e.to_string()))
+        before.as_ref().err().map(|e| (e.kind(), e.to_string())),
+        after.as_ref().err().map(|e| (e.kind(), e.to_string()))
     );
     assert_eq!(actual, expected);
 }
 
 #[test]
-fn native_policy_matches_frozen_walkers_and_explicit_inventory() {
+fn native_walk_matches_the_frozen_walker_and_explicit_inventory() {
     let root = tempfile::tempdir().unwrap();
     fixture(root.path());
     compare(root.path());
-    for policy in [
-        LocalPolicy::PARQUET,
-        LocalPolicy::MUTATION_PARQUET,
-        LocalPolicy::VERIFY_PARQUET,
+    let mut paths = vec![];
+    collect_local(root.path(), &mut paths).unwrap();
+    let selected: BTreeSet<_> = paths
+        .iter()
+        .map(|p| p.strip_prefix(root.path()).unwrap().to_str().unwrap())
+        .collect();
+    // Reserved artifacts and control state are left out by the caller.
+    for reserved in [
+        "cursor.parquet",
+        "_fireparq/other.parquet",
+        ".fireparq-ingest/hidden.parquet",
+        ".fireparq-owner-probes-v1/probe.parquet",
+        ".fireparq-owner-v1.json/record.parquet",
     ] {
-        let mut paths = vec![];
-        collect_local(root.path(), policy, &mut paths).unwrap();
-        let selected: BTreeSet<_> = paths
-            .iter()
-            .map(|p| p.strip_prefix(root.path()).unwrap().to_str().unwrap())
-            .collect();
-        for reserved in [
-            "cursor.parquet",
-            "merkle_roots.parquet",
-            "verify_runs/run/artifact.parquet",
-        ] {
-            assert!(
-                selected.contains(reserved),
-                "reserved selection belongs to caller"
-            );
-        }
-        assert!(selected.contains("folder.parquet/child.parquet"));
-        assert!(!selected.contains("folder.parquet"));
-        assert!(selected.contains("space %/part.parquet"));
-        assert!(selected.contains(".fireparq-ingest-old/retained.parquet"));
-        assert_eq!(
-            selected.contains("UPPER.PARQUET"),
-            matches!(policy.selection, Selection::AsciiInsensitiveParquet)
+        assert!(
+            selected.contains(reserved),
+            "reserved selection belongs to caller"
         );
-        for control in [
-            ".fireparq-ingest/hidden.parquet",
-            ".fireparq-owner-probes-v1/probe.parquet",
-            ".fireparq-owner-v1.json/record.parquet",
-        ] {
-            assert_eq!(selected.contains(control), !policy.prune_controls);
-        }
-        assert!(!selected.contains("notes.txt"));
     }
-    let mut journals = vec![];
-    collect_local(
-        root.path(),
-        LocalPolicy::named("_fireparq_merge.json"),
-        &mut journals,
-    )
-    .unwrap();
-    assert_eq!(
-        journals,
-        vec![root.path().join("nested/_fireparq_merge.json")]
-    );
-}
-
-/// Parquet walks still select `_fireparq/` files (callers leave them out with
-/// `is_reserved_artifact_path`), while journal discovery prunes the whole
-/// artifact directory below the walk root: no partition lives there.
-#[test]
-fn journal_discovery_prunes_the_artifact_directory() {
-    let root = tempfile::tempdir().unwrap();
-    for name in [
-        "_fireparq/cursor.parquet",
-        "_fireparq/_fireparq_merge.json",
-        "_fireparq/verify_runs/run/_fireparq_other.json",
-        "blocks/date=2024-01-01/part.parquet",
-        "blocks/date=2024-01-01/_fireparq_merge.json",
-        "blocks/date=2024-01-02/_fireparq_other.json",
-    ] {
-        write(root.path(), name);
-    }
-    let mut files = vec![];
-    collect_local(root.path(), LocalPolicy::MUTATION_PARQUET, &mut files).unwrap();
-    files.sort();
-    assert_eq!(
-        files,
-        [
-            root.path().join("_fireparq/cursor.parquet"),
-            root.path().join("blocks/date=2024-01-01/part.parquet"),
-        ]
-    );
-    let mut journals = vec![];
-    collect_local(
-        root.path(),
-        LocalPolicy::named_any(&["_fireparq_merge.json", "_fireparq_other.json"]),
-        &mut journals,
-    )
-    .unwrap();
-    journals.sort();
-    assert_eq!(
-        journals,
-        [
-            root.path()
-                .join("blocks/date=2024-01-01/_fireparq_merge.json"),
-            root.path()
-                .join("blocks/date=2024-01-02/_fireparq_other.json"),
-        ]
-    );
-    // Rooted at the artifact directory itself, nothing below it is pruned.
-    let mut journals = vec![];
-    collect_local(
-        &root.path().join("_fireparq"),
-        LocalPolicy::named("_fireparq_merge.json"),
-        &mut journals,
-    )
-    .unwrap();
-    assert_eq!(
-        journals,
-        [root.path().join("_fireparq/_fireparq_merge.json")]
-    );
+    assert!(selected.contains("folder.parquet/child.parquet"));
+    assert!(!selected.contains("folder.parquet"));
+    assert!(selected.contains("space %/part.parquet"));
+    assert!(selected.contains(".fireparq-ingest-old/retained.parquet"));
+    assert!(!selected.contains("UPPER.PARQUET"));
+    assert!(!selected.contains("notes.txt"));
+    assert!(!selected.contains("nested/journal.json"));
 }
 
 #[test]
-fn missing_and_non_directory_roots_keep_skip_vs_read_dir_errors() {
+fn missing_and_non_directory_roots_are_read_dir_errors() {
     let root = tempfile::tempdir().unwrap();
     write(root.path(), "single.parquet");
     for path in [
@@ -196,14 +91,9 @@ fn missing_and_non_directory_roots_keep_skip_vs_read_dir_errors() {
     ] {
         compare(&path);
         let mut files = vec![];
-        collect_local(&path, LocalPolicy::MUTATION_PARQUET, &mut files).unwrap();
+        assert!(collect_local(&path, &mut files).is_err());
         assert!(files.is_empty(), "single-file selection belongs to caller");
-        assert!(collect_local(&path, LocalPolicy::PARQUET, &mut files).is_err());
-        assert!(collect_local(&path, LocalPolicy::VERIFY_PARQUET, &mut files).is_err());
     }
-    // Control pruning uses the full path, including root ancestors.
-    write(root.path(), ".fireparq-ingest/outer/table/part.parquet");
-    compare(&root.path().join(".fireparq-ingest/outer"));
 }
 
 #[cfg(unix)]
@@ -239,7 +129,7 @@ fn symlinks_and_non_utf8_paths_remain_native_and_unnormalized() {
     }
     compare(root.path());
     let mut paths = vec![];
-    collect_local(root.path(), LocalPolicy::MUTATION_PARQUET, &mut paths).unwrap();
+    collect_local(root.path(), &mut paths).unwrap();
     assert_eq!(paths.contains(&non_utf8), non_utf8_supported);
     assert!(paths.contains(&root.path().join("alias/part.parquet")));
     assert!(paths.contains(&root.path().join("file-alias.parquet")));
@@ -259,7 +149,7 @@ fn native_permission_errors_are_not_silently_dropped() {
     std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
     let native_error = std::fs::read_dir(&denied).err().map(|e| e.kind());
     let mut paths = vec![];
-    let actual = collect_local(root.path(), LocalPolicy::PARQUET, &mut paths)
+    let actual = collect_local(root.path(), &mut paths)
         .err()
         .map(|e| e.kind());
     compare(root.path());
@@ -270,8 +160,8 @@ fn native_permission_errors_are_not_silently_dropped() {
 
 #[test]
 fn relative_key_matches_each_inlined_s3_copy() {
-    // Frozen from merge.rs relative_s3_key, truncate_s3,
-    // validate_parquet_s3 and scan_s3_display_key (non-exact branch).
+    // Frozen from the former inline copies, including validate_parquet_s3
+    // and scan_s3_display_key (non-exact branch).
     fn legacy(prefix: &str, key: &str) -> String {
         key.strip_prefix(prefix)
             .map(|s| s.trim_start_matches('/'))
@@ -351,123 +241,7 @@ async fn raw_object_listing_and_complete_reads_match_existing_contract() {
     );
 }
 
-#[test]
-fn named_any_selects_exactly_the_union_of_its_single_name_walks() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    for relative in [
-        "t/date=2024-01-01/_a.json",
-        "t/date=2024-01-01/nested/_b.json",
-        "t/date=2024-01-02/_a.json.bak",
-        "t/date=2024-01-02/part.parquet",
-        "t/.fireparq-ingest/_a.json",
-    ] {
-        write(root, relative);
-    }
-    let walk = |policy: LocalPolicy<'_>| {
-        let mut out = Vec::new();
-        collect_local(root, policy, &mut out).unwrap();
-        out.into_iter().collect::<BTreeSet<_>>()
-    };
-    let mut expected = walk(LocalPolicy::named("_a.json"));
-    expected.extend(walk(LocalPolicy::named("_b.json")));
-    assert_eq!(
-        walk(LocalPolicy::named_any(&["_a.json", "_b.json"])),
-        expected
-    );
-    assert_eq!(expected.len(), 2, "control trees are pruned: {expected:?}");
-    assert!(walk(LocalPolicy::named_any(&[])).is_empty());
-}
-
-#[tokio::test]
-async fn first_object_is_the_first_selected_entry_of_the_same_listing() {
-    use object_store::memory::InMemory;
-    let store = InMemory::new();
-    for key in [
-        "root/a/cursor.parquet",
-        "root/b/part-1.parquet",
-        "root/b/part-2.parquet",
-        "root2/part.parquet",
-    ] {
-        store
-            .put(&ObjectPath::from(key), bytes::Bytes::new().into())
-            .await
-            .unwrap();
-    }
-    let data = |meta: &ObjectMeta| !meta.location.as_ref().ends_with("cursor.parquet");
-    for prefix in ["", "root", "root/b", "root/missing"] {
-        let expected = list_objects(&store, prefix)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|meta| data(meta));
-        let first = first_object(&store, prefix, data).await.unwrap();
-        assert_eq!(first, expected, "prefix {prefix:?}");
-    }
-    assert_eq!(first_object(&store, "root", |_| false).await.unwrap(), None);
-}
-
-// --- Frozen walkers from origin/main 9372f99 -------------------------------
-
-// merge.rs collect_parquet_files_recursive
-fn legacy_merge(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            legacy_merge(&path, out)?;
-        } else if path.extension().map_or(false, |ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-// merge.rs collect_named_files_recursive
-fn legacy_named(dir: &Path, name: &str, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            legacy_named(&path, name, out)?;
-        } else if path.file_name().is_some_and(|file_name| file_name == name) {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-// truncate.rs collect_parquet_files_recursive (with its is_parquet_file inlined)
-fn legacy_truncate(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            legacy_truncate(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
+// --- Frozen walker from origin/main 9372f99 --------------------------------
 
 // cli/inspect.rs collect_parquet_files (also used by cli/validate.rs)
 fn legacy_cli(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -477,23 +251,6 @@ fn legacy_cli(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         if path.is_dir() {
             legacy_cli(&path, out)?;
         } else if path.extension().map_or(false, |ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-// verify.rs collect_parquet_files
-fn legacy_verify(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            legacy_verify(&path, out)?;
-        } else if path
-            .extension()
-            .map_or(false, |ext| ext.eq_ignore_ascii_case("parquet"))
-        {
             out.push(path);
         }
     }

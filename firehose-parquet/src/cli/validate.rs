@@ -886,11 +886,7 @@ pub(in crate::cli) fn validate_parquet_local(
     if path.is_file() {
         paths.push(path.clone());
     } else if path.is_dir() {
-        crate::maintenance::discovery::collect_local(
-            path,
-            crate::maintenance::discovery::LocalPolicy::PARQUET,
-            &mut paths,
-        )?;
+        crate::maintenance::discovery::collect_local(path, &mut paths)?;
         super::inspect::retain_table_files_local(path, &mut paths);
         paths.sort();
     } else {

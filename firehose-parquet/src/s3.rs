@@ -8,8 +8,6 @@ use crate::config::Config;
 
 pub(crate) mod upload;
 
-pub(crate) mod delete;
-
 /// Reject ambiguous S3 output configuration before any network or storage work.
 /// Explicit local output paths keep their local meaning even when S3_BUCKET is set.
 pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> Result<()> {
@@ -112,7 +110,7 @@ fn store_builder(
 /// one transport attempt per request, and the AWS provider chain (environment,
 /// profile or instance metadata) when no access key is configured. The
 /// configured default output bucket never overrides the bucket selected by an
-/// explicit URI. Maintenance commands use [`AwsConfig::build_read_client`] and
+/// explicit URI. Other commands use [`AwsConfig::build_read_client`] and
 /// [`AwsConfig::build_s3_client_for_mutation`], which sign anonymously without
 /// an access key instead.
 pub fn build_ingestion_mutation_client(

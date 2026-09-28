@@ -38,7 +38,6 @@ bytes = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
-tiny-keccak = { version = "2", features = ["keccak"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Delta Lake log (#643, docs/design/delta-lake.md). delta-rs 1.0.0 brings its own
