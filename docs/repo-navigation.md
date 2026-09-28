@@ -166,7 +166,7 @@ Related docs:
 - CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` and the `advisories` job, which calls `advisories.yml`)
 - Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
 - Crash-test hooks: `FIREPARQ_DEBUG_FAULT` fails the real binary at a named step for recovery tests (`blocks/tests/ingestion_transactions.rs`; the Delta kinds, including `crash-at:<Stage>`, are listed in `ingest/controller/pipeline.rs` and used by `blocks/tests/delta_recovery.rs`), and `FIREPARQ_DEBUG_PACE_SAMPLE_MS` shortens the catch-up detection windows (`blocks/tests/adaptive_flush.rs`). Only debug builds (as built by `cargo test`) read them; release binaries ignore them.
-- Docker publish workflow: `.github/workflows/docker-publish.yml` (supports a build-only manual run)
+- Docker publish workflow: `.github/workflows/docker-publish.yml` builds two images, `firehose-parquet` (`Dockerfile`) and `firehose-parquet-maintenance` (`deploy/maintenance/Dockerfile`, the Delta maintenance job); tags push both, a manual run only builds
 - Release assets workflow: `.github/workflows/release.yml` (supports a dry-run dispatch)
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`
 

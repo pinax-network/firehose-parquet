@@ -9,11 +9,22 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   docker:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The fireparq binary.
+          - image: firehose-parquet
+            dockerfile: Dockerfile
+          # The Delta maintenance job (scripts/delta_maintenance.py, #643).
+          - image: firehose-parquet-maintenance
+            dockerfile: deploy/maintenance/Dockerfile
     permissions:
       contents: read
       packages: write
@@ -28,7 +39,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -37,8 +48,9 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
