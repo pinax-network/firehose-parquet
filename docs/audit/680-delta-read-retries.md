@@ -1,7 +1,7 @@
 # #680: Delta log read retries, and a quiet first start
 
 Issue: [#680](https://github.com/pinax-network/firehose-parquet/issues/680).
-PR: -.
+PR: [#681](https://github.com/pinax-network/firehose-parquet/pull/681).
 Released in [v1.0.2](../releases/v1.0.2.md). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §1.3, §3.3, §3.5 and
 the L3 row of §11.
@@ -203,7 +203,7 @@ it met and a listing's prefix.
 - `cargo fmt --all` and `cargo test --workspace --locked` pass with
   `FIREPARQ_REQUIRE_DUCKDB=1` (DuckDB 1.5.5) and `FIREPARQ_REQUIRE_POLARS=1`
   (Polars and `deltalake` from `blocks/tests/engines/requirements.txt`).
-  Counts are in the PR.
+  990 passed and 13 ignored; 9 of the passing tests are new.
 - The three real-binary tests were run against the old behavior (the
   connector removed, and `lacks_log` reduced to its local check): the read
   test and the first-start test fail, and the commit test passes both ways,
