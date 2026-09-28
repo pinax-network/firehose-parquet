@@ -88,6 +88,8 @@ impl MapperState {
             .delta_types();
         let empty_batches = mapper.flush()?;
         let tables = declare_inventory(&empty_batches, &mapper.table_names(), &delta_types)?;
+        let data_schemas =
+            declare_data_schemas(&empty_batches, &mapper.table_names(), &delta_types)?;
         Ok(MapperSemantics {
             chain: setup
                 .endpoint_info
@@ -105,6 +107,7 @@ impl MapperState {
             with_votes: setup.with_votes,
             include_failed_transactions: self.include_failed_transactions,
             tables,
+            data_schemas,
             delta_types,
         })
     }

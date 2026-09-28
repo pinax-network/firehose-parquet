@@ -24,6 +24,12 @@ fn mapper() -> MapperSemantics {
         with_votes: false,
         include_failed_transactions: true,
         tables: declare_inventory(
+            &[("blocks".into(), batch.clone())].into(),
+            &["blocks"],
+            &DeltaTypes::default(),
+        )
+        .unwrap(),
+        data_schemas: declare_data_schemas(
             &[("blocks".into(), batch)].into(),
             &["blocks"],
             &DeltaTypes::default(),

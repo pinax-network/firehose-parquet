@@ -28,6 +28,13 @@ fn record_committed_flush_sizing(
         compressed_to_mapper_ratio = sizing.ratio(),
         commit_ms = committed.elapsed.as_millis() as u64,
         files = committed.files,
+        delta_commits = committed.delta.len(),
+        delta_ms = committed.delta_elapsed.as_millis() as u64,
+        delta_retries = committed
+            .delta
+            .iter()
+            .map(|commit| commit.retries)
+            .sum::<u64>(),
         peak_encoders = committed.work.peak_encoders,
         peak_publications = committed.work.peak_publications,
         peak_inflight_bytes = committed.work.peak_inflight_bytes,

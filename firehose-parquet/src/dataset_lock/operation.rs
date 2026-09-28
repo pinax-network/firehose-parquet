@@ -252,7 +252,13 @@ impl DatasetOwnership {
                 None => Arc::new(aws.build_s3_client_for_mutation(&bucket)?)
                     as Arc<dyn object_store::ObjectStore>,
             };
-            clients.push((bucket.clone(), client, native, scopes));
+            // `build` commits its output's Delta logs through a client of
+            // their own (#643 L3), validated here with the others.
+            let delta_log = match &native {
+                Some(_) => Some(crate::delta::store::s3_log_client(aws, &bucket)?),
+                None => None,
+            };
+            clients.push((bucket.clone(), client, native, delta_log, scopes));
         }
         let local = if local.is_empty() {
             None
@@ -266,13 +272,16 @@ impl DatasetOwnership {
             local,
             remote: BTreeMap::new(),
         };
-        for (bucket, client, native, scopes) in clients {
+        for (bucket, client, native, delta_log, scopes) in clients {
             let acquired = match native {
                 Some(native) => S3Ownership::acquire_native(native, operation, scopes).await,
                 None => S3Ownership::acquire(client, operation, scopes).await,
             };
             let guard = match acquired {
-                Ok(guard) => guard,
+                Ok(guard) => match delta_log {
+                    Some(delta_log) => guard.with_delta_log(delta_log),
+                    None => guard,
+                },
                 Err(error) => {
                     // Earlier bucket acquisitions are resolved and have not
                     // performed data writes. Release those exact owners; if
@@ -304,8 +313,17 @@ impl DatasetOwnership {
         block_storage(Self::acquire(operation, scopes, aws))
     }
 
+    /// A remote owner over a test store. Unless the test attached one, its
+    /// Delta log stores use an in-memory store that lives as long as the
+    /// bucket's store, so a new owner of the same test bucket finds them.
     #[cfg(test)]
     pub(crate) fn from_remote_for_test(bucket: &str, owner: S3Ownership) -> Self {
+        let owner = if owner.delta_log().is_some() {
+            owner
+        } else {
+            let memory = crate::delta::store::test_support::memory_for(owner.object_store());
+            owner.with_delta_log(memory)
+        };
         Self {
             local: None,
             remote: BTreeMap::from([(bucket.to_owned(), owner)]),

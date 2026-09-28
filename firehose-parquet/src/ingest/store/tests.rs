@@ -132,10 +132,7 @@ async fn frozen_receipt_cas_rejects_stale_writer_and_commit_missing_table_receip
         .begin(&authority, plan(&authority.payload, 1))
         .await
         .unwrap();
-    let receipt = PartReceipt {
-        byte_size: 100,
-        sha256: Digest::hash("bytes", &1).unwrap(),
-    };
+    let receipt = PartReceipt::for_test(100, Digest::hash("bytes", &1).unwrap(), 1);
     let first = store
         .record_receipt(&authority, &writing, 0, receipt.clone())
         .await
@@ -215,10 +212,8 @@ async fn batched_receipts_persist_together_and_keep_every_receipt_rule() {
         .begin(&authority, plan(&authority.payload, 1))
         .await
         .unwrap();
-    let receipt = |seed: u64| PartReceipt {
-        byte_size: 100 + seed,
-        sha256: Digest::hash("bytes", &seed).unwrap(),
-    };
+    let receipt =
+        |seed: u64| PartReceipt::for_test(100 + seed, Digest::hash("bytes", &seed).unwrap(), 1);
     assert!(store
         .record_receipts(&authority, &writing, Vec::new())
         .await

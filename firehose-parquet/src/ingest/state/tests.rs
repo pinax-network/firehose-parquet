@@ -263,10 +263,7 @@ fn receipts_freeze_before_commit_and_are_not_transaction_identity() {
     assert!(pending
         .committed_after_verification(&authority.descriptor)
         .is_err());
-    let receipt = PartReceipt {
-        byte_size: 128,
-        sha256: Digest::hash("bytes", &1).unwrap(),
-    };
+    let receipt = PartReceipt::for_test(128, Digest::hash("bytes", &1).unwrap(), 1);
     let frozen = pending
         .with_receipt(0, receipt.clone(), &authority.descriptor)
         .unwrap();

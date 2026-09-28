@@ -1,7 +1,7 @@
 # Delta Lake output (#643): design, spike and plan
 
-Status: proposed design, 2026-09-27. Nothing here changes what `fireparq` builds
-today. The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
+Status: design of 2026-09-27, implemented lane by lane (§11): since L3 every
+`build` writes Delta tables. The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
 runs in CI as the `delta-spike` job. Refs #643, #636, #653, #655, #658, #659;
 part of #463.
 
@@ -126,6 +126,8 @@ The binary grows by only 1.0 MB because nothing in `fireparq` calls
 `firehose_parquet::delta` yet, so the linker drops almost all of delta-rs. The
 trial's 71.5 MB (a probe that loads a snapshot, reads `txn` and builds a
 commit) remains the estimate for when L3 wires the commit layer into `build`.
+With L3 calling delta-rs from `build`, the cold release binary is 69.7 MB
+(163 s wall, 1,395 s CPU, same host).
 The compile cost arrives now: every build compiles delta-rs, the second
 Arrow/Parquet and object_store 0.13. The toolchain alone adds 2.2 MB
 (1.93.1 → 1.98.1). The Docker image was not built locally, because no Docker
@@ -380,7 +382,7 @@ Table properties, set when fireparq creates each table:
 | `delta.dataSkippingStatsColumns` | `block_num,timestamp` | The columns readers prune on. fireparq and OPTIMIZE both write statistics only for these, which keeps `add.stats` and checkpoints small. Partition columns never have statistics. |
 | `delta.targetFileSize` | `268435456` (256 MiB) | OPTIMIZE's default target. This is an estimate to revisit with #658 figures. |
 | `delta.setTransactionRetentionDuration` | **unset** | `txn` entries must never expire, or exactly-once recovery breaks. |
-| `fireparq.descriptor`, `fireparq.chain`, `fireparq.blockType`, `fireparq.network` | stream identity | Replaces the Parquet footer keys that OPTIMIZE drops (§1.10 item 14). `verify` reads them (§7.2). Custom keys need `with_raise_if_key_not_exists(false)`. |
+| `fireparq.descriptor`, `fireparq.chain`, `fireparq.blockType` | stream identity: the descriptor's SHA-256, its `chain` (the EndpointInfo chain name) and its block family (the `--block-type` value) | Replaces the Parquet footer keys that OPTIMIZE drops (§1.10 item 14). `verify` reads them (§7.2). Custom keys need `with_raise_if_key_not_exists(false)`. L3 dropped the `fireparq.network` this row first listed: it would only repeat `fireparq.chain`. |
 
 ## 3. Commit mapping onto the #468 protected transaction
 
@@ -411,6 +413,12 @@ A transaction whose tables all have zero rows makes no Delta commit and
 advances authority as today. A table with no rows in a transaction gets no
 commit in it, so each table's `txn` version is the last transaction that gave
 it rows. Versions only increase.
+
+Implemented by L3 ([643-l3-delta-commits.md](../audit/643-l3-delta-commits.md)):
+steps 2 and 4, table creation (§3.3) and the validation of §3.2. A commit
+failure that may have sent a log write marks the S3 owner uncertain, the
+conservative side of §3.5. Recovery does not roll a Committed transaction
+forward into the logs yet (L4).
 
 ### 3.2 `txn` identity
 
@@ -749,7 +757,8 @@ The tail is bounded by the CronJob's checkpoint cadence. At 1,500 commits a
 day, the hourly run keeps it at about 60–120 commits. A one-day tail cost 4.7 s
 on loopback S3, and 33 ms after a checkpoint (measured). Real RGW latency is
 higher per GET, which is another reason for hourly checkpoints. `build`
-exports the tail length (`fireparq_delta_log_tail_commits` per table) so the
+exports the tail length (`firehose_parquet_delta_log_tail_commits` per table,
+L3; this section first called it `fireparq_delta_log_tail_commits`) so the
 platform can alert when the job stops.
 
 Removing today's three full-root listings (nested-marker discovery twice and
@@ -873,7 +882,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L0** (this PR) | design, spike, `delta-spike` CI job | spike suite | — | — | all |
 | **L1** deps | toolchain 1.93 → 1.98 (`rust-toolchain.toml`, `Dockerfile`); `deltalake-core =1.0.0` (no default features, `rustls`); `deny.toml` ignore reasons also naming object_store 0.13; recheck for a newer delta-rs on Arrow ≥ 60 first | full suite, `cargo deny` | S | — | #655, #658, #659 |
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
-| **L3** commit layer | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
+| **L3** commit layer (done: PR #PRNUM, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
 | **L4** recovery and ownership | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
 | **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b**: the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (post-launch, #666) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |

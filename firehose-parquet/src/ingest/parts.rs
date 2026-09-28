@@ -71,6 +71,14 @@ impl<'a> TransactionParts<'a> {
         Ok(())
     }
 
+    /// Keep remote ownership after a mutation of this dataset (a Delta log
+    /// commit) that may have been sent without a definite outcome.
+    pub fn mark_remote_uncertain(&self) {
+        if let Self::S3 { owner, .. } = self {
+            owner.mark_mutation_uncertain();
+        }
+    }
+
     /// Local parts are published by blocking file I/O.
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })

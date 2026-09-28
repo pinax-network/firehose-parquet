@@ -35,6 +35,12 @@ fn mapper(family: BlockFamily) -> MapperSemantics {
         include_failed_transactions: true,
         tables: declare_inventory(&batches(&[]), &["blocks", "logs"], &DeltaTypes::default())
             .unwrap(),
+        data_schemas: declare_data_schemas(
+            &batches(&[]),
+            &["blocks", "logs"],
+            &DeltaTypes::default(),
+        )
+        .unwrap(),
         delta_types: DeltaTypes::default(),
     }
 }
@@ -673,7 +679,12 @@ async fn mapper_family_order_time_and_inventory_mismatches_are_fatal_before_publ
     assert!(session
         .accept_mapped(ordinal, Some(1_700_000_001), None)
         .is_err());
-    assert!(!config.output.join("blocks").exists());
+    // The Delta table exists from the first open (#643 L3); no part was published.
+    let entries: Vec<_> = std::fs::read_dir(config.output.join("blocks"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["_delta_log"]);
     assert!(declare_inventory(
         &batches(&[100]),
         &["blocks", "logs"],
@@ -1065,6 +1076,12 @@ fn non_final_mapper() -> MapperSemantics {
             &DeltaTypes::default(),
         )
         .unwrap(),
+        data_schemas: declare_data_schemas(
+            &event_batches(&[], 0),
+            &["blocks", "logs"],
+            &DeltaTypes::default(),
+        )
+        .unwrap(),
         ..mapper(BlockFamily::Evm)
     }
 }
@@ -1234,6 +1251,7 @@ async fn flushes_become_delta_data_files_and_values_that_do_not_fit_are_refused(
         .collect();
     let semantics = || MapperSemantics {
         tables: declare_inventory(&empty, &["blocks", "logs"], &types).unwrap(),
+        data_schemas: declare_data_schemas(&empty, &["blocks", "logs"], &types).unwrap(),
         delta_types: types,
         ..mapper(BlockFamily::Evm)
     };
@@ -1449,4 +1467,5 @@ async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappea
     owner.finish(Ok(())).await.unwrap();
 }
 
+mod delta;
 mod resume_cost;

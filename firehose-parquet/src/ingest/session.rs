@@ -21,7 +21,10 @@ use crate::cli::AwsConfig;
 use crate::config::{BlockMetadata, Compression, Config};
 use crate::cursor::CursorState;
 use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
+use crate::delta::commit::DeltaTables;
+use crate::delta::store::DeltaStore;
 use crate::delta::types::DeltaTypes;
+use crate::delta::DeltaIdentity;
 use crate::maintenance::discovery::ListingStats;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
@@ -37,6 +40,25 @@ pub fn declare_inventory(
     declared_names: &[&str],
     delta_types: &DeltaTypes,
 ) -> Result<BTreeMap<String, Digest>> {
+    declare_data_schemas(empty_batches, declared_names, delta_types)?
+        .iter()
+        .map(|(name, schema)| {
+            Ok((
+                name.clone(),
+                Digest::parse(crate::writer::protected::schema_sha256(schema)?)?,
+            ))
+        })
+        .collect()
+}
+
+/// The Delta data file schema of every declared table, from the same empty
+/// flush as [`declare_inventory`]: what each table's Delta table is created
+/// with and validated against (#643 L3). Their digests are the inventory.
+pub fn declare_data_schemas(
+    empty_batches: &HashMap<String, RecordBatch>,
+    declared_names: &[&str],
+    delta_types: &DeltaTypes,
+) -> Result<BTreeMap<String, arrow::datatypes::Schema>> {
     let declared: std::collections::BTreeSet<_> = declared_names.iter().copied().collect();
     ensure!(
         declared.len() == declared_names.len() && !declared.is_empty(),
@@ -56,10 +78,9 @@ pub fn declare_inventory(
                 batch.num_rows() == 0,
                 "schema declaration must precede mapping any events"
             );
-            let schema = delta_types.data_schema(name, batch.schema().as_ref())?;
             Ok((
                 name.clone(),
-                Digest::parse(crate::writer::protected::schema_sha256(&schema)?)?,
+                delta_types.data_schema(name, batch.schema().as_ref())?,
             ))
         })
         .collect()
@@ -75,6 +96,9 @@ pub struct MapperSemantics {
     /// Digests of the Delta data file schemas, from [`declare_inventory`]
     /// with the same `delta_types`.
     pub tables: BTreeMap<String, Digest>,
+    /// The Delta data file schemas themselves ([`declare_data_schemas`]),
+    /// whose digests must be `tables`: each Delta table's columns.
+    pub data_schemas: BTreeMap<String, arrow::datatypes::Schema>,
     /// The family's Delta type decisions, applied to every flush.
     pub delta_types: DeltaTypes,
 }
@@ -292,6 +316,7 @@ impl<'a> IngestionSession<'a> {
             "dry-run cannot open a mutating ingestion session"
         );
         let delta_types = mapper.delta_types;
+        let delta_columns = delta_columns(&mapper.tables, &mapper.data_schemas)?;
         let expected = descriptor(config, mapper)?;
         let aws = aws_config(config);
         let permit = reserve(&expected.output, ownership)?;
@@ -301,6 +326,7 @@ impl<'a> IngestionSession<'a> {
             config,
             expected,
             delta_types,
+            &delta_columns,
             &aws,
             ownership,
             permit,
@@ -322,6 +348,7 @@ impl<'a> IngestionSession<'a> {
         config: &Config,
         expected: StreamDescriptor,
         delta_types: DeltaTypes,
+        delta_columns: &BTreeMap<String, Vec<deltalake_core::kernel::StructField>>,
         aws: &AwsConfig,
         ownership: &'a DatasetOwnership,
         permit: SessionPermit<'a>,
@@ -384,6 +411,27 @@ impl<'a> IngestionSession<'a> {
         )
         .await?
         .with_concurrency(config.flush_concurrency)?;
+        // The Delta tables, after authority exists and recovery ran: a table
+        // is created only while the stream has accepted nothing (#643 L3).
+        let tables = DeltaTables::open(
+            delta_store(&expected.output, ownership)?,
+            DeltaIdentity::of(&expected)?,
+            delta_columns,
+            controller.authority().checkpoint.ordinal == 0,
+            config.flush_concurrency.publications,
+        )
+        .await?;
+        if let Some(metrics) = metrics {
+            for table in tables.names() {
+                metrics
+                    .delta_log_tail_commits
+                    .get_or_create(&crate::metrics::TableLabels {
+                        table: table.to_string(),
+                    })
+                    .set(i64::try_from(tables.tail_commits(table)?).unwrap_or(i64::MAX));
+            }
+        }
+        let controller = controller.with_delta_tables(tables);
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =
             (metrics, controller.authority().checkpoint.event.as_ref())
@@ -431,6 +479,10 @@ impl<'a> IngestionSession<'a> {
 
     pub(crate) fn authority(&self) -> &AuthorityState {
         self.controller.authority()
+    }
+    /// The output's Delta tables, opened and validated for this stream.
+    pub fn delta_tables(&self) -> Option<&DeltaTables> {
+        self.controller.delta_tables()
     }
     pub fn resume_cursor(&self) -> Option<&str> {
         self.authority()
@@ -618,6 +670,23 @@ impl<'a> IngestionSession<'a> {
             .await?;
         self.frontier.acknowledge(&prefix)?;
         if let Some(metrics) = self.metrics {
+            for commit in &committed.delta {
+                let labels = crate::metrics::TableLabels {
+                    table: commit.table.clone(),
+                };
+                metrics
+                    .delta_log_tail_commits
+                    .get_or_create(&labels)
+                    .set(i64::try_from(commit.tail_commits).unwrap_or(i64::MAX));
+                metrics
+                    .delta_commit_seconds
+                    .get_or_create(&labels)
+                    .observe(commit.elapsed.as_secs_f64());
+                metrics
+                    .delta_commit_retries_total
+                    .get_or_create(&labels)
+                    .inc_by(commit.retries);
+            }
             for table in &committed.tables {
                 let labels = crate::metrics::TableLabels {
                     table: table.table.clone(),
@@ -686,6 +755,48 @@ fn require_prefix_stream_ordinals(
         );
     }
     Ok(())
+}
+
+/// The Delta table columns of every declared table, after checking that each
+/// data file schema is exactly the one its inventory digest binds.
+fn delta_columns(
+    tables: &BTreeMap<String, Digest>,
+    schemas: &BTreeMap<String, arrow::datatypes::Schema>,
+) -> Result<BTreeMap<String, Vec<deltalake_core::kernel::StructField>>> {
+    ensure!(
+        tables.keys().eq(schemas.keys()),
+        "the Delta data schemas do not cover exactly the declared table inventory"
+    );
+    tables
+        .iter()
+        .map(|(table, digest)| {
+            let schema = &schemas[table];
+            ensure!(
+                crate::writer::protected::schema_sha256(schema)? == digest.as_str(),
+                "table `{table}`'s Delta data schema differs from its declared digest"
+            );
+            let columns = crate::delta::delta_columns(schema)
+                .with_context(|| format!("mapping table `{table}` onto Delta columns"))?;
+            Ok((table.clone(), columns))
+        })
+        .collect()
+}
+
+/// Where the output's Delta tables live: the local root, or the output
+/// bucket through its owner's Delta log client.
+fn delta_store(output: &StorageIdentity, ownership: &DatasetOwnership) -> Result<DeltaStore> {
+    match output {
+        StorageIdentity::Local { canonical_root } => DeltaStore::local(Path::new(canonical_root)),
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            let owner = ownership
+                .remote(bucket)
+                .context("remote output is not owned")?;
+            let client = owner
+                .delta_log()
+                .context("the output bucket's owner has no Delta log client")?;
+            DeltaStore::s3(bucket, prefix, std::sync::Arc::clone(client))
+        }
+    }
 }
 
 /// Export and log what opening the dataset listed (#655). A resume lists no

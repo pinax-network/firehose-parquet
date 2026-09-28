@@ -131,6 +131,7 @@ fn native_spool_process_qualification() {
             let encoded = EncodedPart {
                 plan,
                 receipt,
+                stats: String::new(),
                 bytes: Bytes::new(),
                 spool: Some(File::open(path).unwrap()),
                 _reservation: None,

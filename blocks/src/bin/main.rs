@@ -18,8 +18,8 @@ use firehose_parquet::grpc::{
     ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume, IngestionSession,
-    MapperSemantics, CURSOR_OVERRIDE_REFUSED, SOLANA_GENESIS_ROUTING_SECONDS,
+    declare_data_schemas, declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
+    IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED, SOLANA_GENESIS_ROUTING_SECONDS,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};

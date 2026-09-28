@@ -541,11 +541,36 @@ pub struct TablePlan {
     pub partition: String,
 }
 
+/// A part's frozen receipt: its exact bytes, and what its Delta `add` needs
+/// (#643 L3), so a commit or a roll-forward builds the `add` from the journal
+/// alone, never by reading the file.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartReceipt {
     pub byte_size: u64,
     pub sha256: Digest,
+    /// The `add.stats` JSON, computed from the encoded batch
+    /// ([`crate::delta::stats::stats_json`]).
+    pub stats: String,
+    /// The `add.modificationTime`: milliseconds since the Unix epoch when the
+    /// receipt was made. Recorded so every commit of the part is identical.
+    pub modification_time: i64,
+}
+
+#[cfg(test)]
+impl PartReceipt {
+    /// A receipt of `byte_size` bytes with `sha256` for a part of `rows` rows,
+    /// with minimal valid Delta statistics.
+    pub(crate) fn for_test(byte_size: u64, sha256: Digest, rows: u64) -> Self {
+        Self {
+            byte_size,
+            sha256,
+            stats: format!(
+                r#"{{"numRecords":{rows},"minValues":{{}},"maxValues":{{}},"nullCount":{{}}}}"#
+            ),
+            modification_time: 1_700_000_000_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -740,12 +765,15 @@ impl PendingTransaction {
             if &without_receipt != expected {
                 bail!("pending final or temporary path differs from its deterministic plan");
             }
-            if actual
-                .receipt
-                .as_ref()
-                .is_some_and(|receipt| receipt.byte_size == 0)
-            {
-                bail!("pending part receipt has an invalid byte size");
+            if let Some(receipt) = &actual.receipt {
+                if receipt.byte_size == 0 {
+                    bail!("pending part receipt has an invalid byte size");
+                }
+                if receipt.modification_time <= 0 {
+                    bail!("pending part receipt has an invalid modification time");
+                }
+                crate::delta::stats::check_stats(&receipt.stats, actual.row_count)
+                    .context("pending part receipt has invalid Delta statistics")?;
             }
             if self.phase == TransactionPhase::Committed && actual.receipt.is_none() {
                 bail!("committed transaction lacks a complete part receipt");

@@ -379,12 +379,34 @@ pub fn effective_log_level(log_level: &str, verbose: bool) -> &str {
     }
 }
 
+/// The crates behind the Delta log (#643): delta-rs and its kernel log every
+/// snapshot load and scan at `info`, several lines per table per commit.
+const DELTA_LOG_CRATES: [&str; 3] = ["deltalake_core", "buoyant_kernel", "buoyant_kernel_engine"];
+
+/// `filter` with the Delta log crates at `warn`, unless it names one of them.
+/// Their warnings and errors still show; `--log-level deltalake_core=debug`
+/// (or any directive naming them) opts back in.
+pub fn with_quiet_delta_logs(filter: &str) -> String {
+    if DELTA_LOG_CRATES.iter().any(|name| filter.contains(name)) {
+        return filter.to_string();
+    }
+    let mut directives = filter.to_string();
+    for name in DELTA_LOG_CRATES {
+        if !directives.is_empty() {
+            directives.push(',');
+        }
+        directives.push_str(name);
+        directives.push_str("=warn");
+    }
+    directives
+}
+
 /// Initialize tracing subscriber with the given log level.
 pub fn init_tracing(log_level: &str, verbose: bool) {
-    let requested_level = effective_log_level(log_level, verbose);
-    let fallback_level = if verbose { "debug" } else { "info" };
-    let filter = tracing_subscriber::EnvFilter::try_new(requested_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback_level));
+    let requested_level = with_quiet_delta_logs(effective_log_level(log_level, verbose));
+    let fallback_level = with_quiet_delta_logs(if verbose { "debug" } else { "info" });
+    let filter = tracing_subscriber::EnvFilter::try_new(&requested_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&fallback_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

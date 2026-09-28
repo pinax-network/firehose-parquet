@@ -218,6 +218,18 @@ impl Server {
         self.state.log.lock().unwrap().clone()
     }
 
+    /// Every stored object under `prefix`, with its exact bytes, sorted by
+    /// key (`blocks/tests/delta_tables.rs` copies a written dataset out).
+    pub fn objects(&self, prefix: &str) -> Vec<(String, Bytes)> {
+        let objects = self.state.objects.lock().unwrap();
+        objects
+            .0
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, stored)| (key.clone(), stored.bytes.clone()))
+            .collect()
+    }
+
     /// `(objects, bytes)` of data parts (`*.parquet` outside `_fireparq/`).
     pub fn data_objects(&self) -> (usize, u64) {
         let objects = self.state.objects.lock().unwrap();
