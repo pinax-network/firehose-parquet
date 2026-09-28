@@ -53,9 +53,6 @@ fn sorting_is_proved_per_complete_part_and_uses_parquet_leaf_ordinal() {
                 assert_eq!(group.sorting_columns().unwrap()[0].column_idx, 2);
             }
         }
-        assert!(for_schema(Compression::Zstd, batch.schema().as_ref(), None)
-            .sorting_columns()
-            .is_none());
     }
 }
 
@@ -194,7 +191,7 @@ fn filters_are_bounded_and_never_added_to_nested_payloads() {
             .map(|name| Field::new(*name, DataType::Utf8, false))
             .collect::<Vec<_>>(),
     );
-    let props = for_schema(Compression::Zstd, &schema, None);
+    let props = builder(Compression::Zstd, &schema, None).build();
     assert_eq!(
         names
             .iter()
@@ -213,7 +210,7 @@ fn filters_are_bounded_and_never_added_to_nested_payloads() {
         DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
         false,
     )]);
-    let props = for_schema(Compression::Zstd, &schema, None);
+    let props = builder(Compression::Zstd, &schema, None).build();
     assert!(props
         .bloom_filter_properties(&ColumnPath::from("address"))
         .is_none());

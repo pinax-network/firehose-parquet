@@ -212,7 +212,7 @@ fn rejects_footer_schema_list_larger_than_remaining_metadata() {
     let path = output.path().join("malformed.parquet");
     std::fs::write(&path, bytes).unwrap();
 
-    // Both maintenance/table reads and cursor startup must propagate the
+    // Both table reads and cursor startup must propagate the
     // bounded rejection, rather than allocating from the untrusted count or
     // interpreting the corrupt cursor as a fresh start.
     for error in [

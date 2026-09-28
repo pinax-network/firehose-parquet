@@ -555,9 +555,9 @@ What the fireparq owner still guards:
 
 The record keeps its protocol: persistent, conditional, with no expiry or
 takeover, and with the uncertainty latch for data PUTs. With `partitions build`
-gone (#653) and `merge` and `truncate` removed (L5), only `build` and
-`recovery recover` take it. `verify` stays ownerless and writes its registry
-conditionally (#621).
+gone (#653) and `merge` and `truncate` removed (L5a), only `build` and
+`recovery recover` take it. `verify`, removed for the launch (L5a) and back
+in #666, stays ownerless and writes its registry conditionally (#621).
 
 What it no longer implies: exclusive control of the Delta tables. Any
 Delta-aware writer, in practice the maintenance CronJob, commits through each
@@ -668,8 +668,19 @@ Consequences:
 | `maintenance/compaction.rs` (the merge encoder and receipt stripping) | — |
 | Finer partition code | Already gone in #652, leaving only `date=`. |
 | `partitions.parquet` and `partitions` | #653 (PR #662, merged) |
+| `verify`, its registry `_fireparq/merkle_roots.parquet` and reports `_fireparq/verify_runs/` (decision of 2026-09-27) | #666, after the launch (§7.2) |
+
+Update (L5a): `merge`, `truncate` and `verify` and everything only they used
+are removed (the plain-Parquet `OutputWriter` goes in L5b, after L3). See
+[the L5a record](../audit/643-l5a-removals.md).
 
 ### 7.2 `verify` over Delta snapshots
+
+The launch ships without `verify` (L5a removes it); #666 implements this
+section. The removed `verify`, its row encoding and the three verifiability
+documents (`docs/verifiability-hash-strategy.md`,
+`docs/verify-report-contract.md`, `docs/verifiability-artifact-runbook.md`)
+are in git history at `4bab87a`, the base of L5a.
 
 What changes, following the subagent audit of `verify.rs`:
 
@@ -697,8 +708,8 @@ What changes, following the subagent audit of `verify.rs`:
 - **Identity:** chain, block type and network come from the tables'
   `fireparq.*` properties (or authority), not from Parquet footers, which
   OPTIMIZE drops.
-- The registry `_fireparq/merkle_roots.parquet` and the reports stay as they
-  are.
+- The registry `_fireparq/merkle_roots.parquet` and the reports come back
+  under `_fireparq/`, as before L5a.
 
 ### 7.3 `validate`, `scan`, `inspect`
 
@@ -750,6 +761,9 @@ datasets are checked in full at creation and through the ancestors on resume,
 and merge journals are looked for only while `.fireparq-ingest/merge-intent.json`
 exists. L5 deletes that record (`ControlKey::MergeIntent`) with `merge`. See
 [the #655 record](../audit/655-resume-cost.md).
+
+Update (L5a): done. `merge` is gone, and with it the intent record and every
+merge-journal check, so `build` lists no data at a resume in any case.
 
 ## 9. Maintenance CronJob
 
@@ -861,8 +875,8 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
 | **L3** commit layer | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
 | **L4** recovery and ownership | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
-| **L5** removals | plain-Parquet `OutputWriter` and readers, `merge` and its journal, `truncate`, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs` cases | the remaining suite stays green; CLI help tests | M (mostly deletions) | L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
-| **L6** verify | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
+| **L5** removals | **L5a** (no dependency, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b**: the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
+| **L6** verify (post-launch, #666) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
 | **L7** validate, scan, inspect | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
 | **L8** engine CI | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |
 | **L9** maintenance job | `scripts/delta_maintenance.py`, a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |

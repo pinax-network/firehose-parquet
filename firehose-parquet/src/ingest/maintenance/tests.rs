@@ -36,7 +36,6 @@ async fn selected_partition_expands_to_whole_protected_root_and_external_mirror(
         vec![MaintenanceTarget::directory(
             root.join("blocks/date=2023-11-14").to_string_lossy(),
         )],
-        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -55,34 +54,20 @@ async fn parent_selection_finds_siblings_but_nested_authorities_are_refused() {
     protected(&temp.path().join("one"), MirrorBinding::Disabled);
     protected(&temp.path().join("two"), MirrorBinding::Disabled);
     let selection = || vec![MaintenanceTarget::directory(temp.path().to_string_lossy())];
-    let prepared = acquire("fixture", selection(), MaintenancePolicy::Recover, None)
-        .await
-        .unwrap();
+    let prepared = acquire("fixture", selection(), None).await.unwrap();
     assert_eq!(prepared.roots.len(), 2);
     prepared.ownership.release().await.unwrap();
     protected(&temp.path().join("one/nested"), MirrorBinding::Disabled);
-    assert!(
-        acquire("fixture", selection(), MaintenancePolicy::Recover, None)
-            .await
-            .is_err()
-    );
+    assert!(acquire("fixture", selection(), None).await.is_err());
 }
 
 #[tokio::test]
-async fn orphan_marker_refuses_reads_and_destructive_policy_precedes_recovery() {
+async fn orphan_marker_is_refused_before_recovery() {
     let temp = tempfile::tempdir().unwrap();
     fs::create_dir(temp.path().join(CONTROL_DIRECTORY)).unwrap();
     fs::write(temp.path().join("sentinel.parquet"), b"untouched").unwrap();
     let selection = || vec![MaintenanceTarget::directory(temp.path().to_string_lossy())];
-    let error = acquire("truncate", selection(), MaintenancePolicy::Truncate, None)
-        .await
-        .err()
-        .unwrap();
-    assert!(error.to_string().contains("truncate is unsupported"));
-    let error = acquire("verify", selection(), MaintenancePolicy::Recover, None)
-        .await
-        .err()
-        .unwrap();
+    let error = acquire("recovery", selection(), None).await.err().unwrap();
     assert!(error.to_string().contains("no authoritative state"));
     assert_eq!(
         fs::read(temp.path().join("sentinel.parquet")).unwrap(),
@@ -101,7 +86,6 @@ async fn explicit_alias_resolves_root_but_nested_alias_is_refused() {
     let prepared = acquire(
         "fixture",
         vec![MaintenanceTarget::directory(alias.to_string_lossy())],
-        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -112,7 +96,6 @@ async fn explicit_alias_resolves_root_but_nested_alias_is_refused() {
     assert!(acquire(
         "fixture",
         vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Recover,
         None
     )
     .await
@@ -234,223 +217,23 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     owner.release().await.unwrap();
 }
 
-/// Acquire `root` and `destination` as `verify` does, then check the
-/// destination against the recovered protected roots.
-async fn validate_destination(root: &Path, destination: &Path) -> Result<()> {
-    let targets = vec![
-        MaintenanceTarget::directory(root.to_string_lossy()),
-        MaintenanceTarget::file(destination.to_string_lossy()),
-    ];
-    let prepared = acquire("verify", targets.clone(), MaintenancePolicy::Recover, None).await?;
-    let result = validate_artifact_destinations(&targets, &prepared.roots, &empty_aws());
-    prepared.ownership.release().await?;
-    result
-}
-
+/// A selected file acquires its enclosing protected root.
 #[tokio::test]
-async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
+async fn selected_file_acquires_its_protected_root() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("data");
-    let mirror = temp.path().join("private-cursor.parquet");
-    protected(
-        &root,
-        MirrorBinding::Local {
-            absolute_path: mirror.to_string_lossy().into_owned(),
-        },
-    );
-    for destination in [
-        root.join("blocks/date=2023-11-14/part-000001.parquet"),
-        mirror,
-        root.join("cursor.parquet"),
-        root.join("_fireparq/cursor.parquet"),
-        root.join("blocks/date=2023-11-14/_fireparq_merge.json"),
-    ] {
-        assert!(validate_destination(&root, &destination).await.is_err());
-        assert!(!destination.exists());
-    }
-    for destination in [
-        root.join("_fireparq/merkle_roots.parquet"),
-        root.join("_fireparq/verify_runs/run/report.json"),
-        root.join("_fireparq/verify_runs/run/roots.parquet"),
-        root.join("merkle_roots.parquet"),
-        root.join("verify_runs/run/report.json"),
-        root.join("report.json"),
-    ] {
-        validate_destination(&root, &destination).await.unwrap();
-        assert!(!destination.exists());
-    }
+    protected(&root, MirrorBinding::Disabled);
     let input = root.join("blocks/date=2023-11-14/part-000001.parquet");
     fs::write(&input, b"selected input").unwrap();
     let prepared = acquire(
-        "verify",
-        vec![MaintenanceTarget::input(input.to_string_lossy()).unwrap()],
-        MaintenancePolicy::Recover,
-        None,
-    )
-    .await
-    .unwrap();
-    prepared.ownership.release().await.unwrap();
-}
-
-fn zero_pending(descriptor: &StreamDescriptor) -> crate::ingest::state::PendingTransaction {
-    use crate::ingest::{
-        frontier::AcceptedFrontier,
-        state::{
-            tests::{event, routing},
-            PartCompression, PendingTransaction, TablePlan,
-        },
-    };
-    let authority = AuthorityState::initial(descriptor.clone()).unwrap();
-    let mut frontier = AcceptedFrontier::resume(&authority.checkpoint);
-    let ordinal = frontier.receive(event(100, 1)).unwrap();
-    frontier
-        .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
-        .unwrap();
-    PendingTransaction::prepare(
-        &authority,
-        frontier.snapshot().unwrap().unwrap(),
-        descriptor
-            .tables
-            .iter()
-            .map(|(table, digest)| TablePlan {
-                table: table.clone(),
-                rows: 0,
-                schema_sha256: digest.clone(),
-                partition: String::new(),
-            })
-            .collect(),
-        PartCompression::Zstd,
-    )
-    .unwrap()
-}
-fn interrupted_merge(
-    root: &Path,
-    stream: Option<&crate::ingest::state::Digest>,
-) -> crate::merge_journal::Journal {
-    use crate::merge_journal::{Journal, LocalPartition, PartitionFiles, RunContext};
-    let partition = root.join("blocks/date=2023-11-14");
-    fs::create_dir_all(&partition).unwrap();
-    fs::write(partition.join("part-000001.parquet"), b"original").unwrap();
-    fs::write(
-        partition.join("part-000002.parquet"),
-        b"unfinished duplicate",
-    )
-    .unwrap();
-    let journal = Journal::new(
-        &RunContext {
-            run_id: "old-fixture".into(),
-            lock: root.join("absent-lock").to_string_lossy().into_owned(),
-        },
-        vec!["part-000001.parquet".into()],
-        2,
-    )
-    .with_protected_stream(stream);
-    LocalPartition::new(&partition)
-        .create_journal(&journal)
-        .unwrap();
-    journal
-}
-
-#[tokio::test]
-async fn pending_ingestion_and_merge_coexistence_refuses_before_any_cleanup() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let descriptor = protected(root, MirrorBinding::Disabled);
-    let pending = zero_pending(&descriptor);
-    {
-        let owner = LocalOwnership::acquire(&[root.to_owned()]).unwrap();
-        LocalStateStore::new(root, &owner)
-            .unwrap()
-            .create(ControlKey::Pending, &pending)
-            .unwrap();
-    }
-    interrupted_merge(root, Some(&descriptor.id().unwrap()));
-    let before = fs::read(root.join(CONTROL_DIRECTORY).join("pending.json")).unwrap();
-    let error = acquire(
         "recovery",
-        vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Recover,
-        None,
-    )
-    .await
-    .err()
-    .unwrap();
-    assert!(error.to_string().contains("coexist"));
-    assert_eq!(
-        fs::read(root.join(CONTROL_DIRECTORY).join("pending.json")).unwrap(),
-        before
-    );
-    assert!(root
-        .join("blocks/date=2023-11-14/part-000002.parquet")
-        .exists());
-}
-
-#[tokio::test]
-async fn bound_merge_recovers_before_artifact_reads_and_unbound_merge_is_refused() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let descriptor = protected(root, MirrorBinding::Disabled);
-    interrupted_merge(root, None);
-    assert!(acquire(
-        "verify",
-        vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Recover,
-        None
-    )
-    .await
-    .is_err());
-    assert!(root
-        .join("blocks/date=2023-11-14/part-000002.parquet")
-        .exists());
-    fs::remove_file(
-        root.join("blocks/date=2023-11-14")
-            .join(crate::merge_journal::JOURNAL_FILE),
-    )
-    .unwrap();
-    interrupted_merge(root, Some(&descriptor.id().unwrap()));
-    let prepared = acquire(
-        "verify",
-        vec![MaintenanceTarget::directory(
-            root.join("blocks/date=2023-11-14").to_string_lossy(),
-        )],
-        MaintenancePolicy::Recover,
+        vec![MaintenanceTarget::input(input.to_string_lossy()).unwrap()],
         None,
     )
     .await
     .unwrap();
-    assert!(!root
-        .join("blocks/date=2023-11-14/part-000002.parquet")
-        .exists());
-    assert_eq!(
-        fs::read(root.join("blocks/date=2023-11-14/part-000001.parquet")).unwrap(),
-        b"original"
-    );
-    prepared.ownership.release().await.unwrap();
-}
-
-#[tokio::test]
-async fn legacy_merge_is_recovered_without_creating_ingestion_authority() {
-    let temp = tempfile::tempdir().unwrap();
-    interrupted_merge(temp.path(), None);
-    let prepared = acquire(
-        "verify",
-        vec![MaintenanceTarget::input(
-            temp.path()
-                .join("blocks/date=2023-11-14/part-000001.parquet")
-                .to_string_lossy(),
-        )
-        .unwrap()],
-        MaintenancePolicy::Recover,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(prepared.roots.is_empty());
-    assert!(!temp.path().join(CONTROL_DIRECTORY).exists());
-    assert!(!temp
-        .path()
-        .join("blocks/date=2023-11-14/part-000002.parquet")
-        .exists());
+    assert_eq!(prepared.roots.len(), 1);
+    assert!(LocalOwnership::acquire(&[root]).is_err());
     prepared.ownership.release().await.unwrap();
 }
 
@@ -548,339 +331,6 @@ async fn committed_dataset(root: &Path) -> StreamDescriptor {
     descriptor
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_protected_parts_merge_preserves_rows_and_frontier_without_source_receipt() {
-    use arrow::array::UInt64Array;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    committed_dataset(root).await;
-    let state_before = fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap();
-    let result = crate::merge::run_merge(&crate::merge::MergeConfig {
-        path: root.join("blocks").to_string_lossy().into_owned(),
-        compression: crate::config::Compression::Zstd,
-        flush_rows: None,
-        flush_bytes: 0,
-        dry_run: false,
-        verbose: false,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .unwrap();
-    assert_eq!(result.files_read, 2);
-    assert_eq!(result.files_written, 1);
-    assert_eq!(
-        fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap(),
-        state_before
-    );
-    let path = root.join("blocks/date=2023-11-14/part-000001.parquet");
-    let builder = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path).unwrap()).unwrap();
-    assert!(builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .unwrap()
-        .iter()
-        .all(|kv| !kv.key.starts_with("fireparq.ingest.")));
-    assert!(builder
-        .schema()
-        .metadata()
-        .keys()
-        .all(|key| !key.starts_with("fireparq.ingest.")));
-    let mut rows = Vec::new();
-    for batch in builder.build().unwrap() {
-        let batch = batch.unwrap();
-        let numbers = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let values = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            rows.push((numbers.value(i), values.value(i)));
-        }
-    }
-    rows.sort();
-    assert_eq!(rows, vec![(100, 200), (101, 202)]);
-    let prepared = acquire(
-        "recovery",
-        vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Recover,
-        None,
-    )
-    .await
-    .unwrap();
-    prepared.ownership.release().await.unwrap();
-}
-
-/// `merge` records its intent before its first journal (#655). An interrupted
-/// merge leaves both, so `build`'s startup finds the journal through the
-/// intent, rolls it back and clears the intent; a complete merge leaves none.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interrupted_merge_leaves_its_intent_for_build_and_a_complete_merge_clears_it() {
-    use crate::merge_journal::{INJECTED_CRASH, JOURNAL_FILE};
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("data");
-    let descriptor = committed_dataset(&root).await;
-    let intent = root.join(CONTROL_DIRECTORY).join("merge-intent.json");
-    let partition = root.join("blocks/date=2023-11-14");
-    let merge = crate::merge::MergeConfig {
-        path: root.join("blocks").to_string_lossy().into_owned(),
-        compression: crate::config::Compression::Zstd,
-        flush_rows: None,
-        flush_bytes: 0,
-        dry_run: false,
-        verbose: false,
-        aws: None,
-        cache_control: String::new(),
-    };
-    INJECTED_CRASH.with(|crash| *crash.borrow_mut() = Some("after-outputs"));
-    let crashed = crate::merge::run_merge(&merge);
-    INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
-    assert!(crashed.is_err());
-    assert!(intent.is_file());
-    assert!(partition.join(JOURNAL_FILE).is_file());
-    let sources = || {
-        let mut names: Vec<_> = fs::read_dir(&partition)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names
-    };
-    assert_eq!(sources().len(), 4, "two sources, the output, the journal");
-
-    // What `build` runs at startup, under its own ownership and permit.
-    let ownership = DatasetOwnership::acquire(
-        "build",
-        vec![MutationScope::directory(root.to_string_lossy())],
-        None,
-    )
-    .await
-    .unwrap();
-    let permit = ownership
-        .local()
-        .unwrap()
-        .acquire_transaction_session()
-        .unwrap();
-    let listing = ListingStats::default();
-    validate_ingestion_recovery_order(
-        &descriptor.output,
-        &ownership,
-        MergeJournals::IfIntended,
-        &listing,
-    )
-    .await
-    .unwrap();
-    assert_eq!(listing.requests(), 0, "no pending transaction: no walk");
-    prepare_ingestion(
-        &descriptor.output,
-        &ownership,
-        &descriptor.id().unwrap(),
-        &listing,
-    )
-    .await
-    .unwrap();
-    assert!(listing.requests() > 0);
-    assert!(!intent.exists());
-    let remaining = sources();
-    assert_eq!(remaining.len(), 2, "{remaining:?}");
-    assert!(remaining.iter().all(|name| name.starts_with("part-v1-")));
-    drop(permit);
-    ownership.release().await.unwrap();
-
-    let result = crate::merge::run_merge(&merge).unwrap();
-    assert_eq!(result.files_written, 1);
-    assert!(!intent.exists());
-    assert!(!partition.join(JOURNAL_FILE).exists());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn public_truncate_refuses_a_selected_protected_table() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("data");
-    committed_dataset(&root).await;
-    let before = fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap();
-    let table = root.join("blocks").to_string_lossy().into_owned();
-    let result = crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
-        path: table.clone(),
-        partitions: vec![],
-        dry_run: false,
-        yes: true,
-        aws: None,
-    });
-    assert!(result.is_err());
-    assert_eq!(
-        fs::read(root.join(CONTROL_DIRECTORY).join("state.json")).unwrap(),
-        before
-    );
-    assert_eq!(
-        fs::read_dir(root.join("blocks/date=2023-11-14"))
-            .unwrap()
-            .count(),
-        2
-    );
-}
-
-#[tokio::test]
-async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_session() {
-    remote_merge_recovery_at("data").await;
-}
-
-/// `build --output s3://bucket` puts the protected root at
-/// the bucket root: its authority, marker discovery and merge recovery use the
-/// empty prefix exactly like a chain directory.
-#[tokio::test]
-async fn native_remote_merge_recovery_at_the_bucket_root() {
-    remote_merge_recovery_at("").await;
-}
-
-async fn remote_merge_recovery_at(prefix: &str) {
-    use crate::{
-        dataset_lock_s3::{S3Ownership, OWNER_KEY},
-        merge_journal::{Journal, RunContext, JOURNAL_FILE},
-    };
-    use object_store::{path::Path as ObjectPath, ObjectStore};
-    use std::sync::Arc;
-    let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    let owner = S3Ownership::acquire(store.clone(), "fixture", vec![prefix.into()])
-        .await
-        .unwrap();
-    let ownership = DatasetOwnership::from_remote_for_test("bucket", owner);
-    let root = if prefix.is_empty() {
-        "s3://bucket".to_string()
-    } else {
-        format!("s3://bucket/{prefix}")
-    };
-    let identity = resolve_output_identity(&root, &empty_aws()).unwrap();
-    let key = |relative: &str| {
-        ObjectPath::from(if prefix.is_empty() {
-            relative.to_string()
-        } else {
-            format!("{prefix}/{relative}")
-        })
-    };
-    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
-    descriptor.output = identity.clone();
-    let remote = ownership.remote("bucket").unwrap();
-    S3StateStore::new(remote, prefix)
-        .unwrap()
-        .create(
-            ControlKey::State,
-            &AuthorityState::initial(descriptor.clone()).unwrap(),
-        )
-        .await
-        .unwrap();
-    let journal = Journal::new(
-        &RunContext {
-            run_id: "old-remote-run".into(),
-            lock: OWNER_KEY.into(),
-        },
-        vec!["part-000001.parquet".into()],
-        2,
-    )
-    .with_protected_stream(Some(&descriptor.id().unwrap()));
-    for (name, bytes) in [
-        ("part-000001.parquet", b"original".to_vec()),
-        ("part-000002.parquet", b"duplicate".to_vec()),
-        (JOURNAL_FILE, serde_json::to_vec(&journal).unwrap()),
-    ] {
-        store
-            .put(
-                &key(&format!("blocks/date=2023-11-14/{name}")),
-                bytes.into(),
-            )
-            .await
-            .unwrap();
-    }
-    let permit = remote.acquire_transaction_session().unwrap();
-    validate_ingestion_recovery_order(
-        &identity,
-        &ownership,
-        MergeJournals::IfIntended,
-        &ListingStats::default(),
-    )
-    .await
-    .unwrap();
-    // Without the merge intent a merge records first, `build` does not look.
-    prepare_ingestion(
-        &identity,
-        &ownership,
-        &descriptor.id().unwrap(),
-        &ListingStats::default(),
-    )
-    .await
-    .unwrap();
-    assert!(store
-        .head(&key("blocks/date=2023-11-14/part-000002.parquet"))
-        .await
-        .is_ok());
-    crate::merge_journal::record_merge_intent(&identity, &ownership)
-        .await
-        .unwrap();
-    let listing = ListingStats::default();
-    prepare_ingestion(&identity, &ownership, &descriptor.id().unwrap(), &listing)
-        .await
-        .unwrap();
-    assert!(listing.requests() >= 1);
-    assert!(
-        !crate::merge_journal::merge_intent_recorded(&identity, &ownership)
-            .await
-            .unwrap(),
-        "a complete recovery clears the intent"
-    );
-    assert!(matches!(
-        store
-            .head(&key("blocks/date=2023-11-14/part-000002.parquet"))
-            .await,
-        Err(object_store::Error::NotFound { .. })
-    ));
-    assert!(store
-        .head(&key("blocks/date=2023-11-14/part-000001.parquet"))
-        .await
-        .is_ok());
-    assert!(matches!(
-        store
-            .head(&key(&format!("blocks/date=2023-11-14/{JOURNAL_FILE}")))
-            .await,
-        Err(object_store::Error::NotFound { .. })
-    ));
-    drop(permit);
-    ownership.release().await.unwrap();
-}
-
-#[test]
-fn malformed_merge_control_never_authorizes_path_traversal_or_empty_commit() {
-    use crate::merge_journal::{Journal, RunContext};
-    let journal = Journal::new(
-        &RunContext {
-            run_id: "fixture".into(),
-            lock: "missing".into(),
-        },
-        vec!["part-000001.parquet".into()],
-        2,
-    );
-    for mutate in 0..5 {
-        let mut value = serde_json::to_value(&journal).unwrap();
-        match mutate {
-            0 => value["sources"] = serde_json::json!(["../../outside.parquet"]),
-            1 => value["state"] = serde_json::json!("committed"),
-            2 => value["unknown_capability"] = serde_json::json!(true),
-            3 => value["protected_stream"] = serde_json::json!("invalid"),
-            _ => {
-                value["sources"] = serde_json::json!(["part-000001.parquet", "part-000001.parquet"])
-            }
-        }
-        assert!(Journal::decode(&serde_json::to_vec(&value).unwrap(), "fixture").is_err());
-    }
-}
-
-mod remote_deletion;
-
 #[tokio::test]
 async fn ingestion_target_refuses_nested_authority_before_creating_any_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -910,7 +360,7 @@ async fn ingestion_target_refuses_nested_authority_before_creating_any_path() {
 }
 
 #[tokio::test]
-async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_guard() {
+async fn recovery_rolls_back_writing_or_finishes_committed_before_returning_guard() {
     use crate::ingest::{
         frontier::AcceptedFrontier,
         state::{
@@ -1029,11 +479,10 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
         }
         ownership.release().await.unwrap();
         let prepared = acquire(
-            "verify",
+            "recovery",
             vec![MaintenanceTarget::directory(
                 root.join("blocks").to_string_lossy(),
             )],
-            MaintenancePolicy::Recover,
             None,
         )
         .await

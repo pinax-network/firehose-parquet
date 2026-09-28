@@ -101,67 +101,6 @@ async fn s3_resume_of_a_million_object_dataset_lists_no_data() {
     }
 }
 
-/// A merge intent (left by a `merge` that did not finish) is the one case in
-/// which a resume lists the dataset: every page once, through the slow page,
-/// with a per-request timeout and no total deadline. With no journal found the
-/// intent is cleared, and the next resume lists nothing again.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_merge_intent_lists_the_dataset_once_then_resumes_list_nothing() {
-    let store = Arc::new(PagedBucket::new(paced()));
-    let config = bucket_root_config("s3://data");
-    let checkpoint = create_and_commit(&store, &config).await;
-    store.generate(Some(GeneratedData::million("")));
-    let owner = paged_owner(&store).await;
-    let identity = resolve_output_identity("s3://data", &aws_config(&config)).unwrap();
-    crate::merge_journal::record_merge_intent(&identity, &owner)
-        .await
-        .unwrap();
-    store.requests.reset();
-
-    let metrics = metrics();
-    let session = IngestionSession::open(
-        &config,
-        mapper(BlockFamily::Evm),
-        &owner,
-        Some(&metrics),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(session.authority().checkpoint.id, checkpoint);
-    let pages = store.requests.list_pages();
-    println!(
-        "merge intent: resume made {pages} LIST requests ({} slow) in {:.2}s of listing",
-        store.requests.slow_pages(),
-        metrics.startup_listing_seconds.get()
-    );
-    assert!((1_000..=1_002).contains(&pages), "{pages}");
-    assert_eq!(store.requests.slow_pages(), 1);
-    assert_eq!(store.requests.data_reads(), 0);
-    let exported = metrics.startup_list_requests.get();
-    assert!(
-        (1_000..=1_002).contains(&exported),
-        "{exported} requests exported"
-    );
-    assert!(metrics.startup_listing_seconds.get() >= SLOW_PAGE.1.as_secs_f64());
-    drop(session);
-    assert!(
-        !crate::merge_journal::merge_intent_recorded(&identity, &owner)
-            .await
-            .unwrap()
-    );
-    owner.finish(Ok(())).await.unwrap();
-
-    store.requests.reset();
-    let owner = paged_owner(&store).await;
-    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
-        .await
-        .unwrap();
-    assert_eq!(store.requests.list_pages(), 0);
-    drop(session);
-    owner.finish(Ok(())).await.unwrap();
-}
-
 /// A dataset placed inside an existing one without `build` (a copy of its
 /// control state) is refused from the child's side: the resume's ancestor
 /// check finds the enclosing marker. The enclosing dataset itself resumes
@@ -261,19 +200,19 @@ async fn local_resume_walks_no_data_directory() {
     let _restore = Restore(sealed.clone());
     std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-    // Maintenance ownership walks the tree and refuses the nested symlink;
+    // `recovery` ownership walks the tree and refuses the nested symlink;
     // `build` acquires without that walk and checks each path it touches.
-    let maintenance = DatasetOwnership::acquire(
-        "merge",
+    let recovery = DatasetOwnership::acquire(
+        "recovery",
         vec![MutationScope::directory(root.to_string_lossy())],
         None,
     )
     .await
     .err()
-    .expect("maintenance ownership walks the tree");
+    .expect("recovery ownership walks the tree");
     assert!(
-        maintenance.to_string().contains("nested symlinks"),
-        "{maintenance:#}"
+        recovery.to_string().contains("nested symlinks"),
+        "{recovery:#}"
     );
     let owner = DatasetOwnership::acquire_for_ingestion(
         ingestion_mutation_scopes(&config).unwrap(),

@@ -1349,8 +1349,8 @@ async fn flushes_become_delta_data_files_and_values_that_do_not_fit_are_refused(
 
 /// A live bucket expires old committed parts with an S3 lifecycle rule that
 /// fireparq does not own. Neither the running session (its next flush) nor a
-/// restarted one (ownership, marker and merge-journal discovery, recovery,
-/// resume) reads a committed part outside its own pending transaction, so
+/// restarted one (ownership, marker discovery, recovery, resume) reads a
+/// committed part outside its own pending transaction, so
 /// removing every earlier part changes nothing but the data. Control
 /// records under `.fireparq-ingest/` and the bucket owner record must stay.
 #[tokio::test]

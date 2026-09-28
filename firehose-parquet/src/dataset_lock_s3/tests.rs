@@ -202,7 +202,7 @@ async fn acquire_release_and_reacquire_increment_generation_without_deleting_rec
     assert_eq!(guard.record().generation(), 1);
     let first_owner = guard.record().owner_id().to_string();
     assert_eq!(
-        S3Ownership::acquire(store.clone(), "merge", vec!["other-prefix".into()])
+        S3Ownership::acquire(store.clone(), "recovery", vec!["other-prefix".into()])
             .await
             .unwrap_err(),
         OwnershipError::Busy
@@ -233,7 +233,7 @@ async fn concurrent_create_and_released_cas_have_only_one_winner() {
         let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
                 S3Ownership::acquire(store.clone(), "ingest", vec!["a".into()]),
-                S3Ownership::acquire(store.clone(), "merge", vec!["b".into()]),
+                S3Ownership::acquire(store.clone(), "recovery", vec!["b".into()]),
             )
         })
         .await
@@ -375,7 +375,7 @@ async fn old_records_dropped_guards_and_uncertain_mutations_never_expire() {
     drop(guard);
     fake.faults.lock().unwrap().old_modified_time = true;
     assert_eq!(
-        S3Ownership::acquire(store.clone(), "merge", vec!["mainnet".into()])
+        S3Ownership::acquire(store.clone(), "recovery", vec!["mainnet".into()])
             .await
             .unwrap_err(),
         OwnershipError::Busy

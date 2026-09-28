@@ -42,7 +42,7 @@ impl NativeS3Upload {
             "native streamed ingestion requires explicit S3 credentials"
         );
         // Reject unsupported native transport before any persistent owner or
-        // canary is created. Ordinary maintenance clients retain their policy.
+        // canary is created. Other clients retain their policy.
         if let Some(endpoint) = &config.aws_endpoint_url {
             let url = reqwest::Url::parse(endpoint)
                 .map_err(|_| anyhow::anyhow!("invalid native ingestion S3 endpoint"))?;

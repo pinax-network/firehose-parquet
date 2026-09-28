@@ -2077,139 +2077,6 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
     eprintln!("exact baseline parity: {} parts, {rows} rows; complete authority and stable mirror columns", expected_paths.len());
 }
 
-/// `fireparq verify` runs beside a live `fireparq build` that owns the
-/// dataset. Partitions the build may still write stay open, the others are
-/// recorded, and the build keeps its ownership throughout.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
-    // Two blocks per UTC day from 2023-11-14.
-    const MIDNIGHT: i64 = 1_699_920_000;
-    let server = MockFirehose::start(
-        (100..106)
-            .map(|n| response_at(n, MIDNIGHT + (n as i64 - 100) / 2 * 86_400))
-            .collect(),
-        vec![Plan {
-            cursor: "",
-            origin: 100,
-            stop: 999,
-            limit: None,
-            keep_open: true,
-            serve_from: None,
-        }],
-    )
-    .await;
-    let dir = tempfile::tempdir().unwrap();
-    let root = root(dir.path());
-    let mut build = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
-    build
-        .kill_on_drop(true)
-        .env_clear()
-        .current_dir(dir.path())
-        .args([
-            "build",
-            "--endpoint",
-            &server.endpoint,
-            "--block-type",
-            "evm",
-            "--start-block",
-            "100",
-            "--stop-block",
-            "1000",
-            "--flush-blocks",
-            "2",
-            "--flush-interval-secs",
-            "1000000000",
-            "--stream-idle-timeout-secs",
-            "0",
-            "--output",
-        ])
-        .arg(dir.path().join("output"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut build = build.spawn().unwrap();
-    // Wait until the build committed block 105 and keeps streaming.
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let committed = std::fs::read(
-                root.join(CONTROL_DIRECTORY)
-                    .join(ControlKey::State.filename()),
-            )
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|record| record["payload"]["checkpoint"]["event"]["block_num"] == 105);
-            if committed {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("build did not commit block 105");
-    assert!(build.try_wait().unwrap().is_none(), "build is still live");
-    assert!(
-        firehose_parquet::dataset_lock::LocalOwnership::acquire(&[root.clone()]).is_err(),
-        "the live build owns the dataset"
-    );
-
-    let verify = |report: &Path| {
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
-        command
-            .kill_on_drop(true)
-            .env_clear()
-            .current_dir(dir.path())
-            .arg("verify")
-            .arg(root.join("blocks"))
-            .args(["--checks", "roots", "--report-json"])
-            .arg(report);
-        command
-    };
-    let report_of =
-        |path: &Path| -> Value { serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap() };
-    let statuses = |report: &Value| -> BTreeMap<String, String> {
-        report["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|finding| {
-                (
-                    finding["partition"].as_str().unwrap().to_string(),
-                    finding["status"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect()
-    };
-
-    let first = dir.path().join("first.json");
-    success(verify(&first)).await;
-    let first = report_of(&first);
-    let expected: BTreeMap<String, String> = [
-        ("date=2023-11-14", "missing_expected"),
-        ("date=2023-11-15", "missing_expected"),
-        ("date=2023-11-16", "open"),
-    ]
-    .into_iter()
-    .map(|(partition, status)| (partition.to_string(), status.to_string()))
-    .collect();
-    assert_eq!(statuses(&first), expected, "{first:#}");
-    assert_eq!(first["summary"]["wrote_registry"], true);
-    assert!(first["warnings"][0]
-        .as_str()
-        .unwrap()
-        .contains("authoritative ingestion state"));
-
-    let second = dir.path().join("second.json");
-    success(verify(&second)).await;
-    let second = report_of(&second);
-    assert_eq!(second["summary"]["matches"], 2, "{second:#}");
-    assert_eq!(second["summary"]["open_partitions"], 1);
-    assert_eq!(second["summary"]["wrote_registry"], false);
-
-    assert!(build.try_wait().unwrap().is_none(), "build kept running");
-    build.start_kill().unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(10), build.wait()).await;
-    server.assert_drained();
-}
-
 /// A final fixture block whose time is `seconds` (the default fixture uses one time).
 fn response_at(number: u64, seconds: i64) -> firehose::Response {
     let mut response = response(number, 3);
@@ -2430,7 +2297,7 @@ async fn fireparq_output(dir: &Path, args: &[&str]) -> Output {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_is_the_dataset_root_and_every_command_follows_it() {
     // 2023-11-14 22:13:20 UTC. Blocks 100 to 102 share 2023-11-14, so the two
-    // runs leave two parts there for merge; 103 starts 2023-11-15.
+    // runs leave two parts there; 103 starts 2023-11-15.
     const T: i64 = 1_700_000_000;
     let server = MockFirehose::start(
         vec![
@@ -2506,71 +2373,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
         2
     );
 
-    // verify infers the root from the layout: registry in the root's
-    // `_fireparq/`, the network from file metadata, open partitions from the
-    // root authority.
-    let verify = |report: &Path| {
-        let mut command = fireparq(dir.path());
-        command
-            .arg("verify")
-            .arg(root.join("blocks"))
-            .args(["--checks", "roots", "--report-json"])
-            .arg(report);
-        command
-    };
-    let verify_report = |name: &str| -> Value {
-        serde_json::from_slice(&std::fs::read(dir.path().join(name)).unwrap()).unwrap()
-    };
-    let statuses = |report: &Value| -> BTreeMap<String, String> {
-        report["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|finding| {
-                (
-                    finding["partition"].as_str().unwrap().to_string(),
-                    finding["status"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect()
-    };
-    let expected = |closed: &str| -> BTreeMap<String, String> {
-        [("date=2023-11-14", closed), ("date=2023-11-15", "open")]
-            .into_iter()
-            .map(|(partition, status)| (partition.to_string(), status.to_string()))
-            .collect()
-    };
     let canonical = std::fs::canonicalize(&root).unwrap();
-    success(verify(&dir.path().join("verify-1.json"))).await;
-    let report = verify_report("verify-1.json");
-    assert_eq!(
-        statuses(&report),
-        expected("missing_expected"),
-        "{report:#}"
-    );
-    assert_eq!(report["network"], CHAIN);
-    assert_eq!(report["table"], "blocks");
-    assert_eq!(
-        report["registry_path"],
-        canonical
-            .join("_fireparq/merkle_roots.parquet")
-            .to_str()
-            .unwrap()
-    );
-    assert!(report["suggested_run_report_path"]
-        .as_str()
-        .unwrap()
-        .starts_with(canonical.join("_fireparq/verify_runs").to_str().unwrap()));
-    assert_eq!(report["summary"]["wrote_registry"], true);
-    assert!(report["warnings"][0].as_str().unwrap().contains(&format!(
-        "authoritative ingestion state of {} is at block 103",
-        canonical.display()
-    )));
-    assert!(root.join("_fireparq/merkle_roots.parquet").exists());
-    assert!(!root.join("merkle_roots.parquet").exists());
-    success(verify(&dir.path().join("verify-2.json"))).await;
-    let report = verify_report("verify-2.json");
-    assert_eq!(statuses(&report), expected("match"), "{report:#}");
 
     // Read-only commands take the table directory under the root.
     let scanned = json_output(&fireparq_output(dir.path(), &["scan", &blocks_arg, "--json"]).await);
@@ -2583,62 +2386,9 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
         assert!(output.status.success(), "{args:?}: {}", logs(&output));
     }
 
-    // merge at the root compacts table partitions and never touches the
-    // artifacts (mirror and registry in `_fireparq/`, authority).
-    let artifacts = |root: &Path| -> BTreeMap<String, Vec<u8>> {
-        tree_digests(root)
-            .into_iter()
-            .filter(|(path, _)| !path.contains("/part-"))
-            .collect()
-    };
-    let artifacts_before = artifacts(&root);
-    for name in [
-        ".fireparq-ingest/state.json",
-        MIRROR,
-        "_fireparq/merkle_roots.parquet",
-    ] {
-        assert!(artifacts_before.contains_key(name), "{artifacts_before:?}");
-    }
-    let output = fireparq_output(dir.path(), &["merge", &root_arg]).await;
-    assert!(output.status.success(), "{}", logs(&output));
-    assert!(
-        logs(&output).contains("Partitions merged:  1"),
-        "{}",
-        logs(&output)
-    );
-    assert_eq!(artifacts(&root), artifacts_before);
-    assert_eq!(
-        parts(&root)
-            .keys()
-            .filter(|path| path.starts_with(day_14))
-            .count(),
-        1
-    );
-    assert_eq!(block_numbers(&root), [100, 101, 102, 103]);
-    success(verify(&dir.path().join("verify-3.json"))).await;
-    assert_eq!(statuses(&verify_report("verify-3.json")), expected("match"));
-
-    // truncate stays refused for protected data, exactly as below a chain
-    // directory.
-    {
-        let before = tree_digests(&root);
-        let output = fireparq_output(
-            dir.path(),
-            &["truncate", &root_arg, "-p", "date=2023-11-14", "--yes"],
-        )
-        .await;
-        assert!(!output.status.success(), "{}", logs(&output));
-        assert!(
-            logs(&output).contains("truncate is unsupported for protected datasets"),
-            "{}",
-            logs(&output)
-        );
-        assert_eq!(tree_digests(&root), before);
-    }
-
-    // The root holds table directories, `_fireparq/` (mirror and registry)
-    // and dot-prefixed control state only, and a per-table glob is unaffected
-    // by the artifacts.
+    // The root holds table directories, `_fireparq/` (the mirror) and
+    // dot-prefixed control state only, and a per-table glob is unaffected by
+    // the artifacts.
     assert_eq!(MIRROR, firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR);
     let tables: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -2649,7 +2399,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     assert_dataset_root_layout(
         &root,
         &tables.iter().map(String::as_str).collect::<Vec<_>>(),
-        &["cursor.parquet", "merkle_roots.parquet"],
+        &["cursor.parquet"],
     );
     // The same with DuckDB: the per-table glob the README recommends reads
     // every block row and no artifact. DuckDB does not skip `_` paths, so a

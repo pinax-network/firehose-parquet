@@ -8,9 +8,6 @@ Related docs:
 - `docs/schemas/`: per-chain table and column reference, generated from the code (see "Change a table schema" below).
 - `docs/audit/README.md`: issue-by-issue implementation and validation records of the September 2026 audit (#463).
 - `docs/design/delta-lake.md`: the Delta Lake output design for the v1.0.0 launch (#643): dependency spike and pinned versions, protocol and table properties, the commit mapping onto the #468 transaction, crash matrix and VACUUM rule, ownership (#636), type mapping, removals, resume cost (#655), the maintenance CronJob, reader examples and the PR-sized implementation lanes.
-- `docs/verifiability-hash-strategy.md`: `merkle_v2` row encoding, normalization rules and golden values.
-- `docs/verifiability-artifact-runbook.md`: publishing, retaining and migrating verify artifacts (`_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/<run_id>/report.json`), including moving pre-v1.0.0 root artifacts into `_fireparq/`.
-- `docs/verify-report-contract.md`: the verify report JSON contract.
 - `docs/partition-vocabulary.md`: the single `date=YYYY-MM-DD` output key and the CLI terms that refer to it.
 - `docs/network-registry-integration.md`: how built-in `--network` aliases are generated, the provider policy, and the endpoint check.
 
@@ -29,7 +26,7 @@ Related docs:
     - `cli/{tests,validate_tests}.rs`: CLI and validation regressions.
   - Configuration and endpoints:
     - `src/config.rs`: pipeline `Config`, `Compression` (including `zstd:<level>`) and receive-transport defaults.
-    - `src/date_partition.rs`: the `date=YYYY-MM-DD` partition key, the only output layout (#652): `DatePartition` formats it from a block time, parses it strictly, and gives its `Date32` value; `is_date_value_pattern` checks `truncate -p date=` globs.
+    - `src/date_partition.rs`: the `date=YYYY-MM-DD` partition key, the only output layout (#652): `DatePartition` formats it from a block time, parses it strictly, and gives its `Date32` value.
     - `src/networks.rs`, `src/networks_generated.rs`: built-in `--network` aliases (generated; do not edit) and `FIREHOSE_ENDPOINT_*` overrides.
     - `src/auth.rs`: Firehose credential selection by resolved provider host, and explicit env-var selectors.
     - `src/grpc.rs`: the Firehose stream client (EndpointInfo, healthcheck and the Stream RPC), shared authenticated transport, reconnect/back-off/timeouts and fatal-status classification.
@@ -42,12 +39,12 @@ Related docs:
     - `frontier.rs`: the accepted-event prefix; `binding.rs`: output and mirror identities from the actual storage configuration (`--cursor none` binds no mirror).
     - `eligibility.rs`: new streams may only initialize empty destinations; legacy data, cursors and any other file are refused.
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
-    - `maintenance.rs`: protected-root discovery and recovery before maintenance commands, and `build`'s startup checks (the whole tree when a dataset is created, only ancestors and the merge intent on resume, #655); `observe.rs`: read-only authority observation for `verify`.
+    - `maintenance.rs`: protected-root discovery and recovery for `recovery recover`, and `build`'s startup check for overlapping roots (the whole tree when a dataset is created, only ancestors on resume, #655).
   - Writing Parquet:
     - `src/delta/types.rs`: the checked flush-boundary mapping onto Delta data file types (#643): `DeltaTypes` (a chain's `decimal(20,0)` columns), `data_schema` (the declared table digests), `data_batches` (every flush, in `IngestionSession::flush` before the transaction journals anything: checked `long`, `decimal(20,0)`, `short`, `string` enums, microsecond timestamps, `date` left out after checking it against the partition), `Conversion` (the rules `docs/schemas/` documents) and `is_delta_type`.
     - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time must fall in that directory, and a mapper `date` column must equal it) and the unprotected low-level `OutputWriter` (not used by protected `build`).
     - `src/writer/protected.rs`, `src/writer/protected/verification.rs`: prepared complete parts, publication and exact receipt/schema verification; `src/writer/protected/budget.rs`: the `--flush-inflight-bytes` encoded-byte budget.
-    - `src/writer/local.rs`: atomic, synced publication of one local part; `src/writer/properties.rs`: bounded Bloom filters, row-group limits and sort metadata shared by ingestion and maintenance.
+    - `src/writer/local.rs`: atomic, synced publication of one local part; `src/writer/properties.rs`: bounded Bloom filters, row-group limits and sort metadata of ingestion parts.
     - `src/flush.rs`: adaptive compressed `--flush-bytes` targets and the summed `--flush-memory-bytes` trigger.
     - `src/flush/pace.rs`: catch-up detection (#659): a pure `PaceDetector` that compares block time with the wall clock, so `--flush-interval-secs` applies only at the chain head.
     - `src/cursor.rs`: cursor Parquet row format and legacy inspection.
@@ -56,21 +53,16 @@ Related docs:
   - Delta Lake (#643, `docs/design/delta-lake.md`):
     - `src/delta/mod.rs`: `deltalake-core` 1.0.0 (its own Arrow/Parquet 59 and object_store 0.13, beside the workspace's 60 and 0.12), the table protocol and properties (design §2), and empty-table creation and opening. `build` does not call it yet.
   - Ownership, durable state and S3:
-    - `src/dataset_lock/{mod,local,operation,session}.rs`: local directory-inode ownership shared by all mutating commands; `DatasetOwnership::finish` ends `build` ownership (release after success or after a failure whose requests all had a definite outcome). `src/dataset_lock_s3.rs`: the persistent bucket-wide S3 owner (`.fireparq-owner-v1.json`) and its uncertainty latch.
+    - `src/dataset_lock/{mod,local,operation,session}.rs`: local directory-inode ownership shared by `build` and `recovery`; `DatasetOwnership::finish` ends `build` ownership (release after success or after a failure whose requests all had a definite outcome). `src/dataset_lock_s3.rs`: the persistent bucket-wide S3 owner (`.fireparq-owner-v1.json`) and its uncertainty latch.
     - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records and CAS tombstones.
     - `src/recovery.rs`: `fireparq recovery` (`status`, `recover`, `release`): ownership inspection, guarded transaction recovery and provider-quiescent S3 owner release.
     - `src/s3.rs`: shared AWS configuration and S3 client builders with explicit credential/retry policies (`build_ingestion_mutation_client`, `AwsConfig::build_read_client`).
     - `src/s3/upload.rs`: native ingestion uploads (disk spool, one conditional PUT, spooled readback verification, explicit timeouts).
-    - `src/s3/delete.rs`: single-attempt, bounded-concurrency maintenance deletes.
-  - Maintenance and verification:
-    - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, the `.fireparq-ingest/merge-intent.json` record that tells `build` a merge may have left journals (#655), and bounded pinned S3 read windows.
-    - `src/truncate.rs`: `truncate` planning (`date=` filters, `--yes`) and deletion.
-    - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge encoder.
-    - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`; `visit_objects`, the paged listing with a timeout per request and no total deadline, and `ListingStats` (#655). `discovery/paged_bucket.rs` is a test bucket of a million generated keys that counts LIST pages.
-    - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
-    - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
+  - Discovery, artifacts and metrics:
+    - `src/maintenance/discovery.rs`: the shared local walker, S3 listing and whole-object reads of `scan`, `inspect` and `validate`; `visit_objects`, the paged listing with a timeout per request and no total deadline, and `ListingStats` (#655), which the startup checks of `build` and `recovery` use. `discovery/paged_bucket.rs` is a test bucket of a million generated keys that counts LIST pages.
+    - `src/artifacts.rs`: dataset artifact names: `ARTIFACTS_DIR` (`_fireparq/`), `DEFAULT_CURSOR_MIRROR` (`_fireparq/cursor.parquet`, the clap default), the owner record names, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, a `cursor.parquet` mirror and control state.
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.
-  - `tests/`: Parquet compatibility and maintenance output-property integration tests.
+  - `tests/`: Parquet compatibility integration tests.
 - `blocks/`: chain-specific mapping crate and the unified `fireparq` binary.
   - `src/bin/main.rs`: `fireparq` entrypoint, command dispatch (`Commands::*`), shared ingestion helpers, and the `.env.example` drift test.
   - `src/bin/ingestion/mod.rs`: `run_ingestion`, the `fireparq build` orchestration; dataset ownership outlives the session and runtime.
@@ -83,7 +75,7 @@ Related docs:
   - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet, and its Delta data file mapping holds only Delta types, exactly the profile's `decimal(20,0)` columns and every value; a value above `i64::MAX` in a `long` column is refused.
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`). `bench_ingestion_concurrency` is the #516 flush-concurrency benchmark; `bench_live_flush` runs the real binary against a looping mock Firehose and a loopback HTTPS S3 with injected latency to measure #658 catch-up throughput and commit phases.
-  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`, and `adaptive_flush.rs`, which paces its mock faster than or at real time), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
+  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`, and `adaptive_flush.rs`, which paces its mock faster than or at real time), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
 - `spikes/delta-lake/`: the #643 Delta Lake spike, a standalone crate outside the workspace (its own `[workspace]`, `Cargo.lock` and `rust-toolchain.toml`, kept from before `firehose-parquet` depended on `deltalake-core` 1.0.0). It commits pre-written Parquet 60 parts to Delta tables (`src/{mapping,part,delta,storage}.rs`, `tests/spike.rs`), and `run.sh` adds loopback S3 (`py/loopback_s3.py`), `deltalake` maintenance beside the writer (`py/concurrent_maintenance.py`) and DuckDB/Polars reads (`py/read_check.py`). Nothing in `fireparq` depends on it; see `docs/design/delta-lake.md`.
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
@@ -95,11 +87,11 @@ Related docs:
 
 1. `blocks/src/bin/main.rs` parses the CLI (`firehose-parquet/src/cli.rs`), loads `.env` from the working directory or `--env-file`, and dispatches. `fireparq build` (`Commands::Build(BuildArgs)`) calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
 2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the dataset root (`resolve_output`, which calls `firehose_parquet::cli::resolve_output_root`: `--output` as given, with an opt-in `{chain}` placeholder expanded to the EndpointInfo chain name) and cursor mirror.
-3. Mutating commands acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<dataset root>/.fireparq-ingest/` before any Blocks request.
+3. `build` and `recovery recover` acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<dataset root>/.fireparq-ingest/` before any Blocks request.
 4. Stream messages come from `grpc.rs`. `ingestion/runtime.rs` filters, orders and routes them; the chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and appends Arrow columns using `schema.rs`.
 5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `_fireparq/cursor.parquet` mirror.
 6. `metrics.rs` exposes counters, readiness and health.
-7. Maintenance (`merge`, `truncate`) runs the shared engines under the same ownership, after `ingest/maintenance.rs` recovers protected roots. `verify` reads without ownership, using `ingest/observe.rs` to find open partitions.
+7. `recovery recover` takes the same ownership and runs the same transaction recovery offline (`ingest/maintenance.rs`). Compaction and cleanup of the Delta tables are an off-the-shelf `deltalake` CronJob, not fireparq code (#643, `docs/design/delta-lake.md` §9).
 
 ## Where To Edit For X
 
@@ -137,7 +129,7 @@ Related docs:
   - `blocks/src/bin/ingestion/{setup,runtime}.rs` (request defaults and ordered receipt/mapping queues).
   - Prefer real-binary regressions in `blocks/tests/ingestion_transactions.rs`.
 - Change S3 behavior:
-  - `firehose-parquet/src/s3.rs` (client policies), `s3/upload.rs` (ingestion uploads), `s3/delete.rs` (maintenance deletes), `dataset_lock_s3.rs` (bucket owner), `cli/paths.rs` (destination rules).
+  - `firehose-parquet/src/s3.rs` (client policies), `s3/upload.rs` (ingestion uploads), `dataset_lock_s3.rs` (bucket owner), `cli/paths.rs` (destination rules).
 - Change encoding of hashes/addresses/bytes:
   - `firehose-parquet/src/encode.rs` and the mapper call sites in `blocks/src/*/mapper.rs`; per-family defaults live in `blocks/src/chain.rs`.
 - Change gRPC retry/auth/stream lifecycle:
@@ -147,13 +139,6 @@ Related docs:
   - `scripts/generate_networks.rs` (provider policy); regenerate `firehose-parquet/src/networks_generated.rs` instead of editing it, following `docs/network-registry-integration.md`.
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`, plus the README metrics table.
-- Change verify roots, row encoding or registry behavior:
-  - `firehose-parquet/src/verify.rs`, `firehose-parquet/src/verify/row_encoding.rs`.
-  - `docs/verifiability-hash-strategy.md` (spec and golden values; changing an existing encoding rule bumps `merkle_version`), `docs/verify-report-contract.md` and `docs/verifiability-artifact-runbook.md`.
-- Change merge/truncate behavior:
-  - `firehose-parquet/src/merge.rs`, `merge/engine.rs`, `merge_journal.rs`, `merge/read.rs`.
-  - `firehose-parquet/src/truncate.rs`.
-  - `firehose-parquet/src/maintenance/{compaction,discovery}.rs` for encoding, schema checks and discovery shared by several commands. Engine changes apply to local and S3 alike; storage-specific steps stay in each command's local and S3 hooks.
 - Change protobuf definitions:
   - `proto/*.proto` (and `proto/core/*.proto`); bindings are rebuilt by Cargo via `firehose-protos/build.rs`.
 - Cut a release:
@@ -178,7 +163,7 @@ Related docs:
 - CI entrypoint: `.github/workflows/ci.yml` (`build-and-test`, the `delta-spike` job and the `advisories` job, which calls `advisories.yml`)
 - Delta Lake spike (#643): the `delta-spike` CI job runs `spikes/delta-lake/run.sh` with DuckDB 1.1.1 and 1.5.5 and the hash-pinned `spikes/delta-lake/requirements.txt`. Locally, `cd spikes/delta-lake && cargo test --locked` (local disk and in-memory store; the directory's toolchain file applies), or `run.sh` with `DELTA_SPIKE_PYTHON`, `DELTA_SPIKE_DUCKDB` and `DELTA_SPIKE_DUCKDB_SIGNED` for everything, as in `docs/design/delta-lake.md` §1.11
 - Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
-- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests, and `FIREPARQ_DEBUG_PACE_SAMPLE_MS` shortens the catch-up detection windows (`blocks/tests/adaptive_flush.rs`). Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
+- Crash-test hooks: `FIREPARQ_DEBUG_FAULT` fails the real binary at a named step for recovery tests (`blocks/tests/ingestion_transactions.rs`), and `FIREPARQ_DEBUG_PACE_SAMPLE_MS` shortens the catch-up detection windows (`blocks/tests/adaptive_flush.rs`). Only debug builds (as built by `cargo test`) read them; release binaries ignore them.
 - Docker publish workflow: `.github/workflows/docker-publish.yml` (supports a build-only manual run)
 - Release assets workflow: `.github/workflows/release.yml` (supports a dry-run dispatch)
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`

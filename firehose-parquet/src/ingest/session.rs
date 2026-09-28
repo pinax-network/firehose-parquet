@@ -1,5 +1,5 @@
 //! Runtime-facing assembly of storage identity, eligibility, recovery and the
-//! accepted frontier. Ownership and maintenance recovery precede stream access.
+//! accepted frontier. Ownership and transaction recovery precede stream access.
 
 use anyhow::{bail, ensure, Context, Result};
 use arrow::record_batch::RecordBatch;
@@ -12,7 +12,7 @@ use super::binding::{
 };
 use super::controller::{CommittedFlush, TransactionController};
 use super::frontier::AcceptedFrontier;
-use super::maintenance::{IngestionTarget, MergeJournals};
+use super::maintenance::IngestionTarget;
 use super::mirror::ProtectedMirror;
 use super::parts::TransactionParts;
 use super::state::*;
@@ -314,9 +314,9 @@ impl<'a> IngestionSession<'a> {
     }
 
     /// Startup reads only control state on resume: the authority, the pending
-    /// journal, the merge intent record and the mirror, plus one control-prefix
-    /// request per ancestor directory. The whole tree is listed only when the
-    /// dataset is created, or when a merge intent says journals may exist (#655).
+    /// journal and the mirror, plus one control-prefix request per ancestor
+    /// directory. The whole tree is listed only when the dataset is created
+    /// (#655).
     #[allow(clippy::too_many_arguments)]
     async fn open_reserved(
         config: &Config,
@@ -375,13 +375,6 @@ impl<'a> IngestionSession<'a> {
                 config.cache_control.as_deref().unwrap_or_default(),
             )?,
         };
-        super::maintenance::validate_ingestion_recovery_order(
-            &expected.output,
-            ownership,
-            MergeJournals::IfIntended,
-            listing,
-        )
-        .await?;
         let controller = TransactionController::open_reserved(
             states(&expected.output, ownership)?,
             parts,
@@ -391,13 +384,6 @@ impl<'a> IngestionSession<'a> {
         )
         .await?
         .with_concurrency(config.flush_concurrency)?;
-        super::maintenance::prepare_ingestion(
-            &expected.output,
-            ownership,
-            &controller.authority().descriptor.id()?,
-            listing,
-        )
-        .await?;
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =
             (metrics, controller.authority().checkpoint.event.as_ref())

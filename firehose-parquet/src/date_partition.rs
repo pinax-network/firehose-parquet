@@ -91,33 +91,6 @@ fn parse_date_value(value: &str) -> Option<time::Date> {
     time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()
 }
 
-/// Whether `pattern`, a `date=` filter value with at most one `*`, can match a
-/// `YYYY-MM-DD` value: a date, or a glob whose literal parts fit that shape and
-/// whose literal prefix, if any, spells out the whole year (`2026-01-*`,
-/// `*-15`). A day of the month such as `15` is refused rather than silently
-/// matching nothing.
-pub fn is_date_value_pattern(pattern: &str) -> bool {
-    const SHAPE: &[u8; 10] = b"DDDD-DD-DD";
-    let fits = |text: &str, offset: usize| {
-        text.bytes()
-            .enumerate()
-            .all(|(index, byte)| match SHAPE.get(offset + index) {
-                Some(b'D') => byte.is_ascii_digit(),
-                Some(shape) => byte == *shape,
-                None => false,
-            })
-    };
-    match pattern.split_once('*') {
-        None => parse_date_value(pattern).is_some(),
-        Some((prefix, suffix)) => {
-            (prefix.is_empty() || prefix.len() >= 4)
-                && prefix.len() + suffix.len() <= SHAPE.len()
-                && fits(prefix, 0)
-                && fits(suffix, SHAPE.len() - suffix.len())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,33 +142,6 @@ mod tests {
         ] {
             let error = DatePartition::parse(invalid).unwrap_err().to_string();
             assert!(error.contains("date=YYYY-MM-DD"), "{invalid}: {error}");
-        }
-    }
-
-    #[test]
-    fn date_filter_patterns_must_fit_the_date_shape() {
-        for valid in [
-            "2024-01-15",
-            "2024-01-*",
-            "2024-*",
-            "2024*",
-            "*-15",
-            "*",
-            "*01-15",
-        ] {
-            assert!(is_date_value_pattern(valid), "{valid}");
-        }
-        for invalid in [
-            "15",
-            "1",
-            "2024-1-15",
-            "2024-02-30",
-            "*x",
-            "2024-01-15-*",
-            "15*",
-            "2*",
-        ] {
-            assert!(!is_date_value_pattern(invalid), "{invalid}");
         }
     }
 }

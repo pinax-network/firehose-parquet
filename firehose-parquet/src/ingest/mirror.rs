@@ -783,9 +783,8 @@ fn write_local(path: &Path, bytes: &Bytes) -> Result<()> {
 }
 /// Creates the mirror's missing parent directories with mode 0700. The dataset's
 /// `_fireparq/` directory, which holds the default mirror, is the exception: it
-/// is shared with the registry and the verify reports, so it gets default
-/// permissions like the table directories. The mirror file itself is always
-/// 0600.
+/// is the dataset's shared artifact directory, so it gets default permissions
+/// like the table directories. The mirror file itself is always 0600.
 fn create_mirror_directory(parent: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);

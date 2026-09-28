@@ -32,8 +32,7 @@ the upgrade guide.
 - **Data-integrity hardening.** `build` commits every table of a flush in one
   transaction. The authoritative checkpoint is stored under
   `<output>/.fireparq-ingest/`, and `_fireparq/cursor.parquet` is now an
-  optional mirror. `merge` uses per-partition journals and recovers from
-  crashes. Every mutating command takes dataset ownership, which
+  optional mirror. `build` and `recovery` take dataset ownership, which
   `fireparq recovery` can inspect.
 - **One consistent schema across chains.** Canonical `timestamp` is a UTC
   timestamp with millisecond values on every table, and every table is
@@ -43,11 +42,12 @@ the upgrade guide.
   access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
   Beacon Electra requests and Tron contracts. See the
   [schema reference](docs/schemas/README.md).
-- **Verifiability.** `verify` computes versioned `merkle_v2` roots and keeps
-  one `_fireparq/merkle_roots.parquet` registry per network. It infers the chain and table
-  from the data, and a failing run never changes the registry.
+- **Removed: `merge`, `truncate` and `verify`.** Compaction is the job of an
+  off-the-shelf `deltalake` maintenance CronJob (#643), `truncate` has no safe
+  Delta equivalent (rebuild into a new root instead), and `verify` returns over
+  Delta snapshots in #666.
 - **Engine-friendly layout.** A dataset root holds only its table directories,
-  `_fireparq/` (cursor mirror, Merkle registry and verify reports) and dot-prefixed control state, so engines that skip `_` and `.`
+  `_fireparq/` (the cursor mirror) and dot-prefixed control state, so engines that skip `_` and `.`
   paths never read fireparq's own files as table data. `--output` is that
   root, used exactly as given; `{chain}` opts into a directory named after the
   network (`--output 's3://datasets/{chain}'`). v0.7.x appended the chain
@@ -56,14 +56,14 @@ the upgrade guide.
 - **Explicit credentials and destinations.** Firehose credentials are scoped to
   the provider (`PINAX_*`, `STREAMINGFAST_*`). S3 writes need an explicit
   `s3://bucket/prefix` output, and `.env` is read only from the working
-  directory or from `--env-file`. `truncate` deletes nothing without `--yes`.
+  directory or from `--env-file`.
 - **Failed transactions.** EVM includes failed transactions by default, with
   only their persistent state changes. Solana, Tron, Antelope and NEAR child
   rows carry the outcome of their parent transaction or receipt.
 - **Performance.** Identifier columns are encoded once per block without
   per-value allocations, and EVM decimals are written directly into Arrow.
   Each `build` flush encodes and publishes its tables concurrently within
-  explicit bounds. `verify` streams with bounded memory. File sizes
+  explicit bounds. File sizes
   follow an adaptive compressed-size target. Firehose receive windows are 16 MiB
   and accept zstd replies.
 - **Existing datasets must be rebuilt into a new output root.** v1.0.0 does not
@@ -284,15 +284,15 @@ and should receive the same access restrictions as the cursor file.
 
 Existing datasets without this authority are not adopted automatically. Rebuild
 into a new empty output root, with an absent cursor mirror. Keep legacy datasets available
-for read-only tools and guarded legacy maintenance. See the
+for read-only tools. See the
 [transaction and migration contract](docs/audit/468-ingestion-runtime.md).
 
 ### Startup cost
 
 A restart costs the same however large the dataset has grown (#655). When
 `--output` already holds a dataset, `build` reads its control records only:
-the S3 owner record, `.fireparq-ingest/` (the authority, a pending transaction and
-the merge intent below) and the `_fireparq/cursor.parquet` mirror. It lists no
+the S3 owner record, `.fireparq-ingest/` (the authority and a pending
+transaction) and the `_fireparq/cursor.parquet` mirror. It lists no
 data objects and walks no data directory. The only other requests are one LIST
 of a control prefix (`<ancestor>/.fireparq-ingest/`) per directory above the
 dataset root, which is none for a dataset at the bucket root, and after a crash
@@ -302,11 +302,9 @@ The whole root is listed only when the dataset is created, when the root must
 be empty anyway: `build` then checks the root, every directory above it and
 every directory below it for another dataset. A dataset created later inside an
 existing one is refused by its own check of the directories above it, so a
-resume never needs to look below its root. The one other case is a `merge`
-that did not finish: it leaves `.fireparq-ingest/merge-intent.json`, and the
-next `build` then lists the dataset once to finish its journals and clears the
-record. Each listing request has a 60-second timeout; a listing has no overall
-deadline and logs its progress every 10 seconds.
+resume never needs to look below its root. Each listing request has a
+60-second timeout; a listing has no overall deadline and logs its progress
+every 10 seconds.
 
 `firehose_parquet_startup_list_requests` and
 `firehose_parquet_startup_listing_seconds` report what the last start listed,
@@ -387,8 +385,8 @@ next `build` or `fireparq recovery recover <root>` removes it from the journal p
 This requires atomic same-directory hard links, file and directory sync, readable
 directory ancestry, and macOS/Linux inode locking. Unsupported operations fail
 closed. Nested symlink entries inside guarded trees are refused. External writers
-that bypass ownership are unsupported. Legacy low-level writers and maintenance
-retain their independent naming and journal rules.
+that bypass ownership are unsupported. The unprotected low-level writer keeps its
+own naming rules.
 
 Final `.parquet` files are individually complete. Concurrent readers using plain
 globs can still see only some tables during publication; this protocol does not
@@ -444,8 +442,8 @@ AWS S3. Bucket-specific AWS endpoints (including global, regional, dualstack and
 accelerate forms) and `bucket.fly.storage.tigris.dev` use virtual-hosted requests
 and reject a different cursor bucket. Other custom endpoints must support
 path-style requests at a service endpoint; arbitrary bucket-specific custom
-domains are not inferred. These addressing rules also apply to S3 maintenance
-and inspection commands.
+domains are not inferred. These addressing rules also apply to S3 inspection
+and recovery commands.
 Relative cursor paths inherit the resolved output bucket and prefix, and
 absolute local cursor paths remain absolute for local output.
 
@@ -486,9 +484,8 @@ resume verification applies the same limits. Connections have a 10-second timeou
 upload and complete readback each have a 15-minute deadline. A write whose
 outcome is uncertain (timed out, cancelled, lost or unverifiable acknowledgement)
 retains ownership for provider-quiescent recovery; an HTTP 401/403 refusal is
-definite and does not. Maintenance commands and
-the generic `ParquetTableWriter::new_s3` API keep their existing buffering and
-endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
+definite and does not. The generic `ParquetTableWriter::new_s3` API keeps its
+existing buffering and endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
 
 ### Parameter Validation on Resume
 
@@ -519,9 +516,7 @@ the resume cursor, completed bounds and routing anchors, so resume, extension,
 same-bound no-ops and recovery behave exactly as with a mirror. The choice is
 bound when the dataset is created: every later `build` must pass `--cursor none`
 again, and a dataset created with a mirror cannot drop it. Without a mirror
-there is no `<root>/_fireparq/cursor.parquet` hint for other tools. `verify`
-reads the authority itself, so it marks partitions `build` may still write as
-`open` either way.
+there is no `<root>/_fireparq/cursor.parquet` hint for other tools.
 
 Local mirror saves use private same-directory temporary files, atomic replacement,
 file and directory sync, and up to three attempts with 1 and 2 second backoff.
@@ -529,12 +524,11 @@ S3 mirror updates use one conditional Create/Update with transport retries disab
 then exact readback. Failed or cancelled saves preserve pending recovery state;
 a shutdown during local retry backoff still reports the durability failure.
 
-Mutating commands hold common ownership over output, source and external cursor
-or artifact locations. Local ownership uses macOS/Linux directory locks; nested
+`build` and `recovery` hold common ownership over the output and an external
+cursor location. Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
 there is one owner per bucket, and a second writing command on any prefix of it
-fails with `bucket ownership is held`, so run `merge` or `truncate`
-only when no `build` is writing to that bucket. It requires conditional-write
+fails with `bucket ownership is held`. It requires conditional-write
 support plus access to reserved control keys. Unresolved remote errors retain
 ownership without an expiry or automatic takeover, and the next run fails until
 it is released. A failed `build` releases S3 ownership on exit when every request
@@ -543,17 +537,16 @@ pending: the next `build` recovers that transaction before streaming. It keeps
 ownership after an uncertain request (timeout, lost acknowledgement, connection
 reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
 panic, and its error then says why and prints the exact `recovery status` and
-`recovery release` commands. `merge`, `truncate`
-and `recovery` keep S3 ownership after any error and log the same guidance.
+`recovery release` commands. `recovery` keeps S3 ownership after any error and
+logs the same guidance.
 `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
 
-Protected datasets allow guarded lossless merge. Truncate is refused because it
-cannot reconcile the ingestion checkpoint. Maintenance
-selected at a table/partition or parent root discovers every affected protected
-dataset and its external mirror before recovery or data reads.
+`recovery recover` selected at a table, a partition or a parent directory
+discovers every affected protected dataset and its external mirror before it
+recovers anything.
 
 ### Cursor Override and Migration
 
@@ -623,8 +616,8 @@ flushes the remaining buffers and saves the final cursor.
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
-under the subcommands `scan`, `inspect`, `validate`, `verify`,
-`merge`, `truncate`, `recovery` and `completions`. The global flags
+under the subcommands `scan`, `inspect`, `validate`, `recovery` and
+`completions`. The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
 
@@ -819,20 +812,15 @@ bucket). Query them with the [two-bucket union](#two-bucket-union).
 | Partitions | `<table>/date=YYYY-MM-DD/` | `<table>/date=YYYY-MM-DD/` |
 | Range | Bounded daily runs: the same `START_BLOCK` on every run, `STOP_BLOCK` at the first block of the next UTC day | Live: no `STOP_BLOCK` |
 | Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` (at the head; [size-based while catching up](#flush-interval-and-catch-up)) and/or `FLUSH_BLOCKS` |
-| After each run | `merge`, then `verify` | Nothing: no `merge` or `truncate` |
+| Compaction | The `deltalake` maintenance CronJob (#643) | None: live parts expire |
 | Retention | Kept | S3 lifecycle expiration, for example after 2 days (48 hours), on table prefixes only |
-| `verify` | Yes | Not applicable |
 
 **Final writer.** One protected stream per root: each run repeats the original
 `START_BLOCK` and extends `STOP_BLOCK` (exclusive) to the first block of the
 next UTC day, for example the live bucket's first block of that day (see
 [block range of a day](#block-range-of-a-day)). A repeated bound opens no Blocks request;
-a larger one resumes from the output authority. Run the day's commands one after
-another, since each needs the bucket's owner: `build` exits at the bound, then
-`fireparq merge s3://final-bucket/v1/mainnet` compacts the completed `date`
-partitions, then `verify` records their roots (the newest day stays `open` until
-the next run moves the frontier past it). A run that stops early only leaves
-more parts to merge the next day.
+a larger one resumes from the output authority. `build` exits at the bound, and
+a run that stops early resumes from the same authority the next day.
 
 **Live writer.** One unbounded `build` with `FINAL_BLOCKS_ONLY=false`. For the
 first run, set `START_BLOCK` at or below the final
@@ -844,9 +832,7 @@ after K blocks, whichever comes first (day boundaries and the size triggers,
 data and more objects. The interval applies once the writer has caught up
 with the head: after a restart or an outage it catches up with size-based
 flushes first ([flush interval and catch-up](#flush-interval-and-catch-up)).
-Do not run `merge` or `truncate` on the live
-bucket: they need its owner, which the running `build` holds, and the live
-parts are expired rather than compacted.
+The live parts are expired rather than compacted.
 
 **Expected objects per day.** Each flush writes one part per table that has rows
 in it.
@@ -859,16 +845,12 @@ in it.
   rows, about 22,000 objects a day. `FLUSH_BLOCKS=1` instead makes about 108,000.
   Because S3 rounds each expiry up to the next midnight UTC, a 48-hour rule
   keeps two to three days of objects.
-- Final: before `merge`, about one part per table per flush, where flushes
-  follow the 32 MiB target of the largest table plus one per day boundary; after
-  `merge`, about one file per 32 MiB of compressed data per table and day
-  (`merge --flush-bytes`).
+- Final: about one part per table per flush, where flushes follow the 32 MiB
+  target of the largest table plus one per day boundary.
 
-Every S3 `build` start lists the whole dataset root three times (for nested
-control markers and merge journals), each listing limited to 60 seconds. S3
-returns 1,000 keys per list request, so keep the live bucket's retained objects
-in the low hundreds of thousands at most: prefer `FLUSH_INTERVAL_SECS` to a
-small `FLUSH_BLOCKS` on fast chains.
+A `build` start lists the dataset only when it creates it
+([startup cost](#startup-cost)), so the number of retained objects does not
+slow a restart.
 
 **Lifecycle expiration.** S3 lifecycle filters select objects by prefix, tag or
 size and cannot exclude a path, so create one expiration rule per table prefix:
@@ -880,10 +862,7 @@ must never match control state:
   transaction journal;
 - the `.fireparq-owner*` records at the bucket root: the owner record and its
   probes;
-- `_fireparq/`, which holds the cursor mirror, the Merkle registry and verify
-  reports;
-- `merge` journals (`_fireparq_merge.json`), which live inside table
-  directories. Never run `merge` on a bucket with an expiration rule.
+- `_fireparq/`, which holds the cursor mirror.
 
 If bucket versioning is enabled, an expiration only adds a delete marker: add a
 noncurrent-version expiration (and expired delete marker cleanup) to reclaim the
@@ -900,12 +879,6 @@ verifies that transaction's parts and refuses if they expired
 (`committed transaction is missing a required final part`). Live data is
 disposable: start a new live dataset (a new prefix or an emptied bucket) at or
 below the final frontier.
-
-**`verify` does not apply to live data.** A reversible stream can append rows to
-any partition, so `verify` reports every partition of a growing non-final
-dataset as `open` and neither compares nor records a root, and expiration would
-change every root anyway. It still reads every part, and a part that expires
-during the scan fails the run. Run `verify` on the final bucket after `merge`.
 
 ### Advanced authentication
 
@@ -998,8 +971,8 @@ only needed for custom deployment environments:
 
 Each `build` mapper flush commits its nonempty tables together before advancing
 output authority and the cursor mirror. `--flush-bytes` is a **target compressed
-size for the largest table's file**, defaulting to 32 MiB in Config and the
-`build` and `merge` commands. Build starts with a conservative
+size for the largest table's file**, defaulting to 32 MiB in Config and
+`build`. Build starts with a conservative
 calibration flush, then learns the compressed-to-mapper-size ratio from actual
 committed file sizes. This prediction resets on restart; dry runs keep the
 conservative estimate because they produce no file receipts. Files can overshoot by
@@ -1020,8 +993,7 @@ only, see below), UTC day changes, the
 memory threshold and clean end of input can all force files below the size
 target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
 like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
-threshold; increasing the file target does not bypass that threshold. `merge`
-uses its own streaming writer and memory policy.
+threshold; increasing the file target does not bypass that threshold.
 
 #### Flush interval and catch-up
 
@@ -1157,10 +1129,10 @@ S3_BUCKET=my-bucket fireparq inspect evm/_fireparq/cursor.parquet
 fireparq inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
 
 # Show only schema fields, including explicit nullability
-fireparq inspect s3://my-bucket/evm/_fireparq/merkle_roots.parquet --schema-only
+fireparq inspect s3://my-bucket/evm/_fireparq/cursor.parquet --schema-only
 
 # Emit machine-readable schema JSON for a single parquet artifact
-fireparq inspect s3://my-bucket/evm/_fireparq/merkle_roots.parquet --schema-only --json
+fireparq inspect s3://my-bucket/evm/_fireparq/cursor.parquet --schema-only --json
 ```
 
 Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
@@ -1197,161 +1169,9 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 | `--cross-partition` | `false` | Check continuity between adjacent partitions |
 | `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
 
-### `verify` — Deterministic Roots + Check Profiles
-
-Verifies deterministic partition Merkle roots and optional protocol checks under one command surface, one table of one network per run. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs for the data path.
-
-The chain and table are inferred from the data: the chain from the `firehose-parquet.block_type` file metadata, the table from the directory layout (`<root>/<table>/...`, where `<root>` is the dataset root that `build --output` resolved to). The registry defaults to `<root>/_fireparq/merkle_roots.parquet`, one per network, and published reports go to `<root>/_fireparq/verify_runs/<run_id>/report.json`. For a bucket-root dataset (`build --output s3://ethereum-mainnet`) point `verify` at `s3://ethereum-mainnet/blocks`; for `build --output './output/{chain}'` at `./output/mainnet/blocks`, as in the examples below. The network comes from the `firehose-parquet.chain_name` file metadata, whatever the directory is called.
-
-A registry that a release before v1.0.0 kept at the chain root (`<chain_root>/merkle_roots.parquet`) is not migrated or shadowed: a `roots` run with the default registry fails before reading any row until you move it to `_fireparq/merkle_roots.parquet` (an explicit `--registry-path` still selects any file). Old reports in a root `verify_runs/` can be moved into `_fireparq/verify_runs/` or left; they stay reserved either way. See [Moving artifacts into `_fireparq/`](docs/verifiability-artifact-runbook.md#moving-artifacts-into-_fireparq).
-
-```bash
-# Standard profile (default): roots + protocol
-fireparq verify ./output/mainnet/blocks
-
-# Quick profile (low-cost)
-fireparq verify ./output/mainnet/blocks --profile quick
-
-# Explicit checks override profile defaults
-fireparq verify ./output/mainnet/blocks --checks roots,protocol
-
-# Publish report to the suggested artifact path
-fireparq verify ./output/mainnet/blocks --publish-report
-
-# Read-only protocol checks may resolve a shorthand S3 data path
-S3_BUCKET=my-bucket fireparq verify mainnet/blocks --checks protocol
-
-# Runs that write roots or reports need the explicit URI
-fireparq verify s3://my-bucket/mainnet/blocks
-```
-
-Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`. That shorthand is read-only: a run that writes registry roots (the `roots` check, which fills missing roots by default), `--report-json`, `--publish-report` or `--publish-report-path` writes artifacts, so it refuses a data path that only the shorthand resolved to S3 and asks for the explicit `s3://` URI (#617). Registry writes log `writing merkle roots registry` with the absolute destination.
-
-| Flag | Default | Description |
-|---|---|---|
-| `--chain` | *(from `firehose-parquet.block_type`)* | Chain family (`evm`, `bitcoin`, `solana`, ...). Needed only for files without that metadata; a different value is an error |
-| `--table` | *(from the table directory)* | Table name. Needed only when files are not inside a table directory; a different value is an error |
-| `--registry-path` | `<chain_root>/_fireparq/merkle_roots.parquet` | Explicit registry location (local or `s3://`); rows are keyed by network, so one registry can serve several networks |
-| `--update-registry` | `false` | Accept the current data: replace differing roots (reported as `updated`; the run passes once the registry is written) |
-| `--checks` | *(from profile)* | Comma-separated check families: `roots`, `protocol`, `continuity`, `completeness` |
-| `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
-| `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
-| `--hash-strategy` | `auto` | Hash strategy for leaves+Merkle nodes: `auto`, `keccak256`, `sha256` |
-| `--no-fail-fast` | `false` | Keep scanning and aggregate findings instead of stopping at the first mismatch |
-| `--report-json` | none | Write the JSON report to this path |
-| `--publish-report` | `false` | Publish `report.json` to the suggested verify artifact path |
-| `--publish-report-path` | *(suggested path)* | Override where the published report is written (local or `s3://`) |
-
-Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`, and the default registry moved from `<chain>/mainnet/merkle_roots.parquet` to the network directory. `verify` warns when it finds a registry at the old location; see [Moving a registry from the old default location](docs/verifiability-artifact-runbook.md#moving-a-registry-from-the-old-default-location).
-
-Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `_fireparq/merkle_roots.parquet` and in the report. Registries written by v0.7.x and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
-
-A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). `verify` only reads table data and takes no dataset ownership, so it runs while `build` writes the network. Partitions `build` may still write, decided from the dataset's authoritative ingestion state (or the legacy root `cursor.parquet` of an unprotected dataset), are reported as `open` and are not recorded. A partition that changes while `verify` reads it, or an unfinished `merge`, fails the run without writing anything; `verify` never recovers data. Registry writes are atomic locally and use one conditional put on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
-
-See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
-
-See [Verify report contract](docs/verify-report-contract.md) for schema versioning, run metadata fields, and artifact path guidance.
-
-See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for registry/report lifecycle, S3 publication guidance, and operational workflows.
-
-### `merge` — Consolidate Part Files
-
-Consolidates multiple small part files within each `date=YYYY-MM-DD` partition directory into fewer, larger files. `merge` keeps the partition layout but reduces file count. Supports local paths and explicit S3 URIs.
-
-`merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. The `_fireparq/` artifact directory and legacy root artifacts (`cursor.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
-
-Parts are only merged when every part in the partition has the same columns (the same names, types, nullability, and order) and the same value-defining file metadata: chain name, block type, byte and block-id encodings, vote and failed-transaction coverage, synthetic timestamps and stream mode. Merge checks each part's footer before writing anything. A partition with mixed parts, such as files from two tool versions, with `--without-extended` toggled, or with different block-id encodings, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
-
-```bash
-# Merge small parts within each partition (default 32 MB target per file)
-fireparq merge ./output/blocks/
-
-# Dry run — show what would be merged without writing
-fireparq merge ./output/blocks/ --dry-run
-
-# Merge with custom file size limit
-fireparq merge ./output/blocks/ --flush-bytes 536870912
-
-# Merge with a row-based flush limit
-fireparq merge ./output/blocks/ --flush-rows 100000
-
-# Merge S3-hosted data
-fireparq merge s3://my-bucket/evm/blocks/
-```
-
-The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `merge` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
-
-| Flag | Default | Description |
-|---|---|---|
-| `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
-| `--flush-bytes` | 32 MiB | Target encoded (compressed) bytes per output file, checked between batches; 0 = unlimited |
-| `--flush-rows` | disabled | Flush merged output after this many rows; 0 disables |
-| `--dry-run` | `false` | Show what would be merged without writing |
-
-> **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory.
-
-Local interrupted merges recover under exclusive ownership:
-
-- Each partition merge has a journal, `_fireparq_merge.json`, created before output. It is committed after all outputs complete and removed after source deletion. Local output is completed and synced before publication.
-- In a protected dataset, `merge` first records `.fireparq-ingest/merge-intent.json`, and clears it when the run (or a later recovery of the whole dataset) completes. A `build` start looks for merge journals only while that record exists, so an ordinary restart lists nothing ([startup cost](#startup-cost)).
-- Under the common local directory guard, the next run finishes a committed journal or removes an uncommitted run's outputs before retrying. The legacy local `.fireparq-merge.lock` remains for recognizing old journals.
-- S3 uses the persistent bucket-wide owner. An interrupted remote run retains ownership until an operator establishes writer cessation and provider-confirmed request quiescence and explicitly releases that exact owner. The subsequent guarded merge can recover journals written under this ownership protocol. Legacy S3 journals using the old expiring lock require separately reviewed migration and are refused automatically.
-- There is no timestamp takeover or best-effort conditional-write fallback. Conflicting local parent/child operations and all mutations in one S3 bucket fail immediately. See [the recovery limits and procedure](docs/audit/468-stage1-ownership.md).
-
-> **Metadata preservation:** `merge` preserves Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files. It only combines files whose value-defining keys agree, so the preserved labels describe every row.
-
-### `truncate` — Delete Parquet Files
-
-Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Never deletes buckets or non-parquet files.
-
-Nothing is deleted without `--yes`. Without it, `truncate` prints a summary of what matched (file count, total size, and the first 10 paths) and exits non-zero. `--dry-run` lists every matched file instead. When truncating a network root without filters, the parquet artifacts under `_fireparq/` (and legacy root ones such as `merkle_roots.parquet`) are included; the summary calls them out. A partition filter never matches them. You can also target a single `.parquet` file directly, such as `fireparq truncate ./unichain/_fireparq/merkle_roots.parquet --yes`.
-
-```bash
-# Preview what would be deleted
-fireparq truncate ./output/blocks/ --dry-run
-
-# Delete all parquet files in a directory
-fireparq truncate ./output/blocks/ --yes
-
-# Delete one day
-fireparq truncate ./output/blocks/ -p date=2026-01-15 --yes
-
-# Delete one day in every table of a network root
-fireparq truncate ./output/mainnet/ -p date=2026-01-15 --yes
-
-# Delete January 2026 on S3
-fireparq truncate s3://bucket/evm/blocks/ -p "date=2026-01-*" --yes
-
-# Delete two days (repeated filters match either one)
-fireparq truncate ./output/blocks/ -p date=2026-01-01 -p date=2026-01-02 --yes
-
-# Preview the 15th of every month
-fireparq truncate s3://bucket/evm/blocks/ -p "date=*-15" --dry-run
-```
-
-Partition filters (`-p`, repeatable) select `date=YYYY-MM-DD` partition directories, the only partition key:
-
-| Filter | Matches |
-|---|---|
-| `date=2026-01-15` | Files in the `date=2026-01-15` directory of every table under the path. |
-| `date=2026-01-*` | One `*` glob over the date: a month (`2026-01-*`), a year (`2026-*`) or every 15th (`*-15`). |
-
-- Repeated filters match if any of them does.
-- A value that is neither a `YYYY-MM-DD` date nor a glob over one, such as `date=15`, is refused rather than matching nothing, and so is any other key or a path of several directories.
-- Filters only match partition directories of table data, so they never select `_fireparq/` or legacy root artifacts, even a partition-shaped path below them.
-
-The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `truncate` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
-
-| Flag | Default | Description |
-|---|---|---|
-| `-p, --partition` | *(none)* | `date=` partition filter (repeatable; a date or one `*` glob over it) |
-| `--dry-run` | `false` | List every file that would be deleted without removing anything |
-| `-y, --yes` | `false` | Delete the matched files. Without it, truncate prints a summary and exits non-zero |
-
 ### `recovery` — Ownership and Recovery State
 
-Mutating commands (`build`, `merge` and `truncate`) hold
-dataset ownership; `verify` takes none. After an interrupted
+`build` and `recovery recover` hold dataset ownership. After an interrupted
 run, use `recovery` to inspect and finish that state. Each
 subcommand takes an existing local dataset root or an explicit
 `s3://bucket/prefix` URI: the root that `build --output` resolved to, with
@@ -1361,7 +1181,7 @@ subcommand takes an existing local dataset root or an explicit
 # Read ownership and control-record summaries (changes nothing)
 fireparq recovery status ./output/mainnet
 
-# Recover protected ingestion, the cursor mirror and recognized merge journals
+# Recover protected ingestion and the cursor mirror
 fireparq recovery recover ./output/mainnet
 
 # Release one exact S3 owner after provider-confirmed request quiescence
@@ -1375,7 +1195,7 @@ fireparq recovery release s3://my-bucket/v1/mainnet \
 | Subcommand | Behavior |
 |---|---|
 | `status` | Read-only ownership and control-record summary |
-| `recover` | Recover protected ingestion, the mirror and recognized merge journals under one owner. A retained S3 owner must be released first |
+| `recover` | Recover protected ingestion and the mirror under one owner, and print `{"recovered_protected_roots": N}`. A retained S3 owner must be released first |
 | `release` | S3 only. Requires `--expected-owner` and `--expected-generation` exactly as reported by `status`, plus `--stopped-writer-evidence` and `--provider-quiescence-evidence` (non-secret operator references). It changes only ownership and repairs no data |
 
 Local ownership is an OS directory lock that is released when the owning process
@@ -1703,8 +1523,8 @@ do not discard its balance observations merely because `transaction_success`
 is false. This addition does not provide a canonical view of reversible events.
 
 Start a fresh output root and replay when adopting these schemas. Old files lack
-the context; a missing column is not `false`. Strict maintenance and protected
-output bindings refuse mixed old/new schemas. An explicit conversion must write
+the context; a missing column is not `false`. Protected output bindings refuse
+mixed old/new schemas. An explicit conversion must write
 a separate dataset and preserve unknown historical context. See the
 [source evidence, migration and offline comparison](docs/audit/550-solana-execution-context.md).
 
@@ -1777,8 +1597,7 @@ order or remove replay duplicates.
 Older files lack both new columns. Readers that union schemas by name can read
 them as null, but nulls alone cannot distinguish old inner rows from top-level
 rows. Check `is_inner` and rebuild old ranges into a separate output root before
-depending on these fields. The existing strict-schema maintenance commands
-refuse to merge or roll up mixed old/new instruction schemas.
+depending on these fields.
 
 ## Solana Reward Indices
 
@@ -1983,7 +1802,7 @@ WHERE key LIKE 'firehose-parquet.%';
 
 ## Parquet Lookup Metadata
 
-Ingestion and merge write bounded Bloom filters for selected scalar
+Ingestion writes bounded Bloom filters for selected scalar
 hash, signature and account/address columns. Readers that support these filters
 can skip row groups for equality lookups; positive matches still require row
 filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
@@ -1993,8 +1812,8 @@ The retained-data benchmark measured 0.74–1.92% larger files and faster missin
 lookups; readers without Bloom pruning may only see the storage overhead.
 
 Complete ingestion parts declare ascending `block_num` only when every observed
-height proves that order. Streaming maintenance omits that assertion. Neither
-path sorts or reconstructs reversible-chain history.
+height proves that order. Ingestion neither sorts nor reconstructs
+reversible-chain history.
 
 Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
 `zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default
@@ -2043,9 +1862,7 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 <root>/
 ├── .fireparq-ingest/          # authoritative checkpoint and transaction journal (do not edit)
 ├── _fireparq/                 # fireparq's artifacts, never table data
-│   ├── cursor.parquet         # optional mirror of the checkpoint (absent with --cursor none)
-│   ├── merkle_roots.parquet   # written by `verify`
-│   └── verify_runs/<run_id>/report.json
+│   └── cursor.parquet         # optional mirror of the checkpoint (absent with --cursor none)
 ├── blocks/
 │   ├── date=2026-02-25/
 │   │   ├── part-v1-<stream>-<first>-<last>-<txn>-<index>.parquet
@@ -2060,7 +1877,6 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 
 `build` names each part deterministically from its stream, the first and last
 accepted event of its transaction, the transaction ID and the part index.
-`merge` writes its own part names.
 
 The dataset root holds only the table directories, `_fireparq/` and
 dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
@@ -2068,12 +1884,9 @@ dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
 Trino, Hive and Delta skip paths that start with `_` or `.`, so a table
 location or a dataset-wide read never picks up fireparq's files; DuckDB does
 not skip them, so glob per table (`<root>/<table>/**/*.parquet`), as below.
-Releases before v1.0.0 wrote `cursor.parquet`, `merkle_roots.parquet` and
-`verify_runs/` at the dataset root. Those names stay reserved; `verify` refuses
-to create a new `_fireparq/` registry beside a legacy one, and a dataset whose
-mirror was bound at the old default keeps `--cursor cursor.parquet`. Move the
-other files into `_fireparq/` (see the
-[runbook](docs/verifiability-artifact-runbook.md#moving-artifacts-into-_fireparq)).
+Releases before v1.0.0 wrote `cursor.parquet` at the dataset root. That name
+stays reserved, and a dataset whose mirror was bound at the old default keeps
+`--cursor cursor.parquet`.
 
 Every table is partitioned by UTC day: `build` writes
 `<table>/date=YYYY-MM-DD/part-*.parquet`, and there is no other layout. The
@@ -2198,8 +2011,6 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
 ```
 
 - Other commands take the root or its tables directly:
-  `verify s3://<bucket>/blocks` (registry at
-  `s3://<bucket>/_fireparq/merkle_roots.parquet`), `merge s3://<bucket>`,
   `recovery status s3://<bucket>`, and `scan` / `validate` / `inspect` on
   `s3://<bucket>/<table>/...`. They skip `_fireparq/` and the bucket's owner
   records.
@@ -2311,8 +2122,7 @@ be missing or differ from canonical values. No removal is scheduled. Existing
 action JSON, nulls and enum labels remain unchanged.
 
 Use a new dataset or rebuild older ranges to populate the added columns. Schema
-union makes them null in old files; strict merge requires explicit schema
-reconciliation. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
+union makes them null in old files. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
 
 ## NEAR: Transactions, Receipts, Actions and Logs
 
@@ -2474,9 +2284,8 @@ in the directory you run `fireparq` from. Since #617:
   exactly that file instead; it must exist, and `./.env` is then ignored.
 - Process environment variables and CLI flags win over the file.
 - Startup names the loaded file and the variables it supplied, never their
-  values: an INFO `loaded env file` log line for `build`, `merge`, `truncate`
-  and `verify`, and one stderr line for other
-  commands. A malformed file is an error that never echoes the offending line.
+  values: an INFO `loaded env file` log line for `build`, and one stderr line
+  for other commands. A malformed file is an error that never echoes the offending line.
 
 ```bash
 # Authentication — use credentials scoped to the destination provider
@@ -2555,7 +2364,7 @@ use firehose_parquet::cli::{build_config, init_tracing, Commands};
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>, // Build(BuildArgs), Scan, Verify, Recovery, ...
+    command: Option<Commands>, // Build(BuildArgs), Scan, Validate, Recovery, ...
 
     #[command(flatten)]
     global: GlobalArgs, // --log-level, --verbose, --env-file
@@ -2609,12 +2418,9 @@ firehose-parquet/
 │       ├── dataset_lock/, dataset_lock_s3.rs  # local directory and bucket-wide S3 ownership
 │       ├── durable_state.rs, durable_state_s3.rs  # versioned control records
 │       ├── recovery.rs                     # `fireparq recovery`
-│       ├── merge.rs, merge/, merge_journal.rs  # crash-safe merge engine and journals
-│       ├── truncate.rs                     # `fireparq truncate`
-│       ├── maintenance/                    # shared compaction and discovery for maintenance commands
-│       ├── verify.rs, verify/              # `fireparq verify` and the merkle_v2 row encoding
+│       ├── maintenance/                    # shared read-only discovery (scan, validate, startup checks)
 │       ├── grpc.rs, grpc/                  # Firehose stream client, auth, reconnects
-│       ├── s3.rs, s3/                      # AWS config, bounded uploads, S3 deletes
+│       ├── s3.rs, s3/                      # AWS config, bounded uploads
 │       ├── auth.rs                         # provider-scoped credential selection
 │       ├── networks.rs, networks_generated.rs  # built-in --network names (generated)
 │       ├── config.rs, flush.rs, cursor.rs  # config model, flush sizing, cursor Parquet format

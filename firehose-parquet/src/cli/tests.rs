@@ -710,7 +710,7 @@ fn test_flush_bytes_zero_means_disabled() {
 fn test_flush_rows_and_interval_zero_mean_disabled() {
     // `--flush-rows 0` / `--flush-interval-secs 0` used to flush after every
     // block (`rows >= 0`, `elapsed >= 0`); zero now disables them like
-    // `--flush-bytes 0` and merge `--flush-rows 0`.
+    // `--flush-bytes 0`.
     let cli = parse(&[
         "test-cli",
         "--endpoint",
@@ -881,32 +881,21 @@ fn test_build_help_clarifies_flush_semantics() {
 }
 
 #[test]
-fn test_merge_help_aligns_flush_controls_with_build() {
-    let cmd = TestCli::command();
-    let build = cmd
+fn test_build_help_shows_the_default_flush_target() {
+    let build = TestCli::command()
         .get_subcommands()
         .find(|subcmd| subcmd.get_name() == "build")
-        .expect("build subcommand should exist");
-    let merge = cmd
-        .get_subcommands()
-        .find(|subcmd| subcmd.get_name() == "merge")
-        .expect("merge subcommand should exist");
+        .expect("build subcommand should exist")
+        .clone()
+        .render_long_help()
+        .to_string();
 
-    let build_help = build.clone().render_long_help().to_string();
-    let merge_help = merge.clone().render_long_help().to_string();
-    let default_flush_bytes = DEFAULT_FLUSH_BYTES.to_string();
-
-    assert!(build_help.contains(&default_flush_bytes));
-    assert!(merge_help.contains(&default_flush_bytes));
+    assert!(build.contains(&DEFAULT_FLUSH_BYTES.to_string()));
     assert_eq!(Config::default().flush_bytes, DEFAULT_FLUSH_BYTES);
     assert_eq!(
         Config::default().flush_memory_bytes,
         DEFAULT_FLUSH_MEMORY_BYTES
     );
-    assert!(merge_help.contains("Flush:"));
-    assert!(merge_help.contains("--flush-rows"));
-    assert!(merge_help.contains("--flush-bytes"));
-    assert!(!merge_help.contains("--flush-blocks"));
 }
 
 #[test]
@@ -1221,26 +1210,9 @@ fn test_resolve_parquet_input_path_normalizes_redundant_current_dir_segments() {
     );
 }
 
-fn test_verify_options() -> crate::verify::VerifyOptions {
-    crate::verify::VerifyOptions {
-        chain: None,
-        table: None,
-        hash_strategy: Some("auto".to_string()),
-        checks: vec![],
-        profile: crate::verify::VerifyProfile::Standard,
-        scope: crate::verify::VerifyScope::Table,
-        no_fail_fast: false,
-        report_json: None,
-        publish_report: false,
-        publish_report_path: None,
-        registry_path: None,
-        update_registry: false,
-    }
-}
-
 #[test]
 #[serial]
-fn test_updated_commands_fall_back_to_configured_s3_bucket_for_missing_relative_paths() {
+fn test_validate_falls_back_to_configured_s3_bucket_for_missing_relative_paths() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
@@ -1259,132 +1231,17 @@ fn test_updated_commands_fall_back_to_configured_s3_bucket_for_missing_relative_
     assert!(validate_err
         .to_string()
         .contains("AWS config required for S3 paths"));
-
-    // Read-only protocol verification keeps the shorthand.
-    let protocol_only = crate::verify::VerifyOptions {
-        checks: vec![crate::verify::VerifyCheck::Protocol],
-        ..test_verify_options()
-    };
-    let verify_err = match crate::verify::verify_parquet("./mainnet/blocks/", None, &protocol_only)
-    {
-        Ok(_) => panic!("verify should resolve to S3 without a local path"),
-        Err(err) => err,
-    };
-    assert!(verify_err
-        .to_string()
-        .contains("AWS config required for S3 paths"));
-
-    // Runs that write roots or reports (and take dataset ownership) refuse a
-    // destination that only the S3_BUCKET shorthand selected (#617).
-    for opts in [
-        test_verify_options(),
-        crate::verify::VerifyOptions {
-            checks: vec![crate::verify::VerifyCheck::Protocol],
-            publish_report: true,
-            ..test_verify_options()
-        },
-        crate::verify::VerifyOptions {
-            checks: vec![crate::verify::VerifyCheck::Protocol],
-            report_json: Some(PathBuf::from("report.json")),
-            ..test_verify_options()
-        },
-    ] {
-        let message = crate::verify::verify_parquet("./mainnet/blocks/", None, &opts)
-            .expect_err("implicit S3 writes must be refused")
-            .to_string();
-        assert!(
-            message.contains("read-only S3_BUCKET shorthand"),
-            "{message}"
-        );
-        assert!(
-            message.contains("s3://configured-bucket/mainnet/blocks"),
-            "{message}"
-        );
-    }
-}
-
-/// Commands that delete or rewrite files must not turn a missing (for example mistyped)
-/// local path into `s3://$S3_BUCKET/<path>`.
-#[test]
-#[serial]
-fn test_destructive_commands_do_not_fall_back_to_configured_s3_bucket() {
-    let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let _cwd = CurrentDirGuard::set(dir.path());
-    let assert_refused = |command: &str, err: anyhow::Error| {
-        let message = err.to_string();
-        assert!(
-            message.contains("path does not exist: ./mainnet/blocks/"),
-            "{command}: {message}"
-        );
-        assert!(
-            message.contains("do not fall back to S3_BUCKET"),
-            "{command}: {message}"
-        );
-        assert!(
-            message.contains("s3://configured-bucket/mainnet/blocks"),
-            "{command}: {message}"
-        );
-    };
-
-    let truncate_err = crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
-        path: "./mainnet/blocks/".to_string(),
-        partitions: vec![],
-        dry_run: false,
-        yes: true,
-        aws: None,
-    })
-    .map(|_| ())
-    .expect_err("truncate must not resolve to S3");
-    assert_refused("truncate", truncate_err);
-
-    let merge_err = crate::merge::run_merge(&crate::merge::MergeConfig {
-        path: "./mainnet/blocks/".to_string(),
-        compression: crate::config::Compression::Zstd,
-        flush_rows: None,
-        flush_bytes: 1024,
-        dry_run: false,
-        verbose: false,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .map(|_| ())
-    .expect_err("merge must not resolve to S3");
-    assert_refused("merge", merge_err);
 }
 
 #[test]
 #[serial]
-fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket() {
+fn test_validate_prefers_existing_local_paths_over_configured_s3_bucket() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
     let blocks_dir = dir.path().join("mainnet").join("blocks");
     std::fs::create_dir_all(&blocks_dir).expect("create blocks dir");
-
-    let truncate_result = crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
-        path: "./mainnet/blocks/".to_string(),
-        partitions: vec![],
-        dry_run: true,
-        yes: false,
-        aws: None,
-    })
-    .expect("truncate should stay local when the directory exists");
-    assert_eq!(truncate_result.files_deleted, 0);
-
-    let merge_result = crate::merge::run_merge(&crate::merge::MergeConfig {
-        path: "./mainnet/blocks/".to_string(),
-        compression: crate::config::Compression::Zstd,
-        flush_rows: None,
-        flush_bytes: 1024,
-        dry_run: true,
-        verbose: false,
-        aws: None,
-        cache_control: String::new(),
-    })
-    .expect("merge should stay local when the directory exists");
-    assert_eq!(merge_result.files_read, 0);
 
     let validate_result = validate_parquet(
         "./mainnet/blocks/",
@@ -1396,15 +1253,6 @@ fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket()
     )
     .expect("validate should stay local when the directory exists");
     assert_eq!(validate_result.files_scanned, 0);
-
-    let verify_err =
-        match crate::verify::verify_parquet("./mainnet/blocks/", None, &test_verify_options()) {
-            Ok(_) => panic!("verify should stay local and report no parquet files"),
-            Err(err) => err,
-        };
-    let verify_message = verify_err.to_string();
-    assert!(verify_message.contains("no parquet files found in"));
-    assert!(!verify_message.contains("AWS config required for S3 paths"));
 }
 
 /// `rollup` is removed (#652): with one `date` partition key there is no
@@ -1429,27 +1277,23 @@ fn partitions_subcommands_are_removed() {
     assert!(TestCli::command().find_subcommand("partitions").is_none());
 }
 
+/// `merge`, `truncate` and `verify` are removed with no compatibility path
+/// (#643): the Delta maintenance CronJob compacts, a bad dataset is rebuilt
+/// into a new root, and `verify` returns over Delta snapshots in #666.
 #[test]
-fn test_merge_subcommand_flush_rows_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "merge",
-        "./output/blocks/",
-        "--flush-rows",
-        "1000",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Merge {
-            path,
-            flush_rows,
-            flush_bytes,
-            ..
-        } => {
-            assert_eq!(path, "./output/blocks/");
-            assert_eq!(flush_rows, Some(1000));
-            assert_eq!(flush_bytes, DEFAULT_FLUSH_BYTES);
-        }
-        _ => panic!("expected merge subcommand"),
+fn merge_truncate_and_verify_are_removed() {
+    for subcommand in ["merge", "truncate", "verify"] {
+        let error = try_parse(&["test-cli", subcommand, "./output/blocks/"])
+            .expect_err("removed command must be rejected");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "{subcommand}"
+        );
+        assert!(
+            TestCli::command().find_subcommand(subcommand).is_none(),
+            "{subcommand}"
+        );
     }
 }
 
@@ -2455,9 +2299,9 @@ fn test_scan_s3_display_key_keeps_exact_object_key() {
 }
 
 /// Read-only commands on a dataset written with `--output s3://<bucket>` to a
-/// bucket root: the registry is an exact object in `_fireparq/`, a table is a
-/// prefix directly below the bucket, and a scan of the whole bucket reads only
-/// table data.
+/// bucket root: the cursor mirror is an exact object in `_fireparq/`, a table
+/// is a prefix directly below the bucket, and a scan of the whole bucket reads
+/// only table data.
 #[test]
 fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     use bytes::Bytes;
@@ -2468,10 +2312,9 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     let store = InMemory::new();
     for key in [
         "_fireparq/cursor.parquet",
-        "_fireparq/merkle_roots.parquet",
-        "_fireparq/verify_runs/run-1/roots.parquet",
-        // Legacy root artifacts of a release before v1.0.0.
-        "merkle_roots.parquet",
+        "_fireparq/other.parquet",
+        "_fireparq/nested/other.parquet",
+        // A mirror kept at the dataset root with `--cursor cursor.parquet`.
         "cursor.parquet",
         "blocks/date=2023-11-14/part-v1-a.parquet",
         "blocks-archive/part-v1-b.parquet",
@@ -2487,18 +2330,18 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     }
     let (objects, exact) = block_on_async(collect_scan_s3_parquet_objects(
         &store,
-        "_fireparq/merkle_roots.parquet",
+        "_fireparq/cursor.parquet",
     ))
-    .expect("collect registry");
+    .expect("collect mirror");
     assert!(exact);
     assert_eq!(objects.len(), 1);
     assert_eq!(
         scan_s3_display_key(
             objects[0].location.as_ref(),
-            "_fireparq/merkle_roots.parquet",
+            "_fireparq/cursor.parquet",
             exact
         ),
-        "_fireparq/merkle_roots.parquet"
+        "_fireparq/cursor.parquet"
     );
     let (objects, exact) =
         block_on_async(collect_scan_s3_parquet_objects(&store, "blocks")).expect("collect table");
@@ -2530,25 +2373,24 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         keys("_fireparq"),
         [
             "_fireparq/cursor.parquet",
-            "_fireparq/merkle_roots.parquet",
-            "_fireparq/verify_runs/run-1/roots.parquet",
+            "_fireparq/nested/other.parquet",
+            "_fireparq/other.parquet",
         ]
     );
 }
 
-/// A local directory scan or validate skips `_fireparq/`, the legacy root
-/// artifacts and control state below it, unless the scanned directory is
+/// A local directory scan or validate skips `_fireparq/`, a root cursor
+/// mirror and control state below it, unless the scanned directory is
 /// `_fireparq/` itself.
 #[test]
 fn test_local_directory_walks_skip_dataset_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("mainnet");
     let files = [
-        "_fireparq/merkle_roots.parquet",
+        "_fireparq/other.parquet",
         "_fireparq/cursor.parquet",
-        "_fireparq/verify_runs/run-1/roots.parquet",
+        "_fireparq/nested/other.parquet",
         "cursor.parquet",
-        "merkle_roots.parquet",
         ".fireparq-ingest/hidden.parquet",
         "blocks/date=2024-01-14/part-v1-a.parquet",
     ];
@@ -2559,12 +2401,7 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
     }
     let walk = |dir: &std::path::Path| {
         let mut found = Vec::new();
-        crate::maintenance::discovery::collect_local(
-            dir,
-            crate::maintenance::discovery::LocalPolicy::PARQUET,
-            &mut found,
-        )
-        .unwrap();
+        crate::maintenance::discovery::collect_local(dir, &mut found).unwrap();
         super::inspect::retain_table_files_local(dir, &mut found);
         let mut found: Vec<String> = found
             .iter()
@@ -2581,17 +2418,12 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
     assert_eq!(walk(&root), ["blocks/date=2024-01-14/part-v1-a.parquet"]);
     assert_eq!(
         walk(&root.join("_fireparq")),
-        [
-            "cursor.parquet",
-            "merkle_roots.parquet",
-            "verify_runs/run-1/roots.parquet"
-        ]
+        ["cursor.parquet", "nested/other.parquet", "other.parquet"]
     );
 }
 
 /// Without a placeholder, `--output` is the dataset root byte for byte: no
-/// `<chain_name>` directory is appended, locally or on S3. The artifacts sit
-/// below the same root.
+/// `<chain_name>` directory is appended, locally or on S3.
 #[test]
 fn test_output_root_default_is_byte_identical_to_output() {
     for output in [
@@ -2609,24 +2441,10 @@ fn test_output_root_default_is_byte_identical_to_output() {
     ] {
         let root = resolve_output_root(output, "mainnet").unwrap();
         assert_eq!(root, output, "{output}");
-        assert_eq!(
-            crate::artifacts::DatasetArtifact::CursorMirror.path_in(&root),
-            crate::artifacts::DatasetArtifact::CursorMirror.path_in(output)
-        );
         // The chain name is not needed by the template, so any nonempty
         // EndpointInfo name leaves the root unchanged.
         assert_eq!(resolve_output_root(output, "a/b c").unwrap(), output);
     }
-    assert_eq!(
-        crate::artifacts::DatasetArtifact::MerkleRoots
-            .path_in(&resolve_output_root("./output", "mainnet").unwrap()),
-        "./output/_fireparq/merkle_roots.parquet"
-    );
-    assert_eq!(
-        crate::artifacts::DatasetArtifact::CursorMirror
-            .path_in(&resolve_output_root("s3://bucket", "mainnet").unwrap()),
-        "s3://bucket/_fireparq/cursor.parquet"
-    );
 }
 
 /// `s3://bucket/` and `s3://bucket` are the same bucket root, and a trailing
@@ -2642,11 +2460,6 @@ fn test_output_root_normalizes_s3_trailing_slashes() {
     ] {
         assert_eq!(resolve_output_root(output, "mainnet").unwrap(), root);
     }
-    assert_eq!(
-        crate::artifacts::DatasetArtifact::MerkleRoots
-            .path_in(&resolve_output_root("s3://ethereum-mainnet/", "mainnet").unwrap()),
-        "s3://ethereum-mainnet/_fireparq/merkle_roots.parquet"
-    );
 }
 
 /// `{chain}` expands to the EndpointInfo chain name in any position of a local
@@ -2679,11 +2492,6 @@ fn test_output_root_expands_the_chain_placeholder() {
     assert_eq!(
         resolve_output_root("s3://datasets/{chain}", "solana-mainnet-beta").unwrap(),
         "s3://datasets/solana-mainnet-beta"
-    );
-    assert_eq!(
-        crate::artifacts::DatasetArtifact::MerkleRoots
-            .path_in(&resolve_output_root("s3://datasets/{chain}", "mainnet").unwrap()),
-        "s3://datasets/mainnet/_fireparq/merkle_roots.parquet"
     );
 }
 

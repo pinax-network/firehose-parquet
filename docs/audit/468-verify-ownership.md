@@ -1,5 +1,7 @@
 # Common ownership for verification artifacts
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `verify` is removed for the launch; #666 brings it back over Delta snapshots. This record is kept as history.
+
 > **Superseded.** `verify` no longer acquires dataset ownership or recovers
 > protected transactions and merge journals. Holding exclusive ownership made
 > roots unverifiable while `build` ran, and recovery deleted files behind a

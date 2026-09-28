@@ -1,5 +1,7 @@
 # Rollup crash safety, copy ownership and value metadata (validation follow-ups)
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `rollup` was removed by #652 and `merge` by #643 L5a. This record is kept as history.
+
 Refs #478, #479, #480, #522; part of #463. Validation of `9372f99` reproduced three
 maintenance defects end to end (evidence retained outside the repository). A fourth
 turned up while preserving behavior for #529. All four are fixed on top of the #529

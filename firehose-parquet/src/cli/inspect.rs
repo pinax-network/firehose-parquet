@@ -130,11 +130,7 @@ pub(in crate::cli) fn collect_scan_parquet_local(
         files.push(path.to_path_buf());
         true
     } else if path.is_dir() {
-        crate::maintenance::discovery::collect_local(
-            path,
-            crate::maintenance::discovery::LocalPolicy::PARQUET,
-            &mut files,
-        )?;
+        crate::maintenance::discovery::collect_local(path, &mut files)?;
         retain_table_files_local(path, &mut files);
         files.sort();
         false

@@ -1,5 +1,7 @@
 # Protected maintenance and recovery
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `merge` and `truncate` are removed; the protected-root discovery and recovery that `recovery recover` runs remain. This record is kept as history.
+
 This change integrates maintenance with the staged ingestion transaction
 implementation. It does not enable protected ingestion or adopt legacy data.
 Issue #468 remains outstanding until the complete session, caller, restart and

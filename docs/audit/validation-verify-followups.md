@@ -1,5 +1,7 @@
 # Verify follow-ups from the maintenance validation pass
 
+> Superseded by [#643 L5a](643-l5a-removals.md): `verify`, its registry and its reports are removed for the launch; #666 brings `verify` back over Delta snapshots. This record is kept as history.
+
 A validation pass at main `9372f99` reproduced five gaps in `fireparq verify`
 after the #487–#490 root work, the #521 streaming rewrite and the #591
 ownership stage. This record covers the diagnosis, the selected behavior, the

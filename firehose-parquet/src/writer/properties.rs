@@ -1,7 +1,6 @@
-//! Bounded lookup metadata shared by ingestion and maintenance output.
+//! Bounded lookup metadata of ingestion output.
 //!
-//! Sorting declarations require a complete per-file proof. Streaming callers
-//! use `for_schema`, which deliberately makes no ordering assertion.
+//! Sorting declarations require a complete per-file proof ([`for_batch`]).
 
 use crate::config::Compression;
 use anyhow::{Context, Result};
@@ -91,15 +90,6 @@ fn builder(
             .set_column_bloom_filter_max_ndv(path, ROW_GROUP_ROWS as u64);
     }
     properties
-}
-
-/// Properties for streaming output: future batches may reverse block order.
-pub fn for_schema(
-    compression: Compression,
-    schema: &Schema,
-    metadata: Option<Vec<KeyValue>>,
-) -> WriterProperties {
-    builder(compression, schema, metadata).build()
 }
 
 /// Properties for a complete output part. Null or decreasing block heights omit

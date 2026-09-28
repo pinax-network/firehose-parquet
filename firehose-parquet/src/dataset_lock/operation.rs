@@ -173,15 +173,14 @@ impl DatasetOwnership {
 
     /// Protected CLI ingestion may stream large authenticated S3 parts. The
     /// output owner and its signer are constructed from the same native client.
-    /// Ordinary maintenance and external cursor buckets retain existing policy.
+    /// `recovery` and external cursor buckets retain existing policy.
     ///
     /// Unlike [`DatasetOwnership::acquire`], this does not walk the local
     /// mutation tree for nested symlinks, so a local `build` start does not
     /// read every directory of its dataset (#655). `build` refuses a symlink on
     /// each path it touches instead, component by component: part staging and
     /// publication, transaction recovery, the control records and the mirror.
-    /// A new root must be empty, and merge-journal recovery walks the tree
-    /// with its own symlink check.
+    /// A new root must be empty.
     pub async fn acquire_for_ingestion(
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
@@ -193,16 +192,6 @@ impl DatasetOwnership {
             None
         };
         Self::acquire_inner("build", scopes, aws, bucket.as_deref(), TreeCheck::Paths).await
-    }
-
-    /// The nested-symlink check [`DatasetOwnership::acquire`] runs, for a
-    /// command that acquired without it and is about to walk its tree.
-    /// Returns the number of directories read.
-    pub(crate) fn validate_local_trees(&self) -> Result<u64> {
-        match &self.local {
-            Some(local) => validate_local_mutation_trees(local),
-            None => Ok(0),
-        }
     }
 
     async fn acquire_inner(
@@ -394,13 +383,6 @@ impl DatasetOwnership {
         }
     }
 
-    pub fn release_blocking(self) -> Result<()> {
-        if self.remote.is_empty() {
-            return Ok(());
-        }
-        block_storage(self.release())
-    }
-
     async fn release_remote(&mut self) -> Result<()> {
         while let Some((_, owner)) = self.remote.pop_last() {
             owner.release().await.context(
@@ -423,15 +405,12 @@ enum TreeCheck {
 /// Explicit scope aliases have already been canonicalized and locked. Nested
 /// aliases would escape that graph, so fail before any command data mutation.
 /// This directory-only walk does not read data file contents.
-/// Returns the number of directories read.
-fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<u64> {
+fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<()> {
     let mut pending = ownership.roots().to_vec();
-    let mut reads = 0;
     while let Some(directory) = pending.pop() {
         if !directory.exists() {
             continue;
         }
-        reads += 1;
         for entry in
             std::fs::read_dir(&directory).context("inspecting a guarded local mutation tree")?
         {
@@ -447,7 +426,7 @@ fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<u64> {
             }
         }
     }
-    Ok(reads)
+    Ok(())
 }
 
 /// This sync bridge never panics in a current-thread runtime. Async callers can
@@ -495,7 +474,7 @@ mod tests {
         std::fs::create_dir_all(output.join("state")).unwrap();
         ownership.revalidate_local_paths().unwrap();
         assert!(LocalOwnership::acquire(&[output]).is_err());
-        ownership.release_blocking().unwrap();
+        futures::executor::block_on(ownership.release()).unwrap();
     }
 
     #[test]
@@ -542,7 +521,7 @@ mod tests {
             None,
         )
         .unwrap();
-        ownership.release_blocking().unwrap();
+        futures::executor::block_on(ownership.release()).unwrap();
     }
 
     #[test]

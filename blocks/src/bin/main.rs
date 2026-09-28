@@ -58,7 +58,7 @@ const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
     after_long_help = "\
 Primary workflow:
   Use `fireparq build` to run the ingestion pipeline.
-  Utility workflows live under subcommands such as `scan`, `inspect`, `validate`, and `verify`.
+  Utility workflows live under subcommands such as `scan`, `inspect`, `validate`, and `recovery`.
 
 Examples:
   # Run a bounded historical ingestion
@@ -1439,13 +1439,7 @@ fn resolve_extended_mode(
 fn env_file_notice_on_stderr(command: Option<&Commands>) -> bool {
     !matches!(
         command,
-        Some(
-            Commands::Build(_)
-                | Commands::Verify { .. }
-                | Commands::Merge { .. }
-                | Commands::Truncate { .. }
-                | Commands::Completions { .. }
-        )
+        Some(Commands::Build(_) | Commands::Completions { .. })
     )
 }
 
@@ -1524,98 +1518,6 @@ async fn main() -> Result<()> {
                 if !result.is_valid() {
                     std::process::exit(1);
                 }
-                return Ok(());
-            }
-            Commands::Verify {
-                path,
-                chain,
-                table,
-                hash_strategy,
-                checks,
-                profile,
-                scope,
-                no_fail_fast,
-                report_json,
-                publish_report,
-                publish_report_path,
-                registry_path,
-                update_registry,
-                aws,
-            } => {
-                init_tracing(&cli.global.log_level, cli.global.verbose);
-                let aws = AwsConfig::from(aws);
-                let opts = firehose_parquet::verify::VerifyOptions {
-                    chain: chain.clone(),
-                    table: table.clone(),
-                    hash_strategy: Some(hash_strategy.clone()),
-                    checks: checks.clone(),
-                    profile: *profile,
-                    scope: *scope,
-                    no_fail_fast: *no_fail_fast,
-                    report_json: report_json.clone(),
-                    publish_report: *publish_report,
-                    publish_report_path: publish_report_path.clone(),
-                    registry_path: registry_path.clone(),
-                    update_registry: *update_registry,
-                };
-                let report = firehose_parquet::verify::verify_parquet(path, Some(&aws), &opts)?;
-                report.print();
-                if !report.is_valid() {
-                    std::process::exit(1);
-                }
-                return Ok(());
-            }
-            Commands::Merge {
-                path,
-                compression,
-                flush_rows,
-                flush_bytes,
-                dry_run,
-                aws,
-                cache_control,
-            } => {
-                init_tracing(&cli.global.log_level, cli.global.verbose);
-                let compression = firehose_parquet::cli::parse_compression(compression)?;
-                let aws = Some(AwsConfig::from(aws));
-                let merge_config = firehose_parquet::merge::MergeConfig {
-                    path: path.clone(),
-                    compression,
-                    flush_rows: *flush_rows,
-                    flush_bytes: *flush_bytes,
-                    dry_run: *dry_run,
-                    verbose: cli.global.verbose,
-                    aws,
-                    cache_control: cache_control.clone(),
-                };
-                let result = firehose_parquet::merge::run_merge(&merge_config)?;
-                result.print();
-                if !result.schema_mismatches.is_empty() {
-                    anyhow::bail!(
-                        "{} partition(s) were not merged because their parts have different \
-                         schemas; nothing was written or deleted in them",
-                        result.schema_mismatches.len()
-                    );
-                }
-                return Ok(());
-            }
-            Commands::Truncate {
-                path,
-                partition,
-                dry_run,
-                yes,
-                aws,
-            } => {
-                init_tracing(&cli.global.log_level, cli.global.verbose);
-                let aws = Some(AwsConfig::from(aws));
-                let truncate_config = firehose_parquet::truncate::TruncateConfig {
-                    path: path.clone(),
-                    partitions: partition.clone(),
-                    dry_run: *dry_run,
-                    yes: *yes,
-                    aws,
-                };
-                let result = firehose_parquet::truncate::run_truncate(&truncate_config)?;
-                result.print(path, *dry_run);
                 return Ok(());
             }
         }
@@ -2222,8 +2124,8 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_help_mentions_shared_verbose_flag() {
-        let help = command_help(&["fireparq", "merge", "--help"]);
+    fn test_build_help_mentions_shared_verbose_flag() {
+        let help = command_help(&["fireparq", "build", "--help"]);
         assert!(help.contains("--verbose"));
         assert!(help.contains("verbose operational logs"));
     }
@@ -2900,6 +2802,30 @@ mod tests {
         assert!(!command_help(&["fireparq", "--help"]).contains("partitions"));
     }
 
+    /// `merge`, `truncate` and `verify` are removed with no compatibility path
+    /// (#643): the Delta maintenance CronJob compacts, a bad dataset is rebuilt
+    /// into a new root, and `verify` returns over Delta snapshots in #666.
+    #[test]
+    fn test_merge_truncate_and_verify_are_removed() {
+        for subcommand in ["merge", "truncate", "verify"] {
+            let err = Cli::try_parse_from(["fireparq", subcommand, "./output"])
+                .expect_err("removed command must be rejected");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{subcommand}"
+            );
+            assert!(
+                Cli::command().find_subcommand(subcommand).is_none(),
+                "{subcommand}"
+            );
+        }
+        let root = Cli::command().render_long_help().to_string();
+        for removed in ["merge", "truncate", "verify", "merkle"] {
+            assert!(!root.contains(removed), "{removed}: {root}");
+        }
+    }
+
     #[test]
     fn test_utility_subcommand_help_uses_grouped_headings() {
         for (name, headings, snippets) in [
@@ -2938,58 +2864,6 @@ mod tests {
                     "--schema-only",
                     "--json",
                     "--aws-region",
-                    "--log-level",
-                ],
-            ),
-            (
-                "truncate",
-                vec![
-                    "Selection:",
-                    "Execution:",
-                    "AWS / S3:",
-                    "Runtime / Logging:",
-                ],
-                vec![
-                    "<PATH>",
-                    "--partition",
-                    "--dry-run",
-                    "--yes",
-                    "--aws-region",
-                    "--log-level",
-                ],
-            ),
-            (
-                "merge",
-                vec![
-                    "Selection:",
-                    "Output:",
-                    "Execution:",
-                    "AWS / S3:",
-                    "Runtime / Logging:",
-                ],
-                vec![
-                    "<PATH>",
-                    "--compression",
-                    "--dry-run",
-                    "--cache-control",
-                    "--log-level",
-                ],
-            ),
-            (
-                "verify",
-                vec![
-                    "Selection:",
-                    "Verification:",
-                    "Reporting:",
-                    "Registry:",
-                    "AWS / S3:",
-                    "Runtime / Logging:",
-                ],
-                vec![
-                    "<PATH>",
-                    "--chain",
-                    "--report-json",
-                    "--registry-path",
                     "--log-level",
                 ],
             ),
