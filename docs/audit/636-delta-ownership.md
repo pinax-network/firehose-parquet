@@ -1,6 +1,6 @@
 # Ownership beside Delta maintenance (#636)
 
-Closes #636; refs #643 (lane L4), #468, #591; part of #463. PR: pending.
+Closes #636; refs #643 (lane L4), #468, #591; part of #463. PR: [#675](https://github.com/pinax-network/firehose-parquet/pull/675).
 Design: [`docs/design/delta-lake.md`](../design/delta-lake.md) §5. The
 recovery work is in [the L4 record](643-l4-delta-recovery.md).
 

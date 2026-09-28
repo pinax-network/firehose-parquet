@@ -1,6 +1,6 @@
 # Delta recovery and ownership (#643, lane L4)
 
-Refs #643; closes #636; part of #463. PR: pending. Design:
+Refs #643; closes #636; part of #463. PR: [#675](https://github.com/pinax-network/firehose-parquet/pull/675). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §3.5, §4, §4.1, §5
 and the L4 row of §11. Ownership: [the #636 record](636-delta-ownership.md).
 Index: the #643 rows of the [audit index](README.md).
