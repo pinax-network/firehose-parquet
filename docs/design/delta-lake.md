@@ -4,9 +4,15 @@ Status: design of 2026-09-27, implemented lane by lane (§11): since L3 every
 `build` writes Delta tables, since L4 recovery rolls an interrupted
 transaction forward into them, and since L5b/L7 nothing writes a table
 file outside the protected transaction or reads a table other than
-through its log. The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
-runs in CI as the `delta-spike` job. Refs #643, #636, #653, #655, #658, #659;
-part of #463.
+through its log.
+Since L8 CI reads every table with DuckDB 1.5.5 and Polars through the log,
+and L9 added the maintenance job (`scripts/delta_maintenance.py`) with its CI
+test beside a real `build`
+([record](../audit/643-l8-l9-engines-maintenance.md)). The spike crate
+(`spikes/delta-lake/`) and its `delta-spike` CI job were removed in L8/L9
+once those tests covered it (§1.11); its files are in git history at
+`d79ce49`, and the paths below that name it refer to that commit. Refs #643,
+#636, #653, #655, #658, #659; part of #463.
 
 ## Decisions this design follows (2026-09-27)
 
@@ -38,7 +44,7 @@ part of #463.
 | Pre-written parts | **Committed as-is.** fireparq keeps writing its deterministic `part-v1-*` files with Parquet 60 and commits them with `add` actions. The bytes are unchanged (measured). fireparq computes `add.stats` itself, because delta-rs keeps its footer-to-stats helper private. |
 | Exactly-once | One Delta commit per table with `txn {appId: fireparq:<descriptor hash>, version: last accepted ordinal}`. Recovery rolls each table forward only when its `txn` version is below the transaction's. A stale or duplicate commit with the same `appId` fails with `ConcurrentTransaction` instead of adding a second copy (measured). |
 | Concurrency | `deltalake` OPTIMIZE, lite VACUUM, checkpoints and log cleanup ran beside the writer on the very partition being appended, on local disk and loopback S3: 0 writer failures, 0 maintenance conflicts, exact rows (measured). |
-| Readers | DuckDB 1.1.1 (delta v0.2.1), DuckDB 1.5.5 (delta `45c4087`) and Polars 1.44.2 (deltalake 1.6.6) read every mapped type exactly, including after OPTIMIZE, VACUUM and checkpoints. Anonymous S3 works with DuckDB 1.5.5 and Polars. **Proposal: move the CI DuckDB pin to 1.5.5.** |
+| Readers | DuckDB 1.1.1 (delta v0.2.1), DuckDB 1.5.5 (delta `45c4087`) and Polars 1.44.2 (deltalake 1.6.6) read every mapped type exactly, including after OPTIMIZE, VACUUM and checkpoints. Anonymous S3 works with DuckDB 1.5.5 and Polars. The CI DuckDB pin is 1.5.5 since L8. |
 | Protocol | `minReaderVersion 1`, `minWriterVersion 2`, no table features. `delta.appendOnly = true` makes the log refuse deletes; OPTIMIZE is still allowed (measured). |
 | Crash safety | The #468 transaction is unchanged up to Committed. Delta commits sit between Committed and the authority advance, with `blocks` committed last. Delta's `txn` is the per-table progress marker, so no new journal phase is needed. |
 | Ownership | The owner record keeps guarding one fireparq writer and its state (`.fireparq-ingest/`, `_fireparq/`, its own uncommitted parts). The Delta tables are shared through the log, and fireparq never deletes, rewrites or relies on a committed part. |
@@ -57,7 +63,7 @@ part of #463.
 | Spike toolchain | Rust 1.98.1 | `spikes/delta-lake/rust-toolchain.toml` (channel `1.98`). |
 | Python `deltalake` | 1.6.6 | Maintenance job and Polars' Delta support. |
 | Polars | 1.44.2 | Same pin as `blocks/tests/engines/requirements.txt`. `scan_delta` also needs `deltalake`. |
-| DuckDB CLI | 1.1.1 (delta v0.2.1), 1.5.5 (delta `45c4087`) | 1.1.1 is the current CI pin; 1.5.5 is the proposed one. Linux amd64 SHA-256: `7f3f1a26…118ae` (1.1.1), `08c0ca11…643d05` (1.5.5). |
+| DuckDB CLI | 1.1.1 (delta v0.2.1), 1.5.5 (delta `45c4087`) | 1.5.5 is the CI pin since L8 (it was 1.1.1). Linux amd64 SHA-256: `7f3f1a26…118ae` (1.1.1), `08c0ca11…643d05` (1.5.5); the 1.5.5 `delta` extension build (`linux_amd64`, `45c4087`) is `c8ce674c…af90e9`. |
 | moto (loopback S3) | 5.2.3 (`moto[s3]`) | Honors `If-None-Match: *` (412), checked at startup by `py/loopback_s3.py`. |
 
 The spike's `Cargo.lock` and hash-pinned `requirements.txt` pin every
@@ -278,8 +284,11 @@ Two layout variants were probed with `--variant`:
   with `scan_delta`. Parts must store microseconds.
 
 The anonymous-S3 results come from moto, not RGW. moto refused some unsigned
-`HEAD` requests that a public-read RGW bucket would allow. L8 repeats the
-anonymous checks against the deployment's RGW.
+`HEAD` requests that a public-read RGW bucket would allow. L8 added an opt-in
+check against a deployment's bucket
+(`blocks/tests/engine_compat.rs::anonymous_reads_of_a_public_deployment_bucket`,
+README "Engine compatibility"), off in CI; it has not been run against RGW
+yet.
 
 ### 1.9 Resume-cost measurements
 
@@ -342,27 +351,35 @@ is the time to open the table and read `txn`.
     `ffi-api` features, which nothing in the graph enables, and no RustSec
     advisory names 6.0.0.
 
-### 1.11 Running the spike
+### 1.11 The spike's tests, after L8 and L9
 
-The CI job `delta-spike` (`.github/workflows/ci.yml`) runs all of it. It
-installs the spike's toolchain, both DuckDB CLIs (checksum-verified) and the
-hash-pinned Python packages. Locally:
+The spike ran in CI as the `delta-spike` job until L8/L9 removed it with the
+crate (git history at `d79ce49`, `spikes/delta-lake/run.sh` ran everything).
+Its checks are now covered by the workspace's tests against fireparq itself:
+
+| Spike check | Covered by |
+|---|---|
+| `checked_casts_refuse_values_that_do_not_fit` | L2: `delta::types::tests::a_value_above_i64_max_in_a_long_column_refuses_the_flush`, `every_mapper_type_maps_onto_its_delta_type`, `conversions_keep_every_value_and_null` |
+| `pre_written_parts_are_committed_byte_for_byte_with_a_txn` | L3: `delta::commit::tests::pre_written_parts_are_committed_byte_for_byte_with_a_txn_blocks_last` (local, in-memory, loopback S3) |
+| `recovery_rolls_each_table_forward_exactly_once` | Its delta-rs behavior (`txn` read back from a fresh handle, a stale same-`appId` commit refused): L3's commit tests above and below. fireparq's own `txn`-gated roll-forward, which replaces the spike's helper: L4's real-binary crash tests in `blocks/tests/delta_recovery.rs` (a crash before any commit and between table commits, a log ahead of authority, and the other §4 rows) |
+| `stale_writers_rebase_on_blind_appends_but_not_on_their_own_app_id` | L3: the test of the same name |
+| `concurrent_writers_serialize_through_conditional_puts` | L3: the test of the same name |
+| `lite_vacuum_keeps_uncommitted_parts_and_full_vacuum_deletes_them` | L9: `blocks/tests/delta_maintenance.rs::vacuum_runs_before_the_checkpoint_and_never_deletes_untracked_parts`, on a real `build`'s table |
+| `conditional_create_refuses_to_overwrite_a_part` | `writer::protected::tests::local_stage_and_publish_are_separate_durable_and_never_clobber`, `s3::upload::tests::conditional_native_put_keeps_existing_bytes_and_has_one_concurrent_winner` |
+| `py/concurrent_maintenance.py` (local, loopback S3) | L9: `maintenance_beside_a_local_build_keeps_exact_rows`, `maintenance_beside_an_s3_build_keeps_exact_rows`: the job itself, beside the real binary |
+| `py/read_check.py` (types, values, `date`, filters; anonymous S3) | L8: `blocks/tests/engine_compat.rs` on every table, after a checkpoint; anonymous reads: the opt-in RGW check (§1.8) |
+| `--variant physical-date`, millisecond files | Decided (§1.8, §6); L2 writes neither, and `engine_compat.rs` asserts both |
+| `py/loopback_s3.py` (moto) | The Rust loopback S3 endpoint (`blocks/examples/bench_live_flush/s3.rs`), which gained DeleteObjects and real `Last-Modified` times in L9 |
+| `bench-load` (§1.9) | Measurements, not a test; L3's `the_log_tail_counts_commits_after_the_last_checkpoint` and the tail metric |
+
+Locally, the Delta tests run with the pinned engines:
 
 ```sh
-uv venv --python 3.12 /tmp/delta-spike
-uv pip install --python /tmp/delta-spike/bin/python --require-hashes -r spikes/delta-lake/requirements.txt
-DELTA_SPIKE_PYTHON=/tmp/delta-spike/bin/python \
-DELTA_SPIKE_DUCKDB=/path/to/duckdb-1.5.5 \
-DELTA_SPIKE_DUCKDB_SIGNED=/path/to/duckdb-1.1.1 \
-spikes/delta-lake/run.sh
+uv venv --python 3.12 /tmp/engines
+uv pip install --python /tmp/engines/bin/python --require-hashes -r blocks/tests/engines/requirements.txt
+FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 FIREPARQ_POLARS_PYTHON=/tmp/engines/bin/python \
+cargo test -p blocks --test engine_compat --test delta_tables --test delta_maintenance
 ```
-
-Only the Rust part, with no Python or DuckDB:
-`cd spikes/delta-lake && cargo test --locked`. That covers local disk and the
-in-memory store. Set `DELTA_SPIKE_S3_ENDPOINT` to a loopback server to add S3.
-`cd` into the directory so its `rust-toolchain.toml` applies. The crate has an
-empty `[workspace]` table, so the workspace's `cargo fmt --all` and
-`cargo test --workspace` ignore it.
 
 ## 2. Protocol and table properties
 
@@ -584,9 +601,15 @@ it lasts until the writer restarts.
   checkpoint drops tombstones older than `deletedFileRetentionDuration`. If
   lite VACUUM ran after the checkpoint with the same retention, the newest
   expired tombstones would leave the snapshot before any VACUUM saw them, and
-  their files would become orphans that only a full VACUUM finds. This comes
-  from reading the delta-rs and kernel sources, not from a measurement. L9
-  should check it.
+  their files would become orphans that only a full VACUUM finds. Measured
+  in L9 with `deltalake` 1.6.6 (`vacuum_runs_before_the_checkpoint_and_never_deletes_untracked_parts`,
+  three files tombstoned by OPTIMIZE, a 2-second retention): a checkpoint
+  followed by a lite VACUUM from a fresh handle (the next run) deleted 0 files
+  and left 3 orphans; VACUUM then checkpoint, and the job, deleted all 3 and
+  left none. A VACUUM on the same in-memory handle right after the checkpoint
+  still sees the tombstones, so the hazard is across runs. The job also turns
+  off the checkpoint of OPTIMIZE's and VACUUM's post-commit hooks, and skips
+  the checkpoint when VACUUM failed.
 
 ## 5. Ownership (#636)
 
@@ -847,9 +870,27 @@ merge-journal check, so `build` lists no data at a resume in any case.
 ## 9. Maintenance CronJob
 
 The CronJob is not fireparq code: it is the `deltalake` Python package
-(pinned, `deltalake==1.6.6`) on a schedule. L9 adds the reference script to
-the repository (`scripts/delta_maintenance.py`) and tests it in CI beside a
-running `build`, reusing the spike's `concurrent_maintenance.py`.
+(pinned, `deltalake==1.6.6`) on a schedule. L9 added the reference script to
+the repository (`scripts/delta_maintenance.py`, pinned by
+`scripts/delta_maintenance.requirements.txt`), an example manifest
+(`deploy/examples/delta-maintenance-cronjob.yaml`) and a CI test beside a
+running `build` (`blocks/tests/delta_maintenance.rs`), which replaces the
+spike's `concurrent_maintenance.py`. The script follows the sketch below, with
+these additions (README "Delta Maintenance" lists every setting):
+
+- `LAKE_ROOT` (a dataset below the bucket root, or a local path) besides
+  `LAKE_BUCKET`, and `DRY_RUN`;
+- `VACUUM_RETENTION_HOURS`: a lite VACUUM may go below the table's 7 days; a
+  full VACUUM refuses less than 168 h, and also refuses a table whose
+  `delta.deletedFileRetentionDuration` is below that;
+- `OPTIMIZE_DATES=all`, which also compacts the open date, for a lake whose
+  writer has stopped;
+- OPTIMIZE and VACUUM run with their post-commit checkpoint and log cleanup
+  off, the checkpoint follows only a successful VACUUM, and a lost commit
+  race is reported as a conflict for the next run;
+- the file counts per date come from one `get_add_actions` per table;
+- the script refuses any `deltalake` but 1.6.6, and `AWS_S3_ALLOW_UNSAFE_RENAME`;
+  credentials are redacted from every error it prints.
 
 ```python
 """Hourly Delta maintenance for one network bucket (all tables at the root)."""
@@ -949,7 +990,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 
 | Lane | Scope | Tests | Size | Depends on | Parallel with |
 |---|---|---|---|---|---|
-| **L0** (this PR) | design, spike, `delta-spike` CI job | spike suite | — | — | all |
+| **L0** (PR #663; the spike and its CI job were removed in L8/L9, §1.11) | design, spike, `delta-spike` CI job | spike suite | — | — | all |
 | **L1** deps | toolchain 1.93 → 1.98 (`rust-toolchain.toml`, `Dockerfile`); `deltalake-core =1.0.0` (no default features, `rustls`); `deny.toml` ignore reasons also naming object_store 0.13; recheck for a newer delta-rs on Arrow ≥ 60 first | full suite, `cargo deny` | S | — | #655, #658, #659 |
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
 | **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
@@ -957,16 +998,16 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #672, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (post-launch, #666) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
 | **L7** validate, scan, inspect (done with L5b: PR #672, [record](../audit/643-l5b-l7-readers.md); `scan` removed) | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
-| **L8** engine CI | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |
-| **L9** maintenance job | `scripts/delta_maintenance.py`, a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |
+| **L8** engine CI (done: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |
+| **L9** maintenance job (done with L8: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `scripts/delta_maintenance.py`, a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |
 | **L10** docs and release | README (outputs, readers, maintenance, ownership, frontier rule), `docs/releases/v1.0.0.md` (breaking changes, and "JVM engines are not a target" replacing "the planned Delta mode covers them"), `docs/repo-navigation.md`, k8s-parquet examples moved to `delta_scan`/`scan_delta` | doc drift tests | M | L2–L9 | — |
 
 Ordering: L1 → L2 → L3 → {L4, L5, L6, L7, L8, L9} → L10. L2 can start on
 Arrow 60 before L1 lands, because it needs no delta-rs. #658's benchmark
 should be re-run after L3 to measure per-flush commit overhead (about one PUT
 and one LIST per table with rows, an estimate). #659's interval switching gives
-the 60–120 s head cadence and needs no Delta changes. The spike (L0) can be
-deleted once L3 and L9 cover its tests.
+the 60–120 s head cadence and needs no Delta changes. The spike (L0) was
+deleted with L8/L9, once L2, L3, L8 and L9 covered its tests (§1.11).
 
 ## 12. Risks and open questions
 
@@ -981,6 +1022,8 @@ deleted once L3 and L9 cover its tests.
   RUSTSEC-2026-0194/0195 ignored until delta-rs moves to object_store ≥ 0.14.2.
   #632 can still move fireparq's own client to 0.14.
 - **Anonymous DuckDB reads** were validated against moto, not RGW (§1.8).
+  L8's opt-in check reads a deployment's bucket anonymously with both
+  engines; an operator runs it once the public-read bucket exists.
 - **Log-commit uncertainty** (§3.5): the proposal not to latch the owner on
   ambiguous log commits needs the L4 review against #468's quiescence
   reasoning. Resolved by L4: confirmed (§3.5).

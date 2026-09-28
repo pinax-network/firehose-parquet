@@ -1,4 +1,5 @@
-//! The spike's commit checks (`spikes/delta-lake/tests/spike.rs`), ported to
+//! The #643 spike's commit checks (`spikes/delta-lake/tests/spike.rs`, removed
+//! in L8/L9; in the history at `d79ce49`), ported to
 //! fireparq's commit layer: pre-written parts committed byte for byte with a
 //! `txn`, `txn` read-back from a fresh handle, blind appends rebasing over
 //! other writers, a same-`appId` conflict, concurrent writers, and the table

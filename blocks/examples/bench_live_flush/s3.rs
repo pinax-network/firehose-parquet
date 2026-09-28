@@ -2,11 +2,14 @@
 //! ingestion transport refuses plain HTTP, so this serves TLS with a throwaway
 //! CA that the child trusts through `SSL_CERT_FILE`. Objects live in memory.
 //!
-//! Semantics are the subset protected ingestion uses: path-style GET/HEAD/PUT/
-//! DELETE, `If-None-Match: *` and `If-Match` conditions, pinned `versionId`
-//! reads, byte ranges and ListObjectsV2, plus the `DeleteObjects` batch that
-//! `deltalake`'s VACUUM sends (`blocks/tests/delta_recovery.rs` runs it
-//! against this endpoint). Every request waits half its injected
+//! Semantics are the subset protected ingestion and the `deltalake`
+//! maintenance job use: path-style GET/HEAD/PUT/DELETE, multi-object
+//! DeleteObjects (`POST ?delete`, which `deltalake`'s VACUUM and log cleanup
+//! send; `blocks/tests/delta_recovery.rs` and `delta_maintenance.rs` run them
+//! against this endpoint), `If-None-Match: *` and `If-Match` conditions,
+//! pinned `versionId` reads, byte ranges and ListObjectsV2. Every object's
+//! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age.
+//! Every request waits half its injected
 //! latency before it is applied and half after, like a symmetric round trip;
 //! with `slow_every = N`, every Nth request (by arrival) waits `slow` instead.
 //! Each request is logged with wall-clock start/end times for phase analysis.
@@ -58,6 +61,7 @@ struct Stored {
     bytes: Bytes,
     etag: String,
     version: String,
+    modified: time::OffsetDateTime,
 }
 
 struct State {
@@ -254,6 +258,7 @@ impl Server {
                 bytes,
                 etag,
                 version,
+                modified: time::OffsetDateTime::now_utc(),
             },
         );
     }
@@ -325,7 +330,37 @@ fn error(status: StatusCode, code: &str) -> (StatusCode, Vec<(&'static str, Stri
     )
 }
 
-const LAST_MODIFIED: &str = "Sun, 27 Sep 2026 00:00:00 GMT";
+/// `Last-Modified` as an RFC 7231 IMF-fixdate.
+fn http_date(time: time::OffsetDateTime) -> String {
+    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+        DAYS[time.weekday().number_days_from_monday() as usize],
+        time.day(),
+        MONTHS[time.month() as usize - 1],
+        time.year(),
+        time.hour(),
+        time.minute(),
+        time.second()
+    )
+}
+
+/// ListObjectsV2 `LastModified` (ISO 8601, milliseconds, UTC).
+fn iso_date(time: time::OffsetDateTime) -> String {
+    format!(
+        "{}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        time.year(),
+        time.month() as u8,
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second(),
+        time.millisecond()
+    )
+}
 
 fn control_note(key: &str, body: &[u8]) -> Option<String> {
     if !key.ends_with("/.fireparq-ingest/pending.json") {
@@ -495,8 +530,9 @@ fn list(
             None => {
                 last = Some(key.clone());
                 contents.push(format!(
-                    "<Contents><Key>{}</Key><LastModified>2026-09-27T00:00:00.000Z</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>",
+                    "<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>",
                     xml_escape(key),
+                    iso_date(stored.modified),
                     xml_escape(&stored.etag),
                     stored.bytes.len()
                 ));
@@ -595,7 +631,7 @@ fn object(
             let mut headers = vec![
                 ("etag", stored.etag.clone()),
                 ("x-amz-version-id", stored.version.clone()),
-                ("last-modified", LAST_MODIFIED.into()),
+                ("last-modified", http_date(stored.modified)),
                 ("accept-ranges", "bytes".into()),
                 ("content-type", "application/octet-stream".into()),
             ];
@@ -669,6 +705,7 @@ fn object(
                     bytes: body,
                     etag,
                     version,
+                    modified: time::OffsetDateTime::now_utc(),
                 },
             );
             (StatusCode::OK, headers, Bytes::new())

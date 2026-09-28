@@ -1,12 +1,12 @@
-# Pinned Polars and deltalake for the engine tests, installed in CI with
-# `pip install --require-hashes -r blocks/tests/engines/requirements.txt`:
-# blocks/tests/engine_compat.rs, delta_tables.rs and delta_maintenance.rs
-# (#643) read the Delta tables with `scan_delta`, which needs deltalake, and
-# the last runs scripts/delta_maintenance.py with this deltalake (its own pins,
-# scripts/delta_maintenance.requirements.txt, must agree). Regenerate after
-# changing a pin:
-#   printf 'polars==<version>\ndeltalake==<version>\n' > engines.in
-#   uv pip compile engines.in --generate-hashes --python-version 3.12 --no-header
+# Pinned deltalake for scripts/delta_maintenance.py (#643), the reference
+# maintenance job, installed with
+#   pip install --only-binary=:all: --require-hashes -r scripts/delta_maintenance.requirements.txt
+# These are the same pins as in blocks/tests/engines/requirements.txt, whose
+# deltalake runs the job in CI; blocks/tests/delta_maintenance.rs checks that
+# they agree with each other and with REQUIRED_DELTALAKE in the script.
+# Regenerate after changing the pin:
+#   printf 'deltalake==<version>\n' > job.in
+#   uv pip compile job.in --generate-hashes --python-version 3.12 --no-header
 arro3-core==0.8.3 \
     --hash=sha256:00083112a216d756b31a906c2e7fc45c32fe88aca2c34e523d03496ffbc0c693 \
     --hash=sha256:048d3214d72db1e8dbf176274297ea9f02bc470de349e2f3a6f67c06cb4a674f \
@@ -81,26 +81,11 @@ deltalake==1.6.6 \
     --hash=sha256:9b9883cc1236a44f62ed360abd1f39e564d892848b8a1aa5483871d12d23f74e \
     --hash=sha256:9e97c964ac768e104a58f147c3b41f281e9ed010825e02a3846d4a9c571a5d8a \
     --hash=sha256:e2829c996dcf32bd6135e2eafe5b807f47ad40e84711c1453ee7b63f4548c034
-    # via -r engines.in
+    # via -r job.in
 deprecated==3.0.0 \
     --hash=sha256:16850204d3a1e6bb0acd06bff48d96e8b0a0d25d1c52f71705405a0f4894192d \
     --hash=sha256:58204cf4a7f6270d547af5c278ee7a6bb56045a4b3d8441a1cd11660f41b7939
     # via deltalake
-polars==1.44.2 \
-    --hash=sha256:1bb331f17a40d9d931101533dcd33637b66edc61eb377b07020dac16a0f0377b \
-    --hash=sha256:86c8e26b6c2de8c8d344bb910b74dfc47b118ac3fe0f19b44909467990a0b281
-    # via -r engines.in
-polars-runtime-32==1.44.2 \
-    --hash=sha256:10c0c695a418407617b5159db7d9a21074a733e4c6d61275b6762f25cb31ca99 \
-    --hash=sha256:1fd536720668ba203a16a20b08cd6b23057e407a0279cf36b2f35f879d6e3208 \
-    --hash=sha256:8598e7a20efba70bb74978c7df7af7c606ff4d79b9b48fdd808250b189bc9a13 \
-    --hash=sha256:a1bafb441e99199a62c63bf1bbdc0ea09ee9776dbac2bf31452b5000fb1df2f7 \
-    --hash=sha256:b84842f7d621aaca7a52e165e19a24f89db45f8aa13744941430218419a14a67 \
-    --hash=sha256:bbf9b45040291dc1c6c588c837019c33557bde25ec536562a9cca9e1f6dfcc45 \
-    --hash=sha256:c4a09fb14aad711526346efc0cb2015c2fd0555ce4118b6524e5debbaea65ff5 \
-    --hash=sha256:d51040d3ab40157f6db3c62be59cab5b80fb3c8d158924769c4982a1c8eef730 \
-    --hash=sha256:e0fd43720c8222ae39919c8ff891636d53b352706087120e62f83544dd3ff782
-    # via polars
 wrapt==2.5.0 \
     --hash=sha256:05246a100da68259af521b88788f131ba005465f1c95d358cc3c03ec5e351b52 \
     --hash=sha256:05b7a271e21598694dcb7a6d6224f04e80ecc24b00a31ec57c658196377b0b29 \
