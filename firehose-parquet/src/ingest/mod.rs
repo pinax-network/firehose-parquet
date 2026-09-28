@@ -13,7 +13,7 @@ pub(crate) mod store;
 
 pub use controller::{CommittedFlush, FlushWorkStats};
 pub use session::{
-    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume, IngestionSession,
-    MapperSemantics, CURSOR_OVERRIDE_REFUSED, PRE_V1_DEFAULT_MIRROR,
+    declare_data_schemas, declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
+    IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED, PRE_V1_DEFAULT_MIRROR,
 };
 pub use state::{BlockFamily, Digest, SOLANA_GENESIS_ROUTING_SECONDS};

@@ -172,6 +172,8 @@ const MIN_PART_RESERVATION: u64 = 256 * 1024;
 pub(crate) struct EncodedPart {
     plan: PlannedPart,
     receipt: PartReceipt,
+    /// The part's Delta `add.stats` JSON, from the encoded batch (#643 L3).
+    stats: String,
     bytes: Bytes,
     // Native S3 owns a private disk spool instead of compressed heap bytes.
     spool: Option<File>,
@@ -189,6 +191,10 @@ impl EncodedPart {
     }
     pub(crate) fn plan(&self) -> &PlannedPart {
         &self.plan
+    }
+    /// The Delta `add.stats` JSON of exactly the encoded rows.
+    pub(crate) fn delta_stats(&self) -> &str {
+        &self.stats
     }
 }
 
@@ -366,6 +372,7 @@ impl PreparedFlush {
         Ok(EncodedPart {
             plan: plan.clone(),
             receipt,
+            stats: crate::delta::stats::stats_json(batch)?,
             bytes: Bytes::new(),
             spool: Some(spool.file),
             _reservation: reservation,
@@ -428,6 +435,7 @@ impl PreparedFlush {
         Ok(EncodedPart {
             plan: plan.clone(),
             receipt,
+            stats: crate::delta::stats::stats_json(batch)?,
             bytes: Bytes::from(bytes),
             spool: None,
             _reservation: reservation,

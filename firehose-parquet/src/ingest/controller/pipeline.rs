@@ -448,10 +448,20 @@ fn fault_after_publication(table: &str) -> Result<()> {
     Ok(())
 }
 
+/// The journaled receipt: the part's exact bytes, plus its Delta `add`
+/// statistics and modification time (#643 L3), fixed here once so that every
+/// commit of the part (and a later roll-forward) is identical.
 fn part_receipt(encoded: &EncodedPart) -> Result<PartReceipt> {
+    let modification_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?
+        .as_millis();
     Ok(PartReceipt {
         byte_size: encoded.receipt().byte_size,
         sha256: Digest::parse(encoded.receipt().sha256.clone())?,
+        stats: encoded.delta_stats().to_string(),
+        modification_time: i64::try_from(modification_time)
+            .context("the system clock is beyond the Delta modification time range")?,
     })
 }
 
@@ -459,10 +469,14 @@ fn part_receipt(encoded: &EncodedPart) -> Result<PartReceipt> {
 /// (as built by `cargo test`) read `FIREPARQ_DEBUG_FAULT=<kind>:<table>`;
 /// release builds compile every check to `false`. Kinds: `encode`, `publish`
 /// (fails before any request), `lost-ack` (fails after a successful
-/// publication) and `crash-after-publish` (aborts the process).
-mod fault {
+/// publication) and `crash-after-publish` (aborts the process), and for the
+/// Delta commit step (#643 L3, in the controller): `delta-commit` (fails
+/// before the table's commit request) and `crash-after-delta-commit` (aborts
+/// once the table's commit is durable; with `blocks`, the last table, that is
+/// after every Delta commit and before authority advances).
+pub(super) mod fault {
     #[cfg(debug_assertions)]
-    pub(super) fn fires(kind: &str, table: &str) -> bool {
+    pub(in crate::ingest::controller) fn fires(kind: &str, table: &str) -> bool {
         use std::sync::OnceLock;
         #[cfg(test)]
         if let Some((test_kind, test_table)) = super::tests::fault() {
@@ -479,7 +493,7 @@ mod fault {
     }
 
     #[cfg(not(debug_assertions))]
-    pub(super) fn fires(_kind: &str, _table: &str) -> bool {
+    pub(in crate::ingest::controller) fn fires(_kind: &str, _table: &str) -> bool {
         false
     }
 }

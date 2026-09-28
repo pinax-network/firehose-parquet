@@ -49,8 +49,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
-      # DuckDB, and blocks/tests/engine_compat.rs reads real output with it;
-      # FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
+      # DuckDB, blocks/tests/engine_compat.rs reads real output with it, and
+      # blocks/tests/delta_tables.rs reads the Delta tables with `delta_scan`
+      # (the test installs the delta extension); FIREPARQ_REQUIRE_DUCKDB makes
+      # a missing CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
           DUCKDB_VERSION: v1.1.1
@@ -64,9 +66,11 @@ jobs:
           echo "FIREPARQ_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
           echo "FIREPARQ_REQUIRE_DUCKDB=1" >> "$GITHUB_ENV"
 
-      # blocks/tests/engine_compat.rs also reads real output with Polars, pinned
-      # with hashes in blocks/tests/engines/requirements.txt;
-      # FIREPARQ_REQUIRE_POLARS makes a missing interpreter fail instead of skip.
+      # blocks/tests/engine_compat.rs also reads real output with Polars, and
+      # blocks/tests/delta_tables.rs its Delta tables with `scan_delta` (which
+      # needs deltalake), both pinned with hashes in
+      # blocks/tests/engines/requirements.txt; FIREPARQ_REQUIRE_POLARS makes a
+      # missing interpreter fail instead of skip.
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -77,7 +81,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/polars"
           "$RUNNER_TEMP/polars/bin/pip" install --only-binary=:all: --require-hashes \
             -r blocks/tests/engines/requirements.txt
-          "$RUNNER_TEMP/polars/bin/python" -c "import polars; print(polars.__version__)"
+          "$RUNNER_TEMP/polars/bin/python" -c "import polars, deltalake; print(polars.__version__, deltalake.__version__)"
           echo "FIREPARQ_POLARS_PYTHON=$RUNNER_TEMP/polars/bin/python" >> "$GITHUB_ENV"
           echo "FIREPARQ_REQUIRE_POLARS=1" >> "$GITHUB_ENV"
 

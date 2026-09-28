@@ -2191,9 +2191,17 @@ fn assert_dataset_root_layout(root: &Path, tables: &[&str], artifacts: &[&str]) 
         );
     }
     let mut union = std::collections::BTreeSet::new();
+    let mut with_rows = 0;
     for table in tables {
+        // Every table is a Delta table from the first start (#643), whose log
+        // holds no Parquet file; a table without rows holds only its log.
+        assert!(root.join(table).join("_delta_log").is_dir(), "{table}");
         let files = glob_parquet(&root.join(table), false);
-        assert!(!files.is_empty(), "{table}");
+        if files.is_empty() {
+            assert_eq!(names(&root.join(table)), ["_delta_log".to_string()].into());
+            continue;
+        }
+        with_rows += 1;
         let mut schema = None;
         for file in &files {
             let name = file.file_name().unwrap().to_str().unwrap();
@@ -2208,6 +2216,7 @@ fn assert_dataset_root_layout(root: &Path, tables: &[&str], artifacts: &[&str]) 
         }
         union.extend(files);
     }
+    assert!(with_rows > 0, "{tables:?}");
     assert_eq!(glob_parquet(root, true), union);
     assert!(glob_parquet(root, false)
         .iter()

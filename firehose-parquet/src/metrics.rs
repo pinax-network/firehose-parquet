@@ -2,6 +2,7 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,15 @@ pub struct FlushLabels {
     pub trigger: String,
     /// `catching_up` or `caught_up` ([`crate::flush::StreamPace::as_str`]).
     pub pace: String,
+}
+
+/// Buckets of the Delta commit duration histogram, in seconds.
+const DELTA_COMMIT_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
+
+fn delta_commit_histogram() -> Histogram {
+    Histogram::new(DELTA_COMMIT_BUCKETS)
 }
 
 /// Labels for error kinds.
@@ -150,6 +160,16 @@ pub struct PipelineMetrics {
     /// Seconds those startup listings took.
     pub startup_listing_seconds: Gauge<f64, AtomicU64>,
 
+    /// Commits after the last checkpoint in each table's Delta log, which a
+    /// reader (and the next `build` start) replays (#643, design §8). It grows
+    /// by one per commit until the maintenance job checkpoints the table.
+    pub delta_log_tail_commits: Family<TableLabels, Gauge>,
+    /// Duration of each table's Delta commit, request to durable version.
+    pub delta_commit_seconds: Family<TableLabels, Histogram, fn() -> Histogram>,
+    /// Lost conditional puts a table's Delta commits retried at a later
+    /// version (another writer, usually the maintenance job, committed first).
+    pub delta_commit_retries_total: Family<TableLabels, Counter>,
+
     /// Errors by kind.
     pub errors_total: Family<ErrorLabels, Counter>,
     /// Number of gRPC stream reconnections.
@@ -259,6 +279,10 @@ impl PipelineMetrics {
 
             startup_list_requests: Gauge::default(),
             startup_listing_seconds: Gauge::default(),
+
+            delta_log_tail_commits: Family::default(),
+            delta_commit_seconds: Family::new_with_constructor(delta_commit_histogram),
+            delta_commit_retries_total: Family::default(),
 
             errors_total: Family::default(),
             grpc_reconnects_total: Counter::default(),
@@ -403,6 +427,22 @@ impl PipelineMetrics {
             "firehose_parquet_startup_listing_seconds",
             "Seconds spent in the listings made while opening the dataset",
             metrics.startup_listing_seconds.clone(),
+        );
+
+        registry.register(
+            "firehose_parquet_delta_log_tail_commits",
+            "Commits after the last checkpoint in each table's Delta log, which readers and the next start replay; grows until the maintenance job checkpoints",
+            metrics.delta_log_tail_commits.clone(),
+        );
+        registry.register(
+            "firehose_parquet_delta_commit_seconds",
+            "Duration of each table's Delta commit, from its request to a durable version",
+            metrics.delta_commit_seconds.clone(),
+        );
+        registry.register(
+            "firehose_parquet_delta_commit_retries",
+            "Lost conditional puts a table's Delta commits retried at a later version",
+            metrics.delta_commit_retries_total.clone(),
         );
 
         registry.register(

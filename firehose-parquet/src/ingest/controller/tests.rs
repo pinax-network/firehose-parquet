@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod concurrency;
+mod delta;
 mod live_flush;
 mod native_upload;
 mod remote_deletion;

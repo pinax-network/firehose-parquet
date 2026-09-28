@@ -1530,6 +1530,7 @@ dependencies = [
  "futures",
  "hex",
  "object_store 0.12.5",
+ "object_store 0.13.2",
  "parquet 60.0.0",
  "prometheus-client",
  "prost",
@@ -1548,6 +1549,7 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

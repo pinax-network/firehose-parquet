@@ -1715,6 +1715,9 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
 | `firehose_parquet_startup_list_requests` | Gauge | — | LIST requests (S3 pages of up to 1,000 keys, or local directory reads) made while opening the dataset; a resume lists no data objects ([startup cost](#startup-cost)) |
 | `firehose_parquet_startup_listing_seconds` | Gauge | — | Seconds those startup listings took |
+| `firehose_parquet_delta_log_tail_commits` | Gauge | `table` | Commits after the last checkpoint in the table's Delta log, which readers and the next start replay; it grows until the maintenance job checkpoints the table, so alert when it keeps growing (#643) |
+| `firehose_parquet_delta_commit_seconds` | Histogram | `table` | Duration of each Delta commit of the table, from its request to a durable version |
+| `firehose_parquet_delta_commit_retries_total` | Counter | `table` | Lost conditional puts the table's Delta commits retried at a later version (another writer, usually the maintenance job, committed first) |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC retries scheduled, once per reconnect path |
 | `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
@@ -1959,9 +1962,9 @@ SELECT min(block_num), max(block_num)
 FROM read_parquet('<root>/blocks/date=2026-09-25/*.parquet');
 ```
 
-Once the output is a Delta table
-([#643](https://github.com/pinax-network/firehose-parquet/issues/643)), the Delta
-log records each file's `date` partition and `block_num` statistics, so the same
+Every table is also a Delta table
+([#643](https://github.com/pinax-network/firehose-parquet/issues/643)): its log
+records each file's `date` partition and `block_num` statistics, so the same
 answer comes from the log:
 
 ```sql

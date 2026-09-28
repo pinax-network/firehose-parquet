@@ -462,6 +462,8 @@ async fn recovery_rolls_back_writing_or_finishes_committed_before_returning_guar
                 PartReceipt {
                     byte_size: encoded.receipt().byte_size,
                     sha256: Digest::parse(encoded.receipt().sha256.clone()).unwrap(),
+                    stats: encoded.delta_stats().to_string(),
+                    modification_time: 1_700_000_000_000,
                 },
                 &descriptor,
             )

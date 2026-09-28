@@ -515,6 +515,25 @@ fn test_all_flags() {
 }
 
 #[test]
+fn delta_log_crates_default_to_warn_unless_the_filter_names_them() {
+    assert_eq!(
+        with_quiet_delta_logs("info"),
+        "info,deltalake_core=warn,buoyant_kernel=warn,buoyant_kernel_engine=warn"
+    );
+    assert_eq!(
+        with_quiet_delta_logs("fireparq=debug"),
+        "fireparq=debug,deltalake_core=warn,buoyant_kernel=warn,buoyant_kernel_engine=warn"
+    );
+    assert_eq!(
+        with_quiet_delta_logs("info,deltalake_core=debug"),
+        "info,deltalake_core=debug"
+    );
+    for filter in ["info", "debug", "warn,fireparq=trace"] {
+        tracing_subscriber::EnvFilter::try_new(with_quiet_delta_logs(filter)).unwrap();
+    }
+}
+
+#[test]
 fn test_effective_log_level_promotes_info_when_verbose() {
     assert_eq!(effective_log_level("info", true), "debug");
     assert_eq!(effective_log_level("INFO", true), "debug");

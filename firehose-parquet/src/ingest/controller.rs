@@ -1,8 +1,16 @@
 //! All-table publication and restart decisions. Every non-dry-run `build`
 //! reaches this controller through `IngestionSession`, which supplies
 //! eligibility, the accepted envelope prefix and completion proof; the
-//! controller journals each flush, publishes its parts, advances authority and
-//! then reconciles the optional `ProtectedMirror`.
+//! controller journals each flush, publishes its parts, commits them to the
+//! tables' Delta logs (#643 L3), advances authority and then reconciles the
+//! optional `ProtectedMirror`.
+//!
+//! The Delta commits sit between Committed and the authority advance
+//! (`docs/design/delta-lake.md` §3.1): every table with a part gets one commit
+//! with `txn = last ordinal`, the others first and `blocks` last. Recovery of a
+//! Committed journal does not roll the Delta commits forward yet (#643 L4), so
+//! a crash or failure between Committed and the authority advance leaves that
+//! transaction's parts out of the logs of the tables that had not committed.
 
 use anyhow::{bail, Context, Result};
 use arrow::record_batch::RecordBatch;
@@ -19,6 +27,7 @@ use super::state::{
 };
 use super::store::{TransactionStateStore, Versioned};
 use crate::config::{BlockMetadata, Compression, FlushConcurrency};
+use crate::delta::commit::{CommitHooks, DeltaTables, TableCommit};
 
 mod lane;
 mod pipeline;
@@ -50,6 +59,9 @@ pub struct TransactionController<'a, M: MirrorAction> {
     mirror: M,
     failed: bool,
     concurrency: FlushConcurrency,
+    /// The dataset's Delta tables. `IngestionSession` always sets them; only
+    /// controller unit tests of the #468 journal alone run without.
+    delta: Option<DeltaTables>,
     _session: crate::dataset_lock::session::SessionPermit<'a>,
 }
 
@@ -64,6 +76,11 @@ pub struct CommittedFlush {
     pub elapsed: Duration,
     /// High-water marks of the bounded table work.
     pub work: FlushWorkStats,
+    /// The Delta commit of each table with a part, in completion order
+    /// (`blocks` last).
+    pub delta: Vec<TableCommit>,
+    /// Wall time of the Delta commit step, from Committed to its last commit.
+    pub delta_elapsed: Duration,
 }
 pub struct CommittedTable {
     pub table: String,
@@ -109,6 +126,16 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                     states.clear(&authority, &pending).await?;
                 }
                 TransactionPhase::Committed => {
+                    // Delta roll-forward gated by each table's `txn` is #643
+                    // L4; until then the tables that had not committed this
+                    // transaction miss its parts.
+                    if authority.payload.checkpoint.id == pending.payload.predecessor {
+                        tracing::warn!(
+                            first_ordinal = pending.payload.prefix.first_ordinal,
+                            last_ordinal = pending.payload.prefix.last_ordinal,
+                            "recovering a Committed transaction whose Delta commits may be incomplete; its rows are not rolled forward into the Delta tables yet (#643 L4)"
+                        );
+                    }
                     // Verify first, even if authority was already advanced by
                     // the interrupted process. Missing/corrupt data never becomes
                     // a reason to remap a committed prefix.
@@ -133,8 +160,21 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             mirror,
             failed: false,
             concurrency: FlushConcurrency::SERIAL,
+            delta: None,
             _session: session,
         })
+    }
+
+    /// Commit every later transaction to these Delta tables, which the caller
+    /// opened and validated for this controller's stream after recovery.
+    pub fn with_delta_tables(mut self, tables: DeltaTables) -> Self {
+        self.delta = Some(tables);
+        self
+    }
+
+    /// The dataset's Delta tables, when set.
+    pub fn delta_tables(&self) -> Option<&DeltaTables> {
+        self.delta.as_ref()
     }
 
     /// Bound table work inside each later commit. Journal order is unchanged.
@@ -268,7 +308,10 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         // The exact temporary names are fixed by this plan before Writing.
         let owned_temporaries = pending.clone();
         let pending = self.states.begin(&self.authority, pending).await?;
-        let (pending, work) = match self.publish_and_commit(Arc::new(prepared), pending).await {
+        let (pending, work, delta, delta_elapsed) = match self
+            .publish_and_commit(Arc::new(prepared), pending)
+            .await
+        {
             Ok(done) => done,
             Err(error) => {
                 // The journal stays pending for recovery, which never needs a
@@ -325,6 +368,8 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                 .collect::<Result<_>>()?,
             elapsed: started.elapsed(),
             work,
+            delta,
+            delta_elapsed,
         };
         self.failed = false;
         Ok(result)
@@ -338,7 +383,12 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         &mut self,
         prepared: Arc<PreparedFlush>,
         pending: Versioned<PendingTransaction>,
-    ) -> Result<(Versioned<PendingTransaction>, FlushWorkStats)> {
+    ) -> Result<(
+        Versioned<PendingTransaction>,
+        FlushWorkStats,
+        Vec<TableCommit>,
+        Duration,
+    )> {
         checkpoint(Stage::WritingPersisted)?;
         // Bounded concurrent table work; every receipt is durable before its
         // part publishes, and nothing below runs unless all parts succeeded
@@ -349,6 +399,9 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             .mark_committed(&self.authority, &pending)
             .await?;
         checkpoint(Stage::CommittedPersisted)?;
+        let delta_started = Instant::now();
+        let delta = self.commit_delta(&pending.payload).await?;
+        let delta_elapsed = delta_started.elapsed();
         self.authority = self.states.advance(&self.authority, &pending).await?;
         checkpoint(Stage::AuthorityAdvanced)?;
         self.mirror.reconcile(&self.authority.payload).await?;
@@ -356,7 +409,49 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         self.parts.cleanup_temporaries(&pending.payload)?;
         self.states.clear(&self.authority, &pending).await?;
         checkpoint(Stage::PendingCleared)?;
-        Ok((pending, work))
+        Ok((pending, work, delta, delta_elapsed))
+    }
+
+    /// One Delta commit per table with a part of this Committed transaction,
+    /// `blocks` last, bounded by the publication concurrency. A commit that
+    /// may have been sent without a definite outcome marks remote ownership
+    /// uncertain, like an unresolved part PUT, so it is not released.
+    async fn commit_delta(&mut self, pending: &PendingTransaction) -> Result<Vec<TableCommit>> {
+        let Some(delta) = self.delta.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let before = |table: &str| {
+            if pipeline::fault::fires("delta-commit", table) {
+                bail!("injected debug fault: the Delta commit of {table} failed");
+            }
+            Ok(())
+        };
+        let after = |table: &str, index: u32| {
+            if pipeline::fault::fires("crash-after-delta-commit", table) {
+                // An abrupt process death after a durable Delta commit.
+                std::process::abort();
+            }
+            checkpoint(Stage::DeltaCommitted(index))
+        };
+        let hooks = CommitHooks {
+            before: &before,
+            after: &after,
+        };
+        match delta
+            .commit(pending, self.concurrency.publications, &hooks)
+            .await
+        {
+            Ok(committed) => {
+                checkpoint(Stage::DeltaCommittedAll)?;
+                Ok(committed)
+            }
+            Err(failure) => {
+                if failure.unresolved {
+                    self.parts.mark_remote_uncertain();
+                }
+                Err(failure.error)
+            }
+        }
     }
 }
 
@@ -459,6 +554,10 @@ enum Stage {
     ReceiptPersisted(u32),
     Published(u32),
     CommittedPersisted,
+    /// A table's Delta commit is durable (its part's entry index).
+    DeltaCommitted(u32),
+    /// Every Delta commit of the transaction is durable.
+    DeltaCommittedAll,
     AuthorityAdvanced,
     MirrorReconciled,
     PendingCleared,

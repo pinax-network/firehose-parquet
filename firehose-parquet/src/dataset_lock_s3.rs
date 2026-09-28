@@ -200,6 +200,9 @@ impl RecoveryAuthorization {
 pub struct S3Ownership {
     store: Arc<dyn ObjectStore>,
     native_upload: Option<crate::s3::upload::NativeS3Upload>,
+    /// The Delta log store's client of this bucket (#643 L3): object_store
+    /// 0.13, one attempt per request. Only `build`'s output bucket has one.
+    delta_log: Option<Arc<dyn object_store_delta::ObjectStore>>,
     owned: OwnerRecord,
     version: UpdateVersion,
     mutation_uncertain: AtomicBool,
@@ -255,6 +258,7 @@ impl S3Ownership {
         Ok(Self {
             store,
             native_upload: None,
+            delta_log: None,
             owned,
             version,
             mutation_uncertain: AtomicBool::new(false),
@@ -275,6 +279,21 @@ impl S3Ownership {
 
     pub(crate) fn native_upload(&self) -> Option<&crate::s3::upload::NativeS3Upload> {
         self.native_upload.as_ref()
+    }
+
+    /// Attach the client the bucket's Delta log stores use.
+    pub(crate) fn with_delta_log(
+        mut self,
+        client: Arc<dyn object_store_delta::ObjectStore>,
+    ) -> Self {
+        self.delta_log = Some(client);
+        self
+    }
+
+    /// The client of this bucket's Delta log stores, when this owner is a
+    /// `build` output owner.
+    pub(crate) fn delta_log(&self) -> Option<&Arc<dyn object_store_delta::ObjectStore>> {
+        self.delta_log.as_ref()
     }
 
     /// Read-only inspection. Never probes, renews, releases or creates an object.
