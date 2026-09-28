@@ -1,6 +1,6 @@
 # Rust-only repository: the maintenance job in Rust, Python removed
 
-Refs #643, #680 (item 3), #678. PR: pending. Design:
+Refs #643, #680 (item 3), #678. PR: [#682](https://github.com/pinax-network/firehose-parquet/pull/682). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §9. Earlier records:
 [#643 L8/L9](643-l8-l9-engines-maintenance.md) (the Python job and engine CI),
 [#678](rgw-if-match-etag.md) (the RGW 19.2 `If-Match` quirk). Index: the
