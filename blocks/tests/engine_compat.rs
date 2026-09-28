@@ -1,38 +1,45 @@
-//! #652: real `fireparq build` output read by the supported engines, DuckDB
-//! and Polars, with Hive partitioning over the `date=YYYY-MM-DD` directories.
-//! Since #643 (L2) every part is a Delta data file; the Delta log arrives with
-//! the commit layer (L3), so this test still reads the plain files.
+//! #652, #643 L8: real `fireparq build` output read by the target engines,
+//! DuckDB (`delta_scan`) and Polars (`scan_delta`), through each table's Delta
+//! log.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
 //! and non-final) and Solana (list, binary, decimal and enum columns)
-//! datasets, and each engine must read, for every checked table:
+//! datasets. Polars first writes a checkpoint of every table, so each
+//! `_delta_log/` also holds Parquet, next to the Parquet cursor mirror in
+//! `_fireparq/`. Then both engines must read, for **every** table of every
+//! dataset (tables that never get rows included):
 //!
-//! - `date` only from the directory: the data files have no `date` column,
-//!   and a `date` filter returns exactly that day's rows and files;
-//! - Delta types: signed integers (`long`, `array<short>`) for the mapper's
-//!   unsigned ones, `decimal(20,0)` for the chain's decimal columns (an EVM
-//!   block nonce of `u64::MAX` exactly), and `string` for enums;
-//! - `timestamp` as a UTC timestamp stored in microseconds (Parquet
-//!   `TIMESTAMP(MICROS, UTC)`), holding whole milliseconds;
-//! - list and binary columns;
+//! - exactly the rows the log's `add` actions count, the same in both engines;
+//! - only the log's data files (`<table>/date=YYYY-MM-DD/part-v1-*.parquet`),
+//!   nothing under `_delta_log/`, `_fireparq/` or a dot-prefixed path;
+//! - `date` as the partition column: a `date` filter returns exactly that
+//!   day's rows, and both engines prune to that day's files; the data files
+//!   themselves hold no `date` column;
+//! - `block_num` as `BIGINT`/`Int64` and `timestamp` as a UTC timestamp stored
+//!   in microseconds (Parquet `TIMESTAMP(MICROS, UTC)`), holding whole
+//!   milliseconds;
 //! - `stream_ordinal` in non-final output only;
-//! - no file under `_fireparq/` or a dot-prefixed path;
-//! - the row count the files hold, the same in both engines.
 //!
-//! The DuckDB CLI comes from `FIREPARQ_DUCKDB` (else `duckdb` on `PATH`) and
-//! Polars from the interpreter in `FIREPARQ_POLARS_PYTHON`. CI installs both
-//! at pinned versions and sets `FIREPARQ_REQUIRE_DUCKDB` and
-//! `FIREPARQ_REQUIRE_POLARS`, so neither check can be skipped there; locally
-//! a missing engine is skipped with a message.
-use firehose_parquet::writer::read_parquet;
+//! and, for the listed columns, their Delta types: signed integers (`long`,
+//! `array<short>`) for the mapper's unsigned ones, `decimal(20,0)` for the
+//! chain's decimal columns (an EVM block nonce of `u64::MAX`, exactly), and
+//! `string` for enums, lists and binary columns.
+//!
+//! `anonymous_reads_of_a_public_deployment_bucket` is an opt-in check against
+//! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
+//! and `FIREPARQ_RGW_BUCKET` are set; see its docs. Engines: see
+//! `common/mod.rs`.
 use firehose_protos::{eth, firehose, solana};
 use prost::Message;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::codegen::{http, BoxFuture, Service};
+
+mod common;
+use common::{number, DuckDb};
 
 const CHAIN: &str = "engine-test";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, 102 and 103
@@ -258,10 +265,12 @@ struct Dataset {
     /// Milliseconds of the latest row `timestamp` within its second.
     millis: u64,
     events: Vec<Event>,
+    /// Tables whose listed columns are checked, besides the checks every
+    /// table gets. Each must have rows.
     tables: Vec<Table>,
 }
 
-/// A checked table and the engine types of some of its columns.
+/// A table with the engine types of some of its columns.
 struct Table {
     name: &'static str,
     /// `(column, DuckDB type, Polars type)`. Enum columns are plain strings
@@ -400,6 +409,10 @@ impl Dataset {
             .map(|(ordinal, event)| response(type_url, block(event.0, event.1), *event, ordinal))
             .collect()
     }
+
+    fn checked(&self, table: &str) -> Option<&Table> {
+        self.tables.iter().find(|checked| checked.name == table)
+    }
 }
 
 /// `build` of `dataset` from a mock Firehose into `root`, one part per block.
@@ -449,168 +462,127 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
     );
 }
 
-/// Every `.parquet` file below `dir`.
-fn parquet_files(dir: &Path) -> Vec<PathBuf> {
-    let mut pending = vec![dir.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "parquet") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
-/// What the files of one table hold, read directly: rows in total and on
-/// [`DAY`], and the files of that day.
+/// What one table's Delta log adds: rows in total and on [`DAY`], and the
+/// data files (paths relative to the table).
+#[derive(Default)]
 struct Expected {
     rows: u64,
     rows_on_day: u64,
+    files: Vec<String>,
     files_on_day: Vec<String>,
 }
 
-fn expected(root: &Path, table: &str) -> Expected {
-    let mut expected = Expected {
-        rows: 0,
-        rows_on_day: 0,
-        files_on_day: Vec::new(),
-    };
-    for file in parquet_files(&root.join(table)) {
-        let partition = file
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(
-            partition.starts_with("date=2023-11-1"),
-            "{table}: {file:?} is not in a date partition"
-        );
-        let rows: u64 = read_parquet(&file)
-            .unwrap()
-            .iter()
-            .map(|batch| batch.num_rows() as u64)
-            .sum();
-        expected.rows += rows;
-        if partition == format!("date={DAY}") {
-            expected.rows_on_day += rows;
-            expected
-                .files_on_day
-                .push(file.to_str().unwrap().to_string());
+/// Reads the JSON commits of a table that nothing but fireparq wrote (only
+/// `add` actions, no `remove`).
+fn expected(table: &Path) -> Expected {
+    let mut expected = Expected::default();
+    for actions in common::delta_log(table).values() {
+        assert!(common::action(actions, "remove").is_none());
+        for add in actions.iter().filter_map(|action| action.get("add")) {
+            let path = add["path"].as_str().unwrap().to_string();
+            let date = add["partitionValues"]["date"].as_str().unwrap();
+            assert!(path.starts_with(&format!("date={date}/part-v1-")), "{path}");
+            let stats: Value = serde_json::from_str(add["stats"].as_str().unwrap()).unwrap();
+            let rows = stats["numRecords"].as_u64().unwrap();
+            expected.rows += rows;
+            if date == DAY {
+                expected.rows_on_day += rows;
+                expected.files_on_day.push(path.clone());
+            }
+            expected.files.push(path);
         }
     }
-    assert!(expected.rows > expected.rows_on_day && expected.rows_on_day > 0);
+    expected.files.sort();
+    expected.files_on_day.sort();
     expected
 }
 
-/// The DuckDB CLI, or `None` locally when it is missing (see the module docs).
-fn duckdb() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_DUCKDB")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::split_paths(&std::env::var_os("PATH")?)
-                .map(|directory| directory.join("duckdb"))
-                .find(|path| path.is_file())
-        })
-        .unwrap_or_else(|| PathBuf::from("duckdb"));
-    let available = std::process::Command::new(&candidate)
-        .arg("-version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if available {
-        return Some(candidate);
+/// The `Scanning Files` value (`read/total`) of the Delta scan in a DuckDB
+/// JSON profile.
+fn scanning_files(profile: &Value) -> Option<String> {
+    if let Some(files) = profile["extra_info"]["Scanning Files"].as_str() {
+        return Some(files.to_string());
     }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
-        "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
-    );
-    eprintln!("skipping the DuckDB engine check: no DuckDB CLI ({candidate:?})");
-    None
-}
-
-/// The Polars interpreter, or `None` locally when it is missing.
-fn polars() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_POLARS_PYTHON").map(PathBuf::from);
-    let available = candidate.as_ref().is_some_and(|python| {
-        std::process::Command::new(python)
-            .args(["-c", "import polars"])
-            .env_clear()
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    if available {
-        return candidate;
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_POLARS").is_none(),
-        "FIREPARQ_REQUIRE_POLARS is set but FIREPARQ_POLARS_PYTHON ({candidate:?}) cannot import polars"
-    );
-    eprintln!(
-        "skipping the Polars engine check: set FIREPARQ_POLARS_PYTHON to a Python with polars"
-    );
-    None
-}
-
-/// Runs `sql` in a fresh in-memory DuckDB without `~/.duckdbrc` and returns
-/// the rows of its last statement.
-fn duckdb_rows(duckdb: &Path, cwd: &Path, sql: &str) -> Vec<Value> {
-    let init = cwd.join("empty.duckdbrc");
-    std::fs::write(&init, "").unwrap();
-    let output = std::process::Command::new(duckdb)
-        .env_clear()
-        .current_dir(cwd)
-        .arg("-init")
-        .arg(&init)
-        .args(["-json", "-c", sql])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{sql}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    if stdout.trim().is_empty() {
-        return Vec::new();
-    }
-    serde_json::from_str(stdout.trim()).unwrap_or_else(|error| panic!("{error}: {stdout}"))
-}
-
-/// A JSON number or numeric string (DuckDB versions differ) as `u64`.
-fn number(value: &Value) -> u64 {
-    match value {
-        Value::Number(number) => number.as_u64().unwrap(),
-        Value::String(text) => text.parse().unwrap(),
-        other => panic!("not a number: {other}"),
-    }
+    profile["children"]
+        .as_array()?
+        .iter()
+        .find_map(scanning_files)
 }
 
 /// DuckDB's view of one table; returns its row count.
-fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table: &Table) -> u64 {
-    let context = format!("duckdb {} {}", dataset.name, table.name);
-    let glob = format!("{root}/{}/**/*.parquet", table.name);
-    let expected = expected(Path::new(root), table.name);
-    let types: BTreeMap<String, String> = duckdb_rows(
-        duckdb,
-        cwd,
-        &format!("DESCRIBE SELECT * FROM read_parquet('{glob}', hive_partitioning = true)"),
-    )
-    .into_iter()
-    .map(|row| {
-        (
-            row["column_name"].as_str().unwrap().to_string(),
-            row["column_type"].as_str().unwrap().to_string(),
-        )
-    })
-    .collect();
-    for (column, duck, _) in CANONICAL.iter().chain(&table.columns) {
+fn check_duckdb(
+    duckdb: &DuckDb,
+    cwd: &Path,
+    root: &Path,
+    dataset: &Dataset,
+    table: &str,
+    expected: &Expected,
+) -> u64 {
+    let context = format!("duckdb {} {} {}", duckdb.version, dataset.name, table);
+    let location = root.join(table);
+    let location = location.to_str().unwrap();
+    let scan = format!("delta_scan('{location}', filename = true)");
+    let checked = dataset.checked(table);
+    let minimums: String = checked
+        .map(|checked| {
+            checked
+                .minimums
+                .iter()
+                .map(|(column, _)| format!(", CAST(min({column}) AS VARCHAR) AS min_{column}"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let profile = cwd.join(format!("profile-{}-{table}.json", dataset.name));
+    let mut sql = format!(
+        "SELECT 'types' AS q, column_name, column_type \
+           FROM (DESCRIBE SELECT * FROM delta_scan('{location}')); \
+         SELECT 'stats' AS q, count(*) AS n, \
+           epoch_ms(max(timestamp)) % 1000 AS millis, \
+           epoch_us(max(timestamp)) % 1000 AS micros, \
+           count(*) FILTER (WHERE NOT (starts_with(filename, '{location}/date=') \
+             AND regexp_matches(filename, '/date=[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}/part-v1-[^/]+[.]parquet$'))) \
+             AS foreign_files, \
+           count(*) FILTER (WHERE date = DATE '{DAY}') AS on_day, \
+           count(DISTINCT date) FILTER (WHERE date = DATE '{DAY}') AS days_on_day, \
+           string_agg(DISTINCT replace(filename, '{location}/', ''), ',' ORDER BY replace(filename, '{location}/', '')) \
+             FILTER (WHERE date = DATE '{DAY}') AS files_on_day, \
+           count(*) FILTER (WHERE date IS DISTINCT FROM \
+             CAST(regexp_extract(filename, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
+             AS partition_mismatches{minimums} \
+           FROM {scan}; \
+         PRAGMA enable_profiling = 'json'; SET profiling_output = '{}'; \
+         SELECT 'pruned' AS q, count(*) AS n FROM delta_scan('{location}') WHERE date = DATE '{DAY}'; \
+         PRAGMA disable_profiling;",
+        profile.display()
+    );
+    if !expected.files.is_empty() {
+        let files = expected
+            .files
+            .iter()
+            .map(|file| format!("'{location}/{file}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(
+            " SELECT 'stored' AS q, column_name \
+                FROM (DESCRIBE SELECT * FROM read_parquet([{files}], hive_partitioning = false)); \
+              SELECT DISTINCT 'timestamp' AS q, converted_type, CAST(logical_type AS VARCHAR) AS logical \
+                FROM parquet_schema([{files}]) WHERE name = 'timestamp';"
+        ));
+    }
+    let rows = duckdb.query(&sql);
+    let types: BTreeMap<String, String> = rows["types"]
+        .iter()
+        .map(|row| {
+            (
+                row["column_name"].as_str().unwrap().to_string(),
+                row["column_type"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let columns = checked
+        .map(|checked| checked.columns.as_slice())
+        .unwrap_or_default();
+    for (column, duck, _) in CANONICAL.iter().chain(columns) {
         assert_eq!(
             types.get(*column).map(String::as_str),
             Some(*duck),
@@ -622,144 +594,137 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
         (!dataset.final_only).then_some("BIGINT"),
         "{context}"
     );
-    // The data files hold no `date` column: it is the partition value only.
-    let stored: Vec<String> = duckdb_rows(
-        duckdb,
-        cwd,
-        &format!("DESCRIBE SELECT * FROM read_parquet('{glob}', hive_partitioning = false)"),
-    )
-    .into_iter()
-    .map(|row| row["column_name"].as_str().unwrap().to_string())
-    .collect();
-    assert!(
-        !stored.iter().any(|column| column == "date") && stored.contains(&"block_num".into()),
-        "{context}: {stored:?}"
-    );
-    for (column, minimum) in &table.minimums {
-        let row = &duckdb_rows(
-            duckdb,
-            cwd,
-            &format!(
-                "SELECT CAST(min({column}) AS VARCHAR) AS minimum \
-                 FROM read_parquet('{glob}', hive_partitioning = true)"
-            ),
-        )[0];
-        assert_eq!(row["minimum"], json!(minimum), "{context}: min({column})");
-    }
-    // The `date=` directory is the only partition column.
+    // `date=` is the only partition column.
     assert!(
         !types.contains_key("year") && !types.contains_key("day"),
         "{context}"
     );
 
-    let row = &duckdb_rows(
-        duckdb,
-        cwd,
-        &format!(
-            "SELECT count(*) AS n, \
-             epoch_ms(max(timestamp)) % 1000 AS millis, \
-             epoch_us(max(timestamp)) % 1000 AS micros, \
-             count(*) FILTER (WHERE regexp_matches(replace(filename, '{root}/', ''), '(^|/)[._]')) \
-               AS hidden, \
-             (SELECT count(*) FROM read_parquet('{glob}', hive_partitioning = true) \
-               WHERE date = DATE '{DAY}') AS on_day, \
-             (SELECT count(DISTINCT date) FROM read_parquet('{glob}', hive_partitioning = true) \
-               WHERE date = DATE '{DAY}') AS days_on_day, \
-             (SELECT string_agg(DISTINCT filename, ',' ORDER BY filename) \
-               FROM read_parquet('{glob}', hive_partitioning = true, filename = true) \
-               WHERE date = DATE '{DAY}') AS files_on_day, \
-             (SELECT count(*) FROM read_parquet('{glob}', hive_partitioning = true, filename = true) \
-               WHERE date IS DISTINCT FROM \
-                 CAST(regexp_extract(filename, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
-               AS partition_mismatches \
-             FROM read_parquet('{glob}', hive_partitioning = true, filename = true)"
-        ),
-    )[0];
-    assert_eq!(number(&row["n"]), expected.rows, "{context}: {row}");
-    assert_eq!(number(&row["millis"]), dataset.millis, "{context}: {row}");
+    let stats = &rows["stats"][0];
+    assert_eq!(number(&stats["n"]), expected.rows, "{context}: {stats}");
+    assert_eq!(number(&stats["foreign_files"]), 0, "{context}: {stats}");
     assert_eq!(
-        number(&row["micros"]),
-        0,
-        "{context}: whole milliseconds: {row}"
-    );
-    assert_eq!(number(&row["hidden"]), 0, "{context}: {row}");
-    assert_eq!(
-        number(&row["on_day"]),
+        number(&stats["on_day"]),
         expected.rows_on_day,
-        "{context}: {row}"
+        "{context}: {stats}"
     );
-    assert_eq!(number(&row["days_on_day"]), 1, "{context}: {row}");
     assert_eq!(
-        row["files_on_day"]
+        number(&stats["partition_mismatches"]),
+        0,
+        "{context}: {stats}"
+    );
+    if let Some(checked) = checked {
+        for (column, minimum) in &checked.minimums {
+            assert_eq!(
+                stats[format!("min_{column}")],
+                json!(minimum),
+                "{context}: min({column})"
+            );
+        }
+    }
+    let pruned = &rows["pruned"][0];
+    assert_eq!(number(&pruned["n"]), expected.rows_on_day, "{context}");
+    let profile: Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+    if expected.rows > 0 {
+        assert_eq!(
+            number(&stats["millis"]),
+            dataset.millis,
+            "{context}: {stats}"
+        );
+        assert_eq!(
+            number(&stats["micros"]),
+            0,
+            "{context}: whole milliseconds: {stats}"
+        );
+        assert_eq!(number(&stats["days_on_day"]), 1, "{context}: {stats}");
+        assert_eq!(
+            stats["files_on_day"]
+                .as_str()
+                .unwrap()
+                .split(',')
+                .collect::<Vec<_>>(),
+            expected.files_on_day,
+            "{context}"
+        );
+        // The `date` filter prunes to that day's files.
+        assert_eq!(
+            scanning_files(&profile),
+            Some(format!(
+                "{}/{}",
+                expected.files_on_day.len(),
+                expected.files.len()
+            )),
+            "{context}: {profile}"
+        );
+        // The data files hold no `date` column: it is the partition value only.
+        let stored: Vec<&str> = rows["stored"]
+            .iter()
+            .map(|row| row["column_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            !stored.contains(&"date") && stored.contains(&"block_num"),
+            "{context}: {stored:?}"
+        );
+        // The Parquet logical type is TIMESTAMP(MICROS, UTC), which Polars
+        // requires under a Delta `timestamp` column.
+        let schema = &rows["timestamp"];
+        assert_eq!(schema.len(), 1, "{context}: {schema:?}");
+        let logical = schema[0]["logical"]
             .as_str()
-            .unwrap()
-            .split(',')
-            .collect::<Vec<_>>(),
-        expected.files_on_day,
-        "{context}"
-    );
-    assert_eq!(number(&row["partition_mismatches"]), 0, "{context}: {row}");
-
-    // The Parquet logical type is TIMESTAMP(MICROS, UTC), which Polars
-    // requires under a Delta `timestamp` column.
-    let schema = duckdb_rows(
-        duckdb,
-        cwd,
-        &format!(
-            "SELECT DISTINCT converted_type, CAST(logical_type AS VARCHAR) AS logical \
-             FROM parquet_schema('{glob}') WHERE name = 'timestamp'"
-        ),
-    );
-    assert_eq!(schema.len(), 1, "{context}: {schema:?}");
-    let logical = schema[0]["logical"]
-        .as_str()
-        .unwrap_or_default()
-        .to_uppercase();
-    assert!(
-        schema[0]["converted_type"] == json!("TIMESTAMP_MICROS")
-            || (logical.contains("MICROS") && logical.contains("UTC=1")),
-        "{context}: {schema:?}"
-    );
+            .unwrap_or_default()
+            .to_uppercase();
+        assert!(
+            schema[0]["converted_type"] == json!("TIMESTAMP_MICROS")
+                || (logical.contains("MICROS") && logical.contains("UTC=1")),
+            "{context}: {schema:?}"
+        );
+    }
     expected.rows
 }
 
 /// Polars' view of every table of `dataset`; returns the row counts.
-fn check_polars(python: &Path, root: &str, dataset: &Dataset) -> BTreeMap<String, u64> {
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/engines/polars_check.py");
-    let spec = json!({
-        "root": root,
-        "tables": dataset.tables.iter().map(|table| table.name).collect::<Vec<_>>(),
-        "minimums": dataset
-            .tables
-            .iter()
-            .map(|table| {
-                let columns: Vec<&str> = table.minimums.iter().map(|(column, _)| *column).collect();
-                (table.name, columns)
-            })
-            .collect::<BTreeMap<_, _>>(),
-        "day": DAY,
-    });
-    let output = std::process::Command::new(python)
-        .env_clear()
-        .arg(script)
-        .arg(spec.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "polars {}: {}",
-        dataset.name,
-        String::from_utf8_lossy(&output.stderr)
+fn check_polars(
+    python: &Path,
+    root: &Path,
+    dataset: &Dataset,
+    tables: &[String],
+    expected: &BTreeMap<String, Expected>,
+) -> BTreeMap<String, u64> {
+    let minimums: BTreeMap<&str, Vec<&str>> = dataset
+        .tables
+        .iter()
+        .map(|table| {
+            let columns = table.minimums.iter().map(|(column, _)| *column).collect();
+            (table.name, columns)
+        })
+        .collect();
+    let report = common::python_report(
+        python,
+        "delta_check.py",
+        &json!({
+            "root": root,
+            "tables": tables,
+            "day": DAY,
+            "minimums": minimums,
+            "checkpoint": true,
+            "stored_columns": true,
+        }),
     );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    eprintln!("polars {} read {}", report["polars"], dataset.name);
+    eprintln!(
+        "polars {} with deltalake {} read {}",
+        report["polars"], report["deltalake"], dataset.name
+    );
     let mut rows = BTreeMap::new();
-    for table in &dataset.tables {
-        let context = format!("polars {} {}", dataset.name, table.name);
-        let seen = &report["tables"][table.name];
-        let expected = expected(Path::new(root), table.name);
+    for table in tables {
+        let context = format!("polars {} {table}", dataset.name);
+        let seen = &report["tables"][table];
+        let expected = &expected[table];
         let schema = &seen["schema"];
-        for (column, _, polars) in CANONICAL.iter().chain(&table.columns) {
+        let checked = dataset.checked(table);
+        let columns = checked
+            .map(|checked| checked.columns.as_slice())
+            .unwrap_or_default();
+        for (column, _, polars) in CANONICAL.iter().chain(columns) {
             assert_eq!(
                 schema[*column].as_str(),
                 Some(*polars),
@@ -771,56 +736,62 @@ fn check_polars(python: &Path, root: &str, dataset: &Dataset) -> BTreeMap<String
             (!dataset.final_only).then_some("Int64"),
             "{context}"
         );
-        let stored = seen["stored_columns"].as_array().unwrap();
-        assert!(
-            !stored.contains(&json!("date")) && stored.contains(&json!("block_num")),
-            "{context}: the data files hold no date column: {stored:?}"
-        );
-        for (column, minimum) in &table.minimums {
-            assert_eq!(
-                seen["minimums"][*column],
-                json!(minimum),
-                "{context}: min({column})"
-            );
+        if let Some(checked) = checked {
+            for (column, minimum) in &checked.minimums {
+                assert_eq!(
+                    seen["minimums"][*column],
+                    json!(minimum),
+                    "{context}: min({column})"
+                );
+            }
         }
-        assert_eq!(number(&seen["rows"]), expected.rows, "{context}");
+        assert_eq!(number(&seen["rows"]), expected.rows, "{context}: {seen}");
+        assert_eq!(number(&seen["day_rows"]), expected.rows_on_day, "{context}");
+        // Only the log's data files, and the `date` filter prunes to the day's.
         assert_eq!(
-            number(&seen["rows_on_day"]),
-            expected.rows_on_day,
+            number(&seen["scan_files"]),
+            expected.files.len() as u64,
             "{context}"
         );
-        assert_eq!(seen["days_on_day"], json!([DAY]), "{context}");
         assert_eq!(
-            seen["paths_on_day"],
-            json!(expected.files_on_day),
+            number(&seen["day_scan_files"]),
+            expected.files_on_day.len() as u64,
             "{context}"
         );
-        assert_eq!(number(&seen["partition_mismatches"]), 0, "{context}");
-        assert_eq!(
-            number(&seen["max_timestamp_ms"]) % 1000,
-            dataset.millis,
-            "{context}"
-        );
-        for path in seen["paths"].as_array().unwrap() {
-            let relative = path.as_str().unwrap().strip_prefix(root).unwrap();
+        if expected.rows > 0 {
+            let first = seen["first_scan_file"].as_str().unwrap();
             assert!(
-                !relative
-                    .split('/')
-                    .any(|part| part.starts_with('_') || part.starts_with('.')),
-                "{context}: {relative}"
+                expected.files.iter().any(|file| file == first),
+                "{context}: {first}"
+            );
+            let first = seen["day_first_scan_file"].as_str().unwrap();
+            assert!(
+                expected.files_on_day.iter().any(|file| file == first),
+                "{context}: {first}"
+            );
+            assert_eq!(seen["day_dates"], json!([DAY]), "{context}");
+            let stored = seen["stored_columns"].as_array().unwrap();
+            assert!(
+                !stored.contains(&json!("date")) && stored.contains(&json!("block_num")),
+                "{context}: the data files hold no date column: {stored:?}"
+            );
+            assert_eq!(
+                number(&seen["max_timestamp_ms"]) % 1000,
+                dataset.millis,
+                "{context}"
             );
         }
-        rows.insert(table.name.to_string(), number(&seen["rows"]));
+        rows.insert(table.clone(), number(&seen["rows"]));
     }
     rows
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duckdb_and_polars_read_date_partitioned_output() {
-    let duckdb = duckdb();
-    let polars = polars();
+async fn duckdb_and_polars_read_every_delta_table() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let duckdb = DuckDb::open(&cwd);
+    let python = common::python();
     for dataset in datasets() {
         let root = cwd.join(dataset.name);
         build(&dataset, &cwd, &root).await;
@@ -828,20 +799,44 @@ async fn duckdb_and_polars_read_date_partitioned_output() {
         // cursor mirror no table read may pick up) and dot-prefixed state.
         assert!(root.join("_fireparq/cursor.parquet").is_file());
         assert!(root.join(".fireparq-ingest").is_dir());
-        let root_str = root.to_str().unwrap();
+        let tables = common::delta_tables(&root);
+        let expected: BTreeMap<String, Expected> = tables
+            .iter()
+            .map(|table| (table.clone(), expected(&root.join(table))))
+            .collect();
+        for checked in &dataset.tables {
+            let rows = expected[checked.name].rows;
+            assert!(rows > 0, "{} {}", dataset.name, checked.name);
+        }
+        let with_rows = expected.values().filter(|table| table.rows > 0).count();
+        eprintln!(
+            "{}: {} Delta tables, {with_rows} with rows",
+            dataset.name,
+            tables.len()
+        );
+        let polars_rows = python
+            .as_ref()
+            .map(|python| check_polars(python, &root, &dataset, &tables, &expected));
+        if python.is_some() {
+            // Every `_delta_log/` now holds a Parquet checkpoint too.
+            for table in &tables {
+                assert!(
+                    root.join(table)
+                        .join("_delta_log/_last_checkpoint")
+                        .is_file(),
+                    "{table}"
+                );
+            }
+        }
         let duck_rows: Option<BTreeMap<String, u64>> = duckdb.as_ref().map(|duckdb| {
-            dataset
-                .tables
+            tables
                 .iter()
                 .map(|table| {
-                    let rows = check_duckdb(duckdb, &cwd, root_str, &dataset, table);
-                    (table.name.to_string(), rows)
+                    let rows = check_duckdb(duckdb, &cwd, &root, &dataset, table, &expected[table]);
+                    (table.clone(), rows)
                 })
                 .collect()
         });
-        let polars_rows = polars
-            .as_ref()
-            .map(|python| check_polars(python, root_str, &dataset));
         if let (Some(duck), Some(polars)) = (&duck_rows, &polars_rows) {
             assert_eq!(
                 duck, polars,
@@ -850,4 +845,150 @@ async fn duckdb_and_polars_read_date_partitioned_output() {
             );
         }
     }
+    if let Some(duckdb) = &duckdb {
+        eprintln!(
+            "duckdb {} (delta {}) read every table",
+            duckdb.version, duckdb.delta_version
+        );
+    }
+}
+
+/// Opt-in, off in CI: anonymous reads of a deployment's public-read bucket
+/// (the S3 API of Ceph RGW or another S3-compatible service), which the
+/// spike could only check against moto. Operators run it against a live
+/// lake:
+///
+/// ```sh
+/// FIREPARQ_RGW_ENDPOINT=https://rgw.example.org FIREPARQ_RGW_BUCKET=ethereum-mainnet \
+/// FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 FIREPARQ_POLARS_PYTHON=/path/to/venv/bin/python \
+/// cargo test -p blocks --test engine_compat anonymous -- --nocapture
+/// ```
+///
+/// Optional: `FIREPARQ_RGW_PREFIX` (a dataset below the bucket root),
+/// `FIREPARQ_RGW_REGION` (default `us-east-1`) and `FIREPARQ_RGW_TABLE`, the
+/// child table of the consistent cut (default `transactions`). Every request
+/// is unsigned: no credential is read or sent. Both engines must read the
+/// newest closed day of `blocks` (found from its log) and the child table:
+/// the same rows and block range, pruned to that day's files, with the
+/// canonical types, and the frontier cut of README "Reading the tables".
+#[test]
+fn anonymous_reads_of_a_public_deployment_bucket() {
+    let (Ok(endpoint), Ok(bucket)) = (
+        std::env::var("FIREPARQ_RGW_ENDPOINT"),
+        std::env::var("FIREPARQ_RGW_BUCKET"),
+    ) else {
+        eprintln!(
+            "skipping the anonymous deployment read: set FIREPARQ_RGW_ENDPOINT and FIREPARQ_RGW_BUCKET"
+        );
+        return;
+    };
+    let region = std::env::var("FIREPARQ_RGW_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let child = std::env::var("FIREPARQ_RGW_TABLE").unwrap_or_else(|_| "transactions".into());
+    let root = match std::env::var("FIREPARQ_RGW_PREFIX") {
+        Ok(prefix) => format!("s3://{bucket}/{}", prefix.trim_matches('/')),
+        Err(_) => format!("s3://{bucket}"),
+    };
+    let (use_ssl, host) = if let Some(host) = endpoint.strip_prefix("https://") {
+        (true, host.trim_end_matches('/'))
+    } else if let Some(host) = endpoint.strip_prefix("http://") {
+        (false, host.trim_end_matches('/'))
+    } else {
+        panic!("FIREPARQ_RGW_ENDPOINT must start with https:// or http://");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let python = common::python().expect("the anonymous check needs FIREPARQ_POLARS_PYTHON");
+    let duckdb = DuckDb::open(&cwd).expect("the anonymous check needs the DuckDB CLI");
+
+    // The newest closed day, from `blocks`' log alone.
+    let storage = json!({
+        "aws_endpoint_url": endpoint,
+        "aws_region": region,
+        "aws_skip_signature": "true",
+        "aws_allow_http": (!use_ssl).to_string(),
+    });
+    let probe = common::python_report(
+        &python,
+        "delta_check.py",
+        &json!({"root": root, "tables": [], "storage_options": storage, "closed_day": true}),
+    );
+    let day = probe["closed_day"]
+        .as_str()
+        .expect("blocks has no closed day yet")
+        .to_string();
+    let tables = ["blocks".to_string(), child.clone()];
+    let report = common::python_report(
+        &python,
+        "delta_check.py",
+        &json!({
+            "root": root, "tables": tables, "day": day, "day_only": true,
+            "storage_options": storage,
+        }),
+    );
+
+    let secret = format!(
+        "CREATE SECRET lake (TYPE s3, KEY_ID '', SECRET '', REGION '{region}', \
+         ENDPOINT '{host}', URL_STYLE 'path', USE_SSL {use_ssl});"
+    );
+    let profile = cwd.join("profile-anonymous.json");
+    let rows = duckdb.query(&format!(
+        "{secret} \
+         SELECT 'types' AS q, column_name, column_type \
+           FROM (DESCRIBE SELECT * FROM delta_scan('{root}/blocks')); \
+         PRAGMA enable_profiling = 'json'; SET profiling_output = '{}'; \
+         SELECT 'blocks' AS q, count(*) AS n, min(block_num) AS first, max(block_num) AS last \
+           FROM delta_scan('{root}/blocks') WHERE date = DATE '{day}'; \
+         PRAGMA disable_profiling; \
+         WITH f AS (SELECT max(block_num) AS b FROM delta_scan('{root}/blocks') \
+                    WHERE date = DATE '{day}') \
+         SELECT 'child' AS q, count(*) AS n, min(block_num) AS first, max(block_num) AS last \
+           FROM delta_scan('{root}/{child}'), f WHERE date = DATE '{day}' AND block_num <= f.b;",
+        profile.display()
+    ));
+    let types: BTreeMap<&str, &str> = rows["types"]
+        .iter()
+        .map(|row| {
+            (
+                row["column_name"].as_str().unwrap(),
+                row["column_type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for (column, duck, polars) in CANONICAL {
+        assert_eq!(types.get(column), Some(&duck), "duckdb {column}");
+        assert_eq!(
+            report["tables"]["blocks"]["schema"][column],
+            json!(polars),
+            "polars {column}"
+        );
+    }
+    for (table, tag) in [("blocks", "blocks"), (child.as_str(), "child")] {
+        let duck = &rows[tag][0];
+        let seen = &report["tables"][table];
+        eprintln!("{table} on {day}: duckdb {duck}, polars {seen}");
+        assert!(number(&duck["n"]) > 0, "{table}: no rows on {day}");
+        assert_eq!(number(&duck["n"]), number(&seen["day_rows"]), "{table}");
+        assert_eq!(
+            number(&duck["first"]),
+            number(&seen["day_min_block"]),
+            "{table}"
+        );
+        assert_eq!(
+            number(&duck["last"]),
+            number(&seen["day_max_block"]),
+            "{table}"
+        );
+    }
+    let profile: Value = serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+    let files = scanning_files(&profile).expect("a Delta scan in the profile");
+    let (read, total) = files.split_once('/').unwrap();
+    assert_eq!(
+        read.parse::<u64>().unwrap(),
+        number(&report["tables"]["blocks"]["day_scan_files"]),
+        "both engines prune to the day's files: {files}"
+    );
+    eprintln!(
+        "anonymous reads of {root}: duckdb {} (delta {}) scanned {read} of {total} blocks files for {day}",
+        duckdb.version, duckdb.delta_version
+    );
 }

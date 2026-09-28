@@ -16,17 +16,13 @@
 //!   `txn {appId: fireparq:<descriptor>, version: last ordinal}`, `blocks` last;
 //! - after the restart, each table's `txn` equals the authority's ordinal and
 //!   its version counts exactly one commit per transaction;
-//! - DuckDB and Polars read exact row counts, the `date` partition, Delta
-//!   types (`BIGINT`/`Int64`, `DECIMAL(20,0)` for a `u64::MAX` nonce,
-//!   microsecond UTC timestamps) and prune by `date`.
+//! - after the restart, DuckDB `delta_scan` and Polars `scan_delta` read
+//!   exactly the rows the logs add, and a table that never had rows as empty.
+//!   Types, the `date` partition and pruning are `engine_compat.rs`'s (#643
+//!   L8).
 //!
 //! The S3 dataset is copied out of the loopback server and read locally.
-//! Engines: the DuckDB CLI from `FIREPARQ_DUCKDB` (else `duckdb` on `PATH`),
-//! which installs its `delta` extension into a temporary directory (or
-//! `FIREPARQ_DUCKDB_EXTENSION_DIR`), and the Python in
-//! `FIREPARQ_POLARS_PYTHON` with `polars` and `deltalake`. With
-//! `FIREPARQ_REQUIRE_DUCKDB` / `FIREPARQ_REQUIRE_POLARS` (CI) a missing
-//! engine fails instead of skipping.
+//! Engines: see `common/mod.rs`.
 use firehose_parquet::writer::read_parquet;
 use firehose_protos::{eth, firehose};
 use prost::Message;
@@ -36,6 +32,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tonic::codegen::{http, BoxFuture, Service};
 
+mod common;
+use common::DuckDb;
+
 #[path = "../examples/bench_live_flush/s3.rs"]
 #[allow(dead_code)]
 mod s3;
@@ -44,7 +43,6 @@ const CHAIN: &str = "delta-test-chain";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, 102 and 103
 /// on 2023-11-15.
 const MIDNIGHT: i64 = 1_700_006_400;
-const DAY: &str = "2023-11-15";
 const BUCKET: &str = "delta-lake";
 
 /// Rows of each checked table per block, and its partition-free columns.
@@ -287,29 +285,6 @@ async fn run(
     output
 }
 
-/// The actions of every commit of a local table, by version.
-fn log(table: &Path) -> BTreeMap<u64, Vec<Value>> {
-    let mut commits = BTreeMap::new();
-    for entry in std::fs::read_dir(table.join("_delta_log")).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_str().unwrap().to_string();
-        let Some(version) = name.strip_suffix(".json") else {
-            continue;
-        };
-        let actions = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        commits.insert(version.parse().unwrap(), actions);
-    }
-    commits
-}
-
-fn action<'a>(actions: &'a [Value], kind: &str) -> Option<&'a Value> {
-    actions.iter().find_map(|action| action.get(kind))
-}
-
 /// The authority's accepted ordinal, from the local control state or its
 /// copy.
 fn authority_ordinal(root: &Path) -> i64 {
@@ -342,10 +317,10 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
     let mut other_commits: BTreeMap<i64, i64> = BTreeMap::new();
     for table in &tables {
         let name = table.file_name().unwrap().to_str().unwrap().to_string();
-        let commits = log(table);
+        let commits = common::delta_log(table);
         // Commit 0 creates the table: protocol, metadata and identity only.
         let create = &commits[&0];
-        let protocol = action(create, "protocol").unwrap();
+        let protocol = common::action(create, "protocol").unwrap();
         assert_eq!(
             (&protocol["minReaderVersion"], &protocol["minWriterVersion"]),
             (&json!(1), &json!(2)),
@@ -354,7 +329,7 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
         assert!(
             protocol.get("readerFeatures").is_none() && protocol.get("writerFeatures").is_none()
         );
-        let metadata = action(create, "metaData").unwrap();
+        let metadata = common::action(create, "metaData").unwrap();
         assert_eq!(metadata["partitionColumns"], json!(["date"]), "{name}");
         let configuration = &metadata["configuration"];
         assert_eq!(configuration["delta.appendOnly"], json!("true"), "{name}");
@@ -377,7 +352,7 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
             &identity,
             "{name}"
         );
-        assert!(action(create, "add").is_none(), "{name}");
+        assert!(common::action(create, "add").is_none(), "{name}");
 
         let expected = TABLES.iter().find(|(table, _)| *table == name);
         let versions: Vec<u64> = commits.keys().copied().collect();
@@ -407,7 +382,7 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
                 3,
                 "{name} v{version}: commitInfo, add, txn: {actions:?}"
             );
-            let add = action(actions, "add").unwrap();
+            let add = common::action(actions, "add").unwrap();
             let path = table.join(add["path"].as_str().unwrap());
             assert!(
                 add["path"].as_str().unwrap().contains("/part-v1-"),
@@ -436,7 +411,7 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
                 .unwrap()
                 .ends_with(".250Z"));
             table_rows += file_rows;
-            let txn = action(actions, "txn").unwrap();
+            let txn = common::action(actions, "txn").unwrap();
             assert_eq!(
                 txn["appId"],
                 json!(format!("fireparq:{identity}")),
@@ -448,7 +423,7 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
                 "{name}: txn increases"
             );
             last_txn = Some(version_txn);
-            let committed_at = action(actions, "commitInfo").unwrap()["timestamp"]
+            let committed_at = common::action(actions, "commitInfo").unwrap()["timestamp"]
                 .as_i64()
                 .unwrap();
             if name == "blocks" {
@@ -482,267 +457,36 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
     rows
 }
 
-/// The DuckDB CLI, or `None` locally when it is missing.
-fn duckdb() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_DUCKDB")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::split_paths(&std::env::var_os("PATH")?)
-                .map(|directory| directory.join("duckdb"))
-                .find(|path| path.is_file())
-        })
-        .unwrap_or_else(|| PathBuf::from("duckdb"));
-    let available = std::process::Command::new(&candidate)
-        .arg("-version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if available {
-        return Some(candidate);
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
-        "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
-    );
-    eprintln!("skipping the DuckDB Delta check: no DuckDB CLI ({candidate:?})");
-    None
-}
-
-/// The Python with Polars and `deltalake`, or `None` locally when missing.
-fn polars() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_POLARS_PYTHON").map(PathBuf::from);
-    let available = candidate.as_ref().is_some_and(|python| {
-        std::process::Command::new(python)
-            .args(["-c", "import polars, deltalake"])
-            .env_clear()
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    if available {
-        return candidate;
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_POLARS").is_none(),
-        "FIREPARQ_REQUIRE_POLARS is set but FIREPARQ_POLARS_PYTHON ({candidate:?}) cannot import polars and deltalake"
-    );
-    eprintln!(
-        "skipping the Polars Delta check: set FIREPARQ_POLARS_PYTHON to a Python with polars and deltalake"
-    );
-    None
-}
-
-/// Runs `sql` after loading the `delta` extension in a fresh in-memory
-/// DuckDB, and returns the rows of the last statement.
-fn duckdb_rows(duckdb: &Path, cwd: &Path, extensions: &Path, sql: &str) -> Vec<Value> {
-    let init = cwd.join("empty.duckdbrc");
-    std::fs::write(&init, "").unwrap();
-    let setup = format!(
-        "SET extension_directory = '{}'; LOAD delta;",
-        extensions.display()
-    );
-    let output = std::process::Command::new(duckdb)
-        .env_clear()
-        .current_dir(cwd)
-        .arg("-init")
-        .arg(&init)
-        .args(["-json", "-c", &format!("{setup} {sql}")])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{sql}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let last = stdout
-        .trim()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if last.is_empty() {
-        return Vec::new();
-    }
-    serde_json::from_str(&last).unwrap_or_else(|error| panic!("{error}: {stdout}"))
-}
-
-/// Installs DuckDB's `delta` extension, retrying transient download errors.
-fn install_delta(duckdb: &Path, cwd: &Path, extensions: &Path) {
-    let sql = format!(
-        "SET extension_directory = '{}'; INSTALL delta; LOAD delta;",
-        extensions.display()
-    );
-    for attempt in 1..=3 {
-        let output = std::process::Command::new(duckdb)
-            .env_clear()
-            .current_dir(cwd)
-            .args(["-c", &sql])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            return;
-        }
-        assert!(
-            attempt < 3,
-            "cannot install the DuckDB delta extension: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        std::thread::sleep(Duration::from_secs(5));
-    }
-}
-
-fn number(value: &Value) -> u64 {
-    match value {
-        Value::Number(number) => number.as_u64().unwrap(),
-        Value::String(text) => text.parse().unwrap(),
-        other => panic!("not a number: {other}"),
-    }
-}
-
-fn check_duckdb(
-    duckdb: &Path,
-    cwd: &Path,
-    extensions: &Path,
-    root: &Path,
-    rows: &BTreeMap<String, u64>,
-) {
-    let version = duckdb_rows(duckdb, cwd, extensions, "SELECT version() AS v")[0]["v"].clone();
-    for (table, expected) in rows {
-        let scan = format!("delta_scan('{}/{table}')", root.display());
-        let row = &duckdb_rows(
-            duckdb,
-            cwd,
-            extensions,
-            &format!(
-                "SELECT count(*) AS n, count(DISTINCT block_num) AS blocks, \
-                 min(block_num) AS first, max(block_num) AS last, \
-                 (SELECT count(*) FROM {scan} WHERE date = DATE '{DAY}') AS on_day, \
-                 epoch_us(max(timestamp)) % 1000000 AS micros \
-                 FROM {scan}"
-            ),
-        )[0];
-        let context = format!("duckdb {version} {table}");
-        assert_eq!(number(&row["n"]), *expected, "{context}: {row}");
+/// DuckDB `delta_scan` and Polars `scan_delta` read exactly the rows the logs
+/// add, and an empty table (one that never had rows) as empty.
+/// `engine_compat.rs` checks types, partitions and pruning in detail.
+fn read_with_engines(cwd: &Path, root: &Path, rows: &BTreeMap<String, u64>) {
+    let mut tables: Vec<String> = rows.keys().cloned().collect();
+    tables.push("withdrawals".into());
+    let mut expected = rows.clone();
+    expected.insert("withdrawals".into(), 0);
+    if let Some(duckdb) = DuckDb::open(cwd) {
         assert_eq!(
-            (
-                number(&row["blocks"]),
-                number(&row["first"]),
-                number(&row["last"])
-            ),
-            (4, 100, 103),
-            "{context}: {row}"
+            common::duckdb_counts(&duckdb, root, &tables),
+            expected,
+            "duckdb {}",
+            duckdb.version
         );
-        assert_eq!(number(&row["on_day"]), expected / 2, "{context}: {row}");
-        assert_eq!(number(&row["micros"]), 250_000, "{context}: {row}");
-        let types: BTreeMap<String, String> = duckdb_rows(
-            duckdb,
-            cwd,
-            extensions,
-            &format!("DESCRIBE SELECT * FROM {scan}"),
-        )
-        .into_iter()
-        .map(|row| {
-            (
-                row["column_name"].as_str().unwrap().to_string(),
-                row["column_type"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-        assert_eq!(types["block_num"], "BIGINT", "{context}");
-        assert_eq!(types["timestamp"], "TIMESTAMP WITH TIME ZONE", "{context}");
-        assert_eq!(types["date"], "DATE", "{context}");
-        if table == "blocks" {
-            assert_eq!(types["nonce"], "DECIMAL(20,0)", "{context}");
-            let nonce = &duckdb_rows(
-                duckdb,
-                cwd,
-                extensions,
-                &format!("SELECT CAST(min(nonce) AS VARCHAR) AS nonce FROM {scan}"),
-            )[0];
-            assert_eq!(nonce["nonce"], json!("18446744073709551615"), "{context}");
-        }
-    }
-    // A table that never had rows reads as empty.
-    let empty = &duckdb_rows(
-        duckdb,
-        cwd,
-        extensions,
-        &format!(
-            "SELECT count(*) AS n FROM delta_scan('{}/withdrawals')",
-            root.display()
-        ),
-    )[0];
-    assert_eq!(number(&empty["n"]), 0);
-    eprintln!(
-        "duckdb {version} read {} Delta tables with exact rows",
-        rows.len()
-    );
-}
-
-fn check_polars(python: &Path, root: &Path, rows: &BTreeMap<String, u64>) {
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/engines/delta_check.py");
-    let mut tables: Vec<&str> = rows.keys().map(String::as_str).collect();
-    tables.push("withdrawals");
-    let spec = json!({
-        "root": root,
-        "tables": tables,
-        "day": DAY,
-        "decimals": {"blocks": ["nonce"]},
-    });
-    let output = std::process::Command::new(python)
-        .env_clear()
-        .arg(script)
-        .arg(spec.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "polars: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    for (table, expected) in rows {
-        let seen = &report["tables"][table];
-        let context = format!("polars {} {table}", report["polars"]);
-        assert_eq!(number(&seen["rows"]), *expected, "{context}: {seen}");
-        assert_eq!(number(&seen["rows_on_day"]), expected / 2, "{context}");
-        let blocks: Vec<u64> = seen["block_nums"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(number)
-            .collect();
-        let per_block = (*expected / 4) as usize;
-        let expected_blocks: Vec<u64> = (100..104)
-            .flat_map(|block| std::iter::repeat_n(block, per_block))
-            .collect();
-        assert_eq!(blocks, expected_blocks, "{context}");
-        assert_eq!(seen["schema"]["block_num"], json!("Int64"), "{context}");
-        assert_eq!(
-            seen["schema"]["timestamp"],
-            json!("Datetime(time_unit='us', time_zone='UTC')"),
-            "{context}"
-        );
-        assert_eq!(seen["schema"]["date"], json!("Date"), "{context}");
-        assert_eq!(
-            number(&seen["version"]),
-            4,
-            "{context}: one commit per block"
+        eprintln!(
+            "duckdb {} (delta {}) read {} Delta tables with exact rows",
+            duckdb.version,
+            duckdb.delta_version,
+            tables.len()
         );
     }
-    let blocks = &report["tables"]["blocks"];
-    assert_eq!(
-        blocks["schema"]["nonce"],
-        json!("Decimal(precision=20, scale=0)")
-    );
-    assert_eq!(blocks["minimums"]["nonce"], json!("18446744073709551615"));
-    let empty = &report["tables"]["withdrawals"];
-    assert_eq!((number(&empty["rows"]), number(&empty["version"])), (0, 0));
-    eprintln!(
-        "polars {} with deltalake {} read {} Delta tables with exact rows",
-        report["polars"],
-        report["deltalake"],
-        rows.len()
-    );
+    if let Some(python) = common::python() {
+        assert_eq!(
+            common::polars_counts(&python, root, &tables),
+            expected,
+            "polars"
+        );
+        eprintln!("polars read {} Delta tables with exact rows", tables.len());
+    }
 }
 
 async fn build_restart_and_read(storage: Storage<'_>, cwd: &Path) {
@@ -755,16 +499,7 @@ async fn build_restart_and_read(storage: Storage<'_>, cwd: &Path) {
     let root = storage.local_copy(cwd);
     let rows = check_logs(&root, 4);
 
-    let extensions = std::env::var_os("FIREPARQ_DUCKDB_EXTENSION_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cwd.join("duckdb-extensions"));
-    if let Some(duckdb) = duckdb() {
-        install_delta(&duckdb, cwd, &extensions);
-        check_duckdb(&duckdb, cwd, &extensions, &root, &rows);
-    }
-    if let Some(python) = polars() {
-        check_polars(&python, &root, &rows);
-    }
+    read_with_engines(cwd, &root, &rows);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -828,7 +563,7 @@ async fn a_crash_after_every_delta_commit_restarts_without_a_duplicate() {
     assert_eq!(pending["payload"]["phase"], json!("committed"));
     for (table, _) in TABLES {
         assert_eq!(
-            log(&root.join(table)).len(),
+            common::delta_log(&root.join(table)).len(),
             2,
             "{table}: create and transaction 1"
         );

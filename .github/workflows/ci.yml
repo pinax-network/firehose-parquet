@@ -49,14 +49,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
-      # DuckDB, blocks/tests/engine_compat.rs reads real output with it, and
-      # blocks/tests/delta_tables.rs reads the Delta tables with `delta_scan`
-      # (the test installs the delta extension); FIREPARQ_REQUIRE_DUCKDB makes
-      # a missing CLI fail instead of skip.
+      # DuckDB, and blocks/tests/engine_compat.rs, delta_tables.rs and
+      # delta_maintenance.rs read the Delta tables with `delta_scan`
+      # (blocks/tests/common/mod.rs); FIREPARQ_REQUIRE_DUCKDB makes a missing
+      # CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
-          DUCKDB_VERSION: v1.1.1
-          DUCKDB_SHA256: 7f3f1a26e98b3f1fcc673ffb81d2daf43c07689ed60e88173d6a4fd307f118ae
+          DUCKDB_VERSION: v1.5.5
+          DUCKDB_SHA256: 08c0ca117111fcede14239d0093792352befdc174218c344d232c13279643d05
         run: |
           curl -fsSL -o "$RUNNER_TEMP/duckdb.zip" \
             "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
@@ -66,17 +66,38 @@ jobs:
           echo "FIREPARQ_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
           echo "FIREPARQ_REQUIRE_DUCKDB=1" >> "$GITHUB_ENV"
 
-      # blocks/tests/engine_compat.rs also reads real output with Polars, and
-      # blocks/tests/delta_tables.rs its Delta tables with `scan_delta` (which
-      # needs deltalake), both pinned with hashes in
-      # blocks/tests/engines/requirements.txt; FIREPARQ_REQUIRE_POLARS makes a
-      # missing interpreter fail instead of skip.
+      # The delta extension is pinned by checksum: DuckDB's extension
+      # repository serves one build per DuckDB version and platform, and has no
+      # versioned URLs for core extensions. The tests load it from
+      # FIREPARQ_DUCKDB_EXTENSION_DIR and check FIREPARQ_DUCKDB_DELTA_VERSION;
+      # LOAD also verifies DuckDB's signature. If the repository replaces the
+      # build, this step fails: record the new checksum and version here.
+      - name: Install the DuckDB delta extension
+        env:
+          DELTA_EXTENSION_VERSION: 45c4087
+          DELTA_EXTENSION_SHA256: c8ce674cd61a395d88f2759e191186ab496714058f3fcf55ee86338780af90e9
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/delta.duckdb_extension.gz" \
+            "https://extensions.duckdb.org/v1.5.5/linux_amd64/delta.duckdb_extension.gz"
+          echo "${DELTA_EXTENSION_SHA256}  $RUNNER_TEMP/delta.duckdb_extension.gz" | sha256sum --check
+          gunzip "$RUNNER_TEMP/delta.duckdb_extension.gz"
+          "$FIREPARQ_DUCKDB" -c "SET extension_directory = '$RUNNER_TEMP/duckdb-extensions';
+            INSTALL '$RUNNER_TEMP/delta.duckdb_extension'; LOAD delta;
+            SELECT extension_name, extension_version, install_mode
+            FROM duckdb_extensions() WHERE extension_name = 'delta';"
+          echo "FIREPARQ_DUCKDB_EXTENSION_DIR=$RUNNER_TEMP/duckdb-extensions" >> "$GITHUB_ENV"
+          echo "FIREPARQ_DUCKDB_DELTA_VERSION=${DELTA_EXTENSION_VERSION}" >> "$GITHUB_ENV"
+
+      # The Delta tests also read with Polars `scan_delta` and run
+      # scripts/delta_maintenance.py with `deltalake`, both pinned with hashes
+      # in blocks/tests/engines/requirements.txt; FIREPARQ_REQUIRE_POLARS makes
+      # a missing interpreter fail instead of skip.
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install Polars
+      - name: Install Polars and deltalake
         run: |
           python -m venv "$RUNNER_TEMP/polars"
           "$RUNNER_TEMP/polars/bin/pip" install --only-binary=:all: --require-hashes \
@@ -98,66 +119,6 @@ jobs:
           ./target/debug/fireparq completions bash > /dev/null
           ./target/debug/fireparq completions zsh > /dev/null
           ./target/debug/fireparq completions fish > /dev/null
-
-  # Delta Lake spike (#643, docs/design/delta-lake.md). A standalone crate with
-  # its own toolchain file (deltalake 1.0.0 needs Rust 1.94.1) and lockfile,
-  # outside the workspace, so it changes nothing that `fireparq` builds. It
-  # commits pre-written Parquet 60 parts to Delta tables on local disk, an
-  # in-memory store and loopback S3, runs `deltalake` OPTIMIZE/VACUUM beside the
-  # writer, and reads the result with DuckDB (1.1.1, the current pin, and 1.5.5,
-  # the proposed one) and Polars. The delta extension is fetched at run time.
-  delta-spike:
-    name: Delta Lake spike (#643)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: spikes/delta-lake
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install the spike's Rust toolchain
-        run: |
-          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          rustup toolchain install "$channel" --profile minimal
-          rustc --version
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: spikes/delta-lake
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Install DuckDB CLIs
-        run: |
-          install_duckdb() {
-            curl -fsSL -o "$RUNNER_TEMP/duckdb-$1.zip" \
-              "https://github.com/duckdb/duckdb/releases/download/$1/duckdb_cli-linux-amd64.zip"
-            echo "$2  $RUNNER_TEMP/duckdb-$1.zip" | sha256sum --check
-            unzip -q "$RUNNER_TEMP/duckdb-$1.zip" -d "$RUNNER_TEMP/duckdb-$1"
-            "$RUNNER_TEMP/duckdb-$1/duckdb" -version
-          }
-          install_duckdb v1.1.1 7f3f1a26e98b3f1fcc673ffb81d2daf43c07689ed60e88173d6a4fd307f118ae
-          install_duckdb v1.5.5 08c0ca117111fcede14239d0093792352befdc174218c344d232c13279643d05
-
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install the spike's Python packages
-        run: |
-          python -m venv "$RUNNER_TEMP/delta-spike"
-          "$RUNNER_TEMP/delta-spike/bin/pip" install --only-binary=:all: --require-hashes \
-            -r requirements.txt
-
-      - name: Run the spike
-        env:
-          DELTA_SPIKE_PYTHON: ${{ runner.temp }}/delta-spike/bin/python
-          DELTA_SPIKE_DUCKDB: ${{ runner.temp }}/duckdb-v1.5.5/duckdb
-          DELTA_SPIKE_DUCKDB_SIGNED: ${{ runner.temp }}/duckdb-v1.1.1/duckdb
-        run: ./run.sh
 
   # The pinned cargo-deny gate lives in advisories.yml, which also runs weekly
   # on its own schedule.

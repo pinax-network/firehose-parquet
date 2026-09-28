@@ -48,7 +48,8 @@ the upgrade guide.
   the active files of a pinned Delta snapshot. See
   [Reading the tables](#reading-the-tables).
 - **Removed: `merge`, `truncate`, `verify` and `scan`.** Compaction is the job
-  of an off-the-shelf `deltalake` maintenance CronJob (#643), `truncate` has no
+  of an off-the-shelf `deltalake` maintenance CronJob (#643,
+  [Delta maintenance](#delta-maintenance)), `truncate` has no
   safe Delta equivalent (rebuild into a new root instead), `verify` returns over
   Delta snapshots in #666, and DuckDB, Polars and the Delta log replace `scan`.
 - **Engine-friendly layout.** A dataset root holds only its table directories,
@@ -87,7 +88,8 @@ the upgrade guide.
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
-- **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](#reading-the-tables))
+- **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](#reading-the-tables), [engine compatibility](#engine-compatibility))
+- **Delta maintenance** — an off-the-shelf `deltalake` job compacts closed days, vacuums and checkpoints beside the writer, with a reference script and Kubernetes CronJob ([Delta maintenance](#delta-maintenance))
 - **Delta Lake types** — every part is a Delta data file: checked signed integers, `decimal(20,0)` for currency amounts and other unchecked 64-bit values, `string` enums and microsecond timestamps, mapped once per flush before anything is written ([type mapping](docs/schemas/README.md))
 - **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
@@ -1918,14 +1920,15 @@ time is in another day. (Earlier releases wrote `year=YYYY/month=MM/` and a
 
 Read every table through its Delta log, never by globbing its files or
 listing its directories. The log is the table's only file index: a glob or a
-listing also finds the files that the maintenance job's OPTIMIZE replaced but
-VACUUM has not deleted yet (their rows twice), files of a transaction that is
-not committed yet, and the log's own checkpoint Parquet files. DuckDB (its
+listing also finds the files that the [maintenance job](#delta-maintenance)'s
+OPTIMIZE replaced but VACUUM has not deleted yet (their rows twice), files of a
+transaction that is not committed yet, and the log's own checkpoint Parquet
+files. DuckDB (its
 `delta` extension) and Polars read the `date` partition column from the log
 and prune by it.
 
 ```sql
--- DuckDB
+-- DuckDB 1.5.5, from a local dataset root
 INSTALL delta; LOAD delta;
 -- Rows, blocks and days of one table
 SELECT count(*) AS rows, min(block_num) AS first_block, max(block_num) AS last_block,
@@ -1936,10 +1939,17 @@ DESCRIBE SELECT * FROM delta_scan('output/mainnet/blocks');
 SELECT * FROM delta_scan('output/mainnet/blocks') ORDER BY block_num DESC LIMIT 20;
 -- One day: pruned by the partition, then by the block_num statistics
 SELECT count(*) FROM delta_scan('output/mainnet/blocks') WHERE date = DATE '2026-02-25';
+
+-- From a bucket with anonymous public read: an empty key and secret send
+-- unsigned requests. Set the endpoint and region of the S3-compatible service.
+CREATE SECRET lake (TYPE s3, KEY_ID '', SECRET '', REGION 'us-east-1',
+                    ENDPOINT 'storage.example.com', URL_STYLE 'path');
+SELECT count(*) FROM delta_scan('s3://ethereum-mainnet/blocks')
+WHERE date = DATE '2026-02-25';
 ```
 
 ```python
-# Polars (with deltalake installed), from a local dataset root
+# Polars 1.44 with deltalake 1.6 (pip install polars deltalake), from a local dataset root
 import datetime
 import polars as pl
 
@@ -1957,6 +1967,20 @@ remote = pl.scan_delta(
     },
 )
 ```
+
+Each transaction commits to one table after another, `blocks` last. A block
+visible in `blocks` has all of its rows in every other table, so bound other
+tables by the newest `blocks` row for a consistent cut:
+
+```sql
+WITH f AS (SELECT max(block_num) AS b FROM delta_scan('s3://ethereum-mainnet/blocks'))
+SELECT count(*) FROM delta_scan('s3://ethereum-mainnet/logs'), f
+WHERE date >= DATE '2026-09-25' AND block_num <= f.b;
+```
+
+Use DuckDB 1.5 or later for S3: DuckDB 1.1's `delta` extension fails
+anonymous reads once a table has a checkpoint, which the maintenance job
+writes every hour.
 
 A table's files, rows (each file's `numRecords`), bytes and days come from
 its log alone, without reading any data file. This is what `fireparq scan`
@@ -1999,8 +2023,13 @@ WHERE date = DATE '2026-09-25';
 ### Engine compatibility
 
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
-non-final) and Solana output with a mock Firehose and reads it with both, at
-pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
+non-final) and Solana output with a mock Firehose, writes a checkpoint of
+every table, and reads every table with both engines through its Delta log
+(`blocks/tests/engine_compat.rs`), at pinned versions: DuckDB 1.5.5 with its
+`delta` extension `45c4087` (both checksum-verified), and Polars 1.44.2 with
+`deltalake` 1.6.6 (hash-pinned). `blocks/tests/delta_maintenance.rs` reads the
+tables again after the maintenance job compacted and vacuumed them beside a
+running `build`.
 
 | Delta type written | DuckDB | Polars | Notes |
 |---|---|---|---|
@@ -2008,7 +2037,7 @@ pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
 | `short` | `SMALLINT` | `Int16` | The mapper's `UInt8` |
 | `decimal(20,0)` | `DECIMAL(20,0)` | `Decimal(precision=20, scale=0)` | Currency amounts and unchecked 64-bit values, exact up to `u64::MAX` |
 | `timestamp` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='us', time_zone='UTC')` | Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)` holding whole milliseconds |
-| `date` (the `date=` directory only) | `DATE` | `Date` | Filters on `date` prune directories |
+| `date` (partition column) | `DATE` | `Date` | Filters on `date` read only that day's files |
 | `string` enum labels | `VARCHAR` | `String` | Pages still dictionary-encoded |
 | `array<T>` | `T[]`, for example `SMALLINT[]` | `List(T)`, for example `List(Int16)` | |
 | `binary` | `BLOB` | `Binary` | |
@@ -2019,11 +2048,25 @@ pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
   (`BIGINT` / `Int64`).
 - [`docs/schemas/`](docs/schemas/README.md) lists every column's Delta type and
   each chain's mapping from the mapper's Arrow types.
-- Spark and other JVM engines are not a target for this plain Parquet layout:
-  they read `UInt64` as `DECIMAL(20,0)` and reject a partition column (`date`)
-  that also appears in the data files. The planned Delta Lake output mode
-  ([#643](https://github.com/pinax-network/firehose-parquet/issues/643))
-  covers them.
+- JVM engines (Spark, Trino) are not a target: the tables use reader
+  version 1 with no table features, but CI does not test these engines.
+
+To check anonymous reads of a deployment's public-read bucket (for example
+Ceph RGW) with both engines, run the opt-in test against it. It sends only
+unsigned requests, reads the newest closed day of `blocks` and one other
+table, and compares the engines' rows, block ranges and pruning:
+
+```bash
+FIREPARQ_RGW_ENDPOINT=https://storage.example.com FIREPARQ_RGW_BUCKET=ethereum-mainnet \
+FIREPARQ_DUCKDB=/path/to/duckdb FIREPARQ_POLARS_PYTHON=/path/to/venv/bin/python \
+cargo test -p blocks --test engine_compat anonymous -- --nocapture
+```
+
+`FIREPARQ_RGW_PREFIX` names a dataset below the bucket root,
+`FIREPARQ_RGW_REGION` the region (default `us-east-1`) and
+`FIREPARQ_RGW_TABLE` the other table (default `transactions`). The Python needs
+`blocks/tests/engines/requirements.txt`. Without `FIREPARQ_RGW_ENDPOINT` the
+test is skipped, as in CI.
 
 ### Single-network buckets
 
@@ -2049,6 +2092,85 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
 - To keep several networks in one bucket instead, use
   `--output 's3://<bucket>/{chain}'`. They then share the bucket-wide owner, so
   their mutating commands run one at a time.
+
+## Delta Maintenance
+
+fireparq only appends: each flush adds one file per table and day, and one
+Delta commit per table. Compacting those files, deleting replaced ones and
+checkpointing the logs is platform-side policy, not a fireparq command (#643):
+[`scripts/delta_maintenance.py`](scripts/delta_maintenance.py) runs the
+off-the-shelf `deltalake` Python package (pinned to 1.6.6 in
+[`scripts/delta_maintenance.requirements.txt`](scripts/delta_maintenance.requirements.txt))
+on a schedule, beside a running `build`. It needs no fireparq ownership:
+fireparq's commits are blind appends that rebase over the job's commits, and
+the job never touches `.fireparq-ingest/` or `_fireparq/`.
+
+For each table it runs, in order:
+
+1. **OPTIMIZE** each closed `date` with more than one file, to the table's
+   `delta.targetFileSize` (256 MiB). A day is closed once `blocks` holds a
+   later day: `blocks` commits last, so every earlier day is complete in every
+   table.
+2. **VACUUM**, lite by default: it deletes only files that a `remove`
+   tombstone older than the retention names, and never a part that `build`
+   published but has not committed yet. A full VACUUM (`FULL_VACUUM=1`, run
+   weekly) also deletes untracked files older than the retention (the files of
+   a failed OPTIMIZE), so the job refuses it below 168 hours.
+3. **A checkpoint**, after VACUUM: a checkpoint drops expired tombstones, and
+   a VACUUM after it would leave their files behind. It is skipped when
+   VACUUM failed.
+4. **Log cleanup** of commits older than `delta.logRetentionDuration`
+   (7 days) behind a checkpoint.
+
+Every step is idempotent: a failed or conflicting run changes nothing that
+the next run cannot finish, and the writer never notices. One JSON object per
+line goes to stdout (`start`, one `table` line per table, `done`); the exit
+status is 0, 1 when a table failed, or 2 for a configuration error.
+Credentials are read from the environment and never printed.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LAKE_ROOT` or `LAKE_BUCKET` | (required) | The dataset root, `s3://bucket[/prefix]` or a local path; `LAKE_BUCKET=b` is `s3://b`, a dataset at the bucket root |
+| `LAKE_TABLES` | (required) | Comma-separated tables, for example every table of the network's [schema](docs/schemas/README.md); `blocks` must exist |
+| `S3_ENDPOINT` | AWS | S3 endpoint URL, for example the in-cluster RGW |
+| `AWS_REGION` | `us-east-1` | |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | (required on S3) | The maintenance user; `AWS_SESSION_TOKEN` is optional |
+| `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | `false` | Plain HTTP; virtual-hosted instead of path-style requests |
+| `FULL_VACUUM` | `0` | `1` for the weekly full VACUUM |
+| `VACUUM_RETENTION_HOURS` | the table's 7 days | Lower only shortens how long readers of older snapshots find replaced files; a full VACUUM refuses less than 168 |
+| `OPTIMIZE_DATES` | `closed` | `all` also compacts the newest day: safe beside the writer, but repeated every run; use it once the writer has stopped for good |
+| `OPTIMIZE_TARGET_SIZE` | `delta.targetFileSize` | Bytes |
+| `OPTIMIZE_ZSTD_LEVEL` | `3` | Compression of the compacted files |
+| `OPTIMIZE_MAX_CONCURRENT_TASKS` | CPU count | Bounds OPTIMIZE's memory |
+| `DRY_RUN` | `0` | `1` reports what would be compacted and deleted, and changes nothing |
+
+```bash
+pip install --only-binary=:all: --require-hashes -r scripts/delta_maintenance.requirements.txt
+DRY_RUN=1 LAKE_ROOT=output/mainnet LAKE_TABLES=blocks,transactions,logs \
+  python scripts/delta_maintenance.py
+```
+
+On Kubernetes,
+[`deploy/examples/delta-maintenance-cronjob.yaml`](deploy/examples/delta-maintenance-cronjob.yaml)
+runs it hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
+weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
+`emptyDir`. Give the job its own S3 user, limited to the table prefixes
+(their `_delta_log/` included), with no access to `.fireparq-ingest/`,
+`_fireparq/` or the owner record, and give the writer no delete permission on
+`*/_delta_log/*`.
+
+- A transaction that `build` has committed but not yet added to every table's
+  log (after a crash in between, until the next start recovers it) must not
+  stay pending longer than `delta.deletedFileRetentionDuration` (7 days), or a
+  full VACUUM may delete its parts. Alert on a writer that has been down for
+  more than a day.
+- Alert on `firehose_parquet_delta_log_tail_commits` (see
+  [Prometheus Metrics](#prometheus-metrics)) growing past a few hundred: the
+  hourly checkpoints have stopped, and every reader and restart replays the
+  whole tail.
+- `blocks/tests/delta_maintenance.rs` runs the job over and over beside a real
+  `build`, on local disk and on a loopback S3 endpoint, and checks the exact
+  rows, the `txn` versions and the file counts afterwards.
 
 ## Canonical Identity Columns
 
@@ -2430,7 +2552,9 @@ firehose-parquet/
 ├── .github/workflows/                      # ci, docker-publish, release, network-endpoints
 ├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
 ├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
-├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
+├── scripts/                                # generate_networks.rs, check_network_endpoints.sh,
+│                                           #   delta_maintenance.py (the Delta maintenance job)
+├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJob)
 ├── docs/                                   # contracts, runbooks, schema reference, release notes, audit records
 ├── firehose-parquet/                       # core library
 │   └── src/
