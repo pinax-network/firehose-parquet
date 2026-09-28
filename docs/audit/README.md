@@ -150,7 +150,7 @@ Production fixes after the v1.0.0 release, with their patch release.
 
 | Issue | Release | PR(s) | Outcome |
 |---|---|---|---|
-| [#678](https://github.com/pinax-network/firehose-parquet/issues/678) | [v1.0.1](../releases/v1.0.1.md) | - | Ceph RGW 19.2 compares `If-Match` with the unquoted ETag and refused every correct quoted CAS, so S3 ownership could not be acquired. The canary now chooses the ETag form per store (as returned, else a full unquoted rerun that must pass every step, else fail closed), and every conditional request through the owner uses it: owner record, control state, S3 cursor mirror, pinned part reads ([record](rgw-if-match-etag.md)). |
+| [#678](https://github.com/pinax-network/firehose-parquet/issues/678) | [v1.0.1](../releases/v1.0.1.md) | [#679](https://github.com/pinax-network/firehose-parquet/pull/679) | Ceph RGW 19.2 compares `If-Match` with the unquoted ETag and refused every correct quoted CAS, so S3 ownership could not be acquired. The canary now chooses the ETag form per store (as returned, else a full unquoted rerun that must pass every step, else fail closed), and every conditional request through the owner uses it: owner record, control state, S3 cursor mirror, pinned part reads ([record](rgw-if-match-etag.md)). |
 
 ## Records by area
 

@@ -1,6 +1,7 @@
 # #678: Ceph RGW 19.2 `If-Match` ETag form
 
 Issue: [#678](https://github.com/pinax-network/firehose-parquet/issues/678).
+PR: [#679](https://github.com/pinax-network/firehose-parquet/pull/679).
 Released in [v1.0.1](../releases/v1.0.1.md).
 
 ## Symptom
