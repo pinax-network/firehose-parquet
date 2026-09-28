@@ -1,6 +1,6 @@
 # Plain-Parquet output and readers removed; `validate`, `scan` and `inspect` on Delta (#643, lanes L5b and L7)
 
-Refs #643; part of #463. PR: #TBD. Design:
+Refs #643; part of #463. PR: [#672](https://github.com/pinax-network/firehose-parquet/pull/672). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §7.1, §7.3 and the L5
 and L7 rows of §11. Index: the #643 rows of the [audit index](README.md).
 
@@ -129,15 +129,20 @@ replay examples write
 checkpoint, the mirror). It now refuses a directory with a message that
 points at the Delta readers.
 
-The one walker left over dataset trees is the protected-root discovery of
-`recovery recover` and of `build`'s overlap check (`ingest/maintenance.rs`:
-`collect_local_markers` locally, `discovery::visit_objects` on S3). It looks
-for `.fireparq-ingest/` markers, not table data. It now skips every
-`_delta_log/` (`artifacts::DELTA_LOG_DIR`, `is_in_delta_log`): locally it no
-longer descends into a log, which saves one directory read per table and the
-listing of every commit and checkpoint in it; on S3 it ignores keys in a log. Eligibility
-(`ingest/eligibility.rs`) is not a reader and still counts a `_delta_log/` as
-data, so a new root with one is refused.
+Three walkers remain over dataset trees, and none reads table data:
+
+- The protected-root discovery of `recovery recover` and of `build`'s overlap
+  check (`ingest/maintenance.rs`: `collect_local_markers` locally,
+  `discovery::visit_objects` on S3) looks for `.fireparq-ingest/` markers. It
+  now skips every `_delta_log/` (`artifacts::DELTA_LOG_DIR`,
+  `is_in_delta_log`): locally it no longer descends into a log, which saves
+  one directory read per table and the listing of every commit and checkpoint
+  in it; on S3 it ignores keys in a log.
+- The symlink check of `recovery`'s local ownership
+  (`dataset_lock/operation.rs`) must see every directory, logs included, so it
+  is unchanged.
+- Eligibility (`ingest/eligibility.rs`) must count a `_delta_log/` as data, so
+  a new root with one is still refused.
 
 ## Tests
 
@@ -188,7 +193,8 @@ data, so a new root with one is refused.
   does not occur on Linux.
 - `cargo test --workspace --locked` with `FIREPARQ_REQUIRE_DUCKDB=1` (DuckDB
   1.1.1) and `FIREPARQ_REQUIRE_POLARS=1` (Polars 1.44.2, `deltalake` 1.6.6):
-  TESTCOUNTS, on origin/main `d79ce49` (after L3) plus this change;
+  935 passed, 0 failed, 13 ignored, on origin/main `d79ce49` (after L3) plus
+  this change;
   `cargo test -p blocks --example refresh_evm_golden --locked` passes.
 - No real endpoint or bucket was used: tests run against loopback mock
   Firehose servers and the loopback S3 endpoint, in temporary directories with

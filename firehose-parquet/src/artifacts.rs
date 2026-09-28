@@ -14,8 +14,8 @@
 //! never picks up fireparq's own files.
 //!
 //! No command reads a table by walking its directory: `validate` reads a pinned Delta
-//! snapshot and engines read the logs. The walkers that remain look for control state
-//! (`recovery`, `build`'s overlap check) and skip every [`DELTA_LOG_DIR`].
+//! snapshot and engines read the logs. The protected-root walker (`recovery`, `build`'s
+//! overlap check) looks for control state only and skips every [`DELTA_LOG_DIR`].
 
 macro_rules! artifacts_dir {
     () => {
