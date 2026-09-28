@@ -233,8 +233,11 @@ harmless, and it does not happen at the default retention.
 - `cargo fmt --all` and `cargo test --workspace --locked` pass with
   `FIREPARQ_REQUIRE_DUCKDB=1` (DuckDB 1.5.5, `delta` `45c4087`) and
   `FIREPARQ_REQUIRE_POLARS=1` (Polars 1.44.2, `deltalake` 1.6.6): 982 passed,
-  14 ignored, on origin/main `d79ce49` plus this change, and 941 passed, 13
-  ignored after rebasing onto `bd02f6a` (#672, L5b/L7, which removed tests). Six tests are new:
+  14 ignored, on origin/main `d79ce49` plus this change; after rebasing onto
+  `f62959b` (#672 L5b/L7, which removed tests, and #675 L4): 967 passed,
+  13 ignored, including L4's `delta_recovery.rs` (local and S3, with
+  `maintenance_beside_build`). L4's test reads `block_nums` from
+  `delta_check.py`, which the rewrite here keeps. Six tests are new:
   five in `delta_maintenance.rs` and the opt-in check in `engine_compat.rs`
   (skipped without its variables).
 - The opt-in anonymous check was run once against a loopback moto 5.2.3

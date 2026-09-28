@@ -2,7 +2,7 @@
 report what they see (#643).
 
 Run by the Rust tests (`blocks/tests/engine_compat.rs`, `delta_tables.rs`,
-`delta_maintenance.rs`) with the interpreter named by `FIREPARQ_POLARS_PYTHON`
+`delta_maintenance.rs`, `delta_recovery.rs`) with the interpreter named by `FIREPARQ_POLARS_PYTHON`
 (Polars and `deltalake`, pinned in `requirements.txt`); the Rust tests make the
 assertions. Usage:
 
@@ -25,7 +25,8 @@ and optionally:
 
 Every read goes through the table's Delta log, never a directory listing. It
 prints one JSON object on stdout with, per table: the schema, the table
-version, row counts and block numbers, the files Polars scans with and without
+version, row counts and block numbers (also every row's, sorted, as
+`block_nums`), the files Polars scans with and without
 the `day` filter (from the query plan), the fireparq `txn` version and the
 active files per `date`.
 """
@@ -96,6 +97,10 @@ def table_report(spec, table, day):
     }
     if not spec.get("day_only"):
         report |= stats(scan, "", uri)
+        # Every row's block number, sorted (`delta_recovery.rs` compares them).
+        report["block_nums"] = (
+            scan.select(pl.col("block_num").sort()).collect().get_column("block_num").to_list()
+        )
         report["minimums"] = {
             name: str(value)
             for name, value in scan.select(
