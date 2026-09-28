@@ -69,9 +69,18 @@ canary under a fresh, never-reused
 1. Conditional Create succeeds, then exact bytes/version are readable.
 2. Duplicate Create is rejected and leaves bytes/version unchanged.
 3. A wrong-version CAS is rejected and leaves bytes/version unchanged.
-4. Correct CAS succeeds, changes the version, and is read back exactly.
-5. The old version no longer matches after that update.
-6. The private canary is deleted and absence is confirmed.
+4. A GET pinned to the correct version (`If-Match`) serves it (added in
+   v1.0.1).
+5. Correct CAS succeeds, changes the version, and is read back exactly.
+6. The old version no longer matches after that update.
+7. The private canary is deleted and absence is confirmed.
+
+Since v1.0.1 the canary also chooses how `If-Match` carries an ETag. It runs
+with ETags as returned first. If only the correct version is refused (steps
+4-5, with the probe unchanged), it reruns in full on a fresh key with unquoted
+ETags, as Ceph RGW 19.2 requires, and adopts that form only if every step
+passes. Every conditional request through the owner then uses the chosen form
+([#678 record](rgw-if-match-etag.md)).
 
 Negative probes never target a real owner record. Unsupported or ignored
 conditions, inconsistent reads, failed cleanup or ambiguous results prevent
@@ -80,8 +89,9 @@ Interrupted/ambiguous probe attempts may leave reserved control objects; their
 names are never reused. Artifact walkers must reserve both ownership constants
 when runtime integration is enabled.
 
-A successful acquisition needs at most 15 calls to `ObjectStore`, each bounded
-to ten seconds including streamed reads. The configured transport may retry
+A successful acquisition needs at most 16 calls to `ObjectStore` (27 when the
+unquoted rerun runs; 15 before v1.0.1), each bounded to ten seconds including
+streamed reads. The configured transport may retry
 HTTP requests within a call. Probe permissions therefore include
 Get/Put/Delete on the reserved canary prefix, and Get/conditional Put on the
 fixed owner key. Status is strictly read-only and does not run canaries.

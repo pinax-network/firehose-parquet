@@ -509,11 +509,8 @@ async fn local_build_writes_delta_tables_that_duckdb_and_polars_read_after_a_res
     build_restart_and_read(Storage::Local(cwd.join("dataset")), &cwd).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_build_writes_delta_tables_with_conditional_log_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let server = s3::Server::start(
+async fn s3_server(cwd: &Path) -> s3::Server {
+    s3::Server::start(
         &cwd.join("tls"),
         BUCKET,
         s3::Latency {
@@ -523,8 +520,61 @@ async fn s3_build_writes_delta_tables_with_conditional_log_commits() {
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+}
+
+fn text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+const UNQUOTED_CHOICE: &str =
+    "s3 conditional writes: If-Match ETags sent unquoted (provider compares them literally)";
+
+/// `(If-Match, status)` of every conditional request, per canary probe key in
+/// order of creation, and of every request outside the probes.
+type Conditions = Vec<(String, u16)>;
+fn if_match_requests(server: &s3::Server) -> (Vec<Conditions>, Conditions) {
+    let mut probes: Vec<(String, Conditions)> = Vec::new();
+    let mut others = Vec::new();
+    for entry in server.log() {
+        let Some(value) = entry.if_match else {
+            continue;
+        };
+        if !entry.key.starts_with(".fireparq-owner-probes-v1/") {
+            others.push((value, entry.status));
+            continue;
+        }
+        let value = if value.contains("never-match-") {
+            "wrong".to_string()
+        } else {
+            value
+        };
+        match probes.iter_mut().find(|(key, _)| *key == entry.key) {
+            Some((_, conditions)) => conditions.push((value, entry.status)),
+            None => probes.push((entry.key, vec![(value, entry.status)])),
+        }
+    }
+    (probes.into_iter().map(|(_, c)| c).collect(), others)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_build_writes_delta_tables_with_conditional_log_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
     build_restart_and_read(Storage::S3(&server), &cwd).await;
+    // RFC 9110 `If-Match` (AWS S3, MinIO): the ETags are sent as returned,
+    // quoted, after one canary run per start (#678).
+    let (probes, others) = if_match_requests(&server);
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    assert!(!others.is_empty());
+    for (value, status) in others {
+        assert!(value.starts_with('"') && status == 200, "{value} {status}");
+    }
     // Every log commit was one PUT: no commit was sent twice.
     let log_puts: Vec<_> = server
         .log()
@@ -536,6 +586,89 @@ async fn s3_build_writes_delta_tables_with_conditional_log_commits() {
     keys.dedup();
     assert_eq!(keys.len(), log_puts.len(), "{log_puts:?}");
     assert!(log_puts.iter().all(|entry| entry.status == 200));
+}
+
+/// #678: Ceph RGW 19.2 compares `If-Match` literally with the stored ETag
+/// without its quotes. Each start's canary sees its quoted correct version
+/// refused, qualifies the unquoted form on a fresh probe (wrong and stale
+/// versions still refused), logs the choice once, and then every
+/// conditional request of fireparq's own state carries the unquoted ETag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_build_on_rgw_19_sends_unquoted_if_match_etags() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
+    server.set_if_match(s3::IfMatch::Rgw19);
+    let storage = Storage::S3(&server);
+    for stop in [102, 104] {
+        let output = run(&storage, &cwd, stop, None).await;
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        assert_eq!(text.matches(UNQUOTED_CHOICE).count(), 1, "{text}");
+    }
+    let root = storage.local_copy(&cwd);
+    assert_eq!(check_logs(&root, 4)["blocks"], 4);
+    let (probes, others) = if_match_requests(&server);
+    assert_eq!(probes.len(), 4, "two canary runs per start: {probes:?}");
+    for pair in probes.chunks(2) {
+        // As returned: the wrong version, then the quoted correct one, refused.
+        assert!(
+            matches!(&pair[0][..], [(wrong, 412), (quoted, 412)]
+                if wrong == "wrong" && quoted.starts_with('"')),
+            "{pair:?}"
+        );
+        // Unquoted: wrong refused, pinned GET and CAS applied, stale refused.
+        assert!(
+            matches!(&pair[1][..], [(wrong, 412), (get, 200), (cas, 200), (stale, 412)]
+                if wrong == "wrong" && !get.starts_with('"') && get == cas && cas == stale),
+            "{pair:?}"
+        );
+    }
+    assert!(!others.is_empty());
+    for (value, status) in others {
+        assert!(!value.contains('"') && status == 200, "{value} {status}");
+    }
+    // Each kind of conditional request ran in that form: the owner record's
+    // CAS, the control state's CAS, and the GET pinning an uploaded part.
+    let log = server.log();
+    let unquoted = |method: &str, key: &dyn Fn(&str) -> bool| {
+        log.iter().any(|entry| {
+            entry.method == method
+                && key(&entry.key)
+                && entry.status == 200
+                && entry
+                    .if_match
+                    .as_deref()
+                    .is_some_and(|value| !value.contains('"'))
+        })
+    };
+    assert!(unquoted("PUT", &|key| key == ".fireparq-owner-v1.json"));
+    assert!(unquoted("PUT", &|key| key.contains("/.fireparq-ingest/")));
+    assert!(unquoted("GET", &s3::is_data_part));
+}
+
+/// #678: a provider on which neither ETag form matches fails closed, as
+/// before: no owner record, no data, and both probes deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_build_fails_closed_when_no_if_match_form_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
+    server.set_if_match(s3::IfMatch::RefuseAll);
+    let output = run(&Storage::S3(&server), &cwd, 102, None).await;
+    let text = text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "conditional-write capability could not be proven; ownership was not acquired"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(UNQUOTED_CHOICE), "{text}");
+    let (probes, others) = if_match_requests(&server);
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    assert!(others.is_empty(), "{others:?}");
+    assert!(server.objects("").is_empty());
 }
 
 /// The crash row the commit layer already recovers without a roll-forward

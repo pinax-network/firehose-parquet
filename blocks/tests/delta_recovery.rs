@@ -712,8 +712,42 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 async fn committed_without_a_delta_commit(s3: bool) {
     let (_dir, cwd) = scratch();
     let storage = Storage::new(s3, &cwd).await;
-    crash(&storage, &cwd, 102, "crash-at:CommittedPersisted", &[]).await;
-    let root = storage.copy(&cwd);
+    recover_committed_without_a_delta_commit(&storage, &cwd).await;
+}
+
+/// #678: the same crash and recovery on Ceph RGW 19.2, which compares
+/// `If-Match` literally with the ETag without its quotes. The crashed
+/// `build`, `recovery release` and the restarted `build` each qualify the
+/// unquoted form, and every conditional request (owner record, pending and
+/// authority state, pinned part reads) carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_without_a_delta_commit_on_rgw_19() {
+    let (_dir, cwd) = scratch();
+    let storage = Storage::new(true, &cwd).await;
+    let Storage::S3(server) = &storage else {
+        unreachable!()
+    };
+    server.set_if_match(s3::IfMatch::Rgw19);
+    recover_committed_without_a_delta_commit(&storage, &cwd).await;
+    let conditional: Vec<_> = server
+        .log()
+        .into_iter()
+        .filter(|entry| {
+            entry.if_match.is_some() && !entry.key.starts_with(".fireparq-owner-probes-v1/")
+        })
+        .collect();
+    assert!(conditional
+        .iter()
+        .any(|entry| entry.key.ends_with("/.fireparq-ingest/pending.json")));
+    for entry in &conditional {
+        let value = entry.if_match.as_deref().unwrap();
+        assert!(!value.contains('"') && entry.status == 200, "{entry:?}");
+    }
+}
+
+async fn recover_committed_without_a_delta_commit(storage: &Storage, cwd: &Path) {
+    crash(storage, cwd, 102, "crash-at:CommittedPersisted", &[]).await;
+    let root = storage.copy(cwd);
     assert_eq!(authority(&root), 0);
     assert_eq!(pending(&root).unwrap()["phase"], "committed");
     for (table, _) in ROW_TABLES {
@@ -723,9 +757,9 @@ async fn committed_without_a_delta_commit(s3: bool) {
             "{table}: no commit yet"
         );
     }
-    release_after_abort(&storage, &cwd).await;
-    build(&storage, &cwd, 102, &[]).await;
-    check_lake(&storage.copy(&cwd), 100..102, true);
+    release_after_abort(storage, cwd).await;
+    build(storage, cwd, 102, &[]).await;
+    check_lake(&storage.copy(cwd), 100..102, true);
 }
 
 /// §4 "Between table commits": `access_lists` and `logs` hold the first

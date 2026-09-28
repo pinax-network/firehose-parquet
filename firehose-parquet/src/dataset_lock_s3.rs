@@ -11,7 +11,9 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::path::Path;
-use object_store::{Attribute, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion};
+use object_store::{
+    Attribute, GetOptions, ObjectStore, PutMode, PutOptions, PutResult, UpdateVersion,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -55,6 +57,62 @@ pub enum OwnershipError {
     DataMutationUncertain,
     #[error("operator recovery requires confirmed process cessation and provider-confirmed remote-request quiescence")]
     RecoveryEvidenceRequired,
+}
+
+/// How a store's `If-Match` preconditions carry an ETag (#678).
+///
+/// S3 returns ETags in the RFC 9110 quoted form (`"abc"`) and compares
+/// `If-Match` against that form. Ceph RGW 19.2 compares `If-Match` literally
+/// against its stored ETag *without* the quotes, so it refuses every correct
+/// quoted compare-and-swap and accepts only the unquoted one. The
+/// conditional-write canary chooses the form once, when ownership is
+/// acquired, and every conditional request through that owner then uses it
+/// ([`ETagForm::if_match`]). It is never mixed within a run, never chosen per
+/// request, and never persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ETagForm {
+    /// Exactly as the provider returned it: AWS S3, MinIO and every store
+    /// that follows RFC 9110.
+    AsReturned,
+    /// Without its surrounding quotes: Ceph RGW 19.2.
+    Unquoted,
+}
+
+impl ETagForm {
+    /// `etag`, as the provider returned it, rendered for an `If-Match` header
+    /// in this form. `None` when this form cannot carry it; callers treat that
+    /// as a missing version and fail closed before sending anything.
+    pub(crate) fn if_match(self, etag: &str) -> Option<String> {
+        match self {
+            ETagForm::AsReturned => Some(etag.to_string()),
+            ETagForm::Unquoted => {
+                let inner = etag
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .unwrap_or(etag);
+                (!inner.is_empty() && !inner.contains('"')).then(|| inner.to_string())
+            }
+        }
+    }
+
+    /// The precondition of a compare-and-swap PUT on `version`: its ETag
+    /// rendered by [`ETagForm::if_match`], its version ID unchanged. Readbacks
+    /// are compared with `version` itself, never with this.
+    pub(crate) fn precondition(self, version: &UpdateVersion) -> Option<UpdateVersion> {
+        let e_tag = match &version.e_tag {
+            Some(etag) => Some(self.if_match(etag)?),
+            None => None,
+        };
+        Some(UpdateVersion {
+            e_tag,
+            version: version.version.clone(),
+        })
+    }
+
+    /// `PutMode::Update` on `version`, in this form.
+    pub(crate) fn update(self, version: &UpdateVersion) -> Option<PutMode> {
+        self.precondition(version).map(PutMode::Update)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +263,9 @@ pub struct S3Ownership {
     delta_log: Option<Arc<dyn object_store_delta::ObjectStore>>,
     owned: OwnerRecord,
     version: UpdateVersion,
+    /// Chosen by this acquisition's canary; every conditional request
+    /// through this owner uses it.
+    etag_form: ETagForm,
     mutation_uncertain: AtomicBool,
     control_mutation: tokio::sync::Mutex<()>,
     transaction_session: crate::dataset_lock::session::SessionSlot,
@@ -214,6 +275,7 @@ impl fmt::Debug for S3Ownership {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S3Ownership")
             .field("record", &self.owned)
+            .field("etag_form", &self.etag_form)
             .field("mutation_uncertain", &self.is_mutation_uncertain())
             .finish_non_exhaustive()
     }
@@ -240,7 +302,7 @@ impl S3Ownership {
             .map_or(0, |(record, _)| record.generation)
             .checked_add(1)
             .ok_or(OwnershipError::GenerationExhausted)?;
-        qualify_conditions(&store).await?;
+        let etag_form = qualify_conditions(&store).await?;
         let owned = OwnerRecord {
             format_version: FORMAT_VERSION,
             generation,
@@ -252,7 +314,7 @@ impl S3Ownership {
         };
         let mode = match current {
             None => PutMode::Create,
-            Some((_, version)) => PutMode::Update(version),
+            Some((_, version)) => update(etag_form, &version)?,
         };
         let version = transition(&store, &owned, mode).await?;
         Ok(Self {
@@ -261,6 +323,7 @@ impl S3Ownership {
             delta_log: None,
             owned,
             version,
+            etag_form,
             mutation_uncertain: AtomicBool::new(false),
             control_mutation: tokio::sync::Mutex::new(()),
             transaction_session: Default::default(),
@@ -313,6 +376,17 @@ impl S3Ownership {
     pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
         &self.store
     }
+    /// The `If-Match` ETag form this owner's canary chose for its store.
+    pub fn etag_form(&self) -> ETagForm {
+        self.etag_form
+    }
+
+    /// `PutMode::Update` on `version` of an object in this owner's store, in
+    /// its [`ETagForm`]. `None` (an ETag the form cannot carry) fails closed.
+    pub(crate) fn update_mode(&self, version: &UpdateVersion) -> Option<PutMode> {
+        self.etag_form.update(version)
+    }
+
     pub fn is_mutation_uncertain(&self) -> bool {
         self.mutation_uncertain.load(Ordering::SeqCst)
     }
@@ -346,7 +420,7 @@ impl S3Ownership {
         transition(
             &self.store,
             &released,
-            PutMode::Update(self.version.clone()),
+            update(self.etag_form, &self.version)?,
         )
         .await?;
         Ok(())
@@ -372,11 +446,11 @@ impl S3Ownership {
         if current != *expected {
             return Err(OwnershipError::StateChanged);
         }
-        qualify_conditions(&store).await?;
+        let etag_form = qualify_conditions(&store).await?;
         let mut released = expected.clone();
         released.state = OwnerState::Released;
         released.recovery = Some(authorization.receipt);
-        transition(&store, &released, PutMode::Update(version)).await?;
+        transition(&store, &released, update(etag_form, &version)?).await?;
         Ok(())
     }
 }
@@ -589,68 +663,190 @@ async fn transition(
     write_and_verify(store, &Path::from(OWNER_KEY), bytes.into(), mode).await
 }
 
-/// Isolated negative probes must never target the real ownership record.
-async fn qualify_conditions(store: &Arc<dyn ObjectStore>) -> Result<()> {
-    let key = Path::from(format!("{PROBE_PREFIX}/{}.json", Uuid::new_v4()));
-    let result = async {
-        let first = Bytes::from_static(b"{\"probe\":1}");
-        let second = Bytes::from_static(b"{\"probe\":2}");
-        let version = write_and_verify(store, &key, first.clone(), PutMode::Create).await?;
-        for mode in [
-            PutMode::Create,
-            PutMode::Update(UpdateVersion {
-                e_tag: Some(format!("\"never-match-{}\"", Uuid::new_v4())),
-                version: Some(format!("never-match-{}", Uuid::new_v4())),
-            }),
-        ] {
-            let response = tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                store.put_opts(&key, second.clone().into(), options(mode)),
-            )
-            .await;
-            if !matches!(
-                response,
-                Ok(Err(object_store::Error::AlreadyExists { .. }
-                    | object_store::Error::Precondition { .. }))
-            ) {
-                return Err(OwnershipError::ConditionalWritesUnproven);
-            }
-            if read_bytes(store, &key).await? != Some((first.clone(), version.clone())) {
-                return Err(OwnershipError::ConditionalWritesUnproven);
-            }
+/// `PutMode::Update` on `version` in `form`. An ETag that the form cannot
+/// carry counts as a missing version.
+fn update(form: ETagForm, version: &UpdateVersion) -> Result<PutMode> {
+    form.update(version).ok_or(OwnershipError::MissingVersion)
+}
+
+/// Qualify the store's conditional writes and choose its [`ETagForm`] (#678).
+///
+/// The canary runs with [`ETagForm::AsReturned`] first. The whole canary runs
+/// again on a fresh probe key with [`ETagForm::Unquoted`] only when all of
+/// these hold: every earlier step passed, the provider then refused the
+/// *correct* version with a precondition failure (to the conditional GET or
+/// to the correct compare-and-swap), the probe was left unchanged, and the
+/// refused ETag was quoted. That form is adopted only if every step passes,
+/// including the wrong-version and stale-version refusals. Anything else
+/// fails closed.
+async fn qualify_conditions(store: &Arc<dyn ObjectStore>) -> Result<ETagForm> {
+    match canary(store, ETagForm::AsReturned).await {
+        Ok(()) => {
+            tracing::debug!("s3 conditional writes: If-Match ETags sent as returned");
+            Ok(ETagForm::AsReturned)
         }
-        let updated = write_and_verify(
-            store,
-            &key,
-            second.clone(),
-            PutMode::Update(version.clone()),
-        )
-        .await?;
-        if updated == version {
-            return Err(OwnershipError::ConditionalWritesUnproven);
+        Err(CanaryFailure::CorrectVersionRefused { quoted: true }) => {
+            canary(store, ETagForm::Unquoted)
+                .await
+                .map_err(|_| OwnershipError::ConditionalWritesUnproven)?;
+            tracing::info!(
+                "s3 conditional writes: If-Match ETags sent unquoted (provider compares them literally)"
+            );
+            Ok(ETagForm::Unquoted)
         }
-        // A previously valid version must stop matching after an update.
-        let stale = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            store.put_opts(&key, first.into(), options(PutMode::Update(version))),
-        )
-        .await;
-        if !matches!(stale, Ok(Err(object_store::Error::Precondition { .. })))
-            || read_bytes(store, &key).await? != Some((second, updated))
-        {
-            return Err(OwnershipError::ConditionalWritesUnproven);
-        }
-        Ok(())
+        Err(_) => Err(OwnershipError::ConditionalWritesUnproven),
     }
-    .await;
+}
+
+/// Why one canary run did not qualify its form.
+#[derive(Debug)]
+enum CanaryFailure {
+    /// Every earlier step passed, then the provider refused the correct
+    /// version with a precondition failure and left the probe unchanged.
+    /// `quoted`: the refused ETag was sent in the quoted form.
+    CorrectVersionRefused { quoted: bool },
+    /// Any other failure. It is never retried in another form.
+    Unproven,
+}
+
+impl From<OwnershipError> for CanaryFailure {
+    fn from(_: OwnershipError) -> Self {
+        CanaryFailure::Unproven
+    }
+}
+
+/// One canary run in `form`, on a fresh, never-reused probe key. Isolated
+/// negative probes must never target the real ownership record.
+async fn canary(
+    store: &Arc<dyn ObjectStore>,
+    form: ETagForm,
+) -> std::result::Result<(), CanaryFailure> {
+    let key = Path::from(format!("{PROBE_PREFIX}/{}.json", Uuid::new_v4()));
+    let result = canary_steps(store, &key, form).await;
     // Only this random, private canary is deleted. The owner key is never deleted.
     let deleted = tokio::time::timeout(REQUEST_TIMEOUT, store.delete(&key)).await;
     let absent = matches!(read_bytes(store, &key).await, Ok(None));
-    if result.is_err() || !matches!(deleted, Ok(Ok(()))) || !absent {
-        return Err(OwnershipError::ConditionalWritesUnproven);
+    if !matches!(deleted, Ok(Ok(()))) || !absent {
+        return Err(CanaryFailure::Unproven);
     }
-    Ok(())
+    result
+}
+
+async fn canary_steps(
+    store: &Arc<dyn ObjectStore>,
+    key: &Path,
+    form: ETagForm,
+) -> std::result::Result<(), CanaryFailure> {
+    let first = Bytes::from_static(b"{\"probe\":1}");
+    let second = Bytes::from_static(b"{\"probe\":2}");
+    let unchanged = |expected: (Bytes, UpdateVersion)| async move {
+        match read_bytes(store, key).await {
+            Ok(Some(current)) if current == expected => Ok(()),
+            _ => Err(CanaryFailure::Unproven),
+        }
+    };
+    // 1. Create-if-absent, read back exactly.
+    let version = write_and_verify(store, key, first.clone(), PutMode::Create).await?;
+    let refused = CanaryFailure::CorrectVersionRefused {
+        quoted: version
+            .e_tag
+            .as_deref()
+            .is_some_and(|etag| ETagForm::Unquoted.if_match(etag).as_deref() != Some(etag)),
+    };
+    // 2. A duplicate Create and 3. a wrong-version CAS in `form` are refused.
+    let wrong = UpdateVersion {
+        e_tag: Some(format!("\"never-match-{}\"", Uuid::new_v4())),
+        version: Some(format!("never-match-{}", Uuid::new_v4())),
+    };
+    for mode in [PutMode::Create, update(form, &wrong)?] {
+        let response = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            store.put_opts(key, second.clone().into(), options(mode)),
+        )
+        .await;
+        if !matches!(
+            response,
+            Ok(Err(object_store::Error::AlreadyExists { .. }
+                | object_store::Error::Precondition { .. }))
+        ) {
+            return Err(CanaryFailure::Unproven);
+        }
+        unchanged((first.clone(), version.clone())).await?;
+    }
+    // 4. A GET pinned to the correct version in `form` serves it, as a
+    // protected part's verification pins its acknowledged upload.
+    let if_match = match version.e_tag.as_deref() {
+        Some(etag) => Some(form.if_match(etag).ok_or(CanaryFailure::Unproven)?),
+        None => None,
+    };
+    let pinned = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        let response = store
+            .get_opts(
+                key,
+                GetOptions {
+                    if_match,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let served = UpdateVersion {
+            e_tag: response.meta.e_tag.clone(),
+            version: response.meta.version.clone(),
+        };
+        if response.meta.size > MAX_RECORD_BYTES as u64 {
+            return Ok(None);
+        }
+        Ok::<_, object_store::Error>(Some((response.bytes().await?, served)))
+    })
+    .await;
+    match pinned {
+        Ok(Ok(Some(served))) if served == (first.clone(), version.clone()) => {}
+        Ok(Err(object_store::Error::Precondition { .. })) => {
+            unchanged((first.clone(), version.clone())).await?;
+            return Err(refused);
+        }
+        _ => return Err(CanaryFailure::Unproven),
+    }
+    // 5. The correct CAS in `form` succeeds, changes the version and is read
+    // back exactly.
+    let response = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        store.put_opts(key, second.clone().into(), options(update(form, &version)?)),
+    )
+    .await;
+    let reported = match response {
+        Ok(Ok(result)) => Some(result),
+        Ok(Err(object_store::Error::Precondition { .. })) => {
+            unchanged((first.clone(), version.clone())).await?;
+            return Err(refused);
+        }
+        _ => None,
+    };
+    let Some((current, updated)) = read_bytes(store, key).await? else {
+        return Err(CanaryFailure::Unproven);
+    };
+    if current != second
+        || updated == version
+        || reported
+            .as_ref()
+            .is_some_and(|result| !reported_version_matches(result, &updated))
+    {
+        return Err(CanaryFailure::Unproven);
+    }
+    // 6. The previous, now stale version no longer matches in `form`.
+    let stale = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        store.put_opts(key, first.into(), options(update(form, &version)?)),
+    )
+    .await;
+    if !matches!(stale, Ok(Err(object_store::Error::Precondition { .. }))) {
+        return Err(CanaryFailure::Unproven);
+    }
+    unchanged((second, updated)).await
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod rgw19_store;

@@ -9,6 +9,8 @@
 //! against this endpoint), `If-None-Match: *` and `If-Match` conditions,
 //! pinned `versionId` reads, byte ranges and ListObjectsV2. Every object's
 //! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age.
+//! `If-Match` follows RFC 9110 by default; [`Server::set_if_match`] switches
+//! it to Ceph RGW 19.2's literal comparison or refuses every value (#678).
 //! Every request waits half its injected
 //! latency before it is applied and half after, like a symmetric round trip;
 //! with `slow_every = N`, every Nth request (by arrival) waits `slow` instead.
@@ -53,6 +55,8 @@ pub struct Entry {
     pub delay_ms: u64,
     /// GET/HEAD carried `If-Match` or `versionId`.
     pub pinned: bool,
+    /// The request's `If-Match` value.
+    pub if_match: Option<String>,
     /// For control-slot PUTs: `writing:<receipts>`, `committed`, `tombstone`.
     pub note: Option<String>,
 }
@@ -64,9 +68,36 @@ struct Stored {
     modified: time::OffsetDateTime,
 }
 
+/// How an `If-Match` value other than `*` is compared with the stored ETag,
+/// which is always returned quoted (#678).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum IfMatch {
+    /// RFC 9110, as AWS S3 and MinIO: the quoted ETag matches.
+    #[default]
+    Rfc,
+    /// Ceph RGW 19.2: literally against the ETag without its quotes, so
+    /// only the unquoted ETag matches, for PUT and GET/HEAD.
+    Rgw19,
+    /// No value matches.
+    RefuseAll,
+}
+
+impl IfMatch {
+    fn holds(self, value: &str, etag: &str) -> bool {
+        value == "*"
+            || match self {
+                IfMatch::Rfc => value == etag,
+                IfMatch::Rgw19 => value == etag.trim_matches('"'),
+                IfMatch::RefuseAll => false,
+            }
+    }
+}
+
 struct State {
     bucket: String,
     latency: Latency,
+    if_match: Mutex<IfMatch>,
     arrivals: AtomicU64,
     objects: Mutex<(BTreeMap<String, Stored>, u64)>,
     log: Mutex<Vec<Entry>>,
@@ -185,6 +216,7 @@ impl Server {
         let state = Arc::new(State {
             bucket: bucket.into(),
             latency,
+            if_match: Mutex::new(IfMatch::default()),
             arrivals: AtomicU64::new(0),
             objects: Mutex::new((BTreeMap::new(), 0)),
             log: Mutex::new(Vec::new()),
@@ -222,6 +254,14 @@ impl Server {
 
     pub fn log(&self) -> Vec<Entry> {
         self.state.log.lock().unwrap().clone()
+    }
+
+    /// How later requests compare `If-Match` (`blocks/tests/delta_tables.rs`
+    /// and `delta_recovery.rs` run Ceph RGW 19.2's comparison; the
+    /// benchmark keeps RFC 9110).
+    #[allow(dead_code)]
+    pub fn set_if_match(&self, mode: IfMatch) {
+        *self.state.if_match.lock().unwrap() = mode;
     }
 
     /// Every stored object under `prefix`, with its exact bytes, sorted by
@@ -473,6 +513,7 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Full<
         response_bytes,
         delay_ms,
         pinned,
+        if_match: header("if-match"),
         note,
     });
     response
@@ -609,6 +650,7 @@ fn object(
     header: &dyn Fn(&str) -> Option<String>,
     body: Bytes,
 ) -> (StatusCode, Vec<(&'static str, String)>, Bytes) {
+    let if_match = *state.if_match.lock().unwrap();
     let mut objects = state.objects.lock().unwrap();
     match method {
         "GET" | "HEAD" => {
@@ -621,7 +663,7 @@ fn object(
             {
                 return error(StatusCode::NOT_FOUND, "NoSuchVersion");
             }
-            if header("if-match").is_some_and(|etag| etag != stored.etag && etag != "*") {
+            if header("if-match").is_some_and(|value| !if_match.holds(&value, &stored.etag)) {
                 return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
             }
             if header("if-none-match").is_some_and(|etag| etag == stored.etag || etag == "*") {
@@ -681,7 +723,7 @@ fn object(
                 return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
             }
             if let Some(expected) = header("if-match") {
-                if existing.is_none_or(|stored| stored.etag != expected) {
+                if existing.is_none_or(|stored| !if_match.holds(&expected, &stored.etag)) {
                     return error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
                 }
             }

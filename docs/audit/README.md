@@ -144,6 +144,14 @@ Docker runs before a release.
 | [#633](https://github.com/pinax-network/firehose-parquet/issues/633) | Open. Replace the unmaintained `backoff` and `bincode` crates (RUSTSEC-2025-0012, RUSTSEC-2025-0141, ignored with a reason in `deny.toml`). |
 | [#634](https://github.com/pinax-network/firehose-parquet/issues/634) | Open. No retained real-data block records a gas change, so the golden regression has no real `gas_changes` rows ([record](validation-misc-followups-evm.md)). |
 
+## After v1.0.0
+
+Production fixes after the v1.0.0 release, with their patch release.
+
+| Issue | Release | PR(s) | Outcome |
+|---|---|---|---|
+| [#678](https://github.com/pinax-network/firehose-parquet/issues/678) | [v1.0.1](../releases/v1.0.1.md) | [#679](https://github.com/pinax-network/firehose-parquet/pull/679) | Ceph RGW 19.2 compares `If-Match` with the unquoted ETag and refused every correct quoted CAS, so S3 ownership could not be acquired. The canary now chooses the ETag form per store (as returned, else a full unquoted rerun that must pass every step, else fail closed), and every conditional request through the owner uses it: owner record, control state, S3 cursor mirror, pinned part reads ([record](rgw-if-match-etag.md)). |
+
 ## Records by area
 
 ### Ingestion safety and durability
@@ -152,6 +160,7 @@ Docker runs before a release.
 - [#468: accepted transaction implementation plan](468-ingestion-transaction-plan.md)
 - [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
 - [#468: conditional S3 ownership qualification](468-s3-ownership.md)
+- [#678: Ceph RGW 19.2 `If-Match` ETag form, chosen by the canary](rgw-if-match-etag.md)
 - [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
 - [#468/#591: release S3 ownership after a provably safe build failure](s3-owner-safe-release.md)
 - [#468: transaction records and accepted-event frontier](468-transaction-records.md)
