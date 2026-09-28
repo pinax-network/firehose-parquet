@@ -2158,9 +2158,20 @@ DRY_RUN=1 LAKE_ROOT=output/mainnet LAKE_TABLES=blocks,transactions,logs \
   python scripts/delta_maintenance.py
 ```
 
+Each release also publishes the job as an image,
+`ghcr.io/pinax-network/firehose-parquet-maintenance:<version>`
+([`deploy/maintenance/Dockerfile`](deploy/maintenance/Dockerfile)). It holds the
+script and its hash-pinned `deltalake`, so a pod needs no package index:
+
+```bash
+docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
+  -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.0
+```
+
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](deploy/examples/delta-maintenance-cronjob.yaml)
-runs it hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
+runs that image hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
 weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
 `emptyDir`. Give the job its own S3 user, limited to the table prefixes
 (their `_delta_log/` included), with no access to `.fireparq-ingest/`,
