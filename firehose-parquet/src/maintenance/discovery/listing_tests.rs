@@ -1,6 +1,7 @@
 //! Paged listings with per-request timeouts and no total deadline (#655).
 use super::paged_bucket::{GeneratedData, Pacing, PagedBucket};
 use super::*;
+use futures::TryStreamExt;
 
 fn small_data() -> GeneratedData {
     GeneratedData {

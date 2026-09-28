@@ -15,7 +15,6 @@
 use anyhow::{bail, Context, Result};
 use arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,7 +31,7 @@ use crate::delta::commit::{CommitHooks, DeltaTables, TableCommit};
 mod lane;
 mod pipeline;
 use crate::writer::protected::PreparedFlush;
-use crate::writer::{ParquetFileMetadata, ParquetTableWriter};
+use crate::writer::ParquetFileMetadata;
 pub use pipeline::FlushWorkStats;
 
 pub trait MirrorAction {
@@ -243,7 +242,6 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         }
         self.failed = true;
         let started = Instant::now();
-        let routing = ParquetTableWriter::new(PathBuf::new(), compression);
         let tables = self
             .authority
             .payload
@@ -257,7 +255,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                 let directory = if rows == 0 {
                     table.clone()
                 } else {
-                    routing.partition_suffix(table, &metadata)?
+                    crate::writer::partition_suffix(table, &metadata)?
                 };
                 let partition = if directory == *table {
                     String::new()

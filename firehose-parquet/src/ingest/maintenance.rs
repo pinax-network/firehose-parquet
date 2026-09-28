@@ -245,7 +245,10 @@ async fn discover_markers(
                 stats,
                 |object| {
                     let location = object.location.as_ref();
-                    if contains_remote(&key, location) {
+                    // A Delta log holds commits and checkpoints, never control state.
+                    if contains_remote(&key, location)
+                        && !crate::artifacts::is_in_delta_log(location)
+                    {
                         if let Some(root) = marker_parent(location) {
                             insert_root(&mut roots, remote_url(&bucket, &root))?;
                         }
@@ -336,6 +339,7 @@ fn collect_local_markers(
                 );
                 insert_root(roots, path.to_string_lossy().into_owned())?;
             } else if kind.is_dir()
+                && entry.file_name() != crate::artifacts::DELTA_LOG_DIR
                 && !crate::artifacts::is_control_path(&entry.path().to_string_lossy())
             {
                 pending.push(entry.path());

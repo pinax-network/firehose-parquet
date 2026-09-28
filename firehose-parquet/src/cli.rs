@@ -223,7 +223,9 @@ pub struct CommonArgs {
     /// for literal braces. The resolved root is bound when a dataset is
     /// created, so later runs must resolve to the same root.
     ///
-    /// Every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`.
+    /// Every table is a Delta table at `<root>/<table>/`, with its data files
+    /// in `<table>/date=YYYY-MM-DD/part-*.parquet` and its log in
+    /// `<table>/_delta_log/`.
     #[arg(
         long,
         env = "OUTPUT",
@@ -401,8 +403,8 @@ pub struct CommonArgs {
 
 /// Arguments for the `build` subcommand — main Firehose ingestion pipeline.
 ///
-/// Streams blocks from a Firehose gRPC endpoint and writes Apache Parquet
-/// datasets, one `date=YYYY-MM-DD` partition per UTC day in every table.
+/// Streams blocks from a Firehose gRPC endpoint and writes one Delta Lake
+/// table per mapper table, partitioned by UTC day (`date=YYYY-MM-DD`).
 #[derive(clap::Args, Debug, Clone)]
 #[command(after_long_help = "\
 Examples:
@@ -554,116 +556,37 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Stream blocks from a Firehose gRPC endpoint and write Apache Parquet datasets.
+    /// Stream blocks from a Firehose gRPC endpoint and write Delta Lake tables.
     ///
-    /// This is the primary ingestion workflow. Writes every table as
-    /// `<table>/date=YYYY-MM-DD/part-*.parquet`. Supports live mode and S3 output. A rerun
+    /// This is the primary ingestion workflow. Writes every table as a Delta
+    /// table at `<table>/`, with data files in `<table>/date=YYYY-MM-DD/`.
+    /// Supports live mode and S3 output. A rerun
     /// resumes from the output's authoritative state under `.fireparq-ingest/`;
     /// `_fireparq/cursor.parquet` is only an optional mirror (`--cursor none`
     /// disables it).
     Build(BuildArgs),
-    /// Read and inspect Parquet files (schema, row counts, sample rows).
-    /// Supports local paths, shorthand S3 keys via `S3_BUCKET`, and `s3://bucket/prefix` URIs.
+    /// Validate the block sequence of a Delta `blocks` table.
+    ///
+    /// Reads the active data files of the table's latest Delta snapshot, from
+    /// its log (never a directory listing, so files that OPTIMIZE replaced are
+    /// not counted twice), and checks gaps, duplicates, the parent hash chain
+    /// and timestamp reversals per `date` partition and overall.
     #[command(after_long_help = "\
 Examples:
-  # Inspect a local parquet file
-  fireparq scan ./output/blocks/part-000001.parquet
+  # Validate the blocks table of a local dataset
+  fireparq validate ./output/mainnet/blocks
 
-  # Scan all files in a directory (up to 20 sample rows total)
-  fireparq scan ./output/blocks/
-
-  # Schema only, no data preview
-  fireparq scan ./output/blocks/ --schema-only
-
-  # Scan S3 files
-  fireparq scan s3://bucket/eth-mainnet/blocks/
+  # Validate the blocks table of a dataset at a bucket root
+  fireparq validate s3://ethereum-mainnet/blocks
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
-  S3_BUCKET=my-bucket fireparq scan eth-mainnet/_fireparq/cursor.parquet
+  S3_BUCKET=ethereum-mainnet fireparq validate blocks
 
-  # Scan a single S3 parquet file
-  fireparq scan s3://bucket/eth-mainnet/_fireparq/cursor.parquet
+  # Solana: allow skipped slots
+  fireparq validate s3://solana-mainnet-beta/blocks --allow-gaps
 
-  # Use row-by-row vertical output
-  fireparq scan ./output/blocks/part-000001.parquet --vertical
-
-  # Emit machine-readable JSON
-  fireparq scan ./output/blocks/part-000001.parquet --json
-
-  # Show up to 50 sample rows total across the scan
-  fireparq scan ./output/blocks/ --limit 50
-
-  # Paginate: skip first 20 rows, show next 20
-  fireparq scan ./output/blocks/ --offset 20 --limit 20
-
-  # Show the latest 20 rows first
-  fireparq scan ./output/blocks/part-000001.parquet --order desc --limit 20
-
-  # Skip the latest 20 rows, then show the previous 20
-  fireparq scan ./output/blocks/part-000001.parquet --order desc --offset 20 --limit 20
-
-Lookup order:
-  1. Explicit s3://bucket/... URIs are used as-is.
-  2. Non-URI paths use the local filesystem when the path exists.
-  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
-")]
-    Scan {
-        /// Path to a .parquet file or directory, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
-        #[arg(help_heading = "Selection")]
-        path: String,
-        /// Number of sample rows to display across the full scan (0 = schema only)
-        #[arg(
-            short = 'n',
-            long = "limit",
-            default_value = "20",
-            help_heading = "Selection"
-        )]
-        limit: usize,
-        /// Number of rows to skip before displaying (for pagination across the full scan)
-        #[arg(long, default_value = "0", help_heading = "Selection")]
-        offset: usize,
-        /// Row display order for pagination and previews
-        #[arg(long, value_enum, default_value = "asc", help_heading = "Selection")]
-        order: ScanOrder,
-        /// Only show file metadata (schema, row count, size) without data
-        #[arg(long, default_value = "false", help_heading = "Selection")]
-        schema_only: bool,
-        /// Use row-by-row vertical display instead of boxed table output
-        #[arg(
-            long,
-            default_value = "false",
-            conflicts_with = "json",
-            help_heading = "Display"
-        )]
-        vertical: bool,
-        /// Emit machine-readable JSON including file info, schema, and sampled rows
-        #[arg(
-            long,
-            default_value = "false",
-            conflicts_with = "vertical",
-            help_heading = "Display"
-        )]
-        json: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-    /// Validate block sequence integrity of Parquet files.
-    ///
-    /// Checks for gaps, parent hash chain, ordering, timestamps, schema
-    /// consistency, empty partitions, and cross-partition continuity.
-    #[command(after_long_help = "\
-Examples:
-  # Validate local blocks directory
-  fireparq validate ./output/blocks/
-
-  # Validate shorthand S3 path when no local match exists
-  S3_BUCKET=my-bucket fireparq validate eth-mainnet/blocks/
-
-  # Validate S3 path
-  fireparq validate s3://bucket/eth-mainnet/blocks/
-
-  # Check continuity across partition boundaries
-  fireparq validate ./output/blocks/ --cross-partition
+  # Also check continuity across adjacent date partitions
+  fireparq validate ./output/mainnet/blocks --cross-partition
 
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -671,7 +594,8 @@ Lookup order:
   3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Validate {
-        /// Path to a directory of .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        /// A Delta table with block_num, block_id and parent_id, normally `<dataset root>/blocks`:
+        /// a local path, a shorthand S3 key via S3_BUCKET, or an S3 URI
         #[arg(help_heading = "Selection")]
         path: String,
         /// Check continuity across partition boundaries
@@ -685,14 +609,15 @@ Lookup order:
     },
     /// Inspect a single Parquet file's metadata: file-level key-value pairs,
     /// schema, row group details, and column chunk info.
+    /// Reads one file, such as a table's data file, a Delta checkpoint or the cursor mirror.
     /// Supports local paths, shorthand S3 keys via `S3_BUCKET`, and `s3://bucket/key.parquet` URIs.
     #[command(after_long_help = "\
 Examples:
-  # Inspect a local parquet file
-  fireparq inspect ./output/blocks/part-000001.parquet
+  # Inspect a data file of a local table
+  fireparq inspect ./output/mainnet/blocks/date=2026-09-25/part-v1-<...>.parquet
 
-  # Inspect an S3 parquet file
-  fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
+  # Inspect a data file of an S3 table
+  fireparq inspect s3://ethereum-mainnet/blocks/date=2026-09-25/part-v1-<...>.parquet
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
   S3_BUCKET=my-bucket fireparq inspect eth-mainnet/_fireparq/cursor.parquet

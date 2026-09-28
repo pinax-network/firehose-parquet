@@ -13,7 +13,7 @@ use object_store::memory::InMemory;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::cell::{Cell, RefCell};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod concurrency;

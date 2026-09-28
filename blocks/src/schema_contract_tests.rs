@@ -15,8 +15,6 @@
 //! through Parquet too.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Int64Array};
 use arrow::compute::concat_batches;
@@ -30,7 +28,7 @@ use firehose_parquet::encode::{decode_base58, EncodeBytes};
 use firehose_parquet::traits::{
     timestamp_micros_utc_type, timestamp_millis_utc_type, BlockIdentity, BlockMapper, StreamEvent,
 };
-use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
+use firehose_parquet::writer::{decode_parquet, encode_parquet, ParquetFileMetadata};
 use prost::Message;
 
 use crate::antelope::mapper::AntelopeBlockMapper;
@@ -419,19 +417,11 @@ fn duplicate_field_names(batch: &RecordBatch) -> Vec<String> {
         .collect()
 }
 
-/// Write `batch` with the production table writer, then read it back.
-fn parquet_round_trip(dir: &Path, table: &str, batch: &RecordBatch) -> RecordBatch {
-    let mut writer = ParquetTableWriter::new(dir, Compression::Zstd);
-    let metadata = BlockMetadata {
-        min_block_number: BLOCK_NUM,
-        max_block_number: BLOCK_NUM,
-        min_timestamp: Some(TIMESTAMP),
-        max_timestamp: Some(TIMESTAMP),
-    };
-    let (path, _) = writer
-        .write_batch(table, batch, &metadata)
-        .expect("write parquet");
-    let batches = read_parquet(&path).expect("read parquet");
+/// Encode `batch` as an ingestion part is encoded, then read it back.
+fn parquet_round_trip(batch: &RecordBatch) -> RecordBatch {
+    let bytes = encode_parquet(batch, Compression::Zstd, &ParquetFileMetadata::new())
+        .expect("encode parquet");
+    let batches = decode_parquet(bytes).expect("read parquet");
     concat_batches(&batches[0].schema(), &batches).expect("concat read batches")
 }
 
@@ -444,36 +434,15 @@ fn display_values(batch: &RecordBatch, column: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Removes the scratch directory even when an assertion fails.
-struct ScratchDir(PathBuf);
-
-impl ScratchDir {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        Self(std::env::temp_dir().join(format!("fireparq-schema-contract-{nanos}")))
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[test]
 fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
-    let scratch = ScratchDir::new();
     let mut checked = 0;
 
-    for (case_index, flushed) in flush_all_cases().iter().enumerate() {
-        let case_dir = scratch.0.join(case_index.to_string());
+    for flushed in &flush_all_cases() {
         for (table, batch) in sorted_tables(&flushed.batches) {
             let context = format!("{} table={table}", flushed.context);
 
@@ -497,10 +466,10 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
                 &timestamp_millis_utc_type(),
                 "{context}: canonical timestamp type"
             );
-            // ParquetTableWriter skips empty batches, so every table needs rows.
+            // Every table needs rows: a table without rows gets no part.
             assert!(batch.num_rows() > 0, "{context}: fixture produced no rows");
 
-            let read = parquet_round_trip(&case_dir, table, batch);
+            let read = parquet_round_trip(batch);
             assert_eq!(
                 read.schema().fields(),
                 batch.schema().fields(),
@@ -576,12 +545,10 @@ fn holds_decimal(data_type: &DataType) -> bool {
 /// round trip that changes neither the values nor the protected schema digest.
 #[test]
 fn every_table_maps_onto_delta_types_and_round_trips_through_parquet() {
-    let scratch = ScratchDir::new();
     let partition = DatePartition::from_timestamp(TIMESTAMP).unwrap();
     let mut checked = 0;
-    for (case_index, flushed) in flush_all_cases().iter().enumerate() {
+    for flushed in &flush_all_cases() {
         let types = flushed.kind.profile().delta_types();
-        let case_dir = scratch.0.join(format!("delta-{case_index}"));
         let data = types
             .data_batches(flushed.batches.clone(), &fixture_metadata())
             .unwrap_or_else(|error| panic!("{}: {error:#}", flushed.context));
@@ -704,7 +671,7 @@ fn every_table_maps_onto_delta_types_and_round_trips_through_parquet() {
                 }
             }
 
-            let read = parquet_round_trip(&case_dir, table, mapped);
+            let read = parquet_round_trip(mapped);
             assert_eq!(
                 read.schema().fields(),
                 schema.fields(),

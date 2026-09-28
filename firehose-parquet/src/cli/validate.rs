@@ -1,5 +1,12 @@
-//! Canonical block validation and diagnostic rendering.
+//! Block continuity of a Delta `blocks` table, and its diagnostic rendering.
+//!
+//! `validate` pins one snapshot of the table (its latest version) and reads
+//! exactly the active data files that snapshot lists, grouped by their `date`
+//! partition value from the log. It never lists a directory: a listing would
+//! count a file that OPTIMIZE replaced (tombstoned, not yet vacuumed) beside
+//! its replacement, and would find the log's checkpoint Parquet files.
 use super::*;
+use crate::delta::store::DeltaStore;
 
 // ---------------------------------------------------------------------------
 // Validate
@@ -29,29 +36,15 @@ pub struct DuplicateBlock {
 
 /// A timestamp reversal between consecutive blocks.
 ///
-/// Timestamps are UTC epoch milliseconds: the canonical `timestamp` column is
-/// `Timestamp(Millisecond, UTC)`, so a reversal within one second is reported.
+/// Timestamps are compared as UTC epoch milliseconds (the canonical
+/// `timestamp` holds whole milliseconds), so a reversal within one second is
+/// reported.
 #[derive(Debug)]
 pub struct TimestampReversal {
     pub block_num: u64,
     pub timestamp_ms: i64,
     pub prev_block_num: u64,
     pub prev_timestamp_ms: i64,
-}
-
-/// An empty partition (no files or 0 rows).
-#[derive(Debug)]
-pub struct EmptyPartition {
-    pub partition: String,
-    pub files: usize,
-    pub reason: &'static str,
-}
-
-/// A schema mismatch between files.
-#[derive(Debug)]
-pub struct SchemaMismatch {
-    pub file: String,
-    pub details: Vec<String>,
 }
 
 /// Cross-partition boundary issue.
@@ -74,16 +67,12 @@ pub struct PartitionResult {
     pub gaps: Vec<BlockGap>,
     pub parent_mismatches: Vec<ParentMismatch>,
     pub duplicates: Vec<DuplicateBlock>,
-    pub ordering_errors: u64,
     pub timestamp_reversals: Vec<TimestampReversal>,
 }
 
 impl PartitionResult {
     pub fn is_valid(&self) -> bool {
-        self.gaps.is_empty()
-            && self.parent_mismatches.is_empty()
-            && self.duplicates.is_empty()
-            && self.ordering_errors == 0
+        self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.duplicates.is_empty()
     }
 }
 
@@ -97,6 +86,8 @@ pub struct ValidateOptions {
 /// Summary of a validate run (with per-partition breakdown).
 #[derive(Debug)]
 pub struct ValidateResult {
+    /// The pinned table version whose active files were read.
+    pub version: u64,
     pub files_scanned: usize,
     pub total_blocks: u64,
     pub min_block: Option<u64>,
@@ -104,14 +95,9 @@ pub struct ValidateResult {
     pub gaps: Vec<BlockGap>,
     pub parent_mismatches: Vec<ParentMismatch>,
     pub duplicates: Vec<DuplicateBlock>,
-    pub ordering_errors: u64,
     pub timestamp_reversals: Vec<TimestampReversal>,
-    /// Per-partition results (empty when data is not partitioned).
+    /// Per-partition results (only when there is more than one partition).
     pub partitions: Vec<PartitionResult>,
-    /// Empty partitions (warning, not failure).
-    pub empty_partitions: Vec<EmptyPartition>,
-    /// Schema mismatches across files.
-    pub schema_mismatches: Vec<SchemaMismatch>,
     /// Cross-partition boundary issues (only when --cross-partition).
     pub cross_partition_issues: Vec<CrossPartitionIssue>,
 }
@@ -121,14 +107,15 @@ impl ValidateResult {
         self.gaps.is_empty()
             && self.parent_mismatches.is_empty()
             && self.duplicates.is_empty()
-            && self.ordering_errors == 0
-            && self.schema_mismatches.is_empty()
             && self.cross_partition_issues.is_empty()
             && self.partitions.iter().all(|p| p.is_valid())
     }
 
     pub fn print(&self, path: &str) {
-        println!("Validating blocks in {} ...\n", path);
+        println!(
+            "Validating blocks in {path} at version {} ...\n",
+            self.version
+        );
 
         // Per-partition breakdown (if partitioned).
         // Only show partitions with issues or warnings; clean ones are counted in the summary.
@@ -184,9 +171,6 @@ impl ValidateResult {
                         dup.block_num, dup.count
                     );
                 }
-                if pr.ordering_errors > 0 {
-                    println!("    ordering errors: {}", pr.ordering_errors);
-                }
                 for tr in &pr.timestamp_reversals {
                     println!(
                         "    timestamp reversal at block {}: {} < previous block {} timestamp {}",
@@ -200,30 +184,6 @@ impl ValidateResult {
             if listed_any {
                 println!();
             }
-        }
-
-        // Schema mismatches.
-        if !self.schema_mismatches.is_empty() {
-            println!("  Schema mismatches: {}", self.schema_mismatches.len());
-            for sm in &self.schema_mismatches {
-                println!("    {}:", sm.file);
-                for detail in &sm.details {
-                    println!("      {}", detail);
-                }
-            }
-            println!();
-        }
-
-        // Empty partitions (warnings).
-        if !self.empty_partitions.is_empty() {
-            println!(
-                "  Empty partitions:  {} (warning)",
-                self.empty_partitions.len()
-            );
-            for ep in &self.empty_partitions {
-                println!("    {} ({})", ep.partition, ep.reason);
-            }
-            println!();
         }
 
         // Cross-partition issues.
@@ -263,7 +223,6 @@ impl ValidateResult {
         println!("  Files scanned:     {}", self.files_scanned);
         println!("  Block range:       {}", range);
         println!("  Total blocks:      {}", self.total_blocks);
-        println!("  Ordering errors:   {}", self.ordering_errors);
         println!("  Gaps:              {}", self.gaps.len());
 
         if self.partitions.is_empty() {
@@ -316,12 +275,6 @@ impl ValidateResult {
         }
 
         // Warnings after the pass/fail line.
-        if !self.empty_partitions.is_empty() && self.is_valid() {
-            println!(
-                "  ⚠ {} empty partition(s) detected (see above)",
-                self.empty_partitions.len()
-            );
-        }
         if !self.timestamp_reversals.is_empty() && self.is_valid() {
             println!(
                 "  ⚠ {} timestamp reversal(s) detected (see above); reported as warnings because some chains allow non-monotonic block times",
@@ -358,28 +311,27 @@ fn format_utc_seconds(timestamp: i64) -> anyhow::Result<String> {
 /// The timestamp is `None` when the table has no `timestamp` column or the value is null.
 pub(in crate::cli) type BlockTuple = (u64, String, String, Option<i64>);
 
-/// Read a string value from a column that may be Utf8 or Binary.
-pub(in crate::cli) fn read_id_string(
-    col: &dyn arrow::array::Array,
-    row: usize,
-    col_name: &str,
-) -> anyhow::Result<String> {
-    use arrow::array::{BinaryArray, StringArray};
-    if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
-        Ok(s.value(row).to_string())
-    } else if let Some(b) = col.as_any().downcast_ref::<BinaryArray>() {
-        Ok(hex::encode(b.value(row)))
+/// A `block_id` / `parent_id` column (Delta `string` or `binary`) as
+/// strings: text as is, bytes as hex.
+fn id_strings(column: &dyn arrow::array::Array, name: &str) -> anyhow::Result<Vec<String>> {
+    use arrow::array::{Array, BinaryArray, StringArray};
+
+    if let Some(text) = column.as_any().downcast_ref::<StringArray>() {
+        Ok((0..text.len())
+            .map(|row| text.value(row).to_string())
+            .collect())
+    } else if let Some(bytes) = column.as_any().downcast_ref::<BinaryArray>() {
+        Ok((0..bytes.len())
+            .map(|row| hex::encode(bytes.value(row)))
+            .collect())
     } else {
-        Err(anyhow::anyhow!("{} column is not Utf8 or Binary", col_name))
+        anyhow::bail!("{name} column is not Utf8 or Binary")
     }
 }
 
-/// Read a `timestamp` column as epoch milliseconds, whatever its unit.
-///
-/// The unit comes from the column type: `Timestamp(Second)` values are scaled up,
-/// the canonical `Timestamp(Millisecond, UTC)` is read as-is, and finer units are
-/// truncated to whole milliseconds (monotonic, so truncation never invents a
-/// reversal). Legacy `Int64` columns hold epoch seconds. Null values stay null.
+/// A `timestamp` column as epoch milliseconds, whatever its unit: finer
+/// units are truncated to whole milliseconds (monotonic, so truncation never
+/// invents a reversal). Null values stay null.
 pub(in crate::cli) fn timestamp_column_as_epoch_millis(
     column: &dyn arrow::array::Array,
 ) -> anyhow::Result<arrow::array::Int64Array> {
@@ -387,17 +339,13 @@ pub(in crate::cli) fn timestamp_column_as_epoch_millis(
     use arrow::compute::cast;
     use arrow::datatypes::{DataType, Int64Type, TimeUnit};
 
-    let column = match column.data_type() {
-        DataType::Timestamp(_, _) => cast(column, &DataType::Timestamp(TimeUnit::Millisecond, None))?,
-        DataType::Int64 => {
-            let seconds = cast(column, &DataType::Timestamp(TimeUnit::Second, None))?;
-            cast(&seconds, &DataType::Timestamp(TimeUnit::Millisecond, None))?
-        }
-        other => anyhow::bail!(
-            "timestamp column has unsupported type {other}: expected Timestamp or Int64 epoch seconds"
-        ),
-    };
-    Ok(cast(&column, &DataType::Int64)?
+    anyhow::ensure!(
+        matches!(column.data_type(), DataType::Timestamp(_, _)),
+        "timestamp column has unsupported type {}: expected a Timestamp",
+        column.data_type()
+    );
+    let millis = cast(column, &DataType::Timestamp(TimeUnit::Millisecond, None))?;
+    Ok(cast(&millis, &DataType::Int64)?
         .as_primitive::<Int64Type>()
         .clone())
 }
@@ -410,45 +358,32 @@ pub(in crate::cli) fn extract_block_tuples(
     parent_id_idx: usize,
     timestamp_idx: Option<usize>,
 ) -> anyhow::Result<Vec<BlockTuple>> {
-    use arrow::array::{Array, Int64Array, UInt64Array};
+    use arrow::array::{Array, Int64Array};
 
     let mut tuples = Vec::new();
     for batch_result in reader {
         let batch = batch_result?;
-        // The mapper's `UInt64`, or the Delta data file's `Int64` (#643).
-        let column = batch.column(block_num_idx);
-        let block_nums: Vec<u64> =
-            if let Some(numbers) = column.as_any().downcast_ref::<UInt64Array>() {
-                numbers.values().to_vec()
-            } else if let Some(numbers) = column.as_any().downcast_ref::<Int64Array>() {
-                numbers
-                    .values()
-                    .iter()
-                    .map(|number| {
-                        u64::try_from(*number)
-                            .map_err(|_| anyhow::anyhow!("negative block_num {number}"))
-                    })
-                    .collect::<anyhow::Result<_>>()?
-            } else {
-                anyhow::bail!("block_num column is not UInt64 or Int64")
-            };
-        let block_id_col = batch.column(block_id_idx).as_ref();
-        let parent_id_col = batch.column(parent_id_idx).as_ref();
+        // A Delta `long` (#643).
+        let block_nums = batch
+            .column(block_num_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("block_num column is not Int64 (a Delta long)"))?;
+        let block_ids = id_strings(batch.column(block_id_idx).as_ref(), "block_id")?;
+        let parent_ids = id_strings(batch.column(parent_id_idx).as_ref(), "parent_id")?;
         let timestamps = timestamp_idx
             .map(|idx| timestamp_column_as_epoch_millis(batch.column(idx).as_ref()))
             .transpose()?;
 
-        for (i, block_num) in block_nums.into_iter().enumerate() {
+        for (i, (block_id, parent_id)) in block_ids.into_iter().zip(parent_ids).enumerate() {
+            let number = block_nums.value(i);
+            let block_num = u64::try_from(number)
+                .map_err(|_| anyhow::anyhow!("negative block_num {number}"))?;
             let ts = timestamps
                 .as_ref()
                 .filter(|millis| millis.is_valid(i))
                 .map(|millis| millis.value(i));
-            tuples.push((
-                block_num,
-                read_id_string(block_id_col, i, "block_id")?,
-                read_id_string(parent_id_col, i, "parent_id")?,
-                ts,
-            ));
+            tuples.push((block_num, block_id, parent_id, ts));
         }
     }
     Ok(tuples)
@@ -484,17 +419,15 @@ pub(in crate::cli) fn find_canonical_indices(
     })
 }
 
-/// Decode only validation columns while retaining the full footer schema for
-/// schema consistency checks. Shared by file-backed and S3-buffer-backed readers.
+/// Decode only the validation columns of one data file.
 pub(in crate::cli) fn read_validation_columns<R: parquet::file::reader::ChunkReader + 'static>(
     input: R,
-) -> anyhow::Result<(arrow::datatypes::Schema, Vec<BlockTuple>, u64)> {
+) -> anyhow::Result<Vec<BlockTuple>> {
     use arrow::record_batch::RecordBatchReader;
     use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ProjectionMask};
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
-    let schema = builder.schema().as_ref().clone();
-    let indices = find_canonical_indices(&schema)?;
+    let indices = find_canonical_indices(builder.schema())?;
     let roots = [
         Some(indices.block_num),
         Some(indices.block_id),
@@ -504,83 +437,132 @@ pub(in crate::cli) fn read_validation_columns<R: parquet::file::reader::ChunkRea
     .into_iter()
     .flatten();
     let projection = ProjectionMask::roots(builder.parquet_schema(), roots);
-    let row_count = builder.metadata().file_metadata().num_rows() as u64;
     let reader = builder.with_projection(projection).build()?;
     // Projection retains source field order, which need not match canonical order.
     let projected = find_canonical_indices(&reader.schema())?;
-    let tuples = extract_block_tuples(
+    extract_block_tuples(
         reader,
         projected.block_num,
         projected.block_id,
         projected.parent_id,
         projected.timestamp,
-    )?;
-    Ok((schema, tuples, row_count))
+    )
 }
 
-/// Compare two schemas and return a list of differences.
-pub(in crate::cli) fn compare_schemas(
-    reference: &arrow::datatypes::Schema,
-    other: &arrow::datatypes::Schema,
-) -> Vec<String> {
-    use std::collections::HashMap;
-
-    let ref_fields: HashMap<&str, &arrow::datatypes::Field> = reference
-        .fields()
-        .iter()
-        .map(|f| (f.name().as_str(), f.as_ref()))
-        .collect();
-    let other_fields: HashMap<&str, &arrow::datatypes::Field> = other
-        .fields()
-        .iter()
-        .map(|f| (f.name().as_str(), f.as_ref()))
-        .collect();
-
-    let mut diffs = Vec::new();
-
-    // Check for missing columns and type mismatches.
-    for (name, ref_field) in &ref_fields {
-        match other_fields.get(name) {
-            None => diffs.push(format!("missing column: {}", name)),
-            Some(other_field) => {
-                if ref_field.data_type() != other_field.data_type() {
-                    diffs.push(format!(
-                        "type mismatch: {} ({} vs {})",
-                        name,
-                        ref_field.data_type(),
-                        other_field.data_type()
-                    ));
-                }
-            }
-        }
-    }
-
-    // Check for extra columns.
-    for name in other_fields.keys() {
-        if !ref_fields.contains_key(name) {
-            diffs.push(format!("extra column: {}", name));
-        }
-    }
-
-    diffs
-}
-
-/// Validate parquet files at the given path (local or S3).
-pub fn validate_parquet(
+/// Validate the Delta table at `path` (local or S3): the active files of its
+/// latest version.
+pub fn validate_table(
     path: &str,
     aws: Option<&AwsConfig>,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
+    use anyhow::Context;
+
     let path = resolve_parquet_input_path_string(path);
-    if path.starts_with("s3://") {
-        validate_parquet_s3(
-            &path,
-            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
-            opts,
+    let (store, table) = if path.starts_with("s3://") {
+        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
+        let (bucket, key) = crate::writer::parse_s3_url(&path)?;
+        let (prefix, table) = key.rsplit_once('/').unwrap_or(("", key.as_str()));
+        anyhow::ensure!(
+            !table.is_empty(),
+            "{path} names a bucket, not a table: pass s3://{bucket}/<dataset>/blocks"
+        );
+        (
+            DeltaStore::s3(&bucket, prefix, s3_read_client(aws, &bucket)?)?,
+            table.to_string(),
         )
     } else {
-        validate_parquet_local(&PathBuf::from(path), opts)
+        let directory =
+            std::fs::canonicalize(&path).with_context(|| format!("path does not exist: {path}"))?;
+        let (Some(parent), Some(table)) = (
+            directory.parent(),
+            directory.file_name().and_then(|name| name.to_str()),
+        ) else {
+            anyhow::bail!("{path} is not a table directory");
+        };
+        (DeltaStore::local(parent)?, table.to_string())
+    };
+    block_on_async(validate_snapshot(&store, &table, &path, opts))
+}
+
+/// A read-only client of `bucket` for the Delta log and its data files, on
+/// delta-rs's object_store: default retries, and anonymous requests without
+/// an access key, like fireparq's other read-only clients.
+fn s3_read_client(
+    aws: &AwsConfig,
+    bucket: &str,
+) -> anyhow::Result<std::sync::Arc<dyn object_store_delta::ObjectStore>> {
+    let mut builder = crate::delta::store::s3_builder(aws, bucket)?
+        .with_retry(object_store_delta::RetryConfig::default());
+    if aws.aws_access_key_id.is_none() {
+        builder = builder.with_skip_signature(true);
     }
+    Ok(std::sync::Arc::new(builder.build()?))
+}
+
+async fn validate_snapshot(
+    store: &DeltaStore,
+    table: &str,
+    path: &str,
+    opts: &ValidateOptions,
+) -> anyhow::Result<ValidateResult> {
+    use anyhow::Context;
+    use object_store_delta::ObjectStoreExt;
+
+    anyhow::ensure!(
+        !store.lacks_local_log(table)?,
+        "{path} is not a Delta table: it has no _delta_log/ (pass a table such as \
+         <dataset root>/blocks)"
+    );
+    let delta = crate::delta::open_table(store.log_store(table)?)
+        .await
+        .with_context(|| format!("opening the Delta table {path}"))?;
+    let version = delta
+        .version()
+        .context("an opened Delta table has no version")?;
+    let version = u64::try_from(version).context("negative Delta table version")?;
+    // The pinned snapshot's active files, with their `date` partition values.
+    let files: Vec<_> = delta
+        .snapshot()?
+        .log_data()
+        .iter()
+        .map(|file| {
+            let date = file
+                .partition_values_map()
+                .remove(crate::delta::PARTITION_COLUMN)
+                .flatten()
+                .unwrap_or_default();
+            (
+                file.path().into_owned(),
+                file.object_store_path(),
+                format!("{}={date}", crate::delta::PARTITION_COLUMN),
+            )
+        })
+        .collect();
+    let data = delta.object_store();
+    let mut infos = Vec::with_capacity(files.len());
+    for (name, location, partition) in files {
+        let bytes = match data.get(&location).await {
+            Ok(object) => object.bytes().await,
+            Err(error) => Err(error),
+        };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(object_store_delta::Error::NotFound { .. }) => anyhow::bail!(
+                "active file {name} of version {version} is missing: a VACUUM removed it after \
+                 this snapshot was read; validate again"
+            ),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading active file {name}"));
+            }
+        };
+        let tuples = read_validation_columns(bytes)
+            .with_context(|| format!("reading active file {name}"))?;
+        infos.push(FileInfo { partition, tuples });
+    }
+    let mut result = validate_from_files(infos, opts);
+    result.version = version;
+    Ok(result)
 }
 
 /// Check results from check_tuples.
@@ -588,17 +570,16 @@ pub(in crate::cli) struct CheckResult {
     pub(in crate::cli) gaps: Vec<BlockGap>,
     pub(in crate::cli) parent_mismatches: Vec<ParentMismatch>,
     pub(in crate::cli) duplicates: Vec<DuplicateBlock>,
-    pub(in crate::cli) ordering_errors: u64,
     pub(in crate::cli) timestamp_reversals: Vec<TimestampReversal>,
 }
 
-/// Check a sorted list of block tuples for gaps, ordering, parent hash chain, and timestamp issues.
+/// Check a list of block tuples sorted by block_num for gaps, duplicates, the
+/// parent hash chain and timestamp reversals.
 pub(in crate::cli) fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
     let mut gaps = Vec::new();
     let mut parent_mismatches = Vec::new();
     let mut duplicates = Vec::new();
     let mut timestamp_reversals = Vec::new();
-    let mut ordering_errors = 0u64;
 
     // Track runs of duplicate block_num.
     let mut dup_start = 0usize;
@@ -623,9 +604,6 @@ pub(in crate::cli) fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
         }
         dup_start = i;
 
-        if curr_num < prev_num {
-            ordering_errors += 1;
-        }
         if curr_num > prev_num + 1 {
             gaps.push(BlockGap {
                 from: prev_num + 1,
@@ -670,102 +648,39 @@ pub(in crate::cli) fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
         gaps,
         parent_mismatches,
         duplicates,
-        ordering_errors,
         timestamp_reversals,
     }
 }
 
-/// Detect the partition key from a file path by looking for Hive-style directories
-/// (e.g. `date=2026-01-01`, `block_range=0-100000`). Returns the partition directory
-/// path relative to the base, or "(root)" if no partition structure is detected.
-pub(in crate::cli) fn detect_partition(file_path: &str, base_path: &str) -> String {
-    let relative = file_path
-        .strip_prefix(base_path)
-        .unwrap_or(file_path)
-        .trim_start_matches('/');
-
-    // Walk directory components, collect Hive-style partition segments.
-    let parts: Vec<&str> = relative
-        .split('/')
-        .filter(|seg| seg.contains('=') && !seg.ends_with(".parquet"))
-        .collect();
-
-    if parts.is_empty() {
-        "(root)".to_string()
-    } else {
-        parts.join("/")
-    }
-}
-
-/// Per-file metadata collected during scanning.
+/// The block tuples of one active data file and its partition (`date=...`,
+/// from the log).
 pub(in crate::cli) struct FileInfo {
-    pub(in crate::cli) path: String,
     pub(in crate::cli) partition: String,
-    pub(in crate::cli) schema: arrow::datatypes::Schema,
     pub(in crate::cli) tuples: Vec<BlockTuple>,
-    pub(in crate::cli) row_count: u64,
 }
 
 pub(in crate::cli) fn validate_from_files(
     files: Vec<FileInfo>,
     opts: &ValidateOptions,
 ) -> ValidateResult {
-    // Schema consistency check (#90).
-    let mut schema_mismatches = Vec::new();
-    if let Some(first) = files.first() {
-        let ref_schema = &first.schema;
-        for f in files.iter().skip(1) {
-            let diffs = compare_schemas(ref_schema, &f.schema);
-            if !diffs.is_empty() {
-                schema_mismatches.push(SchemaMismatch {
-                    file: f.path.clone(),
-                    details: diffs,
-                });
-            }
-        }
-    }
+    let total_files = files.len();
 
     // Group by partition.
-    let mut groups: std::collections::BTreeMap<String, (Vec<BlockTuple>, usize, u64)> =
+    let mut groups: std::collections::BTreeMap<String, (Vec<BlockTuple>, usize)> =
         std::collections::BTreeMap::new();
     for fi in files {
-        let entry = groups
-            .entry(fi.partition)
-            .or_insert_with(|| (Vec::new(), 0, 0));
+        let entry = groups.entry(fi.partition).or_default();
         entry.0.extend(fi.tuples);
         entry.1 += 1;
-        entry.2 += fi.row_count;
     }
 
-    // Detect empty partitions (#89).
-    let mut empty_partitions = Vec::new();
     let mut partitions = Vec::new();
     let mut all_tuples: Vec<BlockTuple> = Vec::new();
-    let mut total_files = 0usize;
 
     // Keep only each partition's own boundary tuples for cross-partition checks.
     // Global duplicate/continuity validation still needs the complete tuple set.
     let mut boundaries = Vec::new();
-    for (partition_name, (mut tuples, file_count, row_count)) in groups {
-        total_files += file_count;
-
-        if file_count == 0 {
-            empty_partitions.push(EmptyPartition {
-                partition: partition_name,
-                files: 0,
-                reason: "no files",
-            });
-            continue;
-        }
-        if row_count == 0 {
-            empty_partitions.push(EmptyPartition {
-                partition: partition_name,
-                files: file_count,
-                reason: "0 rows across all files",
-            });
-            continue;
-        }
-
+    for (partition_name, (mut tuples, file_count)) in groups {
         tuples.sort_by_key(|t| t.0);
         let cr = check_tuples(&tuples);
         let min_block = tuples.first().map(|t| t.0);
@@ -785,7 +700,6 @@ pub(in crate::cli) fn validate_from_files(
             gaps: cr.gaps,
             parent_mismatches: cr.parent_mismatches,
             duplicates: cr.duplicates,
-            ordering_errors: cr.ordering_errors,
             timestamp_reversals: cr.timestamp_reversals,
         });
 
@@ -843,6 +757,7 @@ pub(in crate::cli) fn validate_from_files(
     let show_partitions = partitions.len() > 1;
 
     ValidateResult {
+        version: 0,
         files_scanned: total_files,
         total_blocks: all_tuples.len() as u64,
         min_block: all_tuples.first().map(|t| t.0),
@@ -850,124 +765,8 @@ pub(in crate::cli) fn validate_from_files(
         gaps: if opts.allow_gaps { vec![] } else { cr.gaps },
         parent_mismatches: cr.parent_mismatches,
         duplicates: cr.duplicates,
-        ordering_errors: cr.ordering_errors,
         timestamp_reversals: cr.timestamp_reversals,
         partitions: if show_partitions { partitions } else { vec![] },
-        empty_partitions,
-        schema_mismatches,
         cross_partition_issues,
     }
-}
-
-/// The result for a path without any Parquet file (local and S3 alike).
-fn no_files_result() -> ValidateResult {
-    ValidateResult {
-        files_scanned: 0,
-        total_blocks: 0,
-        min_block: None,
-        max_block: None,
-        gaps: vec![],
-        parent_mismatches: vec![],
-        duplicates: vec![],
-        ordering_errors: 0,
-        timestamp_reversals: vec![],
-        partitions: vec![],
-        empty_partitions: vec![],
-        schema_mismatches: vec![],
-        cross_partition_issues: vec![],
-    }
-}
-
-pub(in crate::cli) fn validate_parquet_local(
-    path: &PathBuf,
-    opts: &ValidateOptions,
-) -> anyhow::Result<ValidateResult> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    if path.is_file() {
-        paths.push(path.clone());
-    } else if path.is_dir() {
-        crate::maintenance::discovery::collect_local(path, &mut paths)?;
-        super::inspect::retain_table_files_local(path, &mut paths);
-        paths.sort();
-    } else {
-        anyhow::bail!("path does not exist: {}", path.display());
-    }
-
-    if paths.is_empty() {
-        println!("No .parquet files found in {}", path.display());
-        return Ok(no_files_result());
-    }
-
-    let base = path.to_string_lossy().to_string();
-    let mut file_infos = Vec::new();
-
-    for file_path in &paths {
-        let file = std::fs::File::open(file_path)?;
-        let (arrow_schema, tuples, row_count) = read_validation_columns(file)?;
-
-        let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
-        let display = file_path
-            .strip_prefix(path)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
-
-        file_infos.push(FileInfo {
-            path: display,
-            partition: partition_key,
-            schema: arrow_schema,
-            tuples,
-            row_count,
-        });
-    }
-
-    Ok(validate_from_files(file_infos, opts))
-}
-
-pub(in crate::cli) fn validate_parquet_s3(
-    path: &str,
-    aws: &AwsConfig,
-    opts: &ValidateOptions,
-) -> anyhow::Result<ValidateResult> {
-    use crate::maintenance::discovery::{list_objects, read_object_bytes, relative_key};
-    use crate::writer::parse_s3_url;
-
-    let (bucket, prefix) = parse_s3_url(path)?;
-    let client = aws.build_read_client(&bucket)?;
-
-    let objects = block_on_async(list_objects(&client, &prefix))
-        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
-
-    let mut parquet_objects: Vec<_> = objects
-        .into_iter()
-        .filter(|obj| super::inspect::is_listed_table_object(&prefix, obj.location.as_ref()))
-        .collect();
-    parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
-
-    if parquet_objects.is_empty() {
-        println!("No .parquet files found in {path}");
-        return Ok(no_files_result());
-    }
-
-    let mut file_infos = Vec::new();
-
-    for obj in &parquet_objects {
-        let data = block_on_async(read_object_bytes(&client, &obj.location))
-            .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
-
-        let (arrow_schema, tuples, row_count) = read_validation_columns(data)?;
-
-        let partition_key = detect_partition(obj.location.as_ref(), &prefix);
-        let display = relative_key(&prefix, obj.location.as_ref()).to_string();
-
-        file_infos.push(FileInfo {
-            path: display,
-            partition: partition_key,
-            schema: arrow_schema,
-            tuples,
-            row_count,
-        });
-    }
-
-    Ok(validate_from_files(file_infos, opts))
 }

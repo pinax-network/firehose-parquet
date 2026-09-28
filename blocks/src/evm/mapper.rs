@@ -3286,9 +3286,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_calls_call_type_round_trips_through_parquet_writer() {
-        use firehose_parquet::config::{BlockMetadata, Compression};
-        use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use firehose_parquet::config::Compression;
+        use firehose_parquet::writer::{decode_parquet, encode_parquet, ParquetFileMetadata};
 
         let block = make_test_evm_block(300);
         let block_bytes = prost::Message::encode_to_vec(&block);
@@ -3304,35 +3303,15 @@ pub(crate) mod tests {
         let batches = mapper.flush().unwrap();
         let calls_batch = &batches["calls"];
 
-        let temp_dir = std::env::temp_dir().join(format!(
-            "firehose-parquet-call-type-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be after unix epoch")
-                .as_nanos()
-        ));
-
-        let result = (|| -> anyhow::Result<()> {
-            let mut writer = ParquetTableWriter::new(&temp_dir, Compression::Snappy);
-            let (path, _) = writer.write_batch(
-                "calls",
-                calls_batch,
-                &BlockMetadata {
-                    min_block_number: block.number,
-                    max_block_number: block.number,
-                    min_timestamp: Some(1_700_000_000),
-                    max_timestamp: Some(1_700_000_000),
-                },
-            )?;
-
-            let read_batches = read_parquet(&path)?;
-            assert_eq!(read_batches.len(), 1);
-            assert_eq!(get_string_value(&read_batches[0], "call_type", 0), "CALL");
-            Ok(())
-        })();
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        result.unwrap();
+        let bytes = encode_parquet(
+            calls_batch,
+            Compression::Snappy,
+            &ParquetFileMetadata::new(),
+        )
+        .unwrap();
+        let read_batches = decode_parquet(bytes).unwrap();
+        assert_eq!(read_batches.len(), 1);
+        assert_eq!(get_string_value(&read_batches[0], "call_type", 0), "CALL");
     }
 
     #[test]
@@ -4406,8 +4385,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_blob_hashes_binary_encoding_round_trips_through_parquet() {
-        use firehose_parquet::config::{BlockMetadata, Compression};
-        use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
+        use firehose_parquet::config::Compression;
+        use firehose_parquet::writer::{decode_parquet, encode_parquet, ParquetFileMetadata};
 
         let block = make_post_prague_block();
         let block_bytes = prost::Message::encode_to_vec(&block);
@@ -4421,30 +4400,13 @@ pub(crate) mod tests {
             .unwrap();
         let batches = mapper.flush().unwrap();
         let schema = batches["transactions"].schema();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "firehose-parquet-blob-hashes-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let result = (|| -> anyhow::Result<Vec<RecordBatch>> {
-            let mut writer = ParquetTableWriter::new(&temp_dir, Compression::Snappy);
-            let (path, _) = writer.write_batch(
-                "transactions",
-                &batches["transactions"],
-                &BlockMetadata {
-                    min_block_number: 500,
-                    max_block_number: 500,
-                    min_timestamp: Some(1_700_000_000),
-                    max_timestamp: Some(1_700_000_000),
-                },
-            )?;
-            read_parquet(&path)
-        })();
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let read = result.unwrap();
+        let bytes = encode_parquet(
+            &batches["transactions"],
+            Compression::Snappy,
+            &ParquetFileMetadata::new(),
+        )
+        .unwrap();
+        let read = decode_parquet(bytes).unwrap();
         assert_eq!(read[0].schema(), schema);
         let list = read[0]
             .column(schema.index_of("blob_hashes").unwrap())

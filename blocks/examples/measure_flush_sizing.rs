@@ -5,11 +5,11 @@ use anyhow::{ensure, Context, Result};
 use blocks::{evm::mapper::EvmBlockMapper, solana::mapper::SolanaBlockMapper};
 use clap::Parser;
 use firehose_parquet::{
-    config::{BlockMetadata, Compression},
+    config::Compression,
     encode::EncodeBytes,
     flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger},
     traits::{BlockIdentity, BlockMapper, StreamEvent},
-    writer::ParquetTableWriter,
+    writer::{encode_parquet, ParquetFileMetadata},
 };
 use firehose_protos::{eth, solana};
 use prost::Message;
@@ -174,13 +174,9 @@ fn main() -> Result<()> {
             true,
         ))
     };
-    let output = tempfile::tempdir()?;
-    let mut writer = ParquetTableWriter::new(output.path(), Compression::Zstd);
     let mut windows = Vec::new();
     let mut sizing = FlushSizing::new(args.target, args.memory)?;
     let mut blocks_in_window = 0;
-    let mut min_block = u64::MAX;
-    let mut max_block = 0;
     for ordinal in 0..args.max_blocks {
         let (bytes, identity) = &fixtures[ordinal % fixtures.len()];
         let varied = args
@@ -190,8 +186,6 @@ fn main() -> Result<()> {
         let bytes = varied.as_deref().unwrap_or(bytes);
         mapper.map_block(bytes, identity, StreamEvent::default())?;
         blocks_in_window += 1;
-        min_block = min_block.min(identity.block_num);
-        max_block = max_block.max(identity.block_num);
         let estimates: BTreeMap<String, u64> = mapper
             .table_estimates()
             .into_iter()
@@ -222,22 +216,8 @@ fn main() -> Result<()> {
                 continue;
             }
             rows += batch.num_rows();
-            let (path, size) = writer.write_batch(
-                table,
-                batch,
-                &BlockMetadata {
-                    min_block_number: min_block,
-                    max_block_number: max_block,
-                    min_timestamp: Some(identity.timestamp),
-                    max_timestamp: Some(identity.timestamp),
-                },
-            )?;
-            ensure!(
-                std::fs::metadata(&path)?.len() == size as u64,
-                "file receipt size differs"
-            );
+            let size = encode_parquet(batch, Compression::Zstd, &ParquetFileMetadata::new())?.len();
             table_bytes.insert(table.clone(), size as u64);
-            std::fs::remove_file(path)?;
         }
         let maximum = table_bytes.values().copied().max().unwrap_or_default();
         let previous_ratio = sizing.ratio();
@@ -247,8 +227,6 @@ fn main() -> Result<()> {
         let ratio = sizing.ratio();
         windows.push(json!({"trigger": reason, "blocks": blocks_in_window, "rows": rows, "max_estimated_bytes": largest, "sum_estimated_bytes": total, "arrow_allocated_bytes": allocated, "max_file_bytes": maximum, "ratio_before": previous_ratio, "ratio_after": ratio, "table_estimates": estimates, "table_file_bytes": table_bytes}));
         blocks_in_window = 0;
-        min_block = u64::MAX;
-        max_block = 0;
         if windows.len() >= args.windows {
             break;
         }
@@ -256,7 +234,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"family": args.family, "sources": sources, "target_bytes": args.target, "memory_threshold_bytes": args.memory, "adaptive": args.adaptive, "synthetic_byte_variation": args.vary_bytes, "notes": "Offline sizing simulation, not real network throughput. Without variation, payloads and identities repeat unchanged. Variation deterministically changes EVM transaction/call/log/storage byte values while preserving lengths, row-producing counts, flags and scalars. All tables flush together through the production Zstd table writer. Protected transaction footer adds small per-file overhead.", "windows": windows})
+            &json!({"family": args.family, "sources": sources, "target_bytes": args.target, "memory_threshold_bytes": args.memory, "adaptive": args.adaptive, "synthetic_byte_variation": args.vary_bytes, "notes": "Offline sizing simulation, not real network throughput. Without variation, payloads and identities repeat unchanged. Variation deterministically changes EVM transaction/call/log/storage byte values while preserving lengths, row-producing counts, flags and scalars. All tables flush together through the production Zstd part encoder. Protected transaction footer adds small per-file overhead.", "windows": windows})
         )?
     );
     Ok(())

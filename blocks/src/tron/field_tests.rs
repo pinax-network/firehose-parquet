@@ -4,10 +4,10 @@ use super::{
 };
 use arrow::{array::*, datatypes::Int32Type, record_batch::RecordBatch};
 use firehose_parquet::{
-    config::{BlockMetadata, Compression},
+    config::Compression,
     encode::{encode_bytes, EncodeBytes},
     traits::{BlockIdentity, BlockMapper, StreamEvent},
-    writer::{read_parquet, ParquetTableWriter},
+    writer::{decode_parquet, encode_parquet, ParquetFileMetadata},
 };
 use prost::Message;
 
@@ -116,23 +116,10 @@ fn roundtrip(table: &str, batch: &RecordBatch) {
     if batch.num_rows() == 0 {
         return;
     }
-    let tmp = tempfile::tempdir().unwrap();
-    let mut writer = ParquetTableWriter::new(tmp.path(), Compression::Zstd);
-    let (path, _) = writer
-        .write_batch(
-            table,
-            batch,
-            &BlockMetadata {
-                min_block_number: 0,
-                max_block_number: 0,
-                min_timestamp: Some(1_700_000_000),
-                max_timestamp: Some(1_700_000_000),
-            },
-        )
-        .unwrap();
-    let batches = read_parquet(&path).unwrap();
+    let bytes = encode_parquet(batch, Compression::Zstd, &ParquetFileMetadata::new()).unwrap();
+    let batches = decode_parquet(bytes).unwrap();
     let actual = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
-    assert_eq!(&actual, batch);
+    assert_eq!(&actual, batch, "Parquet round trip: {table}");
 }
 #[test]
 fn all_contracts_receipts_and_call_values_survive_every_encoding_and_flush() {

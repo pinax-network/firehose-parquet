@@ -1,13 +1,14 @@
-//! Replay a saved producer-compatible Tron block through the mapper/local writer.
+//! Replay a saved producer-compatible Tron block through the mapper and the part encoder,
+//! one `<case>/<table>.parquet` file per table with rows.
 //! This example is entirely offline and refuses an existing output directory.
 use anyhow::{ensure, Context, Result};
 use blocks::tron::{mapper::TronBlockMapper, proto::tron};
 use clap::Parser;
 use firehose_parquet::{
-    config::{BlockMetadata, Compression},
+    config::Compression,
     encode::{encode_hex_no_prefix, EncodeBytes},
     traits::{BlockIdentity, BlockMapper, StreamEvent},
-    writer::ParquetTableWriter,
+    writer::{encode_parquet, ParquetFileMetadata},
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -41,12 +42,6 @@ fn main() -> Result<()> {
         lib_num: header.number - 20,
         ..Default::default()
     };
-    let metadata = BlockMetadata {
-        min_block_number: identity.block_num,
-        max_block_number: identity.block_num,
-        min_timestamp: Some(identity.timestamp),
-        max_timestamp: Some(identity.timestamp),
-    };
     fs::create_dir_all(&args.output)?;
     let mut cases = BTreeMap::new();
     for (name, encoding) in [
@@ -60,8 +55,6 @@ fn main() -> Result<()> {
             for fork in [false, true] {
                 let case = format!("{name}-failed{include_failed}-fork{fork}");
                 let mut mapper = TronBlockMapper::new(fork, encoding.clone(), include_failed);
-                let mut writer =
-                    ParquetTableWriter::new(args.output.join(&case), Compression::Zstd);
                 mapper.map_block_bytes(
                     bytes.clone().into(),
                     &identity,
@@ -75,7 +68,13 @@ fn main() -> Result<()> {
                         table.clone(),
                         serde_json::to_value(batch.schema().as_ref())?,
                     );
-                    writer.write_batch(&table, &batch, &metadata)?;
+                    if batch.num_rows() > 0 {
+                        let path = args.output.join(&case).join(format!("{table}.parquet"));
+                        fs::create_dir_all(path.parent().unwrap())?;
+                        let part =
+                            encode_parquet(&batch, Compression::Zstd, &ParquetFileMetadata::new())?;
+                        fs::write(path, part)?;
+                    }
                 }
                 ensure!(
                     mapper.flush()?.values().all(|batch| batch.num_rows() == 0),
@@ -89,7 +88,7 @@ fn main() -> Result<()> {
         args.output.join("manifest.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "block_sha256": format!("{:x}", Sha256::digest(&bytes)), "block_num": identity.block_num,
-            "writer": "ParquetTableWriter", "owned": true, "cases": cases,
+            "writer": "encode_parquet", "owned": true, "cases": cases,
         }))?,
     )?;
     println!("replayed one local Tron block across {} cases", cases.len());

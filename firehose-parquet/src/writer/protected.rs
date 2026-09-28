@@ -5,7 +5,7 @@
 //! until its all-table commit is acknowledged. These primitives do not advance a
 //! cursor, recover a transaction, retire batches, or make independent writes atomic.
 
-use super::{local, ParquetFileMetadata, ParquetTableWriter};
+use super::{local, ParquetFileMetadata};
 use crate::config::{BlockMetadata, Compression};
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::{provider_rejection, usable_version, ProviderRejected, S3Ownership};
@@ -222,7 +222,6 @@ impl PreparedFlush {
             validate_table(table)?;
             validate_digest(digest)?;
         }
-        let routing = ParquetTableWriter::new(PathBuf::new(), compression);
         for (table, batch) in &batches {
             let expected = inventory
                 .get(table)
@@ -268,8 +267,8 @@ impl PreparedFlush {
                 u64::try_from(batch.num_rows())? == plan.row_count,
                 "planned table row count differs from batch"
             );
-            routing.validate_partition(&plan.table, batch, &metadata)?;
-            let directory = routing.partition_suffix(&plan.table, &metadata)?;
+            super::validate_partition(&plan.table, batch, &metadata)?;
+            let directory = super::partition_suffix(&plan.table, &metadata)?;
             ensure!(
                 plan.final_relative_path == format!("{directory}/{}", final_name(plan))
                     && plan.temporary_relative_path
@@ -332,14 +331,16 @@ impl PreparedFlush {
             .context("prepared batch is missing")?;
         let mut metadata = self.file_metadata.clone();
         metadata.entries.extend(footer_identity(plan));
-        let mut properties = ParquetTableWriter::new(PathBuf::new(), self.compression);
-        properties.set_file_metadata(metadata);
         let mut spool = SpoolWriter::new(crate::s3::upload::MAX_PART_BYTES, reservation)?;
         let encoded = (|| -> Result<()> {
             let mut parquet = ArrowWriter::try_new(
                 &mut spool,
                 batch.schema(),
-                Some(properties.writer_properties(batch)?),
+                Some(super::writer_properties(
+                    self.compression,
+                    batch,
+                    &metadata,
+                )?),
             )?;
             // A slice shares the already-owned mapper allocation. The separate row
             // group trigger bounds encoder accumulation without creating extra parts.
@@ -395,23 +396,12 @@ impl PreparedFlush {
             .context("prepared batch is missing")?;
         let mut metadata = self.file_metadata.clone();
         metadata.entries.extend(footer_identity(plan));
-        let mut writer = ParquetTableWriter::new(PathBuf::new(), self.compression);
-        writer.set_file_metadata(metadata);
         let mut output = CappedBuffer {
             bytes: Vec::new(),
             reservation,
             exceeded: None,
         };
-        let encoded = (|| -> Result<()> {
-            let mut parquet = ArrowWriter::try_new(
-                &mut output,
-                batch.schema(),
-                Some(writer.writer_properties(batch)?),
-            )?;
-            parquet.write(batch)?;
-            parquet.close()?;
-            Ok(())
-        })();
+        let encoded = super::encode_into(&mut output, batch, self.compression, &metadata);
         if let Err(error) = encoded {
             if let Some(reservation) = output.exceeded {
                 return Err(anyhow::Error::new(ReservationExceeded { reservation }));

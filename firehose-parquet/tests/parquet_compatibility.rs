@@ -109,8 +109,8 @@ fn compatibility_cursor() -> CursorState {
 #[test]
 fn reads_parquet58_values_and_writes_them_without_schema_changes() {
     use arrow::compute::concat_batches;
-    use firehose_parquet::config::{BlockMetadata, Compression};
-    use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
+    use firehose_parquet::config::Compression;
+    use firehose_parquet::writer::{decode_parquet, encode_parquet};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let bytes = bytes::Bytes::from_static(include_bytes!("fixtures/parquet58/types.parquet"));
@@ -137,21 +137,8 @@ fn reads_parquet58_values_and_writes_them_without_schema_changes() {
         Compression::Gzip,
         Compression::Zstd,
     ] {
-        let output = tempfile::tempdir().unwrap();
-        let mut writer = ParquetTableWriter::new(output.path(), compression);
-        let (path, _) = writer
-            .write_batch(
-                "types",
-                &actual,
-                &BlockMetadata {
-                    min_block_number: 100,
-                    max_block_number: 102,
-                    min_timestamp: Some(1_700_000_000),
-                    max_timestamp: Some(1_700_000_002),
-                },
-            )
-            .unwrap();
-        let rewritten = read_parquet(&path).unwrap();
+        let bytes = encode_parquet(&actual, compression, &ParquetFileMetadata::new()).unwrap();
+        let rewritten = decode_parquet(bytes).unwrap();
         assert!(rewritten
             .iter()
             .all(|batch| batch.schema() == expected.schema()));

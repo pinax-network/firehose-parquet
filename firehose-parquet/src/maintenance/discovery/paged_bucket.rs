@@ -334,7 +334,12 @@ impl ObjectStore for PagedBucket {
         let mut common_prefixes = BTreeSet::new();
         let mut direct = Vec::new();
         for object in objects {
-            let relative = super::relative_key(&base, object.location.as_ref()).to_owned();
+            let location = object.location.as_ref();
+            let relative = location
+                .strip_prefix(base.as_str())
+                .map(|tail| tail.trim_start_matches('/'))
+                .unwrap_or(location)
+                .to_owned();
             match relative.split_once('/') {
                 Some((directory, _)) => {
                     common_prefixes.insert(if base.is_empty() {

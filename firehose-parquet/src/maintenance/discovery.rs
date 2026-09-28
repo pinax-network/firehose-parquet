@@ -1,14 +1,12 @@
-//! Shared read-only discovery mechanics: `scan`, `inspect`, `validate` and the
-//! protected-root checks of `build` and `recovery`.
+//! Shared read-only listing mechanics: the protected-root and eligibility
+//! checks of `build` and `recovery` (#655), and `inspect`'s whole-object read.
 //!
-//! Local traversal deliberately uses native paths/read_dir, not ObjectStore's
-//! LocalFileSystem::list: the latter changes symlink, non-UTF8 and error behavior.
-//! Sorting, direct-file selection, relative labels and reserved-artifact filtering
-//! remain with callers. Nothing here creates clients, owns reservations or mutates.
-use futures::{StreamExt, TryStreamExt};
+//! No table is read through a listing: `validate` reads the active files of a
+//! pinned Delta snapshot, and engines read the tables through their logs
+//! (#643). Nothing here creates clients, owns reservations or mutates.
+use futures::StreamExt;
 use object_store::{path::Path as ObjectPath, ObjectMeta, ObjectStore};
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -110,42 +108,7 @@ pub(crate) async fn visit_objects<B>(
     outcome
 }
 
-/// Append the `.parquet` entries below `directory`, without sorting or path
-/// normalization. Follows directory symlinks and selects extension-matching
-/// non-directories (including broken links), not only files. read_dir errors
-/// propagate, including a missing or non-directory root.
-pub(crate) fn collect_local(directory: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(directory)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_local(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Raw backend listing, preserving returned order and errors. Prefix boundaries,
-/// exact-object HEAD fallback, extension/reserved filtering and sorting are caller
-/// policies, as are client credentials and retry configuration.
-pub(crate) async fn list_objects(
-    store: &dyn ObjectStore,
-    prefix: &str,
-) -> object_store::Result<Vec<ObjectMeta>> {
-    let prefix = (!prefix.is_empty()).then(|| ObjectPath::from(prefix));
-    store.list(prefix.as_ref()).try_collect().await
-}
-
-/// `key` relative to the listed `prefix`, without a leading `/`. A key outside the
-/// prefix is returned unchanged.
-pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
-    key.strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/'))
-        .unwrap_or(key)
-}
-
-/// Unversioned whole-object read used by scan/inspect/validate.
+/// Unversioned whole-object read of one file, used by `inspect`.
 pub(crate) async fn read_object_bytes(
     store: &dyn ObjectStore,
     location: &ObjectPath,

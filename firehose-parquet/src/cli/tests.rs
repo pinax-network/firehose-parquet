@@ -68,31 +68,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn write_scan_test_parquet(path: &std::path::Path, values: &[i32]) {
-    use arrow::array::Int32Array;
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create parquet parent");
-    }
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(Int32Array::from(values.to_vec()))],
-    )
-    .expect("record batch");
-    let file = File::create(path).expect("create parquet file");
-    let mut writer = ArrowWriter::try_new(file, schema, None).expect("create arrow writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-}
-
 #[test]
 #[serial]
 fn final_blocks_only_accepts_explicit_values_and_preserves_bare_flag() {
@@ -568,17 +543,6 @@ fn test_parse_compression() {
 }
 
 #[test]
-fn test_detect_partition_reads_the_date_directory() {
-    assert_eq!(
-        detect_partition(
-            "/tmp/output/blocks/date=2026-01-15/part-000001.parquet",
-            "/tmp/output"
-        ),
-        "date=2026-01-15"
-    );
-}
-
-#[test]
 #[serial]
 fn test_build_config() {
     let cli = parse(&[
@@ -1025,83 +989,6 @@ fn test_inspect_subcommand_schema_only_json_parse() {
 }
 
 #[test]
-fn test_scan_subcommand_limit_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "scan",
-        "./output/blocks/",
-        "--limit",
-        "50",
-        "--schema-only",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Scan {
-            path,
-            limit,
-            schema_only,
-            order,
-            vertical,
-            json,
-            ..
-        } => {
-            assert_eq!(path, "./output/blocks/");
-            assert_eq!(limit, 50);
-            assert!(schema_only);
-            assert_eq!(order, ScanOrder::Asc);
-            assert!(!vertical);
-            assert!(!json);
-        }
-        _ => panic!("expected scan subcommand"),
-    }
-}
-
-#[test]
-fn test_scan_subcommand_vertical_parse() {
-    let cli = parse(&["test-cli", "scan", "./output/blocks/", "--vertical"]);
-    match cli.command.expect("command should exist") {
-        Commands::Scan { vertical, json, .. } => {
-            assert!(vertical);
-            assert!(!json);
-        }
-        _ => panic!("expected scan subcommand"),
-    }
-}
-
-#[test]
-fn test_scan_subcommand_json_parse() {
-    let cli = parse(&["test-cli", "scan", "./output/blocks/", "--json"]);
-    match cli.command.expect("command should exist") {
-        Commands::Scan { vertical, json, .. } => {
-            assert!(!vertical);
-            assert!(json);
-        }
-        _ => panic!("expected scan subcommand"),
-    }
-}
-
-#[test]
-fn test_scan_subcommand_order_parse() {
-    let cli = parse(&["test-cli", "scan", "./output/blocks/", "--order", "desc"]);
-    match cli.command.expect("command should exist") {
-        Commands::Scan { order, .. } => assert_eq!(order, ScanOrder::Desc),
-        _ => panic!("expected scan subcommand"),
-    }
-}
-
-#[test]
-fn test_scan_subcommand_json_conflicts_with_vertical() {
-    let err = try_parse(&[
-        "test-cli",
-        "scan",
-        "./output/blocks/",
-        "--json",
-        "--vertical",
-    ])
-    .expect_err("scan should reject conflicting output flags");
-    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-}
-
-#[test]
 #[serial]
 fn test_configured_s3_bucket_ignores_blank_values() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "   ");
@@ -1236,7 +1123,7 @@ fn test_validate_falls_back_to_configured_s3_bucket_for_missing_relative_paths()
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
-    let validate_err = match validate_parquet(
+    let validate_err = match validate_table(
         "./mainnet/blocks/",
         None,
         &ValidateOptions {
@@ -1262,7 +1149,9 @@ fn test_validate_prefers_existing_local_paths_over_configured_s3_bucket() {
     let blocks_dir = dir.path().join("mainnet").join("blocks");
     std::fs::create_dir_all(&blocks_dir).expect("create blocks dir");
 
-    let validate_result = validate_parquet(
+    // The local directory wins; it is not a Delta table, so it is refused
+    // instead of being walked.
+    let error = validate_table(
         "./mainnet/blocks/",
         None,
         &ValidateOptions {
@@ -1270,8 +1159,20 @@ fn test_validate_prefers_existing_local_paths_over_configured_s3_bucket() {
             allow_gaps: false,
         },
     )
-    .expect("validate should stay local when the directory exists");
-    assert_eq!(validate_result.files_scanned, 0);
+    .expect_err("a directory without a Delta log is not a table");
+    let error = format!("{error:#}");
+    assert!(error.contains("is not a Delta table"), "{error}");
+    assert!(error.contains("_delta_log"), "{error}");
+}
+
+/// `scan` is removed (#643): engines read the tables through their Delta
+/// logs, and `deltalake` summarizes a log (README "Reading the tables").
+#[test]
+fn scan_subcommand_is_removed() {
+    let error =
+        try_parse(&["test-cli", "scan", "./output/blocks/"]).expect_err("scan is not a subcommand");
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    assert!(TestCli::command().find_subcommand("scan").is_none());
 }
 
 /// `rollup` is removed (#652): with one `date` partition key there is no
@@ -1790,16 +1691,20 @@ fn test_common_args_reject_removed_partition_and_cursor_template_flags() {
     }
 }
 
-/// Write a minimal blocks table (blocks `1..=n` with a valid parent chain) whose
-/// `timestamp` column is `timestamps`, so validate exercises real column types.
-fn write_validate_blocks_file(path: &std::path::Path, timestamps: arrow::array::ArrayRef) {
-    use arrow::array::{StringArray, UInt64Array};
+/// One active file of a blocks table in `partition`: blocks
+/// `first..first + n` with a valid parent chain, whose `timestamp` column is
+/// `timestamps`, encoded and read back as validate reads a data file.
+fn validate_file(
+    partition: &str,
+    first: i64,
+    timestamps: arrow::array::ArrayRef,
+) -> anyhow::Result<super::validate::FileInfo> {
+    use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
     use std::sync::Arc;
 
-    let block_nums = (1..=timestamps.len() as u64).collect::<Vec<_>>();
+    let block_nums = (first..first + timestamps.len() as i64).collect::<Vec<_>>();
     let block_ids = block_nums
         .iter()
         .map(|num| format!("id{num}"))
@@ -1809,34 +1714,38 @@ fn write_validate_blocks_file(path: &std::path::Path, timestamps: arrow::array::
         .map(|num| format!("id{}", num - 1))
         .collect::<Vec<_>>();
     let schema = Arc::new(Schema::new(vec![
-        Field::new("block_num", DataType::UInt64, false),
+        Field::new("block_num", DataType::Int64, false),
         Field::new("block_id", DataType::Utf8, false),
         Field::new("parent_id", DataType::Utf8, false),
         Field::new("timestamp", timestamps.data_type().clone(), true),
     ]));
     let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
+        schema,
         vec![
-            Arc::new(UInt64Array::from(block_nums)),
+            Arc::new(Int64Array::from(block_nums)),
             Arc::new(StringArray::from(block_ids)),
             Arc::new(StringArray::from(parent_ids)),
             timestamps,
         ],
     )
     .expect("record batch");
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create parent dir");
-    }
-    let file = std::fs::File::create(path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
+    let bytes = crate::writer::encode_parquet(
+        &batch,
+        Compression::Zstd,
+        &crate::writer::ParquetFileMetadata::new(),
+    )
+    .expect("encode");
+    Ok(super::validate::FileInfo {
+        partition: partition.to_string(),
+        tuples: super::validate::read_validation_columns(bytes::Bytes::from(bytes))?,
+    })
 }
 
-fn validate_local(path: &std::path::Path) -> ValidateResult {
-    validate_parquet(&path.to_string_lossy(), None, &ValidateOptions::default())
-        .expect("validate should run")
+fn validate_one(timestamps: arrow::array::ArrayRef) -> ValidateResult {
+    super::validate::validate_from_files(
+        vec![validate_file("date=2023-07-31", 1, timestamps).expect("readable file")],
+        &ValidateOptions::default(),
+    )
 }
 
 fn reversal_summary(reversals: &[TimestampReversal]) -> Vec<(u64, i64, u64, i64)> {
@@ -1854,10 +1763,10 @@ fn reversal_summary(reversals: &[TimestampReversal]) -> Vec<(u64, i64, u64, i64)
 }
 
 #[test]
-fn test_validate_parquet_reports_timestamp_reversal_in_any_timestamp_unit() {
+fn test_validate_reports_timestamp_reversal_in_any_timestamp_unit() {
     use arrow::array::{
-        ArrayRef, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray,
+        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
     };
     use std::sync::Arc;
 
@@ -1879,35 +1788,30 @@ fn test_validate_parquet_reports_timestamp_reversal_in_any_timestamp_unit() {
             Arc::new(TimestampMillisecondArray::from(scaled(1_000)).with_timezone("UTC")),
         ),
         (
-            "timestamp_microsecond",
-            Arc::new(TimestampMicrosecondArray::from(scaled(1_000_000))),
+            "timestamp_microsecond_utc (the Delta timestamp)",
+            Arc::new(TimestampMicrosecondArray::from(scaled(1_000_000)).with_timezone("UTC")),
         ),
         (
-            "timestamp_nanosecond_utc",
-            Arc::new(TimestampNanosecondArray::from(scaled(1_000_000_000)).with_timezone("UTC")),
-        ),
-        (
-            "legacy_int64_seconds",
-            Arc::new(Int64Array::from(scaled(1))),
+            "timestamp_nanosecond",
+            Arc::new(TimestampNanosecondArray::from(scaled(1_000_000_000))),
         ),
     ];
 
     for (label, column) in columns {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_validate_blocks_file(&dir.path().join("blocks.parquet"), column);
-
-        let result = validate_local(dir.path());
+        let result = validate_one(column);
         assert_eq!(
             reversal_summary(&result.timestamp_reversals),
             [(3, 1_690_815_595_000, 2, 1_690_815_600_000)],
             "{label}"
         );
         assert_eq!(result.total_blocks, 4, "{label}");
+        // A reversal is a warning.
+        assert!(result.is_valid(), "{label}");
     }
 }
 
 #[test]
-fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
+fn test_validate_reports_sub_second_timestamp_reversal() {
     use arrow::array::{
         ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray,
@@ -1938,9 +1842,7 @@ fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
         ),
     ];
     for (label, column) in columns {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_validate_blocks_file(&dir.path().join("blocks.parquet"), column);
-        let result = validate_local(dir.path());
+        let result = validate_one(column);
         assert_eq!(
             reversal_summary(&result.timestamp_reversals),
             [(3, 1_690_815_600_100, 2, 1_690_815_600_900)],
@@ -1950,20 +1852,15 @@ fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
 
     // Second-precision data with equal and increasing times stays clean, and its
     // values are compared (and reported) in milliseconds.
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_validate_blocks_file(
-        &dir.path().join("blocks.parquet"),
-        Arc::new(
-            TimestampSecondArray::from(vec![
-                1_690_815_600,
-                1_690_815_600,
-                1_690_815_601,
-                1_690_815_612,
-            ])
-            .with_timezone("UTC"),
-        ),
-    );
-    let result = validate_local(dir.path());
+    let result = validate_one(Arc::new(
+        TimestampSecondArray::from(vec![
+            1_690_815_600,
+            1_690_815_600,
+            1_690_815_601,
+            1_690_815_612,
+        ])
+        .with_timezone("UTC"),
+    ));
     assert!(result.timestamp_reversals.is_empty());
     assert!(result.is_valid());
 
@@ -1978,26 +1875,20 @@ fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
 }
 
 #[test]
-fn test_validate_parquet_compares_null_timestamps_against_last_known_timestamp() {
+fn test_validate_compares_null_timestamps_against_last_known_timestamp() {
     use arrow::array::TimestampSecondArray;
     use std::sync::Arc;
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_validate_blocks_file(
-        &dir.path().join("blocks.parquet"),
-        Arc::new(
-            TimestampSecondArray::from(vec![
-                None,
-                Some(1_690_815_600),
-                None,
-                Some(1_690_815_590),
-                Some(1_690_815_610),
-            ])
-            .with_timezone("UTC"),
-        ),
-    );
-
-    let result = validate_local(dir.path());
+    let result = validate_one(Arc::new(
+        TimestampSecondArray::from(vec![
+            None,
+            Some(1_690_815_600),
+            None,
+            Some(1_690_815_590),
+            Some(1_690_815_610),
+        ])
+        .with_timezone("UTC"),
+    ));
     assert_eq!(
         reversal_summary(&result.timestamp_reversals),
         [(4, 1_690_815_590_000, 2, 1_690_815_600_000)]
@@ -2005,25 +1896,33 @@ fn test_validate_parquet_compares_null_timestamps_against_last_known_timestamp()
 }
 
 #[test]
-fn test_validate_parquet_reports_timestamp_reversal_per_partition() {
+fn test_validate_reports_timestamp_reversal_per_partition() {
     use arrow::array::TimestampSecondArray;
     use std::sync::Arc;
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_validate_blocks_file(
-        &dir.path().join("date=2023-07-31").join("blocks.parquet"),
-        Arc::new(
-            TimestampSecondArray::from(vec![1_690_815_590, 1_690_815_580]).with_timezone("UTC"),
-        ),
+    let result = super::validate::validate_from_files(
+        vec![
+            validate_file(
+                "date=2023-07-31",
+                1,
+                Arc::new(
+                    TimestampSecondArray::from(vec![1_690_815_590, 1_690_815_580])
+                        .with_timezone("UTC"),
+                ),
+            )
+            .unwrap(),
+            validate_file(
+                "date=2023-08-01",
+                3,
+                Arc::new(
+                    TimestampSecondArray::from(vec![1_690_900_000, 1_690_900_010])
+                        .with_timezone("UTC"),
+                ),
+            )
+            .unwrap(),
+        ],
+        &ValidateOptions::default(),
     );
-    write_validate_blocks_file(
-        &dir.path().join("date=2023-08-01").join("blocks.parquet"),
-        Arc::new(
-            TimestampSecondArray::from(vec![1_690_900_000, 1_690_900_010]).with_timezone("UTC"),
-        ),
-    );
-
-    let result = validate_local(dir.path());
     let reversals = result
         .partitions
         .iter()
@@ -2047,23 +1946,21 @@ fn test_validate_parquet_reports_timestamp_reversal_per_partition() {
 }
 
 #[test]
-fn test_validate_parquet_rejects_unsupported_timestamp_type() {
-    use arrow::array::StringArray;
+fn test_validate_rejects_unsupported_timestamp_types() {
+    use arrow::array::{ArrayRef, Int64Array, StringArray};
     use std::sync::Arc;
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_validate_blocks_file(
-        &dir.path().join("blocks.parquet"),
-        Arc::new(StringArray::from(vec!["2023-07-31 14:59:50"])),
-    );
-
-    let err = validate_parquet(
-        &dir.path().to_string_lossy(),
-        None,
-        &ValidateOptions::default(),
-    )
-    .expect_err("a Utf8 timestamp column should be rejected, not read as 0");
-    assert!(err.to_string().contains("timestamp"), "{err}");
+    for column in [
+        Arc::new(StringArray::from(vec!["2023-07-31 14:59:50"])) as ArrayRef,
+        // Epoch seconds in a plain Int64 are not a timestamp either.
+        Arc::new(Int64Array::from(vec![1_690_815_590])),
+    ] {
+        let err = match validate_file("date=2023-07-31", 1, column) {
+            Ok(_) => panic!("a non-timestamp column should be rejected, not read as 0"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("timestamp"), "{err}");
+    }
 }
 
 #[test]
@@ -2228,216 +2125,6 @@ fn test_write_destinations_are_absolute_for_logs() {
     assert_eq!(
         display_cursor_destination("s3://b/p", "/abs/cursor.parquet"),
         "/abs/cursor.parquet"
-    );
-}
-
-#[test]
-fn test_collect_scan_s3_parquet_objects_treats_exact_file_as_single_object() {
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-
-    let store = InMemory::new();
-    let location = Path::from("mainnet/part-000001.parquet");
-    block_on_async(async {
-        store
-            .put(
-                &location,
-                object_store::PutPayload::from(Bytes::from_static(b"parquet")),
-            )
-            .await
-    })
-    .expect("put object");
-
-    let (objects, exact_object_path) = block_on_async(collect_scan_s3_parquet_objects(
-        &store,
-        "mainnet/part-000001.parquet",
-    ))
-    .expect("collect objects");
-
-    assert!(exact_object_path);
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].location.as_ref(), "mainnet/part-000001.parquet");
-}
-
-#[test]
-fn test_collect_scan_s3_parquet_objects_lists_prefix_and_filters_parquet() {
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-
-    let store = InMemory::new();
-    block_on_async(async {
-        store
-            .put(
-                &Path::from("mainnet/a.parquet"),
-                object_store::PutPayload::from(Bytes::from_static(b"a")),
-            )
-            .await?;
-        store
-            .put(
-                &Path::from("mainnet/nested/b.parquet"),
-                object_store::PutPayload::from(Bytes::from_static(b"b")),
-            )
-            .await?;
-        store
-            .put(
-                &Path::from("mainnet/notes.txt"),
-                object_store::PutPayload::from(Bytes::from_static(b"txt")),
-            )
-            .await
-    })
-    .expect("put objects");
-
-    let (objects, exact_object_path) =
-        block_on_async(collect_scan_s3_parquet_objects(&store, "mainnet"))
-            .expect("collect objects");
-
-    assert!(!exact_object_path);
-    assert_eq!(
-        objects
-            .iter()
-            .map(|obj| obj.location.as_ref())
-            .collect::<Vec<_>>(),
-        vec!["mainnet/a.parquet", "mainnet/nested/b.parquet"]
-    );
-}
-
-#[test]
-fn test_scan_s3_display_key_keeps_exact_object_key() {
-    assert_eq!(
-        scan_s3_display_key(
-            "mainnet/part-000001.parquet",
-            "mainnet/part-000001.parquet",
-            true
-        ),
-        "mainnet/part-000001.parquet"
-    );
-}
-
-/// Read-only commands on a dataset written with `--output s3://<bucket>` to a
-/// bucket root: the cursor mirror is an exact object in `_fireparq/`, a table
-/// is a prefix directly below the bucket, and a scan of the whole bucket reads
-/// only table data.
-#[test]
-fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-
-    let store = InMemory::new();
-    for key in [
-        "_fireparq/cursor.parquet",
-        "_fireparq/other.parquet",
-        "_fireparq/nested/other.parquet",
-        // A mirror kept at the dataset root with `--cursor cursor.parquet`.
-        "cursor.parquet",
-        "blocks/date=2023-11-14/part-v1-a.parquet",
-        "blocks-archive/part-v1-b.parquet",
-        ".fireparq-ingest/state.json",
-        ".fireparq-ingest/hidden.parquet",
-        ".fireparq-owner-probes-v1/probe.parquet",
-    ] {
-        block_on_async(store.put(
-            &Path::from(key),
-            object_store::PutPayload::from(Bytes::from_static(b"parquet")),
-        ))
-        .expect("put object");
-    }
-    let (objects, exact) = block_on_async(collect_scan_s3_parquet_objects(
-        &store,
-        "_fireparq/cursor.parquet",
-    ))
-    .expect("collect mirror");
-    assert!(exact);
-    assert_eq!(objects.len(), 1);
-    assert_eq!(
-        scan_s3_display_key(
-            objects[0].location.as_ref(),
-            "_fireparq/cursor.parquet",
-            exact
-        ),
-        "_fireparq/cursor.parquet"
-    );
-    let (objects, exact) =
-        block_on_async(collect_scan_s3_parquet_objects(&store, "blocks")).expect("collect table");
-    assert!(!exact);
-    let keys: Vec<_> = objects
-        .iter()
-        .map(|object| scan_s3_display_key(object.location.as_ref(), "blocks", exact))
-        .collect();
-    assert_eq!(keys, ["date=2023-11-14/part-v1-a.parquet"]);
-
-    let keys = |prefix: &str| -> Vec<String> {
-        block_on_async(collect_scan_s3_parquet_objects(&store, prefix))
-            .expect("collect prefix")
-            .0
-            .iter()
-            .map(|object| object.location.to_string())
-            .collect()
-    };
-    // The whole bucket: tables only.
-    assert_eq!(
-        keys(""),
-        [
-            "blocks-archive/part-v1-b.parquet",
-            "blocks/date=2023-11-14/part-v1-a.parquet",
-        ]
-    );
-    // Asking for the artifact directory itself lists its files.
-    assert_eq!(
-        keys("_fireparq"),
-        [
-            "_fireparq/cursor.parquet",
-            "_fireparq/nested/other.parquet",
-            "_fireparq/other.parquet",
-        ]
-    );
-}
-
-/// A local directory scan or validate skips `_fireparq/`, a root cursor
-/// mirror and control state below it, unless the scanned directory is
-/// `_fireparq/` itself.
-#[test]
-fn test_local_directory_walks_skip_dataset_artifacts() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("mainnet");
-    let files = [
-        "_fireparq/other.parquet",
-        "_fireparq/cursor.parquet",
-        "_fireparq/nested/other.parquet",
-        "cursor.parquet",
-        ".fireparq-ingest/hidden.parquet",
-        "blocks/date=2024-01-14/part-v1-a.parquet",
-    ];
-    for file in files {
-        let path = root.join(file);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"parquet").unwrap();
-    }
-    let walk = |dir: &std::path::Path| {
-        let mut found = Vec::new();
-        crate::maintenance::discovery::collect_local(dir, &mut found).unwrap();
-        super::inspect::retain_table_files_local(dir, &mut found);
-        let mut found: Vec<String> = found
-            .iter()
-            .map(|file| {
-                file.strip_prefix(dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        found.sort();
-        found
-    };
-    assert_eq!(walk(&root), ["blocks/date=2024-01-14/part-v1-a.parquet"]);
-    assert_eq!(
-        walk(&root.join("_fireparq")),
-        ["cursor.parquet", "nested/other.parquet", "other.parquet"]
     );
 }
 
@@ -2625,295 +2312,6 @@ fn test_resolve_s3_output_root_keeps_a_valid_output_template() {
     assert!(error.contains("disagrees with --s3-bucket"), "{error}");
 }
 
-#[test]
-fn test_format_array_value_formats_timestamp_second_utc() {
-    use arrow::array::TimestampSecondArray;
-
-    let array = TimestampSecondArray::from(vec![0]).with_timezone("UTC");
-
-    assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00 UTC");
-}
-
-#[test]
-fn test_format_array_value_formats_timestamp_millisecond_utc() {
-    use arrow::array::TimestampMillisecondArray;
-
-    let array = TimestampMillisecondArray::from(vec![123]).with_timezone("UTC");
-
-    assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00.123 UTC");
-}
-
-#[test]
-fn test_collect_sample_rows_respects_ascending_and_descending_pagination() {
-    use arrow::array::Int32Array;
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50]))],
-    )
-    .expect("record batch");
-
-    let asc_rows = collect_sample_rows(
-        &schema,
-        vec![Ok(batch.clone())].into_iter(),
-        5,
-        2,
-        1,
-        ScanOrder::Asc,
-    );
-    assert_eq!(
-        asc_rows
-            .iter()
-            .map(|row| row.row_number)
-            .collect::<Vec<_>>(),
-        vec![2, 3]
-    );
-    assert_eq!(
-        asc_rows
-            .iter()
-            .map(|row| row.cells[0].value.as_str())
-            .collect::<Vec<_>>(),
-        vec!["20", "30"]
-    );
-
-    let desc_rows = collect_sample_rows(
-        &schema,
-        vec![Ok(batch.clone())].into_iter(),
-        5,
-        2,
-        1,
-        ScanOrder::Desc,
-    );
-    assert_eq!(
-        desc_rows
-            .iter()
-            .map(|row| row.row_number)
-            .collect::<Vec<_>>(),
-        vec![4, 3]
-    );
-    assert_eq!(
-        desc_rows
-            .iter()
-            .map(|row| row.cells[0].value.as_str())
-            .collect::<Vec<_>>(),
-        vec!["40", "30"]
-    );
-}
-
-#[test]
-fn test_collect_sample_rows_returns_empty_when_offset_exceeds_selected_order() {
-    use arrow::array::Int32Array;
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-    )
-    .expect("record batch");
-
-    let rows = collect_sample_rows(
-        &schema,
-        vec![Ok(batch)].into_iter(),
-        3,
-        2,
-        3,
-        ScanOrder::Desc,
-    );
-
-    assert!(rows.is_empty());
-}
-
-#[test]
-fn test_collect_scan_parquet_local_applies_limit_globally_across_files() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_scan_test_parquet(&dir.path().join("a.parquet"), &[1, 2]);
-    write_scan_test_parquet(&dir.path().join("b.parquet"), &[3, 4]);
-    write_scan_test_parquet(&dir.path().join("c.parquet"), &[5, 6]);
-
-    let files = collect_scan_parquet_local(dir.path(), 3, 0, ScanOrder::Asc, false).expect("scan");
-
-    assert_eq!(
-        files
-            .iter()
-            .map(|file| file.path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a.parquet", "b.parquet"]
-    );
-    assert_eq!(
-        files
-            .iter()
-            .flat_map(|file| file.sample_rows.iter())
-            .map(|row| row.cells[0].value.as_str())
-            .collect::<Vec<_>>(),
-        vec!["1", "2", "3"]
-    );
-}
-
-#[test]
-fn test_collect_scan_parquet_local_applies_offset_globally_across_files() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_scan_test_parquet(&dir.path().join("a.parquet"), &[1, 2]);
-    write_scan_test_parquet(&dir.path().join("b.parquet"), &[3, 4]);
-    write_scan_test_parquet(&dir.path().join("c.parquet"), &[5, 6]);
-
-    let files = collect_scan_parquet_local(dir.path(), 2, 3, ScanOrder::Asc, false).expect("scan");
-
-    assert_eq!(
-        files
-            .iter()
-            .map(|file| file.path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a.parquet", "b.parquet", "c.parquet"]
-    );
-    assert_eq!(
-        files
-            .iter()
-            .flat_map(|file| file.sample_rows.iter())
-            .map(|row| row.cells[0].value.as_str())
-            .collect::<Vec<_>>(),
-        vec!["4", "5"]
-    );
-}
-
-#[test]
-fn test_format_scan_rows_table_includes_headers_and_row_numbers() {
-    let file = ScanFileResult {
-        path: "blocks.parquet".to_string(),
-        total_rows: 2,
-        row_groups: 1,
-        columns: 2,
-        size_bytes: 42,
-        size_human: "42 B".to_string(),
-        schema: vec![
-            ScanSchemaColumn {
-                name: "block_num".to_string(),
-                data_type: "UInt64".to_string(),
-                nullable: false,
-            },
-            ScanSchemaColumn {
-                name: "block_hash".to_string(),
-                data_type: "Utf8".to_string(),
-                nullable: false,
-            },
-        ],
-        sample_rows: vec![
-            ScanRow {
-                row_number: 1,
-                cells: vec![
-                    ScanRowCell {
-                        name: "block_num".to_string(),
-                        value: "1".to_string(),
-                    },
-                    ScanRowCell {
-                        name: "block_hash".to_string(),
-                        value: "0xabc".to_string(),
-                    },
-                ],
-            },
-            ScanRow {
-                row_number: 2,
-                cells: vec![
-                    ScanRowCell {
-                        name: "block_num".to_string(),
-                        value: "2".to_string(),
-                    },
-                    ScanRowCell {
-                        name: "block_hash".to_string(),
-                        value: "0xdef".to_string(),
-                    },
-                ],
-            },
-        ],
-    };
-
-    let rendered = format_scan_rows_table(&file);
-    assert!(rendered.contains("┌"));
-    assert!(rendered.contains("block_num"));
-    assert!(rendered.contains("block_hash"));
-    assert!(rendered.contains("1. │ 1"));
-    assert!(rendered.contains("2. │ 2"));
-}
-
-#[test]
-fn test_format_scan_rows_table_aligns_border_with_single_digit_row_numbers() {
-    let file = ScanFileResult {
-        path: "blocks.parquet".to_string(),
-        total_rows: 2,
-        row_groups: 1,
-        columns: 1,
-        size_bytes: 42,
-        size_human: "42 B".to_string(),
-        schema: vec![ScanSchemaColumn {
-            name: "block_num".to_string(),
-            data_type: "UInt64".to_string(),
-            nullable: false,
-        }],
-        sample_rows: vec![
-            ScanRow {
-                row_number: 1,
-                cells: vec![ScanRowCell {
-                    name: "block_num".to_string(),
-                    value: "1".to_string(),
-                }],
-            },
-            ScanRow {
-                row_number: 2,
-                cells: vec![ScanRowCell {
-                    name: "block_num".to_string(),
-                    value: "2".to_string(),
-                }],
-            },
-        ],
-    };
-
-    let rendered = format_scan_rows_table(&file);
-    let lines = rendered.lines().collect::<Vec<_>>();
-
-    assert_eq!(lines[0].find('┌'), lines[1].find('│'));
-    assert_eq!(lines[0].find('┌'), lines[2].find('├'));
-    assert_eq!(lines[0].find('┌'), lines[3].find('│'));
-    assert_eq!(lines[0].find('┌'), lines[4].find('│'));
-    assert_eq!(lines[0].find('┌'), lines[5].find('└'));
-}
-
-#[test]
-fn test_format_scan_rows_vertical_matches_legacy_style() {
-    let file = ScanFileResult {
-        path: "blocks.parquet".to_string(),
-        total_rows: 1,
-        row_groups: 1,
-        columns: 1,
-        size_bytes: 42,
-        size_human: "42 B".to_string(),
-        schema: vec![ScanSchemaColumn {
-            name: "block_num".to_string(),
-            data_type: "UInt64".to_string(),
-            nullable: false,
-        }],
-        sample_rows: vec![ScanRow {
-            row_number: 1,
-            cells: vec![ScanRowCell {
-                name: "block_num".to_string(),
-                value: "42".to_string(),
-            }],
-        }],
-    };
-
-    let rendered = format_scan_rows_vertical(&file);
-    assert!(rendered.contains("Row 1:"));
-    assert!(rendered.contains("block_num"));
-    assert!(rendered.contains("42"));
-}
-
 fn env_file_load(
     explicit: Option<&Path>,
     cwd: &Path,
@@ -3012,7 +2410,7 @@ fn explicit_env_file_argument_is_found_before_clap_parsing() {
         Some(PathBuf::from("b.env"))
     );
     assert_eq!(
-        parse(&["fireparq", "scan", "--", "--env-file=c.env"]).unwrap(),
+        parse(&["fireparq", "inspect", "--", "--env-file=c.env"]).unwrap(),
         None
     );
     assert!(parse(&["fireparq", "--env-file"]).is_err());

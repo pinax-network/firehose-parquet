@@ -28,7 +28,7 @@ All of them are closed.
 | [#474](https://github.com/pinax-network/firehose-parquet/issues/474) | A11 | medium | [#597](https://github.com/pinax-network/firehose-parquet/pull/597) | `--final-blocks-only=false` enables append-only non-final output; NEW/UNDO semantics and query limits are documented. |
 | [#475](https://github.com/pinax-network/firehose-parquet/issues/475) | A12 | medium | [#587](https://github.com/pinax-network/firehose-parquet/pull/587) | Single `_total` suffix, no unbounded `partition` label, misleading gauges removed, `/ready` follows stream state. |
 | [#476](https://github.com/pinax-network/firehose-parquet/issues/476) | A13 | low | [#584](https://github.com/pinax-network/firehose-parquet/pull/584) | Invalid timestamps and streamed blocks without metadata are errors instead of routing to 1970 or block 0. |
-| [#477](https://github.com/pinax-network/firehose-parquet/issues/477) | A14 | medium | [#581](https://github.com/pinax-network/firehose-parquet/pull/581) | The unreachable partition-split writer path is removed; every mapper flush targets one partition. |
+| [#477](https://github.com/pinax-network/firehose-parquet/issues/477) | A14 | medium | [#581](https://github.com/pinax-network/firehose-parquet/pull/581) | The unreachable partition-split writer path is removed; every mapper flush targets one partition; the `OutputWriter` buffering is superseded by #643 (L5b), which removes it, while its partition contract stays. |
 | [#478](https://github.com/pinax-network/firehose-parquet/issues/478) | B1 | critical | [#536](https://github.com/pinax-network/firehose-parquet/pull/536), [#624](https://github.com/pinax-network/firehose-parquet/pull/624) | Rollup re-runs no longer delete or duplicate rows; in-place runs need `--delete-source`; reserved root files are skipped; rollups are journaled. `rollup` was later removed by #652. |
 | [#479](https://github.com/pinax-network/firehose-parquet/issues/479) | B2 | high | [#542](https://github.com/pinax-network/firehose-parquet/pull/542), [#624](https://github.com/pinax-network/firehose-parquet/pull/624) | `merge` and `rollup` refuse partitions whose files differ in schema or value metadata; superseded by #652 and #643 (L5a), which remove `rollup` and `merge`. |
 | [#480](https://github.com/pinax-network/firehose-parquet/issues/480) | B3 | high | [#561](https://github.com/pinax-network/firehose-parquet/pull/561) | Partition merges are journaled in `_fireparq_merge.json`, outputs are atomic, and overlapping merges are refused; superseded by #643 (L5a), which removes `merge`. |
@@ -90,8 +90,9 @@ All of them are closed.
 | [#567](https://github.com/pinax-network/firehose-parquet/issues/567) | - | - | [#569](https://github.com/pinax-network/firehose-parquet/pull/569) | Ten compatible dependency advisories resolved. |
 | [#568](https://github.com/pinax-network/firehose-parquet/issues/568) | - | - | [#577](https://github.com/pinax-network/firehose-parquet/pull/577) | Arrow/Parquet upgrade removes the vulnerable Thrift dependency. |
 | [#572](https://github.com/pinax-network/firehose-parquet/issues/572) | - | - | [#576](https://github.com/pinax-network/firehose-parquet/pull/576) | The final mapper flush on completion is checkpointed. |
-| [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | - | - | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Local Parquet parts are published atomically after sync. |
+| [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | - | - | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Local Parquet parts are published atomically after sync; the standalone-file writer is superseded by #643 (L5b), and the protected store keeps its durable-directory and no-replace primitives. |
 | [#617](https://github.com/pinax-network/firehose-parquet/issues/617) | N6 | high | [#623](https://github.com/pinax-network/firehose-parquet/pull/623) | `.env` is read from the working directory only; S3 writes need an explicit `s3://` destination. |
+| [#643](https://github.com/pinax-network/firehose-parquet/issues/643) (L5b, L7) | - | - | [#672](https://github.com/pinax-network/firehose-parquet/pull/672) | The plain-Parquet output is removed (`OutputWriter`, `ParquetTableWriter`'s local and S3 writers and the standalone atomic publication); no command reads a table by walking it: `validate` reads the active files of a pinned Delta snapshot (same checks; OPTIMIZE's tombstoned files and checkpoints are never read as data), `scan` is removed in favor of DuckDB, Polars and a tested README summary from the log, `inspect` reads one file, and the protected-root walker skips `_delta_log/` ([record](643-l5b-l7-readers.md)). |
 | [#643](https://github.com/pinax-network/firehose-parquet/issues/643) (L5a) | - | - | [#670](https://github.com/pinax-network/firehose-parquet/pull/670) | `merge` (and its journal and #655 intent record), `truncate` and `verify` (with its `_fireparq/` registry and reports, its row encoding and its docs) are removed with no compatibility path, as is every ownership and discovery path only they used; the `deltalake` CronJob compacts, a bad dataset is rebuilt into a new root, and #666 brings `verify` back over Delta snapshots ([record](643-l5a-removals.md)). |
 | [#643](https://github.com/pinax-network/firehose-parquet/issues/643) (L3) | - | - | [#671](https://github.com/pinax-network/firehose-parquet/pull/671) | Every `build` writes Delta tables: one per mapper table, created at the first start and validated on resume (properties, `fireparq.*` identity, protocol, partition, schema); each Committed transaction commits its parts as they are (journaled `add` with statistics, `txn` = last ordinal) to every table with rows, `blocks` last, before authority advances; the S3 log uses a single-attempt conditional-put client. The `txn`-gated recovery roll-forward is L4 ([record](643-l3-delta-commits.md)). |
 | [#643](https://github.com/pinax-network/firehose-parquet/issues/643) (L2) | - | - | [#669](https://github.com/pinax-network/firehose-parquet/pull/669) | Every part is a Delta data file: one checked mapping per flush, before the journal, turns `UInt64` into a checked `long` (a value above `i64::MAX` refuses the flush) or, for each chain's listed amounts and unchecked values, `decimal(20,0)`; enums become `string`, timestamps microseconds, and `date` the partition column only; mapper epoch `v3` ([record](643-l2-delta-types.md)). |
@@ -170,9 +171,9 @@ Docker runs before a release.
 - [#648: durable per-row `stream_ordinal`, the canonical live view and live bucket expiry](648-stream-ordinal.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
-- [#477: single-partition writer contract](477-writer-partition-contract.md)
+- [#477: single-partition writer contract](477-writer-partition-contract.md) (`OutputWriter` superseded by #643 L5b)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
-- [#578: atomic local Parquet publication](578-atomic-local-parquet.md)
+- [#578: atomic local Parquet publication](578-atomic-local-parquet.md) (standalone writer superseded by #643 L5b)
 - [#655: resume cost independent of data size, and the overlap argument](655-resume-cost.md) (merge-intent part superseded by #643 L5a)
 
 ### Security and configuration
@@ -191,10 +192,11 @@ Docker runs before a release.
 - [Validation follow-ups 10-15: validate precision, live partition retries, index time type and v2 validation](validation-misc-followups-partitions.md) (partitions parts superseded by #653)
 - [Verify follow-ups: Struct roots, verify beside build, registry scan exclusion, merge refusal](validation-verify-followups.md) (superseded by #643 L5a)
 - [Rollup crash safety, copy ownership and value metadata (#478, #479, #480, #522 follow-ups)](maintenance-safety-followups.md) (superseded by #652 and #643 L5a)
-- [#647: dataset artifacts under `_fireparq/`](647-fireparq-artifact-dir.md) (registry and report parts superseded by #643 L5a)
+- [#647: dataset artifacts under `_fireparq/`](647-fireparq-artifact-dir.md) (registry and report parts superseded by #643 L5a, walker reservations by #643 L5b/L7)
 - [#652: one `date=YYYY-MM-DD` partition key, `rollup` removed, DuckDB and Polars engine test](652-date-partition-key.md)
 - [#653: `partitions.parquet` and the `partitions` subcommands removed, replaced by Delta log metadata](653-remove-partitions.md)
 - [#643 L5a: `merge`, `truncate` and `verify` removed](643-l5a-removals.md)
+- [#643 L5b/L7: plain-Parquet output and readers removed; `validate` on Delta snapshots, `scan` removed, `inspect` one file](643-l5b-l7-readers.md)
 
 ### Chain schemas and values
 

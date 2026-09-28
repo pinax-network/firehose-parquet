@@ -129,8 +129,7 @@ fn plan(table: &str, index: u32, batch: &RecordBatch, metadata: &BlockMetadata) 
         entry_index: index,
         row_count: batch.num_rows() as u64,
     };
-    let writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
-    let directory = writer.partition_suffix(table, metadata).unwrap();
+    let directory = crate::writer::partition_suffix(table, metadata).unwrap();
     plan.final_relative_path = format!("{directory}/{}", final_name(&plan));
     plan.temporary_relative_path = format!("{directory}/{}", temporary_name(&plan));
     plan
@@ -320,8 +319,7 @@ fn encoding_is_repeatable_retains_all_batches_and_roundtrips_negative_nullable_t
     let mut unrouted = metadata();
     unrouted.min_timestamp = None;
     unrouted.max_timestamp = None;
-    let writer = ParquetTableWriter::new(PathBuf::new(), Compression::Zstd);
-    assert!(writer.partition_suffix("blocks", &unrouted).is_err());
+    assert!(crate::writer::partition_suffix("blocks", &unrouted).is_err());
 }
 
 #[test]
@@ -867,7 +865,7 @@ async fn remote_cancelled_successful_put_latches_uncertainty_before_release() {
 }
 
 #[test]
-fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
+fn protected_and_unprotected_encodings_share_lookup_metadata_without_changing_rows() {
     use arrow::array::StringArray;
     use arrow::compute::concat_batches;
     for (heights, sorted) in [(vec![10, 10, 11], true), (vec![11, 10, 11], false)] {
@@ -886,12 +884,12 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
         let protected = prepare(batch.clone(), metadata.clone())
             .encode(0, None)
             .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let mut legacy = ParquetTableWriter::new(directory.path(), Compression::Zstd);
-        let (path, _) = legacy.write_batch("blocks", &batch, &metadata).unwrap();
+        let unprotected =
+            crate::writer::encode_parquet(&batch, Compression::Zstd, &ParquetFileMetadata::new())
+                .unwrap();
         for (bytes, is_protected) in [
             (protected.bytes.clone(), true),
-            (Bytes::from(std::fs::read(path).unwrap()), false),
+            (Bytes::from(unprotected), false),
         ] {
             let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
             let footer = reader.metadata().file_metadata();
