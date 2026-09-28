@@ -1,6 +1,6 @@
 # Remove `merge`, `truncate` and `verify` (#643, lane L5a)
 
-Refs #643; part of #463. Design: [`docs/design/delta-lake.md`](../design/delta-lake.md)
+Refs #643; part of #463. PR: [#670](https://github.com/pinax-network/firehose-parquet/pull/670). Design: [`docs/design/delta-lake.md`](../design/delta-lake.md)
 §7.1, §7.2, §8 and the L5 row of §11. Follow-up: #666. Index: the #643 rows of
 the [audit index](README.md).
 
