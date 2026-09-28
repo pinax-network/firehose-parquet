@@ -93,7 +93,7 @@ Both used fresh local roots, completed normally, saved last block 300000001 and
 left no temporary table parts. This is two two-block streams in addition to the
 two raw Fetch calls above; no wider scan was performed.
 
-The offline [independent comparison](501-compare-solana-votes.py) builds expected
+The offline [independent comparison](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/501-compare-solana-votes.py) builds expected
 transaction indices from raw protobufs before reading output. For this sample it
 independently parses the complete compact-vote wire format: discriminant, root,
 canonical short-vector/varint lockout offsets, hash and optional timestamp,

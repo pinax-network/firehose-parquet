@@ -10,7 +10,10 @@ snapshots (§7.2), is deferred to #666, after the launch.
 Since L8 CI reads every table with DuckDB 1.5.5 and Polars through the log,
 and L9 added the maintenance job (`scripts/delta_maintenance.py`) with its CI
 test beside a real `build`
-([record](../audit/643-l8-l9-engines-maintenance.md)). The spike crate
+([record](../audit/643-l8-l9-engines-maintenance.md)). From v1.0.2 the
+repository is Rust-only ([record](../audit/rust-only.md)): the job is the
+`fireparq-maintenance` binary (§9), and CI reads with DuckDB and delta-rs
+instead of Polars, which reads through delta-rs. The spike crate
 (`spikes/delta-lake/`) and its `delta-spike` CI job were removed in L8/L9
 once those tests covered it (§1.11); its files are in git history at
 `d79ce49`, and the paths below that name it refer to that commit. Refs #643,
@@ -31,7 +34,9 @@ once those tests covered it (§1.11); its files are in git history at
 - The writer commits every 60–120 s at the chain head, and in size-based
   batches while backfilling (#659).
 - Maintenance is an off-the-shelf scheduled job, not fireparq logic. A k8s
-  CronJob runs the `deltalake` Python package beside the writer. fireparq's
+  CronJob runs the `deltalake` Python package beside the writer (since the
+  Rust-only change, the same delta-rs operations in `fireparq-maintenance`,
+  §9). fireparq's
   `merge` is removed, and its ownership stops blocking other writers to the
   Delta tables (#636).
 - `partitions.parquet` and the `partitions` subcommands are removed by #653
@@ -63,8 +68,8 @@ once those tests covered it (§1.11); its files are in git history at
 | Arrow / Parquet inside delta-rs | 59.3.0 | The workspace stays on 60.0.0. Parquet 59.3.0 still lacks the #10979 Thrift list bound ([#11186](https://github.com/apache/arrow-rs/issues/11186) open), so a workspace downgrade is ruled out. |
 | `object_store` inside delta-rs | 0.13.2 | Pulls `quick-xml` 0.39.4, still under RUSTSEC-2026-0194/0195. The fix needs object_store 0.14.2 (`quick-xml` ^0.41), which no delta-rs release uses yet (#632). |
 | Spike toolchain | Rust 1.98.1 | `spikes/delta-lake/rust-toolchain.toml` (channel `1.98`). |
-| Python `deltalake` | 1.6.6 | Maintenance job and Polars' Delta support. |
-| Polars | 1.44.2 | Same pin as `blocks/tests/engines/requirements.txt`. `scan_delta` also needs `deltalake`. |
+| Python `deltalake` | 1.6.6 | Maintenance job and Polars' Delta support, until the Rust-only change: the job is now `deltalake-core` 1.0.0 with its `datafusion` feature (DataFusion 55) in `maintenance/`, and CI installs no Python. |
+| Polars | 1.44.2 | Pinned in `blocks/tests/engines/requirements.txt` until the Rust-only change removed it; `scan_delta` also needs `deltalake`. CI's delta-rs reads cover it now. |
 | DuckDB CLI | 1.1.1 (delta v0.2.1), 1.5.5 (delta `45c4087`) | 1.5.5 is the CI pin since L8 (it was 1.1.1). Linux amd64 SHA-256: `7f3f1a26…118ae` (1.1.1), `08c0ca11…643d05` (1.5.5); the 1.5.5 `delta` extension build (`linux_amd64`, `45c4087`) is `c8ce674c…af90e9`. |
 | moto (loopback S3) | 5.2.3 (`moto[s3]`) | Honors `If-None-Match: *` (412), checked at startup by `py/loopback_s3.py`. |
 
@@ -380,12 +385,12 @@ Its checks are now covered by the workspace's tests against fireparq itself:
 | `py/loopback_s3.py` (moto) | The Rust loopback S3 endpoint (`blocks/examples/bench_live_flush/s3.rs`), which gained DeleteObjects and real `Last-Modified` times in L9 |
 | `bench-load` (§1.9) | Measurements, not a test; L3's `the_log_tail_counts_commits_after_the_last_checkpoint` and the tail metric |
 
-Locally, the Delta tests run with the pinned engines:
+Locally, the Delta tests run with the pinned DuckDB CLI and the maintenance
+binary (the delta-rs reads need nothing else):
 
 ```sh
-uv venv --python 3.12 /tmp/engines
-uv pip install --python /tmp/engines/bin/python --require-hashes -r blocks/tests/engines/requirements.txt
-FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 FIREPARQ_POLARS_PYTHON=/tmp/engines/bin/python \
+cargo build -p fireparq-maintenance
+FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 \
 cargo test -p blocks --test engine_compat --test delta_tables --test delta_maintenance
 ```
 
@@ -833,7 +838,10 @@ table data any more; the protected-root discovery of `recovery` and of
 on S3) skips `_delta_log/`, while the ownership symlink check and eligibility
 must still see logs. A test runs `validate` after a simulated OPTIMIZE and
 after a real `deltalake` OPTIMIZE and checkpoint, with the same result. See
-[the L5b/L7 record](../audit/643-l5b-l7-readers.md).
+[the L5b/L7 record](../audit/643-l5b-l7-readers.md). Since the Rust-only
+change the real OPTIMIZE and checkpoint are delta-rs's, and the test computes
+the README summary through delta-rs; the README's Python program is kept for
+users but no longer run.
 
 ## 8. Resume cost independent of data size (#655)
 
@@ -881,14 +889,23 @@ merge-journal check, so `build` lists no data at a resume in any case.
 
 ## 9. Maintenance CronJob
 
-The CronJob is not fireparq code: it is the `deltalake` Python package
-(pinned, `deltalake==1.6.6`) on a schedule. L9 added the reference script to
-the repository (`scripts/delta_maintenance.py`, pinned by
-`scripts/delta_maintenance.requirements.txt`), an example manifest
-(`deploy/examples/delta-maintenance-cronjob.yaml`) and a CI test beside a
-running `build` (`blocks/tests/delta_maintenance.rs`), which replaces the
-spike's `concurrent_maintenance.py`. The script follows the sketch below, with
-these additions (README "Delta Maintenance" lists every setting):
+The CronJob is not writer code: it is delta-rs's own operations on a schedule,
+with no compaction logic of its own. L9 added it as the `deltalake` Python
+package (`deltalake==1.6.6`, `scripts/delta_maintenance.py`); from v1.0.2 it
+is the Rust binary `fireparq-maintenance` (crate `maintenance/`,
+[record](../audit/rust-only.md)), with the same settings, order, output and
+exit statuses. It calls `deltalake-core` 1.0.0: `optimize` (compact, with a
+`date` partition filter; this needs the crate's `datafusion` feature, which
+brings DataFusion 55), `vacuum` (lite or full), `checkpoints::create_checkpoint`
+and `checkpoints::cleanup_metadata`. Only `maintenance/` enables `datafusion`:
+the writer (`blocks`, `firehose-parquet`) links no DataFusion, and CI checks
+that with `cargo tree -p blocks`. The repository also has an
+example manifest (`deploy/examples/delta-maintenance-cronjob.yaml`), a CI test
+beside a running
+`build` (`blocks/tests/delta_maintenance.rs`, which replaced the spike's
+`concurrent_maintenance.py`) and tests of the binary itself
+(`maintenance/tests/cli.rs`). The job follows the sketch below, with these
+additions (README "Delta Maintenance" lists every setting):
 
 - `LAKE_ROOT` (a dataset below the bucket root, or a local path) besides
   `LAKE_BUCKET`, and `DRY_RUN`;
@@ -899,10 +916,30 @@ these additions (README "Delta Maintenance" lists every setting):
   writer has stopped;
 - OPTIMIZE and VACUUM run with their post-commit checkpoint and log cleanup
   off, the checkpoint follows only a successful VACUUM, and a lost commit
-  race is reported as a conflict for the next run;
-- the file counts per date come from one `get_add_actions` per table;
-- the script refuses any `deltalake` but 1.6.6, and `AWS_S3_ALLOW_UNSAFE_RENAME`;
-  credentials are redacted from every error it prints.
+  race is reported as a conflict for the next run. A conflict is only a lost
+  race (delta-rs's commit conflict, too many commit attempts, or a version
+  that already exists); any other commit error fails the table (the Python
+  bindings reported every transaction error as a conflict);
+- a table that does not exist yet (no commit in its `_delta_log/`: delta-rs's
+  "No files in log segment", or no local table directory) is skipped with a
+  `skipped` line, not failed (#680); a table that exists but cannot be read
+  still fails;
+- the file counts per date come from the active files of one snapshot per
+  table;
+- `deltalake-core` is pinned (`=1.0.0`) in `maintenance/Cargo.toml` (the
+  script refused any `deltalake` but 1.6.6); `AWS_S3_ALLOW_UNSAFE_RENAME` is
+  refused, and credentials are redacted from every error the job prints;
+- on S3, log commits are conditional creates (`If-None-Match: *`), as the
+  writer's are. No request of the job carries `If-Match` (delta-rs's commits,
+  checkpoints, VACUUM deletes and log cleanup use none), so Ceph RGW 19.2's
+  literal `If-Match` comparison (#678, [record](../audit/rgw-if-match-etag.md))
+  does not affect it. Requests keep object_store's default retries, as the
+  Python package had. Unlike the writer's blind appends, an OPTIMIZE commit
+  removes files, so a retry whose first attempt landed finds those files
+  already removed and fails as a conflict instead of committing twice.
+
+The sketch, as first written against the Python package (the binary makes the
+same calls through `deltalake-core`):
 
 ```python
 """Hourly Delta maintenance for one network bucket (all tables at the root)."""
@@ -953,15 +990,16 @@ Notes:
   - hourly, for example `17 * * * *`, with `concurrencyPolicy: Forbid` and
     `activeDeadlineSeconds: 3000`;
   - a second weekly CronJob (`FULL_VACUUM=1`) at a quiet hour;
-  - the image is `python:3.12-slim` plus the pinned wheel. It runs as an RGW
-    user limited as in §5.
+  - the image is the `fireparq-maintenance` binary on `debian:bookworm-slim`
+    with CA certificates, as user 65534 (up to v1.0.1: `python:3.12-slim` plus
+    the pinned wheel). It runs as an RGW user limited as in §5.
 - **Failure behavior:** a failed or conflicting run is simply retried next
   hour. OPTIMIZE files that failed to commit are untracked and are removed by
   the weekly full VACUUM after 7 days. The writer is never affected.
 - **Bloom filters and sort metadata:** fireparq writes both. OPTIMIZE output
-  keeps neither unless `WriterProperties(column_properties=…)` enables Bloom
-  filters. Choose the columns with the #658 numbers. That tuning is
-  platform-side too.
+  keeps neither unless its Parquet writer properties enable Bloom filters (the
+  job sets only ZSTD compression and its level). Choose the columns with the
+  #658 numbers. That tuning is platform-side too.
 
 ## 10. Reader examples (anonymous, public-read RGW)
 
@@ -1011,7 +1049,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L6** verify (deferred to #666, after the launch) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
 | **L7** validate, scan, inspect (done with L5b: PR #672, [record](../audit/643-l5b-l7-readers.md); `scan` removed) | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
 | **L8** engine CI (done: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |
-| **L9** maintenance job (done with L8: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `scripts/delta_maintenance.py`, a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |
+| **L9** maintenance job (done with L8: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `scripts/delta_maintenance.py` (replaced in v1.0.2 by `fireparq-maintenance`, §9), a k8s CronJob example, the CI test beside a real `fireparq build` (local and loopback S3), the VACUUM-then-checkpoint ordering check (§4.1) | the concurrency test from the spike, run against the binary | M | L3 | L4–L8 |
 | **L10** docs and release (done: PR #676, [release notes](../releases/v1.0.0.md); the k8s-parquet examples live in that repository) | README (outputs, readers, maintenance, ownership, frontier rule), `docs/releases/v1.0.0.md` (breaking changes, and "JVM engines are not a target" replacing "the planned Delta mode covers them"), `docs/repo-navigation.md`, k8s-parquet examples moved to `delta_scan`/`scan_delta` | doc drift tests | M | L2–L9 | — |
 
 Ordering: L1 → L2 → L3 → {L4, L5, L6, L7, L8, L9} → L10. L2 can start on

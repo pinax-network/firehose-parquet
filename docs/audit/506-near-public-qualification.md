@@ -62,7 +62,7 @@ Failure does not authorize another sample.
 
 ## Actual transport controls
 
-[506-near-public.py](506-near-public.py) uses direct stdlib `HTTPSConnection`
+[506-near-public.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/506-near-public.py) uses direct stdlib `HTTPSConnection`
 with verified TLS, no proxy resolution, cookie jar, netrc, auth or retry layer.
 The TLS context does not honor ambient `SSLKEYLOGFILE`. Only fixed Accept,
 Accept-Encoding, Connection and optional JSON Content-Type headers are sent.
@@ -213,7 +213,7 @@ current-main baseline checkout at 81f5b79 and the candidate both use the same
 production edits. Stable binaries were copied inside the Cargo lock before
 running. Each reads only a saved protobuf and writes a fresh local directory.
 
-[506-compare-near-public.py](506-compare-near-public.py) derives expected rows
+[506-compare-near-public.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/506-compare-near-public.py) derives expected rows
 from original NearData JSON and the exact anchor reply. It does not import the
 converter, read the converted protobuf for expected values, or derive expected
 row selection/positions from mapper output. It independently applies the pinned

@@ -214,13 +214,31 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        serde_json::to_string(&json!({
+        serde_json::to_string(&sorted(json!({
             "code": exception.code,
             "name": exception.name,
             "message": exception.message,
             "stack": stack,
-        }))
+        })))
         .expect("exception JSON serialization should be infallible")
+    }
+
+    /// `value` with every object's keys in sorted order: the order of
+    /// serde_json's default map, which the streamed JSON keeps. A build that
+    /// also compiles DataFusion (`cargo test --workspace` with
+    /// `fireparq-maintenance`) turns on serde_json's `preserve_order`.
+    fn sorted(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let entries: std::collections::BTreeMap<String, Value> = map
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect();
+                Value::Object(entries.into_iter().collect())
+            }
+            Value::Array(values) => Value::Array(values.into_iter().map(sorted).collect()),
+            other => other,
+        }
     }
 
     fn serialize_auth_sequence(auth_sequence: &[antelope::AuthSequence]) -> Option<String> {

@@ -147,5 +147,5 @@ mirror, partition index, Merkle registry and verify reports).
 - CI installs a pinned, checksum-verified DuckDB CLI (v1.1.1) and sets
   `FIREPARQ_REQUIRE_DUCKDB`, so the README query check cannot be skipped there.
   Locally the check runs when a `duckdb` CLI is on `PATH` or in `FIREPARQ_DUCKDB`.
-- [474-check-query.py](474-check-query.py) still runs the superseded #474 query,
+- [474-check-query.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/474-check-query.py) still runs the superseded #474 query,
   now embedded in the script.

@@ -1,10 +1,11 @@
 //! #652, #643 L8: real `fireparq build` output read by the target engines,
-//! DuckDB (`delta_scan`) and Polars (`scan_delta`), through each table's Delta
-//! log.
+//! DuckDB (`delta_scan`) and delta-rs (a snapshot's schema, active files and
+//! partition pruning, then those files' rows: how Polars' `scan_delta` reads
+//! through delta-rs), through each table's Delta log.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
 //! and non-final) and Solana (list, binary, decimal and enum columns)
-//! datasets. Polars first writes a checkpoint of every table, so each
+//! datasets. delta-rs first writes a checkpoint of every table, so each
 //! `_delta_log/` also holds Parquet, next to the Parquet cursor mirror in
 //! `_fireparq/`. Then both engines must read, for **every** table of every
 //! dataset (tables that never get rows included):
@@ -29,7 +30,9 @@
 //! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
 //! and `FIREPARQ_RGW_BUCKET` are set; see its docs. Engines: see
 //! `common/mod.rs`.
+use firehose_parquet::delta::store::DeltaStore;
 use firehose_protos::{eth, firehose, solana};
+use object_store_delta::ObjectStoreExt as _;
 use prost::Message;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -273,8 +276,8 @@ struct Dataset {
 /// A table with the engine types of some of its columns.
 struct Table {
     name: &'static str,
-    /// `(column, DuckDB type, Polars type)`. Enum columns are plain strings
-    /// in the files (their pages are still dictionary-encoded).
+    /// `(column, DuckDB type, delta-rs Arrow type)`. Enum columns are plain
+    /// strings in the files (their pages are still dictionary-encoded).
     columns: Vec<(&'static str, &'static str, &'static str)>,
     /// `(column, exact minimum)`: both engines' `min`, as text.
     minimums: Vec<(&'static str, &'static str)>,
@@ -286,13 +289,13 @@ const CANONICAL: [(&str, &str, &str); 3] = [
     (
         "timestamp",
         "TIMESTAMP WITH TIME ZONE",
-        "Datetime(time_unit='us', time_zone='UTC')",
+        "Timestamp(µs, \"UTC\")",
     ),
-    ("date", "DATE", "Date"),
+    ("date", "DATE", "Date32"),
 ];
 
-/// Polars' spelling of a Delta `decimal(20,0)`.
-const POLARS_DECIMAL: &str = "Decimal(precision=20, scale=0)";
+/// Arrow's spelling of a Delta `decimal(20,0)`, as delta-rs reads it.
+const DELTA_DECIMAL: &str = "Decimal128(20, 0)";
 
 fn datasets() -> Vec<Dataset> {
     let final_events: Vec<Event> = (100..104).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect();
@@ -303,8 +306,8 @@ fn datasets() -> Vec<Dataset> {
                 columns: vec![
                     ("num_transactions", "BIGINT", "Int64"),
                     ("gas_used", "BIGINT", "Int64"),
-                    ("nonce", "DECIMAL(20,0)", POLARS_DECIMAL),
-                    ("detail_level", "VARCHAR", "String"),
+                    ("nonce", "DECIMAL(20,0)", DELTA_DECIMAL),
+                    ("detail_level", "VARCHAR", "Utf8"),
                 ],
                 minimums: vec![("nonce", "18446744073709551615"), ("gas_used", "42000")],
             },
@@ -312,8 +315,8 @@ fn datasets() -> Vec<Dataset> {
                 name: "transactions",
                 columns: vec![
                     ("index", "BIGINT", "Int64"),
-                    ("type", "VARCHAR", "String"),
-                    ("status", "VARCHAR", "String"),
+                    ("type", "VARCHAR", "Utf8"),
+                    ("status", "VARCHAR", "Utf8"),
                 ],
                 minimums: vec![("gas_used", "21000")],
             },
@@ -324,7 +327,7 @@ fn datasets() -> Vec<Dataset> {
             },
             Table {
                 name: "access_lists",
-                columns: vec![("storage_keys", "VARCHAR[]", "List(String)")],
+                columns: vec![("storage_keys", "VARCHAR[]", "List(Utf8, field: 'element')")],
                 minimums: vec![],
             },
         ]
@@ -365,11 +368,11 @@ fn datasets() -> Vec<Dataset> {
                     name: "transactions",
                     columns: vec![
                         ("transaction_index", "BIGINT", "Int64"),
-                        ("fee", "DECIMAL(20,0)", POLARS_DECIMAL),
+                        ("fee", "DECIMAL(20,0)", DELTA_DECIMAL),
                         (
                             "pre_balances",
                             "DECIMAL(20,0)[]",
-                            "List(Decimal(precision=20, scale=0))",
+                            "List(Decimal128(20, 0), field: 'element')",
                         ),
                         ("compute_units_consumed", "BIGINT", "Int64"),
                         ("return_data", "BLOB", "Binary"),
@@ -379,7 +382,11 @@ fn datasets() -> Vec<Dataset> {
                 Table {
                     name: "instructions",
                     columns: vec![
-                        ("accounts", "SMALLINT[]", "List(Int16)"),
+                        (
+                            "accounts",
+                            "SMALLINT[]",
+                            "List(non-null Int16, field: 'element')",
+                        ),
                         ("data", "BLOB", "Binary"),
                     ],
                     minimums: vec![],
@@ -387,8 +394,8 @@ fn datasets() -> Vec<Dataset> {
                 Table {
                     name: "rewards",
                     columns: vec![
-                        ("reward_type", "VARCHAR", "String"),
-                        ("post_balance", "DECIMAL(20,0)", POLARS_DECIMAL),
+                        ("reward_type", "VARCHAR", "Utf8"),
+                        ("post_balance", "DECIMAL(20,0)", DELTA_DECIMAL),
                     ],
                     minimums: vec![("post_balance", "999")],
                 },
@@ -682,116 +689,98 @@ fn check_duckdb(
     expected.rows
 }
 
-/// Polars' view of every table of `dataset`; returns the row counts.
-fn check_polars(
-    python: &Path,
+/// delta-rs's view of every table of `dataset`, after a checkpoint of each:
+/// the snapshot's schema and active files, its partition pruning, and the
+/// rows of those files (the way Polars' `scan_delta` reads through delta-rs);
+/// returns the row counts.
+async fn check_delta_rs(
     root: &Path,
     dataset: &Dataset,
     tables: &[String],
     expected: &BTreeMap<String, Expected>,
 ) -> BTreeMap<String, u64> {
-    let minimums: BTreeMap<&str, Vec<&str>> = dataset
-        .tables
-        .iter()
-        .map(|table| {
-            let columns = table.minimums.iter().map(|(column, _)| *column).collect();
-            (table.name, columns)
-        })
-        .collect();
-    let report = common::python_report(
-        python,
-        "delta_check.py",
-        &json!({
-            "root": root,
-            "tables": tables,
-            "day": DAY,
-            "minimums": minimums,
-            "checkpoint": true,
-            "stored_columns": true,
-        }),
-    );
-    eprintln!(
-        "polars {} with deltalake {} read {}",
-        report["polars"], report["deltalake"], dataset.name
-    );
     let mut rows = BTreeMap::new();
     for table in tables {
-        let context = format!("polars {} {table}", dataset.name);
-        let seen = &report["tables"][table];
+        let context = format!("delta-rs {} {table}", dataset.name);
         let expected = &expected[table];
-        let schema = &seen["schema"];
+        // A checkpoint first, so the log also holds Parquet that no read may
+        // pick up; the tables are then read through it.
+        common::delta_checkpoint(&common::open_local(root, table).await).await;
+        let delta = common::open_local(root, table).await;
+        let read = common::delta_read(&delta).await;
         let checked = dataset.checked(table);
         let columns = checked
             .map(|checked| checked.columns.as_slice())
             .unwrap_or_default();
-        for (column, _, polars) in CANONICAL.iter().chain(columns) {
+        for (column, _, arrow) in CANONICAL.iter().chain(columns) {
             assert_eq!(
-                schema[*column].as_str(),
-                Some(*polars),
-                "{context}: {column} in {schema}"
+                read.types.get(*column).map(String::as_str),
+                Some(*arrow),
+                "{context}: {column} in {:?}",
+                read.types
             );
         }
         assert_eq!(
-            schema["stream_ordinal"].as_str(),
+            read.types.get("stream_ordinal").map(String::as_str),
             (!dataset.final_only).then_some("Int64"),
             "{context}"
         );
+        // Only the log's data files, and the `date` filter prunes to the day's.
+        let sorted = |files: &[String]| {
+            let mut files = files.to_vec();
+            files.sort();
+            files
+        };
+        assert_eq!(read.paths(), sorted(&expected.files), "{context}");
+        assert_eq!(
+            common::delta_day_files(&delta, DAY).await,
+            sorted(&expected.files_on_day),
+            "{context}"
+        );
+        let batches = common::delta_batches(&root.join(table), &read);
+        let count: u64 = batches
+            .iter()
+            .map(|(_, batch)| batch.num_rows() as u64)
+            .sum();
+        let on_day: u64 = batches
+            .iter()
+            .filter(|(date, _)| date == DAY)
+            .map(|(_, batch)| batch.num_rows() as u64)
+            .sum();
+        assert_eq!(count, expected.rows, "{context}");
+        assert_eq!(on_day, expected.rows_on_day, "{context}");
         if let Some(checked) = checked {
             for (column, minimum) in &checked.minimums {
                 assert_eq!(
-                    seen["minimums"][*column],
-                    json!(minimum),
+                    common::minimum(&batches, column).as_deref(),
+                    Some(*minimum),
                     "{context}: min({column})"
                 );
             }
         }
-        assert_eq!(number(&seen["rows"]), expected.rows, "{context}: {seen}");
-        assert_eq!(number(&seen["day_rows"]), expected.rows_on_day, "{context}");
-        // Only the log's data files, and the `date` filter prunes to the day's.
-        assert_eq!(
-            number(&seen["scan_files"]),
-            expected.files.len() as u64,
-            "{context}"
-        );
-        assert_eq!(
-            number(&seen["day_scan_files"]),
-            expected.files_on_day.len() as u64,
-            "{context}"
-        );
-        if expected.rows > 0 {
-            let first = seen["first_scan_file"].as_str().unwrap();
+        if let Some((_, batch)) = batches.first() {
+            // The data files hold no `date` column: it is the partition value.
+            let schema = batch.schema();
+            let stored: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
-                expected.files.iter().any(|file| file == first),
-                "{context}: {first}"
-            );
-            let first = seen["day_first_scan_file"].as_str().unwrap();
-            assert!(
-                expected.files_on_day.iter().any(|file| file == first),
-                "{context}: {first}"
-            );
-            assert_eq!(seen["day_dates"], json!([DAY]), "{context}");
-            let stored = seen["stored_columns"].as_array().unwrap();
-            assert!(
-                !stored.contains(&json!("date")) && stored.contains(&json!("block_num")),
+                !stored.contains(&"date") && stored.contains(&"block_num"),
                 "{context}: the data files hold no date column: {stored:?}"
             );
-            assert_eq!(
-                number(&seen["max_timestamp_ms"]) % 1000,
-                dataset.millis,
-                "{context}"
-            );
+            // Microseconds that hold whole milliseconds.
+            let micros = common::max_timestamp_micros(&batches).unwrap() as u64;
+            assert_eq!(micros % 1000, 0, "{context}");
+            assert_eq!(micros / 1000 % 1000, dataset.millis, "{context}");
         }
-        rows.insert(table.clone(), number(&seen["rows"]));
+        rows.insert(table.clone(), count);
     }
     rows
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duckdb_and_polars_read_every_delta_table() {
+async fn duckdb_and_delta_rs_read_every_delta_table() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     let duckdb = DuckDb::open(&cwd);
-    let python = common::python();
     for dataset in datasets() {
         let root = cwd.join(dataset.name);
         build(&dataset, &cwd, &root).await;
@@ -814,32 +803,26 @@ async fn duckdb_and_polars_read_every_delta_table() {
             dataset.name,
             tables.len()
         );
-        let polars_rows = python
-            .as_ref()
-            .map(|python| check_polars(python, &root, &dataset, &tables, &expected));
-        if python.is_some() {
-            // Every `_delta_log/` now holds a Parquet checkpoint too.
-            for table in &tables {
-                assert!(
-                    root.join(table)
-                        .join("_delta_log/_last_checkpoint")
-                        .is_file(),
-                    "{table}"
-                );
-            }
+        let delta_rows = check_delta_rs(&root, &dataset, &tables, &expected).await;
+        // Every `_delta_log/` now holds a Parquet checkpoint too.
+        for table in &tables {
+            assert!(
+                root.join(table)
+                    .join("_delta_log/_last_checkpoint")
+                    .is_file(),
+                "{table}"
+            );
         }
-        let duck_rows: Option<BTreeMap<String, u64>> = duckdb.as_ref().map(|duckdb| {
-            tables
+        if let Some(duckdb) = &duckdb {
+            let duck_rows: BTreeMap<String, u64> = tables
                 .iter()
                 .map(|table| {
                     let rows = check_duckdb(duckdb, &cwd, &root, &dataset, table, &expected[table]);
                     (table.clone(), rows)
                 })
-                .collect()
-        });
-        if let (Some(duck), Some(polars)) = (&duck_rows, &polars_rows) {
+                .collect();
             assert_eq!(
-                duck, polars,
+                duck_rows, delta_rows,
                 "{}: row counts differ across engines",
                 dataset.name
             );
@@ -860,19 +843,19 @@ async fn duckdb_and_polars_read_every_delta_table() {
 ///
 /// ```sh
 /// FIREPARQ_RGW_ENDPOINT=https://rgw.example.org FIREPARQ_RGW_BUCKET=ethereum-mainnet \
-/// FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 FIREPARQ_POLARS_PYTHON=/path/to/venv/bin/python \
+/// FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 \
 /// cargo test -p blocks --test engine_compat anonymous -- --nocapture
 /// ```
 ///
 /// Optional: `FIREPARQ_RGW_PREFIX` (a dataset below the bucket root),
 /// `FIREPARQ_RGW_REGION` (default `us-east-1`) and `FIREPARQ_RGW_TABLE`, the
 /// child table of the consistent cut (default `transactions`). Every request
-/// is unsigned: no credential is read or sent. Both engines must read the
-/// newest closed day of `blocks` (found from its log) and the child table:
-/// the same rows and block range, pruned to that day's files, with the
+/// is unsigned: no credential is read or sent. DuckDB and delta-rs must read
+/// the newest closed day of `blocks` (found from its log) and the child
+/// table: the same rows and block range, pruned to that day's files, with the
 /// canonical types, and the frontier cut of README "Reading the tables".
-#[test]
-fn anonymous_reads_of_a_public_deployment_bucket() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anonymous_reads_of_a_public_deployment_bucket() {
     let (Ok(endpoint), Ok(bucket)) = (
         std::env::var("FIREPARQ_RGW_ENDPOINT"),
         std::env::var("FIREPARQ_RGW_BUCKET"),
@@ -884,9 +867,12 @@ fn anonymous_reads_of_a_public_deployment_bucket() {
     };
     let region = std::env::var("FIREPARQ_RGW_REGION").unwrap_or_else(|_| "us-east-1".into());
     let child = std::env::var("FIREPARQ_RGW_TABLE").unwrap_or_else(|_| "transactions".into());
-    let root = match std::env::var("FIREPARQ_RGW_PREFIX") {
-        Ok(prefix) => format!("s3://{bucket}/{}", prefix.trim_matches('/')),
-        Err(_) => format!("s3://{bucket}"),
+    let prefix = std::env::var("FIREPARQ_RGW_PREFIX")
+        .map(|prefix| prefix.trim_matches('/').to_string())
+        .unwrap_or_default();
+    let root = match prefix.as_str() {
+        "" => format!("s3://{bucket}"),
+        prefix => format!("s3://{bucket}/{prefix}"),
     };
     let (use_ssl, host) = if let Some(host) = endpoint.strip_prefix("https://") {
         (true, host.trim_end_matches('/'))
@@ -897,35 +883,67 @@ fn anonymous_reads_of_a_public_deployment_bucket() {
     };
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let python = common::python().expect("the anonymous check needs FIREPARQ_POLARS_PYTHON");
     let duckdb = DuckDb::open(&cwd).expect("the anonymous check needs the DuckDB CLI");
+    let client = object_store_delta::aws::AmazonS3Builder::new()
+        .with_bucket_name(&bucket)
+        .with_region(&region)
+        .with_endpoint(&endpoint)
+        .with_allow_http(!use_ssl)
+        .with_skip_signature(true)
+        .build()
+        .unwrap();
+    let client: Arc<dyn object_store_delta::ObjectStore> = Arc::new(client);
+    let store = DeltaStore::s3(&bucket, &prefix, Arc::clone(&client)).unwrap();
 
     // The newest closed day, from `blocks`' log alone.
-    let storage = json!({
-        "aws_endpoint_url": endpoint,
-        "aws_region": region,
-        "aws_skip_signature": "true",
-        "aws_allow_http": (!use_ssl).to_string(),
-    });
-    let probe = common::python_report(
-        &python,
-        "delta_check.py",
-        &json!({"root": root, "tables": [], "storage_options": storage, "closed_day": true}),
-    );
-    let day = probe["closed_day"]
-        .as_str()
-        .expect("blocks has no closed day yet")
-        .to_string();
-    let tables = ["blocks".to_string(), child.clone()];
-    let report = common::python_report(
-        &python,
-        "delta_check.py",
-        &json!({
-            "root": root, "tables": tables, "day": day, "day_only": true,
-            "storage_options": storage,
-        }),
-    );
-
+    let blocks = common::open_table(&store, "blocks").await;
+    let blocks_read = common::delta_read(&blocks).await;
+    let day = blocks_read
+        .files_per_date()
+        .into_keys()
+        .rev()
+        .nth(1)
+        .expect("blocks has no closed day yet");
+    let mut seen = BTreeMap::new();
+    for table in ["blocks", child.as_str()] {
+        // The rows of that day's files (partition pruning), read unsigned.
+        let delta = common::open_table(&store, table).await;
+        let mut block_nums = Vec::new();
+        for file in common::delta_day_files(&delta, &day).await {
+            let key = match prefix.as_str() {
+                "" => format!("{table}/{file}"),
+                prefix => format!("{prefix}/{table}/{file}"),
+            };
+            let bytes = client
+                .get(&object_store_delta::path::Path::from(key))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            let reader =
+                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)
+                    .unwrap()
+                    .build()
+                    .unwrap();
+            for batch in reader {
+                block_nums.extend(
+                    common::int64(&batch.unwrap(), "block_num")
+                        .values()
+                        .to_vec(),
+                );
+            }
+        }
+        seen.insert(
+            table.to_string(),
+            (
+                block_nums.len() as u64,
+                block_nums.iter().min().copied(),
+                block_nums.iter().max().copied(),
+            ),
+        );
+    }
+    let day_files = common::delta_day_files(&blocks, &day).await.len();
     let secret = format!(
         "CREATE SECRET lake (TYPE s3, KEY_ID '', SECRET '', REGION '{region}', \
          ENDPOINT '{host}', URL_STYLE 'path', USE_SSL {use_ssl});"
@@ -954,28 +972,29 @@ fn anonymous_reads_of_a_public_deployment_bucket() {
             )
         })
         .collect();
-    for (column, duck, polars) in CANONICAL {
+    for (column, duck, arrow) in CANONICAL {
         assert_eq!(types.get(column), Some(&duck), "duckdb {column}");
         assert_eq!(
-            report["tables"]["blocks"]["schema"][column],
-            json!(polars),
-            "polars {column}"
+            blocks_read.types.get(column).map(String::as_str),
+            Some(arrow),
+            "delta-rs {column}"
         );
     }
     for (table, tag) in [("blocks", "blocks"), (child.as_str(), "child")] {
         let duck = &rows[tag][0];
-        let seen = &report["tables"][table];
-        eprintln!("{table} on {day}: duckdb {duck}, polars {seen}");
-        assert!(number(&duck["n"]) > 0, "{table}: no rows on {day}");
-        assert_eq!(number(&duck["n"]), number(&seen["day_rows"]), "{table}");
-        assert_eq!(
-            number(&duck["first"]),
-            number(&seen["day_min_block"]),
-            "{table}"
+        let (n, first, last) = seen[table];
+        eprintln!(
+            "{table} on {day}: duckdb {duck}, delta-rs {:?}",
+            seen[table]
         );
+        assert!(number(&duck["n"]) > 0, "{table}: no rows on {day}");
         assert_eq!(
-            number(&duck["last"]),
-            number(&seen["day_max_block"]),
+            (
+                number(&duck["n"]),
+                Some(number(&duck["first"]) as i64),
+                Some(number(&duck["last"]) as i64)
+            ),
+            (n, first, last),
             "{table}"
         );
     }
@@ -983,8 +1002,8 @@ fn anonymous_reads_of_a_public_deployment_bucket() {
     let files = scanning_files(&profile).expect("a Delta scan in the profile");
     let (read, total) = files.split_once('/').unwrap();
     assert_eq!(
-        read.parse::<u64>().unwrap(),
-        number(&report["tables"]["blocks"]["day_scan_files"]),
+        read.parse::<usize>().unwrap(),
+        day_files,
         "both engines prune to the day's files: {files}"
     );
     eprintln!(

@@ -7,6 +7,12 @@ GitHub issues and PRs provide the lifecycle state; a local implementation or a
 passing test alone is not closure. The user-facing summary of all of these
 changes is the [v1.0.0 release notes](../releases/v1.0.0.md).
 
+The repository is Rust-only since v1.0.2
+([record](rust-only.md)): the historical Python validation tooling that
+several records name (`docs/audit/*.py`) was removed, and is in git history at
+the [v1.0.1 tag](https://github.com/pinax-network/firehose-parquet/tree/v1.0.1/docs/audit).
+The records link each script there; check out that tag to run one.
+
 ## Final summary (v1.0.0)
 
 Every issue the audit tracker lists, plus the issues found and fixed during the
@@ -151,6 +157,7 @@ Production fixes after the v1.0.0 release, with their patch release.
 | Issue | Release | PR(s) | Outcome |
 |---|---|---|---|
 | [#678](https://github.com/pinax-network/firehose-parquet/issues/678) | [v1.0.1](../releases/v1.0.1.md) | [#679](https://github.com/pinax-network/firehose-parquet/pull/679) | Ceph RGW 19.2 compares `If-Match` with the unquoted ETag and refused every correct quoted CAS, so S3 ownership could not be acquired. The canary now chooses the ETag form per store (as returned, else a full unquoted rerun that must pass every step, else fail closed), and every conditional request through the owner uses it: owner record, control state, S3 cursor mirror, pinned part reads ([record](rgw-if-match-etag.md)). |
+| [#680](https://github.com/pinax-network/firehose-parquet/issues/680) (item 3) | [unreleased](../releases/unreleased.md) | pending | The repository is Rust-only: the Delta maintenance job is the `fireparq-maintenance` binary (delta-rs OPTIMIZE with DataFusion, VACUUM, checkpoint, log cleanup; the same settings, order, output and exit statuses as `scripts/delta_maintenance.py`), a table that does not exist yet is skipped instead of failed, the maintenance image runs the binary, the writer links no DataFusion, CI installs no Python, and the `docs/audit/*.py` tooling moves to the v1.0.1 tag ([record](rust-only.md)). |
 
 | [#680](https://github.com/pinax-network/firehose-parquet/issues/680) | [v1.0.2](../releases/v1.0.2.md) | [#681](https://github.com/pinax-network/firehose-parquet/pull/681) | One connection-level failure of a `GET _delta_log/_last_checkpoint` ended a `build` on Ceph RGW, because the Delta log client sent every request once. Its HTTP connector now resends idempotent reads (`GET`, `HEAD`) up to 3 times on a transport error, 408, 429 or 5xx, with jittered backoff and a warning per retry; every write, including the conditional log commit, still goes out once, and a lost commit still resolves from `txn`. A new dataset no longer logs `No files in log segment` at ERROR per table: creation lists each log instead of opening a missing table ([record](680-delta-read-retries.md)). |
 
@@ -214,6 +221,7 @@ Production fixes after the v1.0.0 release, with their patch release.
 - [#643 L5a: `merge`, `truncate` and `verify` removed](643-l5a-removals.md)
 - [#643 L5b/L7: plain-Parquet output and readers removed; `validate` on Delta snapshots, `scan` removed, `inspect` one file](643-l5b-l7-readers.md)
 - [#643 L8, L9: engine CI on the Delta tables, and the `deltalake` maintenance job beside `build`](643-l8-l9-engines-maintenance.md)
+- [#680: Rust-only repository, the `fireparq-maintenance` binary, missing tables skipped](rust-only.md)
 
 ### Chain schemas and values
 

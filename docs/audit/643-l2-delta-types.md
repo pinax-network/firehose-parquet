@@ -186,7 +186,7 @@ The payloads are unchanged. `expected.json` changed because of this:
   --decode`). This pins the `decimal(20,0)` type of `blocks.nonce` in real data.
   The counts went from 283 to 284 and from 304 to 305 selected values.
 
-The 26,000,004 oracle (`docs/audit/499-evm-golden-oracle.py`) emits the same
+The 26,000,004 oracle ([`docs/audit/499-evm-golden-oracle.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/499-evm-golden-oracle.py)) emits the same
 strings. Run with Python protobuf 7.36.2 and `protoc` on the retained payload,
 it reproduces `expected.json` byte for byte.
 `cargo test -p blocks --example refresh_evm_golden` (the capture helper's

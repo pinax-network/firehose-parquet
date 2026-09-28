@@ -45,7 +45,7 @@ transaction, call and recording order; every call's state changes for a
 succeeded transaction; and, for a failed or reverted transaction, only the root
 call's persistent balance/nonce changes plus one nonce and code change per
 accepted authorization. It never ran the Rust mapper; the generator is retained
-as `docs/audit/499-evm-golden-oracle.py`. Decimal strings are
+as [`docs/audit/499-evm-golden-oracle.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/499-evm-golden-oracle.py). Decimal strings are
 computed from the raw big-endian bytes. The mapper test then passed on its first
 run against this oracle.
 

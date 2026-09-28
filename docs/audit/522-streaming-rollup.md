@@ -102,7 +102,7 @@ flush without premature file publication, and current-part-only retention over
 
 ## Reproducible measurements
 
-The local synthetic benchmark is `522-rollup-benchmark.py`, with raw results in
+The local synthetic benchmark is [`522-rollup-benchmark.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/522-rollup-benchmark.py), with raw results in
 `522-rollup-benchmark.json`. The baseline binary is clean main `f555898`; the measured updated
 binary is this change integrated on main `9379883`. Both were built and copied
 under the whole-process Cargo lock, with debug profiles and debuginfo disabled.

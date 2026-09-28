@@ -50,9 +50,9 @@ jobs:
 
       # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
       # DuckDB, and blocks/tests/engine_compat.rs, delta_tables.rs and
-      # delta_maintenance.rs read the Delta tables with `delta_scan`
-      # (blocks/tests/common/mod.rs); FIREPARQ_REQUIRE_DUCKDB makes a missing
-      # CLI fail instead of skip.
+      # delta_maintenance.rs read the Delta tables with `delta_scan`, next to
+      # delta-rs (blocks/tests/common/mod.rs); FIREPARQ_REQUIRE_DUCKDB makes a
+      # missing CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
           DUCKDB_VERSION: v1.5.5
@@ -88,27 +88,36 @@ jobs:
           echo "FIREPARQ_DUCKDB_EXTENSION_DIR=$RUNNER_TEMP/duckdb-extensions" >> "$GITHUB_ENV"
           echo "FIREPARQ_DUCKDB_DELTA_VERSION=${DELTA_EXTENSION_VERSION}" >> "$GITHUB_ENV"
 
-      # The Delta tests also read with Polars `scan_delta` and run
-      # scripts/delta_maintenance.py with `deltalake`, both pinned with hashes
-      # in blocks/tests/engines/requirements.txt; FIREPARQ_REQUIRE_POLARS makes
-      # a missing interpreter fail instead of skip.
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Polars and deltalake
+      # The repository is Rust-only: no Python is installed. The Delta tests
+      # read through delta-rs snapshots (blocks/tests/common/mod.rs) and run
+      # the maintenance job, the fireparq-maintenance binary (maintenance/),
+      # whose OPTIMIZE needs DataFusion. Only that crate may enable it: the
+      # writer links no DataFusion, not even in its tests.
+      - name: Check that the repository is Rust-only
         run: |
-          python -m venv "$RUNNER_TEMP/polars"
-          "$RUNNER_TEMP/polars/bin/pip" install --only-binary=:all: --require-hashes \
-            -r blocks/tests/engines/requirements.txt
-          "$RUNNER_TEMP/polars/bin/python" -c "import polars, deltalake; print(polars.__version__, deltalake.__version__)"
-          echo "FIREPARQ_POLARS_PYTHON=$RUNNER_TEMP/polars/bin/python" >> "$GITHUB_ENV"
-          echo "FIREPARQ_REQUIRE_POLARS=1" >> "$GITHUB_ENV"
+          if git ls-files | grep -E '\.py$|requirements.*\.txt$'; then
+            echo "::error::the repository is Rust-only; see docs/audit/rust-only.md"
+            exit 1
+          fi
 
+      - name: Check that the writer links no DataFusion
+        run: |
+          if cargo tree --locked -p blocks --prefix none | grep -E '^datafusion'; then
+            echo "::error::blocks (fireparq) depends on DataFusion; only fireparq-maintenance may"
+            exit 1
+          fi
+          cargo tree --locked -p fireparq-maintenance -e normal --prefix none | grep -q '^datafusion v'
+
+      # Two runs: cargo unifies features across the packages of one run, and
+      # DataFusion's (serde_json `preserve_order`, delta-rs `datafusion`)
+      # would change the writer under test. The maintenance tests build the
+      # binary that the blocks tests then run (FIREPARQ_REQUIRE_MAINTENANCE).
       - name: Run tests
+        env:
+          FIREPARQ_REQUIRE_MAINTENANCE: "1"
         run: |
-          cargo test --workspace --locked
+          cargo test -p fireparq-maintenance --locked
+          cargo test --workspace --exclude fireparq-maintenance --locked
           cargo test -p blocks --example refresh_evm_golden --locked
 
       - name: Build fireparq binary

@@ -112,7 +112,7 @@ The subprocess received only PATH and the intended Pinax API key, with a
 retained from the separately documented [#504 qualification](504-beacon-qualification.md).
 No new raw-source request, production S3 write, or wide range scan was needed.
 
-[505-compare-beacon.py](505-compare-beacon.py) performs only offline reads:
+[505-compare-beacon.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/505-compare-beacon.py) performs only offline reads:
 
 ```sh
 python3 docs/audit/505-compare-beacon.py RAW_JSON OLD_CHAIN_ROOT NEW_CHAIN_ROOT

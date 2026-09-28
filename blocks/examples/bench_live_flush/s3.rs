@@ -59,6 +59,9 @@ pub struct Entry {
     pub pinned: bool,
     /// The request's `If-Match` value.
     pub if_match: Option<String>,
+    /// The client, for example `object_store/0.13.2` (delta-rs) or
+    /// `object_store/0.12.5` (fireparq's own parts and control state).
+    pub user_agent: Option<String>,
     /// For control-slot PUTs: `writing:<receipts>`, `committed`, `tombstone`.
     pub note: Option<String>,
     /// A ListObjectsV2 request's `prefix`.
@@ -612,6 +615,7 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Option<Respons
         delay_ms,
         pinned,
         if_match: header("if-match"),
+        user_agent: header("user-agent"),
         note,
         prefix,
         fault,

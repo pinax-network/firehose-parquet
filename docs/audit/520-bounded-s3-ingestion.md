@@ -138,7 +138,7 @@ all typed values were equal, including multiple dictionaries and nullable/nested
 values. No new provider calls were made. This is offline qualification of already
 captured data, not new live S3 provider qualification.
 
-The reproducible [measurement driver](520-s3-spool-benchmark.py) and
+The reproducible [measurement driver](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/520-s3-spool-benchmark.py) and
 [complete results](520-s3-spool-results.json) use synthetic random binary rows,
 a separately running disk-backed loopback provider, and a preserved core test
 executable (`de29f7804a74706239cb5bd6cef86773526c240a7810745e35be8b4041d4163c`).

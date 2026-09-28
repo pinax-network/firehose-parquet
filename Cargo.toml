@@ -4,6 +4,7 @@ members = [
     "firehose-protos",
     "firehose-parquet",
     "blocks",
+    "maintenance",
 ]
 
 [workspace.package]

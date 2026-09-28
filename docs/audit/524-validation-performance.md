@@ -51,7 +51,7 @@ requests or production storage mutations were involved.
 
 ## Reproducible benchmark
 
-`524-benchmark.py` builds one 250,000-row wide file (four validation fields plus
+[`524-benchmark.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/524-benchmark.py) builds one 250,000-row wide file (four validation fields plus
 64 pseudo-random UInt64 payload fields) and three 200,000-row canonical-only
 layouts with 25, 100 and 400 Hive partitions. DuckDB 1.1.1 writes uncompressed
 Parquet. The wide fixture isolates wasted-column decoding; the narrow layouts

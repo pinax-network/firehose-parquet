@@ -53,7 +53,7 @@ changes, and no code change.
 The oracle applies the documented persistence rules to the decoded data:
 counts for all 20 tables (14,001 extended rows) and 304 values on 27 selected
 rows, each naming its protobuf source path. The generator is retained as
-[`499-evm-golden-oracle.py`](499-evm-golden-oracle.py) and regenerates
+[`499-evm-golden-oracle.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/499-evm-golden-oracle.py) and regenerates
 `expected.json` byte for byte. The mapper matched it on the first run, and a
 deliberate one-value change to `expected.json` made the test fail. No mapper
 code changed.

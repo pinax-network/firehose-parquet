@@ -57,7 +57,8 @@ results. It contains one transaction, one message, 366 block events and 17
 transaction events. The [retained source fixture and hashes](../../blocks/tests/fixtures/cosmos-33121486/README.md)
 are independent of the mapper. No production output or S3 data was written.
 
-`510-qualify.py prepare` builds a minimal v2 block from only the consumed RPC
+[`510-qualify.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/510-qualify.py)
+(removed from the tree after v1.0.1; run it from that tag) `prepare` builds a minimal v2 block from only the consumed RPC
 fields. It follows the relevant field/array mapping in the
 [pinned Firehose converter](https://github.com/streamingfast/firehose-cosmos/blob/5cf6c3b04091931f2463eba405d215be27738e21/cometbft/101/convert/convert.go);
 the Injective-specific block-bloom reordering is absent in this sample and

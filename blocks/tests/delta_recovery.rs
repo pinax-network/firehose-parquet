@@ -22,14 +22,15 @@
 //! increasing by one commit per transaction up to the authority's ordinal,
 //! and `blocks` committed last in every transaction.
 //!
-//! Maintenance is the `deltalake` package run by `tests/engines/delta_maintain.py`
-//! in the Python named by `FIREPARQ_POLARS_PYTHON` (`FIREPARQ_REQUIRE_POLARS`
-//! in CI makes it mandatory): OPTIMIZE with a lite VACUUM of retention 0 (it
-//! deletes compacted parts at once), or a full VACUUM of retention 0 (it
-//! deletes untracked parts). Without it, a test deletes exactly the files that
-//! VACUUM would, and skips the row reads those files would serve; the
-//! maintenance-beside-`build` tests are skipped. Those also read the final
-//! tables with Polars `scan_delta` (`tests/engines/delta_check.py`).
+//! Maintenance is the `fireparq-maintenance` binary (`common::maintenance_bin`,
+//! required in CI by `FIREPARQ_REQUIRE_MAINTENANCE`): OPTIMIZE of every date
+//! with a lite VACUUM of retention 0 (it deletes compacted parts at once) and
+//! a checkpoint. A full VACUUM of retention 0 (it deletes untracked parts),
+//! which the job refuses, is delta-rs's own VACUUM in this process. Without
+//! the binary, a test deletes exactly the files that VACUUM would, and skips
+//! the row reads those files would serve; the maintenance-beside-`build`
+//! tests are skipped. Those also read the final tables through delta-rs.
+use firehose_parquet::delta::store::DeltaStore;
 use firehose_parquet::writer::read_parquet;
 use firehose_protos::{eth, firehose};
 use futures::StreamExt;
@@ -39,12 +40,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tonic::codegen::{http, BoxFuture, Service};
 
 #[path = "../examples/bench_live_flush/s3.rs"]
 #[allow(dead_code)]
 mod s3;
+
+mod common;
 
 const CHAIN: &str = "delta-recovery-chain";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, later blocks
@@ -282,19 +287,49 @@ impl Storage {
         }
     }
 
-    /// The object_store options of `deltalake` for this storage.
-    fn storage_options(&self) -> Value {
+    /// The dataset's Delta tables in this process, through the writer's log
+    /// store: on S3 a delta-rs client of the loopback endpoint, trusting its
+    /// CA.
+    fn delta_store(&self) -> DeltaStore {
         match self {
-            Storage::Local(_) => Value::Null,
-            Storage::S3(server) => json!({
-                "AWS_ENDPOINT_URL": server.endpoint,
-                "AWS_ACCESS_KEY_ID": "loopback-access-key",
-                "AWS_SECRET_ACCESS_KEY": "loopback-secret-key",
-                "AWS_REGION": "us-east-1",
-                "aws_conditional_put": "etag",
-                "allow_invalid_certificates": "true",
-            }),
+            Storage::Local(root) => DeltaStore::local(root).unwrap(),
+            Storage::S3(server) => {
+                let ca = std::fs::read(&server.ca_file).unwrap();
+                let mut client = object_store_delta::ClientOptions::new();
+                for certificate in object_store_delta::Certificate::from_pem_bundle(&ca).unwrap() {
+                    client = client.with_root_certificate(certificate);
+                }
+                let store = object_store_delta::aws::AmazonS3Builder::new()
+                    .with_bucket_name(BUCKET)
+                    .with_region("us-east-1")
+                    .with_access_key_id("loopback-access-key")
+                    .with_secret_access_key("loopback-secret-key")
+                    .with_endpoint(&server.endpoint)
+                    .with_client_options(client)
+                    .build()
+                    .unwrap();
+                DeltaStore::s3(BUCKET, CHAIN, Arc::new(store)).unwrap()
+            }
         }
+    }
+
+    /// The maintenance job's environment for this storage (as a CronJob
+    /// would set it).
+    fn maintenance_env(&self, tables: &[&str]) -> Vec<(&'static str, String)> {
+        let mut env = vec![
+            ("LAKE_ROOT", self.output()),
+            ("LAKE_TABLES", tables.join(",")),
+        ];
+        if let Storage::S3(server) = self {
+            env.extend([
+                ("S3_ENDPOINT", server.endpoint.clone()),
+                ("AWS_ACCESS_KEY_ID", "loopback-access-key".into()),
+                ("AWS_SECRET_ACCESS_KEY", "loopback-secret-key".into()),
+                ("AWS_REGION", "us-east-1".into()),
+                ("SSL_CERT_FILE", server.ca_file.to_str().unwrap().into()),
+            ]);
+        }
+        env
     }
 
     /// A `fireparq` command in `cwd` with a cleared environment and, for S3,
@@ -629,72 +664,37 @@ fn check_lake(root: &Path, blocks: Range<u64>, rows: bool) -> BTreeMap<String, D
     logs
 }
 
-/// The Python with `deltalake`, or `None` locally when it is missing.
-fn python() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_POLARS_PYTHON").map(PathBuf::from);
-    let available = candidate.as_ref().is_some_and(|python| {
-        std::process::Command::new(python)
-            .args(["-c", "import deltalake"])
-            .env_clear()
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    if available {
-        return candidate;
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_POLARS").is_none(),
-        "FIREPARQ_REQUIRE_POLARS is set but FIREPARQ_POLARS_PYTHON ({candidate:?}) cannot import deltalake"
-    );
-    eprintln!(
-        "no deltalake maintenance: set FIREPARQ_POLARS_PYTHON to a Python with deltalake; deleting the files VACUUM would instead"
-    );
-    None
+/// One maintenance job run over `tables` that compacts every date
+/// (`OPTIMIZE_DATES=all`) and vacuums at once (a lite VACUUM of retention 0,
+/// which deletes the compacted parts), then checkpoints. Asserts a clean run.
+async fn compact(job: &Path, storage: &Storage, tables: &[&str]) -> common::JobRun {
+    let mut env = storage.maintenance_env(tables);
+    env.extend([
+        ("OPTIMIZE_DATES", "all".to_string()),
+        ("VACUUM_RETENTION_HOURS", "0".to_string()),
+    ]);
+    let run = common::maintenance_job(job, &env).await;
+    run.assert_clean();
+    run
 }
 
-fn maintenance_spec(storage: &Storage, tables: &[&str], mode: &str) -> Value {
-    json!({
-        "root": match storage {
-            Storage::Local(root) => root.to_str().unwrap().to_string(),
-            Storage::S3(_) => storage.output(),
-        },
-        "tables": tables,
-        "mode": mode,
-        "storage": storage.storage_options(),
-    })
+/// The dates the job compacted in `table`.
+fn compacted_dates(run: &common::JobRun, table: &str) -> usize {
+    run.table(table)["compacted"].as_array().unwrap().len()
 }
 
-fn maintain_command(python: &Path, spec: &Value) -> std::process::Command {
-    let mut command = std::process::Command::new(python);
-    command
-        .env_clear()
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/engines/delta_maintain.py"
-        ))
-        .arg(spec.to_string());
-    command
-}
-
-/// Runs one maintenance `mode` on `tables` and returns its report, after
-/// checking that no call failed.
-fn maintain(python: &Path, storage: &Storage, tables: &[&str], mode: &str) -> Value {
-    let spec = maintenance_spec(storage, tables, mode);
-    let result = maintain_command(python, &spec).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{mode}: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+/// A delta-rs full VACUUM of retention 0 over `tables`, which the job
+/// refuses: it deletes every untracked file, uncommitted parts included.
+/// Returns the files deleted per table.
+async fn full_vacuum(storage: &Storage, tables: &[&str]) -> BTreeMap<String, usize> {
+    let store = storage.delta_store();
+    let mut deleted = BTreeMap::new();
     for table in tables {
-        assert_eq!(
-            report["tables"][table]["errors"],
-            json!([]),
-            "{mode} {table}: {report}"
-        );
+        let files =
+            common::delta_vacuum_now(common::open_table(&store, table).await, true, false).await;
+        deleted.insert(table.to_string(), files.len());
     }
-    report
+    deleted
 }
 
 fn row_tables() -> Vec<&'static str> {
@@ -853,11 +853,12 @@ async fn committed_parts_compacted_before_the_restart(s3: bool, fault: &str) {
     assert_eq!(pending(&root).unwrap()["phase"], "committed", "{fault}");
     let parts = pending_parts(&root, &row_tables());
     assert_eq!(parts.len(), ROW_TABLES.len());
-    let rows = match python() {
-        Some(python) => {
-            let report = maintain(&python, &storage, &row_tables(), "compact");
+    // Both dates have two parts per table: one OPTIMIZE commit each.
+    let rows = match common::maintenance_bin() {
+        Some(job) => {
+            let run = compact(&job, &storage, &row_tables()).await;
             for table in row_tables() {
-                assert_eq!(report["tables"][table]["optimize_commits"], 1, "{report}");
+                assert_eq!(compacted_dates(&run, table), 2, "{run:?}");
             }
             true
         }
@@ -875,7 +876,7 @@ async fn committed_parts_compacted_before_the_restart(s3: bool, fault: &str) {
     let logs = check_lake(&storage.copy(&cwd), 100..104, rows);
     if rows {
         for table in row_tables() {
-            assert_eq!(logs[table].optimize_versions().len(), 1, "{table}");
+            assert_eq!(logs[table].optimize_versions().len(), 2, "{table}");
         }
     }
 }
@@ -995,14 +996,9 @@ async fn a_vacuumed_uncommitted_part(s3: bool) {
     let root = storage.copy(&cwd);
     let untracked = pending_parts(&root, &["blocks", "transactions"]);
     let committed = pending_parts(&root, &["access_lists", "logs"]);
-    match python() {
-        Some(python) => {
-            let report = maintain(&python, &storage, &row_tables(), "full-vacuum");
-            for table in ["blocks", "transactions"] {
-                assert_eq!(report["tables"][table]["vacuumed"], 1, "{report}");
-            }
-        }
-        None => storage.delete(&untracked),
+    let deleted = full_vacuum(&storage, &row_tables()).await;
+    for table in ["blocks", "transactions"] {
+        assert_eq!(deleted[table], 1, "{deleted:?}");
     }
     let root = storage.copy(&cwd);
     assert!(untracked.iter().all(|part| !root.join(part).exists()));
@@ -1060,75 +1056,56 @@ async fn recovery_recover(s3: bool) {
     check_lake(&storage.copy(&cwd), 100..102, true);
 }
 
-/// #636: `deltalake` maintenance runs beside `build` while it catches up
-/// (block times from 2023) and across a restart, rewriting and vacuuming the
-/// very dates being appended to. Every flush commits, maintenance never
-/// fails, OPTIMIZE lands between fireparq's commits, and the tables end with
-/// each block exactly once.
+/// #636: the maintenance job runs beside `build` while it catches up (block
+/// times from 2023) and across a restart, rewriting and vacuuming the very
+/// dates being appended to. Every flush commits, maintenance never fails or
+/// loses a race, OPTIMIZE lands between fireparq's commits, and the tables
+/// end with each block exactly once.
 async fn maintenance_beside_build(s3: bool) {
     let (_dir, cwd) = scratch();
-    let storage = Storage::new(s3, &cwd).await;
-    let Some(python) = python() else {
+    let storage = Arc::new(Storage::new(s3, &cwd).await);
+    let Some(job) = common::maintenance_bin() else {
         return;
     };
     // The tables exist once a first run has started.
     build(&storage, &cwd, 101, &[]).await;
-    let stop_file = cwd.join("stop-maintenance");
-    let mut spec = maintenance_spec(&storage, &row_tables(), "loop");
-    spec["stop_file"] = json!(stop_file);
-    spec["min_rounds"] = json!(2);
-    let maintenance = maintain_command(&python, &spec)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    // Compact rounds until the builds are done, at least two of them.
+    let stop = Arc::new(AtomicBool::new(false));
+    let maintenance = tokio::spawn({
+        let (stop, storage, job) = (Arc::clone(&stop), Arc::clone(&storage), job.clone());
+        async move {
+            let mut rounds = 0;
+            while rounds < 2 || !stop.load(Ordering::SeqCst) {
+                compact(&job, &storage, &row_tables()).await;
+                rounds += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            rounds
+        }
+    });
     let pace = Duration::from_millis(60);
     for stop in [124, 140] {
         let result = run(&storage, &cwd, stop, None, &[], pace).await;
         assert!(result.status.success(), "{}", text(&result));
     }
-    std::fs::write(&stop_file, b"stop").unwrap();
-    let finished = maintenance.wait_with_output().unwrap();
-    assert!(
-        finished.status.success(),
-        "{}",
-        String::from_utf8_lossy(&finished.stderr)
-    );
-    let report: Value = serde_json::from_slice(&finished.stdout).unwrap();
-    for table in row_tables() {
-        assert_eq!(report["tables"][table]["errors"], json!([]), "{report}");
-    }
+    stop.store(true, Ordering::SeqCst);
+    let rounds = maintenance.await.unwrap();
     // A last round, then the restart after maintenance continues.
-    maintain(&python, &storage, &row_tables(), "compact");
+    compact(&job, &storage, &row_tables()).await;
     build(&storage, &cwd, 142, &[]).await;
     let root = storage.copy(&cwd);
     let logs = check_lake(&root, 100..142, true);
-    // Polars `scan_delta` reads the same rows through the compacted,
-    // vacuumed and checkpointed logs.
-    let spec = json!({"root": root, "tables": row_tables(), "day": "2023-11-15", "decimals": {}});
-    let read = std::process::Command::new(&python)
-        .env_clear()
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/engines/delta_check.py"
-        ))
-        .arg(spec.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        read.status.success(),
-        "polars: {}",
-        String::from_utf8_lossy(&read.stderr)
-    );
-    let read: Value = serde_json::from_slice(&read.stdout).unwrap();
+    // delta-rs reads the same rows through the compacted, vacuumed and
+    // checkpointed logs.
     for (table, per_block) in ROW_TABLES {
-        let expected: Vec<u64> = (100..142)
+        let expected: Vec<i64> = (100..142)
             .flat_map(|block| std::iter::repeat_n(block, per_block))
             .collect();
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
         assert_eq!(
-            read["tables"][table]["block_nums"],
-            json!(expected),
-            "polars {table}"
+            common::delta_block_nums(&root.join(table), &read),
+            expected,
+            "delta-rs {table}"
         );
     }
     let mut interleaved = 0;
@@ -1146,12 +1123,11 @@ async fn maintenance_beside_build(s3: bool) {
     }
     assert!(
         interleaved > 0,
-        "OPTIMIZE ran between fireparq's commits: {report}"
+        "no OPTIMIZE ran between fireparq's commits"
     );
     eprintln!(
-        "maintenance beside build ({}): {} rounds, {interleaved} OPTIMIZE commits between fireparq commits",
+        "maintenance beside build ({}): {rounds} rounds, {interleaved} OPTIMIZE commits between fireparq commits",
         if s3 { "s3" } else { "local" },
-        report["rounds"]
     );
 }
 

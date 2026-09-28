@@ -1,7 +1,7 @@
 # Example Kubernetes CronJobs for the Delta maintenance job (#643), to adopt in
-# a deployment repository. They run scripts/delta_maintenance.py, the
-# off-the-shelf `deltalake` package (1.6.6, preinstalled in the
-# firehose-parquet-maintenance image), beside a running `fireparq build`
+# a deployment repository. They run `fireparq-maintenance`, the Rust binary
+# of delta-rs's own operations (`deltalake-core` 1.0.0; crate maintenance/),
+# beside a running `fireparq build`
 # on one network bucket: hourly OPTIMIZE of closed dates, lite VACUUM, a
 # checkpoint and log cleanup, and a weekly full VACUUM with the enforced 168 h
 # retention. See README "Delta maintenance" and docs/design/delta-lake.md §9.
@@ -20,13 +20,16 @@
 # 2. `kubectl -n lake apply -f deploy/examples/delta-maintenance-cronjob.yaml`
 #
 # The image ghcr.io/pinax-network/firehose-parquet-maintenance is published
-# with each fireparq release (deploy/maintenance/Dockerfile): the script and
-# its hash-pinned deltalake, preinstalled, so the pod needs no package index.
-# The root filesystem is read-only, /tmp is an emptyDir, and the job runs as
-# an unprivileged user.
+# with each fireparq release (deploy/maintenance/Dockerfile): the
+# fireparq-maintenance binary on debian-slim, as its ENTRYPOINT, so no
+# `command:` is needed and the pod needs no Python or package index (images up
+# to v1.0.1 ran the former Python job with the same settings). The root
+# filesystem is read-only, /tmp is an emptyDir, and the job runs as an
+# unprivileged user (65534).
 #
 # A run that fails or loses a commit race changes nothing that the next run
-# cannot finish, and the writer is never affected. Alert on the writer's
+# cannot finish, and the writer is never affected. A table the writer has not
+# created yet is skipped, not failed. Alert on the writer's
 # `firehose_parquet_delta_log_tail_commits` growing past a few hundred: the
 # hourly checkpoints have stopped.
 apiVersion: v1
@@ -80,9 +83,9 @@ spec:
               type: RuntimeDefault
           containers:
             - name: maintenance
-              # scripts/delta_maintenance.py with its pinned deltalake
-              # preinstalled (deploy/maintenance/Dockerfile). Pin the digest of
-              # the release's image in production.
+              # The fireparq-maintenance binary is the ENTRYPOINT
+              # (deploy/maintenance/Dockerfile). Pin the digest of the release's
+              # image in production.
               image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
               envFrom:
                 - configMapRef:
@@ -144,9 +147,9 @@ spec:
               type: RuntimeDefault
           containers:
             - name: maintenance
-              # scripts/delta_maintenance.py with its pinned deltalake
-              # preinstalled (deploy/maintenance/Dockerfile). Pin the digest of
-              # the release's image in production.
+              # The fireparq-maintenance binary is the ENTRYPOINT
+              # (deploy/maintenance/Dockerfile). Pin the digest of the release's
+              # image in production.
               image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
               env:
                 - name: FULL_VACUUM

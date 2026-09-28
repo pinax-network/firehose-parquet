@@ -4,7 +4,7 @@
 > durable accepted-event ordinal of their envelope, so the README replaces the
 > finalized-intersection query discussed below with a tested canonical live view
 > ([record](648-stream-ordinal.md)). This record describes the schema before that
-> column; [474-check-query.py](474-check-query.py) keeps the original query
+> column; [474-check-query.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/474-check-query.py) keeps the original query
 > verbatim.
 
 ## Decision and implementation
@@ -71,7 +71,7 @@ is presented as reliable.
 - Warning applicability is unit-tested for bounded/unbounded and both finality
   modes. The subprocess test verifies the warning is actually invoked by the
   binary, rather than testing only an unused helper.
-- [474-check-query.py](474-check-query.py) runs the exact README SQL of that
+- [474-check-query.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/474-check-query.py) runs the exact README SQL of that
   time (extracted from the README then, embedded in the script since #648)
   using DuckDB against temporary local Parquet. Cases include recurrence,
   replay duplicates, competing identities at one height, reference-uncovered

@@ -6,7 +6,7 @@ This record only measures. No ingestion, writer or controller behavior
 changed: the harness is an example, plus test-only hooks. The raw numbers are
 in [658-live-flush-benchmark.json](658-live-flush-benchmark.json), and every
 table below is rendered from that file by
-[658-live-flush-report.py](658-live-flush-report.py).
+[658-live-flush-report.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/658-live-flush-report.py).
 
 ## Target
 
