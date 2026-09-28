@@ -111,7 +111,7 @@ impl<'a> S3StateStore<'a> {
         self.require_resolved_owner()?;
         let mode = match self.read_slot(key).await? {
             None => PutMode::Create,
-            Some(slot) if slot.payload.is_none() => PutMode::Update(slot.version.object),
+            Some(slot) if slot.payload.is_none() => self.update(&slot.version)?,
             Some(_) => bail!("control record already exists"),
         };
         let (bytes, _) = encode(payload, &uuid::Uuid::new_v4().to_string(), 0)?;
@@ -133,12 +133,8 @@ impl<'a> S3StateStore<'a> {
             .checked_add(1)
             .context("control revision exhausted")?;
         let (bytes, _) = encode(payload, &expected.record.incarnation, revision)?;
-        self.put_and_verify(
-            key,
-            Bytes::from(bytes),
-            PutMode::Update(expected.object.clone()),
-        )
-        .await
+        self.put_and_verify(key, Bytes::from(bytes), self.update(expected)?)
+            .await
     }
 
     /// Logically clear a slot through CAS. The tombstone remains at the fixed key.
@@ -147,13 +143,16 @@ impl<'a> S3StateStore<'a> {
         self.require_resolved_owner()?;
         self.require_version(key, expected).await?;
         let (bytes, _) = encode_tombstone(&expected.record)?;
-        self.put_and_verify(
-            key,
-            Bytes::from(bytes),
-            PutMode::Update(expected.object.clone()),
-        )
-        .await?;
+        self.put_and_verify(key, Bytes::from(bytes), self.update(expected)?)
+            .await?;
         Ok(())
+    }
+
+    /// The CAS on `expected`, in the owner's `If-Match` ETag form (#678).
+    fn update(&self, expected: &S3ControlVersion) -> Result<PutMode> {
+        self.ownership
+            .update_mode(&expected.object)
+            .context("control object lacks a usable conditional version")
     }
 
     fn require_resolved_owner(&self) -> Result<()> {
@@ -329,6 +328,33 @@ mod tests {
                 .payload,
             1
         );
+        assert!(!owner.is_mutation_uncertain());
+        owner.release().await.unwrap();
+    }
+
+    /// #678: on Ceph RGW 19.2, which refuses quoted `If-Match` ETags, every
+    /// control-slot CAS uses the owner's unquoted form, and stale versions
+    /// are still refused.
+    #[tokio::test]
+    async fn rgw_19_control_slots_cas_in_the_owners_etag_form() {
+        let rgw: Arc<dyn ObjectStore> =
+            Arc::new(crate::dataset_lock_s3::rgw19_store::Rgw19Store::default());
+        let owner = S3Ownership::acquire(rgw.clone(), "test", vec!["data".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            owner.etag_form(),
+            crate::dataset_lock_s3::ETagForm::Unquoted
+        );
+        let store = S3StateStore::new(&owner, "data").unwrap();
+        let old = store.create(ControlKey::Pending, &1).await.unwrap();
+        let replaced = store.replace(ControlKey::Pending, &old, &2).await.unwrap();
+        assert!(store.replace(ControlKey::Pending, &old, &3).await.is_err());
+        store.remove(ControlKey::Pending, &replaced).await.unwrap();
+        let recreated = store.create(ControlKey::Pending, &4).await.unwrap();
+        assert!(store.remove(ControlKey::Pending, &replaced).await.is_err());
+        let loaded = store.load::<u64>(ControlKey::Pending).await.unwrap();
+        assert_eq!(loaded.unwrap().version, recreated);
         assert!(!owner.is_mutation_uncertain());
         owner.release().await.unwrap();
     }

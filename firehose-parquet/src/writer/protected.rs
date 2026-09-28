@@ -1142,8 +1142,22 @@ impl<'a> S3PartStore<'a> {
             receipt.byte_size <= crate::s3::upload::MAX_PART_BYTES,
             "native protected part exceeds the single-PUT size limit"
         );
+        // Pinned in the owner's `If-Match` ETag form (#678); the observed
+        // version is still compared with `expected` as returned.
+        let if_match = match expected
+            .as_ref()
+            .and_then(|version| version.e_tag.as_deref())
+        {
+            Some(etag) => Some(
+                self.ownership
+                    .etag_form()
+                    .if_match(etag)
+                    .context("native protected part has no usable version")?,
+            ),
+            None => None,
+        };
         let options = object_store::GetOptions {
-            if_match: expected.as_ref().and_then(|version| version.e_tag.clone()),
+            if_match,
             version: expected
                 .as_ref()
                 .and_then(|version| version.version.clone()),

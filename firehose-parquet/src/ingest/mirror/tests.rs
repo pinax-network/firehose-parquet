@@ -581,6 +581,42 @@ async fn remote_fixture() -> (Arc<RemoteStore>, DatasetOwnership, AuthorityState
     let authority = AuthorityState::initial(desc).unwrap();
     (store, ownership, authority, service)
 }
+/// #678: on Ceph RGW 19.2, which refuses quoted `If-Match` ETags, the
+/// mirror's compare-and-swap uses the owner's unquoted form.
+#[tokio::test]
+async fn rgw_19_mirror_updates_through_the_owners_etag_form() {
+    let store: Arc<dyn object_store::ObjectStore> =
+        Arc::new(crate::dataset_lock_s3::rgw19_store::Rgw19Store::default());
+    let owner = S3Ownership::acquire(store, "ingest", vec![KEY.into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.etag_form(),
+        crate::dataset_lock_s3::ETagForm::Unquoted
+    );
+    let ownership = DatasetOwnership::from_remote_for_test("cursor-bucket", owner);
+    let service = Digest::hash("service", &"fixture").unwrap();
+    let mut desc = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    desc.mirror = MirrorBinding::S3 {
+        service: service.clone(),
+        bucket: "cursor-bucket".into(),
+        key: KEY.into(),
+    };
+    let initial = AuthorityState::initial(desc).unwrap();
+    let adapter =
+        ProtectedMirror::new(&ownership, &initial.descriptor.mirror, Some(&service)).unwrap();
+    let one = advance(&initial, 100);
+    let two = advance(&one, 101);
+    for authority in [&one, &two] {
+        assert_eq!(
+            adapter.reconcile(authority).await.unwrap(),
+            MirrorOutcome::Repaired
+        );
+    }
+    assert!(adapter.reconcile(&one).await.is_err());
+    ownership.release().await.unwrap();
+}
+
 #[tokio::test]
 async fn remote_binding_and_conditional_repair_preserve_current_authority() {
     let (store, ownership, initial, service) = remote_fixture().await;

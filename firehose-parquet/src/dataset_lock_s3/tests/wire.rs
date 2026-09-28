@@ -17,14 +17,61 @@ struct RequestSummary {
     if_none_match: Option<String>,
     cache_control: Option<String>,
     signed: bool,
+    status: u16,
+}
+/// How the server compares an `If-Match` value (other than `*`) with the
+/// stored, quoted ETag (#678).
+#[derive(Clone, Copy, Default, PartialEq)]
+enum IfMatch {
+    /// RFC 9110, as AWS S3 and MinIO: the quoted ETag matches.
+    #[default]
+    Rfc,
+    /// Ceph RGW 19.2: literally against the ETag without its quotes, so only
+    /// the unquoted ETag matches, for PUT and GET.
+    Rgw19,
+    /// No value ever matches.
+    RefuseAll,
 }
 #[derive(Default)]
 struct ServerState {
     objects: HashMap<String, Stored>,
+    /// Every ETag each path has had, oldest first.
+    history: HashMap<String, Vec<String>>,
     revision: u64,
     ignore_conditions: bool,
+    if_match: IfMatch,
+    /// A broken provider: an earlier ETag of the object still matches.
+    match_stale: bool,
+    /// A broken provider: any value in the mode's form matches.
+    match_any: bool,
     lose_owner_put_responses: usize,
     requests: Vec<RequestSummary>,
+}
+impl ServerState {
+    fn if_match_holds(&self, path: &str, value: &str) -> bool {
+        let Some(current) = self.objects.get(path) else {
+            return false;
+        };
+        if value == "*" {
+            return true;
+        }
+        let candidates: Vec<&String> = if self.match_stale {
+            self.history.get(path).into_iter().flatten().collect()
+        } else {
+            vec![&current.etag]
+        };
+        let quoted = value.starts_with('"');
+        match self.if_match {
+            IfMatch::Rfc => (self.match_any && quoted) || candidates.contains(&&value.to_string()),
+            IfMatch::Rgw19 => {
+                (self.match_any && !quoted)
+                    || candidates
+                        .iter()
+                        .any(|etag| etag.trim_matches('"') == value)
+            }
+            IfMatch::RefuseAll => false,
+        }
+    }
 }
 struct Server {
     endpoint: String,
@@ -131,9 +178,18 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<Mutex<ServerState>
             signed: headers
                 .get("authorization")
                 .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256 ")),
+            status: 0,
         });
-        match method.as_str() {
+        let answer = match method.as_str() {
             "GET" => match state.objects.get(&path).cloned() {
+                Some(_)
+                    if !state.ignore_conditions
+                        && headers
+                            .get("if-match")
+                            .is_some_and(|value| !state.if_match_holds(&path, value)) =>
+                {
+                    (412, xml_error("PreconditionFailed"), None, false)
+                }
                 Some(object) => (200, object.bytes.clone(), Some(object), false),
                 None => (404, xml_error("NoSuchKey"), None, false),
             },
@@ -143,9 +199,9 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<Mutex<ServerState>
                     && (headers
                         .get("if-none-match")
                         .is_some_and(|value| value == "*" && exists.is_some())
-                        || headers.get("if-match").is_some_and(|value| {
-                            exists.is_none_or(|object| &object.etag != value)
-                        }));
+                        || headers
+                            .get("if-match")
+                            .is_some_and(|value| !state.if_match_holds(&path, value)));
                 if denied {
                     (412, xml_error("PreconditionFailed"), None, false)
                 } else {
@@ -156,6 +212,11 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<Mutex<ServerState>
                         version: format!("version-{}", state.revision),
                     };
                     state.objects.insert(path.clone(), object.clone());
+                    state
+                        .history
+                        .entry(path.clone())
+                        .or_default()
+                        .push(object.etag.clone());
                     let lose = path == format!("/owner-tests/{OWNER_KEY}")
                         && state.lose_owner_put_responses > 0;
                     if lose {
@@ -174,7 +235,9 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<Mutex<ServerState>
                 (204, Vec::new(), None, false)
             }
             _ => panic!("unexpected HTTP method"),
-        }
+        };
+        state.requests.last_mut().unwrap().status = answer.0;
+        answer
     };
     if lose_response {
         // Remote publication succeeded, but the client never receives its result.
@@ -265,4 +328,197 @@ async fn real_s3_adapter_refuses_a_server_ignoring_conditions() {
         .all(|request| request.method != "PUT"
             || request.path != format!("/owner-tests/{OWNER_KEY}")));
     server.shutdown().await;
+}
+
+/// `(method, If-Match, status)` of every conditional request on each probe
+/// key, in the order the probes were created. A wrong version reads `wrong`.
+fn probe_conditions(state: &ServerState) -> Vec<Vec<(String, String, u16)>> {
+    let mut probes: Vec<(String, Vec<(String, String, u16)>)> = Vec::new();
+    for request in &state.requests {
+        let Some(probe) = request
+            .path
+            .strip_prefix(&format!("/owner-tests/{PROBE_PREFIX}/"))
+        else {
+            continue;
+        };
+        let index = match probes.iter().position(|(key, _)| key == probe) {
+            Some(index) => index,
+            None => {
+                probes.push((probe.to_string(), Vec::new()));
+                probes.len() - 1
+            }
+        };
+        if let Some(value) = &request.if_match {
+            let value = if value.contains("never-match-") {
+                "wrong".to_string()
+            } else {
+                value.clone()
+            };
+            probes[index]
+                .1
+                .push((request.method.clone(), value, request.status));
+        }
+    }
+    probes
+        .into_iter()
+        .map(|(_, conditions)| conditions)
+        .collect()
+}
+
+/// `(If-Match, status)` of every conditional request on the owner key.
+fn owner_if_matches(state: &ServerState) -> Vec<(String, u16)> {
+    state
+        .requests
+        .iter()
+        .filter(|request| request.path == format!("/owner-tests/{OWNER_KEY}"))
+        .filter_map(|request| Some((request.if_match.clone()?, request.status)))
+        .collect()
+}
+
+fn condition(method: &str, value: &str, status: u16) -> (String, String, u16) {
+    (method.to_string(), value.to_string(), status)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rfc_provider_keeps_quoted_etags_in_one_canary_run() {
+    let server = Server::start().await;
+    let store = server.client();
+    let guard = acquire(&store).await;
+    assert_eq!(guard.etag_form(), ETagForm::AsReturned);
+    guard.release().await.unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        // etag-1 is the probe's Create, etag-3 the owner record's.
+        assert_eq!(
+            probe_conditions(&state),
+            vec![vec![
+                condition("PUT", "wrong", 412),
+                condition("GET", "\"etag-1\"", 200),
+                condition("PUT", "\"etag-1\"", 200),
+                condition("PUT", "\"etag-1\"", 412),
+            ]]
+        );
+        assert_eq!(owner_if_matches(&state), vec![("\"etag-3\"".into(), 200)]);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rgw_19_provider_gets_unquoted_etags_on_every_conditional_request() {
+    let server = Server::start().await;
+    server.state.lock().unwrap().if_match = IfMatch::Rgw19;
+    let store = server.client();
+    let guard = acquire(&store).await;
+    assert_eq!(guard.etag_form(), ETagForm::Unquoted);
+    // Durable control state: create, replace, a refused stale replacement,
+    // a tombstone and a re-create over it are all CAS in the chosen form.
+    {
+        use crate::durable_state::ControlKey;
+        let control = crate::durable_state_s3::S3StateStore::new(&guard, "mainnet").unwrap();
+        let first = control.create(ControlKey::State, &1_u64).await.unwrap();
+        let second = control
+            .replace(ControlKey::State, &first, &2_u64)
+            .await
+            .unwrap();
+        assert!(control
+            .replace(ControlKey::State, &first, &3_u64)
+            .await
+            .is_err());
+        control.remove(ControlKey::State, &second).await.unwrap();
+        control.create(ControlKey::State, &4_u64).await.unwrap();
+        let loaded = control.load::<u64>(ControlKey::State).await.unwrap();
+        assert_eq!(loaded.unwrap().payload, 4);
+    }
+    assert!(!guard.is_mutation_uncertain());
+    guard.release().await.unwrap();
+    let next = acquire(&store).await;
+    assert_eq!(next.record().generation(), 2);
+    next.release().await.unwrap();
+    {
+        let state = server.state.lock().unwrap();
+        let probes = probe_conditions(&state);
+        assert_eq!(probes.len(), 4, "two canary runs per acquisition");
+        for pair in probes.chunks(2) {
+            // As returned: the wrong version is refused, then the correct
+            // quoted version too (the pinned GET), so the canary runs again.
+            let [(_, wrong, 412), (method, quoted, 412)] = &pair[0][..] else {
+                panic!("{:?}", pair[0]);
+            };
+            assert_eq!((wrong.as_str(), method.as_str()), ("wrong", "GET"));
+            assert!(quoted.starts_with("\"etag-"), "{quoted}");
+            // Unquoted: every step passes, and the wrong and stale versions
+            // are refused.
+            let [(_, wrong, 412), (_, pinned, 200), (_, cas, 200), (_, stale, 412)] = &pair[1][..]
+            else {
+                panic!("{:?}", pair[1]);
+            };
+            assert_eq!(wrong, "wrong");
+            assert!(pinned.starts_with("etag-") && pinned == cas && cas == stale);
+        }
+        // Every owner and control-state CAS was unquoted and applied (the
+        // stale replacement is refused by its readback, before any PUT).
+        let control: Vec<_> = state
+            .requests
+            .iter()
+            .filter(|request| request.method == "PUT" && request.path.contains(".fireparq-ingest"))
+            .filter_map(|request| Some((request.if_match.clone()?, request.status)))
+            .collect();
+        assert_eq!(
+            control
+                .iter()
+                .map(|(_, status)| *status)
+                .collect::<Vec<_>>(),
+            vec![200, 200, 200],
+            "replace, tombstone, re-create"
+        );
+        let owner = owner_if_matches(&state);
+        assert_eq!(
+            owner.iter().map(|(_, status)| *status).collect::<Vec<_>>(),
+            vec![200, 200, 200],
+            "release, reacquire, release"
+        );
+        for (value, _) in owner.iter().chain(&control) {
+            assert!(value.starts_with("etag-"), "{value}");
+        }
+        assert!(state
+            .objects
+            .keys()
+            .all(|path| !path.contains(PROBE_PREFIX)));
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn providers_matching_no_form_or_broken_versions_fail_closed() {
+    // (mode, stale versions match, any value in the form matches, canary runs)
+    let cases = [
+        (IfMatch::RefuseAll, false, false, 2),
+        (IfMatch::Rgw19, true, false, 2),
+        (IfMatch::Rgw19, false, true, 2),
+        // A failure other than a refused correct version never reruns.
+        (IfMatch::Rfc, true, false, 1),
+        (IfMatch::Rfc, false, true, 1),
+    ];
+    for (mode, stale, any, runs) in cases {
+        let server = Server::start().await;
+        {
+            let mut state = server.state.lock().unwrap();
+            state.if_match = mode;
+            state.match_stale = stale;
+            state.match_any = any;
+        }
+        let store = server.client();
+        assert_eq!(
+            S3Ownership::acquire(store, "ingest", vec!["mainnet".into()])
+                .await
+                .unwrap_err(),
+            OwnershipError::ConditionalWritesUnproven
+        );
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(probe_conditions(&state).len(), runs, "{stale} {any}");
+            assert!(state.objects.is_empty(), "probes deleted, no owner record");
+        }
+        server.shutdown().await;
+    }
 }

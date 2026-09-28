@@ -267,8 +267,13 @@ impl<'a> ProtectedMirror<'a> {
                     return Ok(MirrorOutcome::Unchanged);
                 }
                 let bytes = encode(authority)?;
-                let mode =
-                    existing.map_or(PutMode::Create, |(_, version)| PutMode::Update(version));
+                let mode = match existing {
+                    None => PutMode::Create,
+                    // In the owner's `If-Match` ETag form (#678).
+                    Some((_, version)) => owner
+                        .update_mode(&version)
+                        .context("protected mirror lacks a usable conditional version")?,
+                };
                 let mut options = crate::writer::s3_put_options("no-store, no-cache, max-age=0");
                 options.mode = mode;
                 ensure!(

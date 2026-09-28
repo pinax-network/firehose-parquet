@@ -643,4 +643,148 @@ fn bounded_canonical_requests_and_safe_versions() {
     }
 }
 
+#[test]
+fn etag_forms_render_if_match_values() {
+    use ETagForm::{AsReturned, Unquoted};
+    assert_eq!(AsReturned.if_match("\"abc\"").as_deref(), Some("\"abc\""));
+    assert_eq!(AsReturned.if_match("7").as_deref(), Some("7"));
+    assert_eq!(Unquoted.if_match("\"abc\"").as_deref(), Some("abc"));
+    assert_eq!(Unquoted.if_match("abc").as_deref(), Some("abc"));
+    // Only one clean pair of quotes is removed; anything else is unusable.
+    for unusable in ["\"\"", "\"", "\"abc", "abc\"", "W/\"abc\"", "\"a\"b\""] {
+        assert_eq!(Unquoted.if_match(unusable), None, "{unusable}");
+    }
+    let version = UpdateVersion {
+        e_tag: Some("\"abc\"".into()),
+        version: Some("v1".into()),
+    };
+    assert_eq!(AsReturned.precondition(&version), Some(version.clone()));
+    assert_eq!(
+        Unquoted.precondition(&version),
+        Some(UpdateVersion {
+            e_tag: Some("abc".into()),
+            version: Some("v1".into()),
+        })
+    );
+    assert!(matches!(
+        Unquoted.update(&version),
+        Some(PutMode::Update(UpdateVersion { e_tag: Some(etag), .. })) if etag == "abc"
+    ));
+    // A missing ETag stays missing: the store refuses the CAS, as before.
+    let bare = UpdateVersion {
+        e_tag: None,
+        version: Some("v1".into()),
+    };
+    assert_eq!(Unquoted.precondition(&bare), Some(bare.clone()));
+    assert!(Unquoted
+        .update(&UpdateVersion {
+            e_tag: Some("W/\"weak\"".into()),
+            version: None,
+        })
+        .is_none());
+}
+
+/// The distinct canary probe keys written so far.
+fn probe_keys(store: &StatefulStore) -> std::collections::BTreeSet<String> {
+    store
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(key, _)| key.starts_with(PROBE_PREFIX))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn one_canary_run_keeps_etags_as_returned_on_an_rfc_store() {
+    let (fake, store) = store();
+    let guard = acquire(&store).await;
+    assert_eq!(guard.etag_form(), ETagForm::AsReturned);
+    assert_eq!(probe_keys(&fake).len(), 1, "no second run");
+    guard.release().await.unwrap();
+}
+
+#[tokio::test]
+async fn each_canary_form_proves_its_refusals() {
+    use super::rgw19_store::Rgw19Store;
+    // A store with unquoted ETags passes in both forms, which render alike.
+    let memory: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    for form in [ETagForm::AsReturned, ETagForm::Unquoted] {
+        canary(&memory, form).await.unwrap();
+    }
+    // RGW 19.2: the quoted form of the correct version is refused, cleanly.
+    let rgw: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::default());
+    assert!(matches!(
+        canary(&rgw, ETagForm::AsReturned).await,
+        Err(CanaryFailure::CorrectVersionRefused { quoted: true })
+    ));
+    canary(&rgw, ETagForm::Unquoted).await.unwrap();
+    // Neither form matches: both runs fail on the correct version.
+    let refusing: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::refusing_every_version());
+    for form in [ETagForm::AsReturned, ETagForm::Unquoted] {
+        assert!(matches!(
+            canary(&refusing, form).await,
+            Err(CanaryFailure::CorrectVersionRefused { .. })
+        ));
+    }
+    // Every run deleted its probe.
+    for store in [memory, rgw, refusing] {
+        let left: Vec<_> = store.list(None).collect().await;
+        assert!(left.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rgw_19_ownership_uses_unquoted_etags_for_every_transition() {
+    use super::rgw19_store::Rgw19Store;
+    let store: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::default());
+    let guard = acquire(&store).await;
+    assert_eq!(guard.etag_form(), ETagForm::Unquoted);
+    // Release and reacquisition are compare-and-swaps on the owner record.
+    guard.release().await.unwrap();
+    let next = acquire(&store).await;
+    assert_eq!(next.record().generation(), 2);
+    assert_eq!(next.etag_form(), ETagForm::Unquoted);
+    // Operator release qualifies the store again and CASes in its form.
+    let expected = next.record().clone();
+    drop(next);
+    let authorization = RecoveryAuthorization::assert_provider_quiescence(
+        &expected,
+        "the test dropped the writer",
+        "the in-memory store has no pending requests",
+    )
+    .unwrap();
+    S3Ownership::operator_release(store.clone(), &expected, authorization)
+        .await
+        .unwrap();
+    let status = S3Ownership::status(&store).await.unwrap().unwrap();
+    assert_eq!(
+        (status.generation(), status.state()),
+        (2, OwnerState::Released)
+    );
+    let objects: Vec<_> = store
+        .list(None)
+        .map(|meta| meta.unwrap().location.to_string())
+        .collect()
+        .await;
+    assert_eq!(objects, vec![OWNER_KEY.to_string()], "no probe is left");
+}
+
+#[tokio::test]
+async fn a_store_refusing_both_forms_fails_closed() {
+    use super::rgw19_store::Rgw19Store;
+    let store: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::refusing_every_version());
+    assert_eq!(
+        S3Ownership::acquire(store.clone(), "ingest", vec!["a".into()])
+            .await
+            .unwrap_err(),
+        OwnershipError::ConditionalWritesUnproven
+    );
+    assert!(S3Ownership::status(&store).await.unwrap().is_none());
+    let left: Vec<_> = store.list(None).collect().await;
+    assert!(left.is_empty(), "both probes were deleted");
+}
+
+mod provider;
 mod wire;

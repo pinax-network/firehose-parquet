@@ -25,6 +25,10 @@ them on several Solana, Antelope, NEAR and Tron tables.
 
 ## What's new in v1.0.0
 
+**v1.0.1** is a patch release: S3 ownership now works on Ceph RGW 19.2.x,
+which compares `If-Match` ETags without their quotes
+([v1.0.1 release notes](docs/releases/v1.0.1.md)).
+
 v1.0.0 is a breaking release that follows the v0.7 series. The
 [v1.0.0 release notes](docs/releases/v1.0.0.md) list every change and include
 the upgrade guide.
@@ -119,7 +123,7 @@ Each GitHub release attaches `fireparq` binaries for Linux and macOS
 (`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
-curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.0/fireparq-linux-x86_64.tar.gz
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.1/fireparq-linux-x86_64.tar.gz
 tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
@@ -277,17 +281,17 @@ fails at startup with an error.
 ### Docker
 
 The image is published to GitHub Container Registry for each release tag; this
-release is tagged `1.0.0`, `1.0`, `1` and `latest`. The image path stays
+release is tagged `1.0.1`, `1.0`, `1` and `latest`. The image path stays
 `ghcr.io/pinax-network/firehose-parquet`, and the container entrypoint runs
 `fireparq`.
 
 ```bash
-docker pull ghcr.io/pinax-network/firehose-parquet:1.0.0
+docker pull ghcr.io/pinax-network/firehose-parquet:1.0.1
 
 docker run --rm \
   -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
-  ghcr.io/pinax-network/firehose-parquet:1.0.0 \
+  ghcr.io/pinax-network/firehose-parquet:1.0.1 \
   build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -598,7 +602,18 @@ cursor location. Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
 there is one owner per bucket, and a second writing command on any prefix of it
 fails with `bucket ownership is held`. It requires conditional-write
-support plus access to reserved control keys. Unresolved remote errors retain
+support plus access to reserved control keys. Before it takes ownership, a
+canary on a private probe key checks that the provider applies
+`If-None-Match: *` and a correct `If-Match`, and refuses wrong and stale
+versions. Ceph RGW 19.2.x compares `If-Match` literally with the ETag
+without its quotes, so it refuses the quoted form that S3 returns and
+that AWS S3 and MinIO expect. The canary detects this, reruns with
+unquoted ETags, and uses that form for the rest of the run only when every
+check passes. It then logs `s3 conditional writes: If-Match ETags sent
+unquoted (provider compares them literally)`. A provider that passes
+neither form fails with `conditional-write capability could not be
+proven` (v1.0.1, [#678](docs/audit/rgw-if-match-etag.md), which also
+describes an opt-in check of a disposable bucket). Unresolved remote errors retain
 ownership without an expiry or automatic takeover, and the next run fails until
 it is released. A failed `build` releases S3 ownership on exit when every request
 it sent had a definite outcome, including when its failed transaction is still
@@ -1743,7 +1758,7 @@ Every Parquet file `build` writes embeds key-value metadata in the file footer u
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `1.0.0` |
+| `firehose-parquet.version` | `1.0.1` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
@@ -2166,7 +2181,7 @@ script and its hash-pinned `deltalake`, so a pod needs no package index:
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.0
+  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.1
 ```
 
 On Kubernetes,
