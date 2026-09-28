@@ -19,5 +19,3 @@ empty when the release is cut.
 ## Performance
 
 ## Internal
-
-- #658: `blocks/examples/bench_live_flush` measures catch-up throughput, the steady-state margin and per-phase commit latency of the real binary on Robinhood and Arbitrum One blocks, against local disk and a loopback HTTPS S3 with injected per-request latency. The v1.0.0 baseline is in [658-live-flush-benchmark.md](../audit/658-live-flush-benchmark.md). No writer behavior changed.

@@ -1047,14 +1047,14 @@ fn render_index(references: &[ChainReference]) -> String {
     }
     out.push_str(
         "\n## Conventions\n\n\
-         - Each table is one directory directly below the dataset root, which is \
-         `build --output` as given (`<output>/<table>/`; with `--output '<prefix>/{chain}'` \
-         it is `<prefix>/<chain_name>/<table>/`). The `_fireparq/` directory and the \
-         dot-prefixed entries \
-         beside the tables hold fireparq's artifacts (the cursor mirror) and control \
-         state, not tables. Engines that \
-         skip `_` and `.` paths (Spark, Trino, Hive, Delta) ignore them; with DuckDB, \
-         read one table with `<root>/<table>/**/*.parquet`.\n\
+         - Each table is a Delta table, one directory directly below the dataset root, \
+         which is `build --output` as given (`<output>/<table>/`; with \
+         `--output '<prefix>/{chain}'` it is `<prefix>/<chain_name>/<table>/`), with its \
+         log in `<table>/_delta_log/`. The `_fireparq/` directory and the dot-prefixed \
+         entries beside the tables hold fireparq's artifacts (the cursor mirror) and \
+         control state, not tables. Read a table through its log, with DuckDB \
+         `delta_scan('<root>/<table>')` or Polars `scan_delta`, never by globbing its \
+         files.\n\
          - Types are Delta Lake types (#643), the types of the data files: `long`, \
          `integer`, `short`, `decimal(20,0)`, `double`, `boolean`, `string`, `binary`, \
          `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has no unsigned, \
@@ -1077,9 +1077,8 @@ fn render_index(references: &[ChainReference]) -> String {
          `<table>/date=YYYY-MM-DD/part-*.parquet`. `date` is the partition column only: \
          its value is the directory (the Delta `partitionValues.date`), and the data files \
          have no `date` column. A Solana row without `block_time` has a null `timestamp` \
-         and the `date` of its routing day, the last known block time. Partition-aware \
-         readers such as DuckDB and Polars read the directory as the `date` column and \
-         prune by it.\n\
+         and the `date` of its routing day, the last known block time. DuckDB and \
+         Polars read `date` from the Delta log and prune by it.\n\
          - `fork_step` (`string`, `NEW`, `UNDO` or `FINAL`) and `stream_ordinal` (`long`) \
          exist only on non-final streams (`--final-blocks-only=false`). `stream_ordinal` \
          is the accepted-event ordinal of the stream event that produced the row: strictly \

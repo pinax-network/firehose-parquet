@@ -1,6 +1,9 @@
 //! Exercise reversible CLI selection, append-only events and the bounded warning,
-//! the durable per-row `stream_ordinal`, the README canonical live view, and a
-//! live build whose expired committed parts disappear under it.
+//! the durable per-row `stream_ordinal`, the README canonical live view (over
+//! the Delta tables, with DuckDB's `delta` extension), and a non-final build
+//! whose committed parts disappear under it.
+mod common;
+
 use arrow::array::{Int64Array, StringArray};
 use firehose_parquet::{cursor::load_cursor_parquet, writer::read_parquet};
 use firehose_protos::{eth, firehose};
@@ -615,59 +618,6 @@ fn event_rows(chain_root: &Path, table: &str) -> Vec<EventRow> {
     rows
 }
 
-/// The DuckDB CLI for the README query check: `FIREPARQ_DUCKDB`, else
-/// `duckdb` on `PATH`. CI installs a pinned CLI and sets
-/// `FIREPARQ_REQUIRE_DUCKDB`, so the check can only be skipped locally.
-fn duckdb() -> Option<PathBuf> {
-    // Resolve to an absolute path: the query runs with a cleared environment.
-    let candidate = std::env::var_os("FIREPARQ_DUCKDB")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::split_paths(&std::env::var_os("PATH")?)
-                .map(|directory| directory.join("duckdb"))
-                .find(|path| path.is_file())
-        })
-        .unwrap_or_else(|| PathBuf::from("duckdb"));
-    let available = std::process::Command::new(&candidate)
-        .arg("-version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if available {
-        return Some(candidate);
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
-        "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
-    );
-    eprintln!("skipping the README DuckDB query check: no DuckDB CLI ({candidate:?})");
-    None
-}
-/// Run `sql` in a fresh in-memory DuckDB, without any `~/.duckdbrc`, and
-/// return the last statement's rows.
-fn duckdb_rows(duckdb: &Path, cwd: &Path, sql: &str) -> Vec<Value> {
-    let init = cwd.join("empty.duckdbrc");
-    std::fs::write(&init, "").unwrap();
-    let output = std::process::Command::new(duckdb)
-        .env_clear()
-        .current_dir(cwd)
-        .arg("-init")
-        .arg(&init)
-        .args(["-json", "-c", sql])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{sql}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    if stdout.trim().is_empty() {
-        return Vec::new();
-    }
-    let rows: Vec<Value> =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|error| panic!("{error}: {stdout}"));
-    rows.iter().map(scalars_as_text).collect()
-}
 /// DuckDB versions differ in whether JSON output quotes `UBIGINT` values, so
 /// numbers and strings are compared as text.
 fn scalars_as_text(value: &Value) -> Value {
@@ -684,7 +634,7 @@ fn scalars_as_text(value: &Value) -> Value {
     }
 }
 /// The SQL blocks of the README "Non-final streams and reorgs" section: the
-/// live view first, then the two-bucket union.
+/// canonical live view.
 fn readme_sql() -> Vec<String> {
     let readme =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md")).unwrap();
@@ -719,9 +669,9 @@ const HISTORY: [Envelope; 8] = [
 /// `stream_ordinal` is the accepted-event ordinal: one per delivered envelope,
 /// strictly increasing in delivery order, continued across an in-process
 /// reconnect and a restarted build, identical for the rows of one envelope in
-/// every table and inside its part's recorded window. The README live view
-/// (and its two-bucket union with a final-only dataset) then selects exactly
-/// the canonical head: B at 100, C at 101 once (the later NEW), nothing at 102.
+/// every table and inside its part's recorded window. The README live view,
+/// read through the Delta logs with `delta_scan`, then selects exactly the
+/// canonical head: B at 100, C at 101 once (the later NEW), nothing at 102.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canonical_head() {
     let dir = tempfile::tempdir().unwrap();
@@ -806,41 +756,40 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
         [(100, tx_hash(0xbb)), (101, tx_hash(0xcc))]
     );
 
-    // A final-only dataset of the same chain up to 100: the final frontier.
-    let finalized = dir.path().join("final");
-    let final_server = ReplayServer::start(
-        &[envelope(100, 0xbb, FINAL, HOUR + 3_599)],
-        vec![Plan::new("", true, 100)],
-    )
-    .await;
-    succeed(build(&final_server, dir.path(), &finalized, true, 101, 1)).await;
-    final_server.assert_drained();
-
-    let Some(duckdb) = duckdb() else {
+    let Some(duckdb) = common::DuckDb::open(dir.path()) else {
         return;
     };
     let sql = readme_sql();
-    assert!(sql.len() >= 2, "README live view and union: {sql:?}");
-    let live_prefix = live_root.to_str().unwrap();
-    let final_prefix = finalized.clone();
-    let views = format!("{};\n{}", sql[0], sql[1])
-        .replace("live/mainnet", live_prefix)
-        .replace("final/mainnet", final_prefix.to_str().unwrap());
+    assert_eq!(sql.len(), 1, "README live view: {sql:?}");
+    assert!(
+        sql[0].contains("delta_scan('live/mainnet/blocks')"),
+        "{}",
+        sql[0]
+    );
+    let views = sql[0].replace("live/mainnet", live_root.to_str().unwrap());
     let check = |select: &str, expected: Vec<Value>| {
-        let rows = duckdb_rows(&duckdb, dir.path(), &format!("{views};\n{select};"));
+        let rows: Vec<Value> = duckdb
+            .query(&format!("{views};\nSELECT 'rows' AS q, {select};"))
+            .remove("rows")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut row| {
+                row.as_object_mut().unwrap().remove("q");
+                scalars_as_text(&row)
+            })
+            .collect();
         let expected: Vec<Value> = expected.iter().map(scalars_as_text).collect();
         assert_eq!(rows, expected, "{select}");
     };
     check(
-        "SELECT block_num, block_id, stream_ordinal FROM live_head ORDER BY block_num",
+        "block_num, block_id, stream_ordinal FROM live_head ORDER BY block_num",
         vec![
             json!({"block_num": 100, "block_id": block_id(0xbb), "stream_ordinal": 3}),
             json!({"block_num": 101, "block_id": block_id(0xcc), "stream_ordinal": 6}),
         ],
     );
     check(
-        "SELECT block_num, block_id, fork_step, stream_ordinal FROM live_blocks \
-         ORDER BY block_num",
+        "block_num, block_id, fork_step, stream_ordinal FROM live_blocks ORDER BY block_num",
         vec![
             json!({"block_num": 100, "block_id": block_id(0xbb), "fork_step": "NEW", "stream_ordinal": 3}),
             json!({"block_num": 101, "block_id": block_id(0xcc), "fork_step": "NEW", "stream_ordinal": 6}),
@@ -848,41 +797,27 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
     );
     // C was delivered as NEW twice; only the rows of the later NEW remain.
     check(
-        "SELECT block_num, hash, stream_ordinal FROM live_transactions ORDER BY block_num",
+        "block_num, hash, stream_ordinal FROM live_transactions ORDER BY block_num",
         vec![
             json!({"block_num": 100, "hash": tx_hash(0xbb), "stream_ordinal": 3}),
             json!({"block_num": 101, "hash": tx_hash(0xcc), "stream_ordinal": 6}),
         ],
     );
-    // Two-bucket union: the final dataset up to its frontier (100, whose FINAL
-    // row reports lib_num 100), the live view above it, in the final schema.
+    // Each view keeps its table's own columns, the `date` partition included.
     check(
-        "SELECT block_num, block_id, lib_num FROM canonical_blocks ORDER BY block_num",
-        vec![
-            json!({"block_num": 100, "block_id": block_id(0xbb), "lib_num": 100}),
-            json!({"block_num": 101, "block_id": block_id(0xcc), "lib_num": 99}),
-        ],
-    );
-    check(
-        "SELECT block_num, hash, lib_num FROM canonical_transactions ORDER BY block_num",
-        vec![
-            json!({"block_num": 100, "hash": tx_hash(0xbb), "lib_num": 100}),
-            json!({"block_num": 101, "hash": tx_hash(0xcc), "lib_num": 99}),
-        ],
-    );
-    check(
-        "SELECT count(*) AS n FROM (DESCRIBE canonical_transactions) \
-         WHERE column_name IN ('fork_step', 'stream_ordinal')",
-        vec![json!({"n": 0})],
+        "count(*) AS n FROM (DESCRIBE live_transactions) \
+         WHERE column_name IN ('date', 'fork_step', 'stream_ordinal')",
+        vec![json!({"n": 3})],
     );
 }
 
-/// A live bucket's lifecycle rule deletes committed parts older than its
-/// window, outside fireparq's ownership. A running build (its next flushes and
-/// completion), `recovery status`, `recovery recover` and a restarted build
-/// (resume from authority, the next flushes) never read those parts, so they
-/// are unaffected when every part of an earlier day disappears. Control state
-/// under `.fireparq-ingest/` and the cursor mirror are left in place.
+/// `build` never reads a committed part outside its own pending transaction.
+/// When every committed part of an earlier day disappears under a running
+/// non-final build (outside fireparq's ownership), the build (its next flushes
+/// and completion), `recovery status`, `recovery recover` and a restarted build
+/// (resume from authority, the next flushes) are unaffected. Control state
+/// under `.fireparq-ingest/` and the cursor mirror are left in place. (Readers
+/// of the Delta tables are not: their logs still reference the files.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build() {
     let history: Vec<Envelope> = (0..8)
@@ -940,7 +875,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
             day
         })
         .collect();
-    // The lifecycle rule expires the whole first day of every table.
+    // The whole first day of every table disappears.
     for day in &day_dirs {
         std::fs::remove_dir_all(day).unwrap();
     }

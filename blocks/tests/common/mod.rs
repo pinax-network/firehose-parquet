@@ -1,6 +1,6 @@
 //! Helpers shared by the tests that read fireparq's Delta tables with the
-//! target engines (#643): `engine_compat.rs`, `delta_tables.rs` and
-//! `delta_maintenance.rs`.
+//! target engines (#643): `engine_compat.rs`, `delta_tables.rs`,
+//! `delta_maintenance.rs` and `non_final_stream.rs` (the README live view).
 //!
 //! Engines, all optional locally and required in CI:
 //!
