@@ -71,14 +71,6 @@ impl<'a> TransactionParts<'a> {
         Ok(())
     }
 
-    /// Keep remote ownership after a mutation of this dataset (a Delta log
-    /// commit) that may have been sent without a definite outcome.
-    pub fn mark_remote_uncertain(&self) {
-        if let Self::S3 { owner, .. } = self {
-            owner.mark_mutation_uncertain();
-        }
-    }
-
     /// Local parts are published by blocking file I/O.
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })
@@ -140,6 +132,43 @@ impl<'a> TransactionParts<'a> {
                 Ok(())
             })
             .await
+    }
+
+    /// Verify the final parts of `tables` only, at most `concurrency` at a
+    /// time: a Committed roll-forward reads just the parts it is about to
+    /// add to a Delta log (#643 L4). The error names each part that is
+    /// missing or fails verification, by table and dataset-relative path.
+    pub async fn verify_finals_of(
+        &self,
+        pending: &PendingTransaction,
+        tables: &[String],
+        concurrency: usize,
+    ) -> Result<()> {
+        use futures::StreamExt;
+        let checks = pending
+            .parts
+            .iter()
+            .filter(|part| tables.contains(&part.table))
+            .map(|part| async move {
+                let outcome = match self.verify_final(pending, part).await {
+                    Ok(PartPresence::Present) => return None,
+                    Ok(PartPresence::Missing) => "is missing".to_string(),
+                    Err(error) => format!("could not be verified against its receipt ({error:#})"),
+                };
+                Some(format!(
+                    "the part of table `{}` ({}) {outcome}",
+                    part.table, part.final_relative_path
+                ))
+            });
+        let failures: Vec<String> = futures::stream::iter(checks)
+            .buffered(concurrency.max(1))
+            .filter_map(|failure| async move { failure })
+            .collect()
+            .await;
+        if !failures.is_empty() {
+            bail!("{}", failures.join("; "));
+        }
+        Ok(())
     }
 
     pub async fn rollback_writing(&self, pending: &PendingTransaction) -> Result<()> {

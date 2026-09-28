@@ -7,12 +7,23 @@
 //!
 //! The Delta commits sit between Committed and the authority advance
 //! (`docs/design/delta-lake.md` §3.1): every table with a part gets one commit
-//! with `txn = last ordinal`, the others first and `blocks` last. Recovery of a
-//! Committed journal does not roll the Delta commits forward yet (#643 L4), so
-//! a crash or failure between Committed and the authority advance leaves that
-//! transaction's parts out of the logs of the tables that had not committed.
+//! with `txn = last ordinal`, the others first and `blocks` last.
+//!
+//! Recovery (#643 L4, design §4) runs before any Blocks request. It first
+//! reads every table's `txn` and refuses a log ahead of authority. A Committed
+//! journal whose authority has not advanced is rolled forward table by table,
+//! gated by `txn`: only the tables whose logs lack the transaction are
+//! committed, `blocks` last, after their parts (and only theirs) verified
+//! against the journal; then authority advances. Once authority reached the
+//! transaction's target, no part is read again, because OPTIMIZE and VACUUM
+//! may have rewritten or removed committed parts.
+//!
+//! A Delta commit whose outcome is unknown does not set the S3 owner's
+//! uncertainty latch (design §3.5, decided in #643 L4): the conditional log
+//! PUT and the `txn` action resolve every arrival order to one copy at the
+//! next start, and nothing fireparq does ever deletes a log commit.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -26,7 +37,7 @@ use super::state::{
 };
 use super::store::{TransactionStateStore, Versioned};
 use crate::config::{BlockMetadata, Compression, FlushConcurrency};
-use crate::delta::commit::{CommitHooks, DeltaTables, TableCommit};
+use crate::delta::commit::{CommitFailure, CommitHooks, DeltaTables, TableCommit, UnknownOutcome};
 
 mod lane;
 mod pipeline;
@@ -58,8 +69,9 @@ pub struct TransactionController<'a, M: MirrorAction> {
     mirror: M,
     failed: bool,
     concurrency: FlushConcurrency,
-    /// The dataset's Delta tables. `IngestionSession` always sets them; only
-    /// controller unit tests of the #468 journal alone run without.
+    /// The dataset's Delta tables. `IngestionSession` always sets them, and
+    /// `recovery recover` whenever a journal needs them; only controller unit
+    /// tests of the #468 journal alone run without.
     delta: Option<DeltaTables>,
     _session: crate::dataset_lock::session::SessionPermit<'a>,
 }
@@ -87,18 +99,46 @@ pub struct CommittedTable {
     pub bytes: u64,
 }
 
+/// Refusal of a request whose stream descriptor differs from authority's.
+pub(super) const STREAM_MISMATCH: &str = "existing authoritative stream differs from this request; use a new output root for changed semantics or bindings";
+
 impl<'a, M: MirrorAction> TransactionController<'a, M> {
-    /// Recovery happens before the caller opens its Firehose Blocks stream.
-    /// The expected descriptor must describe the resolved runtime configuration;
-    /// merely reading a descriptor from disk does not validate an append request.
+    /// Journal recovery without Delta tables, for the #468 unit tests of the
+    /// journal alone.
+    #[cfg(test)]
     pub async fn open(
         states: TransactionStateStore<'a>,
         parts: TransactionParts<'a>,
         mirror: M,
         expected: &StreamDescriptor,
     ) -> Result<Self> {
+        Self::open_with_delta(
+            states,
+            parts,
+            mirror,
+            expected,
+            None,
+            FlushConcurrency::SERIAL,
+        )
+        .await
+    }
+
+    /// Recovery happens before the caller opens its Firehose Blocks stream.
+    /// The expected descriptor must describe the resolved runtime configuration;
+    /// merely reading a descriptor from disk does not validate an append request.
+    /// `delta` are the dataset's tables, opened for `expected` by the caller;
+    /// every later transaction commits to them. `concurrency` bounds both
+    /// recovery's table work and every later commit's.
+    pub async fn open_with_delta(
+        states: TransactionStateStore<'a>,
+        parts: TransactionParts<'a>,
+        mirror: M,
+        expected: &StreamDescriptor,
+        delta: Option<DeltaTables>,
+        concurrency: FlushConcurrency,
+    ) -> Result<Self> {
         let session = parts.acquire_session()?;
-        Self::open_reserved(states, parts, mirror, expected, session).await
+        Self::open_reserved(states, parts, mirror, expected, session, delta, concurrency).await
     }
 
     pub(super) async fn open_reserved(
@@ -107,15 +147,38 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         mirror: M,
         expected: &StreamDescriptor,
         session: crate::dataset_lock::session::SessionPermit<'a>,
+        mut delta: Option<DeltaTables>,
+        concurrency: FlushConcurrency,
     ) -> Result<Self> {
+        concurrency.validate()?;
         expected.validate()?;
         let snapshot = states.load().await?;
         let mut authority = snapshot.authority.context(
             "protected ingestion authority is absent; eligible-root initialization is required",
         )?;
         if authority.payload.descriptor != *expected {
-            bail!("existing authoritative stream differs from this request; use a new output root for changed semantics or bindings");
+            bail!("{STREAM_MISMATCH}");
         }
+        // A Committed transaction whose authority has not advanced yet: its
+        // Delta commits may be incomplete.
+        let behind = snapshot.pending.as_ref().filter(|pending| {
+            pending.payload.phase == TransactionPhase::Committed
+                && authority.payload.checkpoint.id == pending.payload.predecessor
+        });
+        // Every table's `txn` is checked before anything changes, so a log
+        // ahead of authority stops the start with all evidence in place.
+        let uncommitted = match &delta {
+            Some(delta) => {
+                delta
+                    .check_progress(
+                        authority.payload.checkpoint.ordinal,
+                        behind.map(|pending| &pending.payload),
+                        concurrency.publications,
+                    )
+                    .await?
+            }
+            None => Vec::new(),
+        };
         let mut mirror_reconciled = false;
         if let Some(pending) = snapshot.pending {
             match pending.payload.phase {
@@ -125,23 +188,22 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                     states.clear(&authority, &pending).await?;
                 }
                 TransactionPhase::Committed => {
-                    // Delta roll-forward gated by each table's `txn` is #643
-                    // L4; until then the tables that had not committed this
-                    // transaction miss its parts.
                     if authority.payload.checkpoint.id == pending.payload.predecessor {
-                        tracing::warn!(
-                            first_ordinal = pending.payload.prefix.first_ordinal,
-                            last_ordinal = pending.payload.prefix.last_ordinal,
-                            "recovering a Committed transaction whose Delta commits may be incomplete; its rows are not rolled forward into the Delta tables yet (#643 L4)"
-                        );
-                    }
-                    // Verify first, even if authority was already advanced by
-                    // the interrupted process. Missing/corrupt data never becomes
-                    // a reason to remap a committed prefix.
-                    parts.verify_all_finals(&pending.payload, 1).await?;
-                    if authority.payload.checkpoint.id == pending.payload.predecessor {
+                        roll_forward(
+                            &parts,
+                            delta.as_mut(),
+                            &pending.payload,
+                            &uncommitted,
+                            concurrency.publications,
+                        )
+                        .await?;
                         authority = states.advance(&authority, &pending).await?;
+                        checkpoint(Stage::RecoveryAuthorityAdvanced)?;
                     }
+                    // Otherwise authority already reached the target, so every
+                    // Delta commit landed before it advanced. No part is read
+                    // again: OPTIMIZE and VACUUM may have rewritten or removed
+                    // committed parts since (design §4).
                     mirror.reconcile(&authority.payload).await?;
                     mirror_reconciled = true;
                     parts.cleanup_temporaries(&pending.payload)?;
@@ -158,17 +220,10 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             authority,
             mirror,
             failed: false,
-            concurrency: FlushConcurrency::SERIAL,
-            delta: None,
+            concurrency,
+            delta,
             _session: session,
         })
-    }
-
-    /// Commit every later transaction to these Delta tables, which the caller
-    /// opened and validated for this controller's stream after recovery.
-    pub fn with_delta_tables(mut self, tables: DeltaTables) -> Self {
-        self.delta = Some(tables);
-        self
     }
 
     /// The dataset's Delta tables, when set.
@@ -177,6 +232,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
     }
 
     /// Bound table work inside each later commit. Journal order is unchanged.
+    #[cfg(test)]
     pub fn with_concurrency(mut self, concurrency: FlushConcurrency) -> Result<Self> {
         concurrency.validate()?;
         self.concurrency = concurrency;
@@ -411,45 +467,166 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
     }
 
     /// One Delta commit per table with a part of this Committed transaction,
-    /// `blocks` last, bounded by the publication concurrency. A commit that
-    /// may have been sent without a definite outcome marks remote ownership
-    /// uncertain, like an unresolved part PUT, so it is not released.
+    /// `blocks` last, bounded by the publication concurrency. A commit whose
+    /// outcome is unknown does not mark remote ownership uncertain: the next
+    /// start reads the table's `txn` and commits it only if it did not land
+    /// (design §3.5).
     async fn commit_delta(&mut self, pending: &PendingTransaction) -> Result<Vec<TableCommit>> {
         let Some(delta) = self.delta.as_mut() else {
             return Ok(Vec::new());
         };
-        let before = |table: &str| {
-            if pipeline::fault::fires("delta-commit", table) {
-                bail!("injected debug fault: the Delta commit of {table} failed");
-            }
-            Ok(())
-        };
-        let after = |table: &str, index: u32| {
-            if pipeline::fault::fires("crash-after-delta-commit", table) {
-                // An abrupt process death after a durable Delta commit.
-                std::process::abort();
-            }
-            checkpoint(Stage::DeltaCommitted(index))
-        };
-        let hooks = CommitHooks {
-            before: &before,
-            after: &after,
-        };
         match delta
-            .commit(pending, self.concurrency.publications, &hooks)
+            .commit(pending, self.concurrency.publications, &COMMIT_HOOKS)
             .await
         {
             Ok(committed) => {
                 checkpoint(Stage::DeltaCommittedAll)?;
                 Ok(committed)
             }
-            Err(failure) => {
-                if failure.unresolved {
-                    self.parts.mark_remote_uncertain();
-                }
-                Err(failure.error)
-            }
+            Err(failure) => Err(unresolved_note(pending, failure)),
         }
+    }
+}
+
+/// The hooks around every Delta commit, of a flush or of a roll-forward:
+/// the real-binary debug faults (`FIREPARQ_DEBUG_FAULT`, debug builds) and
+/// the `DeltaCommitted(entry index)` stage.
+const COMMIT_HOOKS: CommitHooks<'static> = CommitHooks {
+    before: &|table| {
+        if pipeline::fault::fires("delta-commit", table) {
+            bail!("injected debug fault: the Delta commit of {table} failed");
+        }
+        Ok(())
+    },
+    after: &|table, index| {
+        if pipeline::fault::fires("crash-after-delta-commit", table) {
+            // An abrupt process death after a durable Delta commit.
+            std::process::abort();
+        }
+        if pipeline::fault::fires("delta-commit-lost-response", table) {
+            // The commit landed, but its response is lost: an outcome the
+            // process cannot know, which the next start reads from the log.
+            return Err(anyhow::Error::new(UnknownOutcome).context(format!(
+                "injected debug fault: the Delta commit of {table} landed but its response was lost"
+            )));
+        }
+        checkpoint(Stage::DeltaCommitted(index))
+    },
+};
+
+/// A failed Delta commit, with a note when its outcome is unknown. The S3
+/// owner is not marked uncertain for it: the next start resolves it from
+/// the table's `txn` (design §3.5).
+fn unresolved_note(pending: &PendingTransaction, failure: CommitFailure) -> anyhow::Error {
+    if !failure.unresolved {
+        return failure.error;
+    }
+    tracing::warn!(
+        first_ordinal = pending.prefix.first_ordinal,
+        last_ordinal = pending.prefix.last_ordinal,
+        "a Delta commit has an unknown outcome; the journal stays Committed, and the next start reads each table's txn to commit only what did not land"
+    );
+    failure.error.context(
+        "a Delta commit's outcome is unknown (it may have landed); the next start resolves it from the table's txn",
+    )
+}
+
+/// Roll the Committed transaction `pending`, whose authority has not
+/// advanced, forward into the Delta logs of `uncommitted` (from
+/// [`DeltaTables::check_progress`]): verify exactly those tables' parts,
+/// then commit them, `blocks` last. Tables whose logs already hold the
+/// transaction are not touched. A missing or differing part stops recovery
+/// with the journal kept, as design §4.1 requires.
+async fn roll_forward(
+    parts: &TransactionParts<'_>,
+    delta: Option<&mut DeltaTables>,
+    pending: &PendingTransaction,
+    uncommitted: &[String],
+    concurrency: usize,
+) -> Result<()> {
+    let Some(delta) = delta else {
+        // The #468 journal alone (unit tests without Delta tables): verify
+        // every part before authority advances.
+        ensure!(
+            cfg!(test),
+            "a Committed transaction can only be recovered with the dataset's Delta tables"
+        );
+        return parts.verify_all_finals(pending, concurrency).await;
+    };
+    let holding: Vec<&str> = pending
+        .parts
+        .iter()
+        .map(|part| part.table.as_str())
+        .filter(|table| !uncommitted.iter().any(|missing| missing == table))
+        .collect();
+    let age = pending_age(pending);
+    tracing::info!(
+        first_ordinal = pending.prefix.first_ordinal,
+        last_ordinal = pending.prefix.last_ordinal,
+        pending_secs = age.map(|age| age.as_secs()),
+        committed = ?holding,
+        rolling_forward = ?uncommitted,
+        "recovering a Committed transaction: committing it to the Delta tables whose logs lack it"
+    );
+    if uncommitted.is_empty() {
+        return Ok(());
+    }
+    parts
+        .verify_finals_of(pending, uncommitted, concurrency)
+        .await
+        .map_err(|error| {
+            error.context(format!(
+                "cannot roll the Committed transaction of ordinals {}..={} (pending for {}) \
+                 forward into the Delta tables {}: a part their logs do not reference yet is \
+                 gone or does not match the journal. Lite VACUUM never deletes such an \
+                 untracked part, but a full VACUUM whose retention is shorter than the time \
+                 the transaction has been pending, or another cleanup, may have \
+                 (docs/design/delta-lake.md §4.1). Tables that already hold the transaction: \
+                 {}. Nothing was committed or changed, and the journal and authority stay as \
+                 evidence; rebuild into a new, empty output root",
+                pending.prefix.first_ordinal,
+                pending.prefix.last_ordinal,
+                age.map_or("an unknown time".to_string(), human_duration),
+                uncommitted.join(", "),
+                if holding.is_empty() {
+                    "none".to_string()
+                } else {
+                    holding.join(", ")
+                },
+            ))
+        })?;
+    delta
+        .roll_forward(pending, uncommitted, concurrency, &COMMIT_HOOKS)
+        .await
+        .map_err(|failure| unresolved_note(pending, failure))?;
+    Ok(())
+}
+
+/// How long ago the newest part of `pending` was received: its journal's age.
+fn pending_age(pending: &PendingTransaction) -> Option<Duration> {
+    let newest = pending
+        .parts
+        .iter()
+        .filter_map(|part| part.receipt.as_ref())
+        .map(|receipt| receipt.modification_time)
+        .max()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let newest = u128::try_from(newest).ok()?;
+    Some(Duration::from_millis(
+        u64::try_from(now.saturating_sub(newest)).unwrap_or(u64::MAX),
+    ))
+}
+
+fn human_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7_199 => format!("{} min", seconds / 60),
+        7_200..=172_799 => format!("{} h", seconds / 3_600),
+        _ => format!("{} days", seconds / 86_400),
     }
 }
 
@@ -560,6 +737,9 @@ enum Stage {
     MirrorReconciled,
     PendingCleared,
     RollbackComplete,
+    /// Recovery advanced authority after rolling a Committed transaction
+    /// forward.
+    RecoveryAuthorityAdvanced,
     CompletionAuthorityAdvanced,
     CompletionMirrorReconciled,
 }
@@ -567,8 +747,19 @@ fn checkpoint(stage: Stage) -> Result<()> {
     #[cfg(test)]
     tests::checkpoint(stage)?;
     #[cfg(not(test))]
-    let _ = stage;
+    if pipeline::fault::fires("crash-at", &format!("{stage:?}")) {
+        // `FIREPARQ_DEBUG_FAULT=crash-at:<Stage>` (debug builds): an abrupt
+        // process death at a transaction boundary, e.g. `CommittedPersisted`
+        // or `AuthorityAdvanced`.
+        std::process::abort();
+    }
     Ok(())
+}
+
+/// Whether the debug fault `kind:table` is set (`FIREPARQ_DEBUG_FAULT`, debug
+/// builds only), for the session's Delta table creation.
+pub(super) fn debug_fault(kind: &str, table: &str) -> bool {
+    pipeline::fault::fires(kind, table)
 }
 
 #[cfg(test)]

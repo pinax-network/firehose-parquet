@@ -470,10 +470,15 @@ fn part_receipt(encoded: &EncodedPart) -> Result<PartReceipt> {
 /// release builds compile every check to `false`. Kinds: `encode`, `publish`
 /// (fails before any request), `lost-ack` (fails after a successful
 /// publication) and `crash-after-publish` (aborts the process), and for the
-/// Delta commit step (#643 L3, in the controller): `delta-commit` (fails
-/// before the table's commit request) and `crash-after-delta-commit` (aborts
-/// once the table's commit is durable; with `blocks`, the last table, that is
-/// after every Delta commit and before authority advances).
+/// Delta commit step (#643 L3 and L4, in the controller, also during a
+/// recovery roll-forward): `delta-commit` (fails before the table's commit
+/// request), `crash-after-delta-commit` (aborts once the table's commit is durable;
+/// with `blocks`, the last table, that is after every Delta commit and
+/// before authority advances) and `delta-commit-lost-response` (the commit
+/// lands, then fails as if its response were lost). `crash-at:<Stage>`
+/// aborts at a transaction boundary (`CommittedPersisted`,
+/// `AuthorityAdvanced`, ...), and the session's
+/// `crash-after-delta-create:<table>` aborts once that table is created.
 pub(super) mod fault {
     #[cfg(debug_assertions)]
     pub(in crate::ingest::controller) fn fires(kind: &str, table: &str) -> bool {

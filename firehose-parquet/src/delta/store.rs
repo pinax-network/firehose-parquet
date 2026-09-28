@@ -162,6 +162,31 @@ impl DeltaStore {
         }
         Ok(())
     }
+
+    /// Makes a local table's log tail durable: every commit file after the
+    /// checkpoint `checkpoint` (all of them without one) and its `_delta_log/`
+    /// directory. Recovery calls it for a table whose log already holds a
+    /// pending transaction, which a process that died after the commit but
+    /// before [`Self::sync_commit`] left possibly unsynced.
+    pub(crate) fn sync_log_tail(&self, table: &str, checkpoint: Option<u64>) -> Result<()> {
+        let Self::Local { root } = self else {
+            return Ok(());
+        };
+        let log = root.join(table).join("_delta_log");
+        for entry in std::fs::read_dir(&log).context("listing a local Delta log")? {
+            let entry = entry.context("listing a local Delta log")?;
+            let name = entry.file_name();
+            let version = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .filter(|stem| stem.len() == 20)
+                .and_then(|stem| stem.parse::<u64>().ok());
+            if version.is_some_and(|version| checkpoint.is_none_or(|last| version > last)) {
+                sync(&entry.path())?;
+            }
+        }
+        sync(&log)
+    }
 }
 
 fn sync(path: &Path) -> Result<()> {

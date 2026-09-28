@@ -243,6 +243,9 @@ after every Delta commit and before authority advances).
 From the design's §4 matrix. L4's real-binary crash tests can use the two new
 fault hooks.
 
+Update (L4): every row is closed as the last column says; the log commit
+skips the latch. See [643-l4-delta-recovery.md](643-l4-delta-recovery.md).
+
 | Row | L3 behavior | L4 |
 |---|---|---|
 | `CommittedPersisted`, no Delta commit yet | The restart verifies the parts, advances authority and clears: the transaction is in no Delta table (its parts are untracked). A logged warning names the ordinals. | Commit each table gated by its `txn`, `blocks` last, then advance. |
@@ -258,9 +261,9 @@ fault hooks.
 
 - Until L4, a crash or a failed Delta commit between Committed and the
   authority advance loses that transaction from the Delta tables that had not
-  committed it. A normal run and a clean restart lose nothing.
+  committed it. A normal run and a clean restart lose nothing. (Closed by L4.)
 - `recovery recover` and the pre-ingestion recovery of other roots do not
-  touch Delta (L4).
+  touch Delta (L4). (Closed by L4: `recovery recover` rolls forward too.)
 - Each open table keeps delta-rs's eager snapshot of its active files in
   memory (design §8). Opening reads each table's `_last_checkpoint`,
   checkpoint and log tail (one LIST of its `_delta_log/`), which

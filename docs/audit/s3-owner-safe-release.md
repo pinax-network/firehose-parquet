@@ -88,6 +88,14 @@ transaction in Writing or later is kept whenever one of its requests is not
 definitely resolved. A pending journal whose requests are all resolved does not
 keep it.
 
+Update (#643 L4): a Delta log commit (a conditional create of
+`_delta_log/<version>.json`, after the journal is Committed) does not set the
+latch when its outcome is unknown. The next start reads the table's `txn` and
+commits only what did not land, and every arrival order of a delayed copy ends
+with one copy, so a late arrival cannot undo anything recovery did. The
+[review](643-l4-delta-recovery.md#the-owner-latch-and-log-commits) has the
+reasoning; every other request keeps the rule above.
+
 ## Exit paths
 
 | Exit | S3 ownership | Reason |

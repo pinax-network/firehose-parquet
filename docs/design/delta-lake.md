@@ -1,9 +1,10 @@
 # Delta Lake output (#643): design, spike and plan
 
 Status: design of 2026-09-27, implemented lane by lane (§11): since L3 every
-`build` writes Delta tables, and since L5b/L7 nothing writes a table file
-outside the protected transaction or reads a table other than through its log.
-The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
+`build` writes Delta tables, since L4 recovery rolls an interrupted
+transaction forward into them, and since L5b/L7 nothing writes a table
+file outside the protected transaction or reads a table other than
+through its log. The spike lives in [`spikes/delta-lake/`](../../spikes/delta-lake/) and
 runs in CI as the `delta-spike` job. Refs #643, #636, #653, #655, #658, #659;
 part of #463.
 
@@ -417,10 +418,12 @@ commit in it, so each table's `txn` version is the last transaction that gave
 it rows. Versions only increase.
 
 Implemented by L3 ([643-l3-delta-commits.md](../audit/643-l3-delta-commits.md)):
-steps 2 and 4, table creation (§3.3) and the validation of §3.2. A commit
-failure that may have sent a log write marks the S3 owner uncertain, the
-conservative side of §3.5. Recovery does not roll a Committed transaction
-forward into the logs yet (L4).
+steps 2 and 4, table creation (§3.3) and the validation of §3.2. L4
+([643-l4-delta-recovery.md](../audit/643-l4-delta-recovery.md)) adds the
+recovery of step 4: every start checks each table's `txn` and rolls a
+Committed transaction forward into the tables whose logs lack it (§4), and a
+log commit with an unknown outcome no longer marks the S3 owner uncertain
+(§3.5).
 
 ### 3.2 `txn` identity
 
@@ -492,6 +495,22 @@ a crash in step 4 that lasts until recovery runs. Two guarantees hold:
   uncertainty latch, because it resolves itself without provider quiescence.
   Ambiguous **part** PUTs keep today's latch and quiescence rules unchanged.
   The recovery lane (L4) must confirm this before relying on it.
+
+  **Decision (L4): confirmed and implemented.** The latch exists because a
+  delayed request could still take effect after recovery acted on its
+  absence: a delayed part PUT could recreate a part that Writing rollback
+  deleted. Nothing like that follows a log commit. fireparq never deletes a
+  log commit (the writer needs no DeleteObject on `_delta_log/`), a
+  Committed transaction is only rolled forward, never back, and a log commit
+  is one conditional create of `<version>.json` (delta-rs's `DefaultLogStore`,
+  no temporary object, no copy). Every arrival order therefore ends with
+  one copy, at whatever time the delayed PUT arrives, and the latch would only
+  block the next start that resolves it. The latch also never covered the
+  maintenance job, which does not take the owner. Part PUTs, control records,
+  the mirror and deletions keep the latch. A recovery commit that loses to a
+  winning commit of this stream reloads the table and counts as done when its
+  `txn` is the transaction's. The review against #468 is in the
+  [L4 record](../audit/643-l4-delta-recovery.md#the-owner-latch-and-log-commits).
 - **Duplicate `add` of the same path**: Delta reconciles `add`s by path, so
   re-adding a live file does not duplicate rows. Re-adding a file that
   OPTIMIZE already removed would, which is why roll-forward is gated by `txn`
@@ -520,6 +539,17 @@ The existing real-binary crash hooks (`FIREPARQ_DEBUG_FAULT`) gain the new
 stages. `blocks/tests/ingestion_transactions.rs` gets one crash test per new
 row, which reopens the tables and compares exact rows and `txn` versions.
 
+Status (L4, [record](../audit/643-l4-delta-recovery.md)): every row is
+implemented as the table says and has a real-binary crash test on local disk
+and loopback S3 in `blocks/tests/delta_recovery.rs` (a separate file, not
+`ingestion_transactions.rs`), with `deltalake` OPTIMIZE and VACUUM between
+the crash and the restart where the row is about maintenance. The
+`controller.rs` change is made: no part is read once every log or authority
+holds the transaction. Two details differ from the table: the "log ahead"
+check runs at every start for every table, not only with a pending
+transaction, and a `txn` between the predecessor's ordinal and `L` is refused
+as well, since no fireparq commit makes one.
+
 ### 4.1 VACUUM and uncommitted parts: the rule
 
 A part is **untracked** from its upload until its table's Delta commit.
@@ -544,6 +574,12 @@ it lasts until the writer restarts.
   into a new root. To make that visible early, `build` logs the pending
   journal's age at startup and exports it as a metric, and the platform alerts
   on a writer that has been down for more than a day.
+  Update (L4): the roll-forward logs the journal's age (from its newest
+  receipt) and puts it in the fail-closed error, which names each missing part
+  and the tables that already hold the transaction. It exports no metric: a
+  process exports metrics only after it restarts, too late to warn about the
+  outage. Alert on a writer down for a day from the pod's liveness or a stale
+  `firehose_parquet_cursor_last_block_num` instead.
 - **Order inside each job run:** run VACUUM before `create_checkpoint()`. A
   checkpoint drops tombstones older than `deletedFileRetentionDuration`. If
   lite VACUUM ran after the checkpoint with the same retention, the newest
@@ -601,6 +637,13 @@ user limited to Get/Put/Delete/List on `*/_delta_log/*` and the table data
 prefixes, with no access to `.fireparq-ingest/`, `_fireparq/` or the owner
 key. Give the writer no DeleteObject on `*/_delta_log/*`. Writing rollback
 deletes only data parts, and log cleanup belongs to the CronJob.
+
+Status (L4, [#636 record](../audit/636-delta-ownership.md)): implemented and
+tested. The owner record is unchanged; it guards fireparq's writer and state
+only, and `deltalake` OPTIMIZE, VACUUM and checkpoints run beside a live
+`build` (between its commits, during catch-up and across a restart) on local
+disk and loopback S3 with every row exactly once. The README ownership
+section and the #636 record give the bucket policy for both principals.
 
 ## 6. Types
 
@@ -910,7 +953,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L1** deps | toolchain 1.93 → 1.98 (`rust-toolchain.toml`, `Dockerfile`); `deltalake-core =1.0.0` (no default features, `rustls`); `deny.toml` ignore reasons also naming object_store 0.13; recheck for a newer delta-rs on Arrow ≥ 60 first | full suite, `cargo deny` | S | — | #655, #658, #659 |
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
 | **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt; the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
-| **L4** recovery and ownership | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
+| **L4** recovery and ownership (done: PR #675, [record](../audit/643-l4-delta-recovery.md), [#636 record](../audit/636-delta-ownership.md)) | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
 | **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #672, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (post-launch, #666) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
 | **L7** validate, scan, inspect (done with L5b: PR #672, [record](../audit/643-l5b-l7-readers.md); `scan` removed) | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
@@ -940,7 +983,7 @@ deleted once L3 and L9 cover its tests.
 - **Anonymous DuckDB reads** were validated against moto, not RGW (§1.8).
 - **Log-commit uncertainty** (§3.5): the proposal not to latch the owner on
   ambiguous log commits needs the L4 review against #468's quiescence
-  reasoning.
+  reasoning. Resolved by L4: confirmed (§3.5).
 - **`merkle_v3` memory** on the largest partitions (§7.2) needs a #658-style
   measurement.
 - **Target file size and Bloom filters** for compacted files are estimates.

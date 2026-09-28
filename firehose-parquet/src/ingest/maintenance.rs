@@ -464,16 +464,68 @@ async fn recover_roots(
     for root in roots {
         let service = mirror_service(&root.descriptor.mirror, aws)?;
         let mirror = ProtectedMirror::new(ownership, &root.descriptor.mirror, service.as_ref())?;
-        let controller = TransactionController::open(
+        let delta = recovery_tables(ownership, root, aws).await?;
+        let controller = TransactionController::open_with_delta(
             state_store(&root.identity, ownership)?,
             part_store(&root.identity, ownership)?,
             &mirror,
             &root.descriptor,
+            delta,
+            crate::config::FlushConcurrency::SERIAL,
         )
         .await?;
         drop(controller);
     }
     Ok(())
+}
+
+/// The Delta tables `recovery recover` rolls a Committed transaction
+/// forward into and checks for a log ahead of authority (#643 L4): every
+/// table of the root's stream, which must exist, validated except for the
+/// schema (no mapper here; the next `build` checks it). A root that has
+/// accepted nothing and has no Committed journal needs none: its tables may
+/// be incomplete after a start interrupted while creating them, which the
+/// next `build` completes.
+async fn recovery_tables(
+    ownership: &DatasetOwnership,
+    root: &ProtectedRoot,
+    aws: &AwsConfig,
+) -> Result<Option<crate::delta::commit::DeltaTables>> {
+    let journal = state_store(&root.identity, ownership)?.load().await?;
+    let accepted = journal
+        .authority
+        .as_ref()
+        .is_some_and(|authority| authority.payload.checkpoint.ordinal > 0);
+    let committed = journal
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.payload.phase == super::state::TransactionPhase::Committed);
+    if !accepted && !committed {
+        return Ok(None);
+    }
+    let store = match &root.identity {
+        StorageIdentity::Local { canonical_root } => {
+            crate::delta::store::DeltaStore::local(Path::new(canonical_root))?
+        }
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            let owner = ownership
+                .remote(bucket)
+                .context("dataset bucket is not owned")?;
+            let client = match owner.delta_log() {
+                Some(client) => std::sync::Arc::clone(client),
+                None => crate::delta::store::s3_log_client(aws, bucket)?,
+            };
+            crate::delta::store::DeltaStore::s3(bucket, prefix, client)?
+        }
+    };
+    let tables = crate::delta::commit::DeltaTables::open_existing(
+        store,
+        crate::delta::DeltaIdentity::of(&root.descriptor)?,
+        root.descriptor.tables.keys().map(String::as_str),
+        1,
+    )
+    .await?;
+    Ok(Some(tables))
 }
 fn state_store<'a>(
     identity: &StorageIdentity,

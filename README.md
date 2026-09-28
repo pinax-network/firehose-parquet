@@ -367,8 +367,10 @@ fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-bloc
 3. **Commit and mirror** — after verifying every part, record the transaction's
    commit, advance output authority, repair the cursor mirror, and clear pending.
 4. **Recover before streaming** — roll back a Writing transaction or finish a
-   Committed transaction before opening Firehose Blocks. Never infer progress
-   from the greatest block number, a filename, or an external cursor alone.
+   Committed transaction before opening Firehose Blocks: commit it to each
+   Delta table whose `txn` lacks it, `blocks` last, then advance authority.
+   Never infer progress from the greatest block number, a filename, or an
+   external cursor alone.
 
 ### Local part publication
 
@@ -541,12 +543,44 @@ pending: the next `build` recovers that transaction before streaming. It keeps
 ownership after an uncertain request (timeout, lost acknowledgement, connection
 reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
 panic, and its error then says why and prints the exact `recovery status` and
-`recovery release` commands. `recovery` keeps S3 ownership after any error and
+`recovery release` commands. A Delta log commit is the exception: the next
+start reads the table's `txn` to learn whether it landed, so an uncertain one
+does not keep the owner. `recovery` keeps S3 ownership after any error and
 logs the same guidance.
 `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
+
+#### Delta tables and the maintenance job
+
+The owner guards one fireparq writer (`build`, or `recovery recover`) and the
+state only it changes: `.fireparq-ingest/` (authority and the pending
+journal), `_fireparq/cursor.parquet` and its own uncommitted parts. It does not
+make the Delta tables exclusive. The `deltalake` maintenance job (OPTIMIZE,
+VACUUM, checkpoints, log cleanup) commits to them through their logs beside a
+running `build` and never takes the owner (#636):
+
+- fireparq's commits are blind appends with a `txn` per stream; it never
+  removes, rewrites or deletes a committed file, and maintenance and its
+  appends retry at the next version instead of conflicting;
+- recovery reads each table's `txn`: it commits an interrupted transaction
+  only to the tables whose logs lack it, and never reads a part a log already
+  holds, so a compacted and vacuumed part cannot stop a restart;
+- a lite VACUUM (the job's default) never deletes a part no log references
+  yet. A full VACUUM with a retention shorter than an outage can; the next
+  start then stops with a message naming the part and keeps the journal, and
+  the dataset is rebuilt into a new root. Run full VACUUM at most weekly with
+  the enforced 7-day retention.
+
+Give the job its own S3 user: List on the bucket; Get, Put and Delete on each
+table prefix (`<table>/*`, data files and `_delta_log/`); nothing on
+`.fireparq-ingest/`, `_fireparq/`, `.fireparq-owner-v1.json` or
+`.fireparq-owner-probes-v1/`. Give the writer's user no DeleteObject on
+`*/_delta_log/*`: fireparq writes no checkpoint and cleans no log. The
+[#636 record](docs/audit/636-delta-ownership.md) has an RGW bucket policy for
+both users, and the [recovery record](docs/audit/643-l4-delta-recovery.md)
+the crash cases.
 
 `recovery recover` selected at a table, a partition or a parent directory
 discovers every affected protected dataset and its external mirror before it
@@ -1173,7 +1207,7 @@ fireparq recovery release s3://my-bucket/v1/mainnet \
 | Subcommand | Behavior |
 |---|---|
 | `status` | Read-only ownership and control-record summary |
-| `recover` | Recover protected ingestion and the mirror under one owner, and print `{"recovered_protected_roots": N}`. A retained S3 owner must be released first |
+| `recover` | Recover protected ingestion and the mirror under one owner, including the Delta tables of an interrupted transaction, and print `{"recovered_protected_roots": N}`. A retained S3 owner must be released first |
 | `release` | S3 only. Requires `--expected-owner` and `--expected-generation` exactly as reported by `status`, plus `--stopped-writer-evidence` and `--provider-quiescence-evidence` (non-secret operator references). It changes only ownership and repairs no data |
 
 Local ownership is an OS directory lock that is released when the owning process

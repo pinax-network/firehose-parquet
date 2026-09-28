@@ -3,7 +3,10 @@
 //! `txn`, `txn` read-back from a fresh handle, blind appends rebasing over
 //! other writers, a same-`appId` conflict, concurrent writers, and the table
 //! validation, on local disk, an in-memory store and a loopback S3 endpoint
-//! (conditional puts, one attempt per request).
+//! (conditional puts, one attempt per request). #643 L4 adds recovery's
+//! reads: an interrupted table creation completed, existing tables opened for
+//! `recovery recover`, and a roll-forward that commits each part once in
+//! every arrival order of a delayed commit.
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -666,6 +669,212 @@ async fn the_log_tail_counts_commits_after_the_last_checkpoint() {
             reopened.txn_version("blocks").await.unwrap(),
             Some(4),
             "{name}"
+        );
+    }
+}
+
+/// A start interrupted between table creations (design §4) finds some
+/// tables and creates the others, calling the creation hook only for those;
+/// an empty local `_delta_log/`, or one holding only an interrupted local
+/// write's staging file, counts as missing. `open_existing` (`recovery
+/// recover`) validates everything but the schema and never creates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_creation_is_completed_and_recovery_opens_existing_tables_only() {
+    for (name, lake) in Lake::all().await {
+        let only_blocks = BTreeMap::from([("blocks".to_string(), columns()["blocks"].clone())]);
+        DeltaTables::open(lake.store(), identity('h'), &only_blocks, true, 1)
+            .await
+            .unwrap();
+        if let Lake::Local(_, root) = &lake {
+            std::fs::create_dir_all(root.join("transactions/_delta_log")).unwrap();
+            std::fs::write(
+                root.join("transactions/_delta_log/00000000000000000000.json#1"),
+                b"{\"partial\"",
+            )
+            .unwrap();
+        }
+        // `recovery recover` refuses the missing table with guidance.
+        let refused = DeltaTables::open_existing(lake.store(), identity('h'), TABLES, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("the next `build`, which creates them"),
+            "{name}: {refused:#}"
+        );
+        let created = Mutex::new(Vec::new());
+        let hook = |table: &str| {
+            created.lock().unwrap().push(table.to_string());
+            Ok(())
+        };
+        let tables =
+            DeltaTables::open_with(lake.store(), identity('h'), &columns(), true, 2, &hook)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        assert_eq!(*created.lock().unwrap(), ["transactions"], "{name}");
+        for table in TABLES {
+            assert_eq!(tables.version(table).unwrap(), 0, "{name}");
+        }
+        // Existing tables open without their schema, but with their identity.
+        let existing = DeltaTables::open_existing(lake.store(), identity('h'), TABLES, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            existing.names().collect::<Vec<_>>(),
+            ["blocks", "transactions"]
+        );
+        let other = DeltaTables::open_existing(lake.store(), identity('i'), TABLES, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{other:#}").contains("belongs to another stream"),
+            "{name}: {other:#}"
+        );
+    }
+}
+
+/// A Committed transaction of ordinals 1..=2 with one ten-row part per table
+/// of [`TABLES`] in `date=2023-11-14`, as recovery finds it in the journal.
+fn committed_pending() -> crate::ingest::state::PendingTransaction {
+    use crate::ingest::frontier::AcceptedFrontier;
+    use crate::ingest::state::tests::{descriptor, event, routing, FIXTURE_DATE};
+    use crate::ingest::state::{
+        AuthorityState, Digest, PartCompression, PartReceipt, PendingTransaction, RoutingPolicy,
+        TablePlan,
+    };
+    let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    descriptor.tables = TABLES
+        .iter()
+        .map(|table| {
+            (
+                table.to_string(),
+                Digest::hash("schema-fixture", table).unwrap(),
+            )
+        })
+        .collect();
+    let authority = AuthorityState::initial(descriptor.clone()).unwrap();
+    let mut frontier = AcceptedFrontier::resume(&authority.checkpoint);
+    for number in [100, 101] {
+        let ordinal = frontier.receive(event(number, 1)).unwrap();
+        frontier
+            .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
+            .unwrap();
+    }
+    let tables = descriptor
+        .tables
+        .iter()
+        .map(|(table, schema)| TablePlan {
+            table: table.clone(),
+            rows: 10,
+            schema_sha256: schema.clone(),
+            partition: FIXTURE_DATE.into(),
+        })
+        .collect();
+    let mut pending = PendingTransaction::prepare(
+        &authority,
+        frontier.snapshot().unwrap().unwrap(),
+        tables,
+        PartCompression::Zstd,
+    )
+    .unwrap();
+    for index in 0..pending.parts.len() as u32 {
+        let receipt = PartReceipt {
+            byte_size: 1_000 + u64::from(index),
+            sha256: Digest::hash("part-fixture", &index).unwrap(),
+            stats: stats_json(&batch(1)).unwrap(),
+            modification_time: 1_790_337_600_123,
+        };
+        pending = pending.with_receipt(index, receipt, &descriptor).unwrap();
+    }
+    pending.committed_after_verification(&descriptor).unwrap()
+}
+
+/// Recovery's view of a Committed transaction (design §3.5 and §4), on every
+/// store: `check_progress` names the tables whose `txn` lacks it; a delayed
+/// copy of an earlier commit that lands in between wins, and the
+/// roll-forward's own commit is resolved from the log instead of adding the
+/// part twice; a raw copy of an already taken version is refused by its
+/// condition; and a `txn` above authority is a log ahead, refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_roll_forward_commits_each_part_once_in_every_arrival_order() {
+    for (name, lake) in Lake::all().await {
+        let pending = committed_pending();
+        let mut recovering = open(&lake, 'j', true).await.unwrap();
+        let missing = recovering
+            .check_progress(0, Some(&pending), 2)
+            .await
+            .unwrap();
+        assert_eq!(missing, ["blocks", "transactions"], "{name}");
+        // The delayed copy of the `transactions` commit lands now.
+        let mut delayed = open(&lake, 'j', false).await.unwrap();
+        let landed = delayed
+            .roll_forward(
+                &pending,
+                &["transactions".to_string()],
+                1,
+                &CommitHooks::NONE,
+            )
+            .await
+            .unwrap();
+        assert_eq!((landed[0].version, landed[0].found_in_log), (1, false));
+        let order = Mutex::new(Vec::new());
+        let before = |table: &str| {
+            order.lock().unwrap().push(table.to_string());
+            Ok(())
+        };
+        let hooks = CommitHooks {
+            before: &before,
+            after: &|_, _| Ok(()),
+        };
+        let committed = recovering
+            .roll_forward(&pending, &missing, 2, &hooks)
+            .await
+            .unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        assert_eq!(*order.lock().unwrap(), ["transactions", "blocks"], "{name}");
+        let outcome: Vec<_> = committed
+            .iter()
+            .map(|commit| (commit.table.as_str(), commit.version, commit.found_in_log))
+            .collect();
+        assert_eq!(
+            outcome,
+            [("transactions", 1, true), ("blocks", 1, false)],
+            "{name}: blocks last, transactions resolved from the log"
+        );
+        // A raw copy of an already landed commit, PUT again, finds its
+        // version taken, and nothing changes.
+        let commit_file = "_delta_log/00000000000000000001.json";
+        let bytes = lake.read("transactions", commit_file).await;
+        let late = lake
+            .root_store()
+            .put_opts(
+                &lake.key("transactions", commit_file),
+                PutPayload::from(bytes),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..PutOptions::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(late, Err(object_store_delta::Error::AlreadyExists { .. })),
+            "{name}: {late:?}"
+        );
+        let reopened = open(&lake, 'j', false).await.unwrap();
+        for table in TABLES {
+            assert_eq!(reopened.version(table).unwrap(), 1, "{name} {table}");
+            assert_eq!(active(&reopened.tables[table].table).1.len(), 1, "{name}");
+            assert_eq!(reopened.txn_version(table).await.unwrap(), Some(2));
+        }
+        // Every log holds it now: nothing is left to roll forward.
+        assert!(reopened
+            .check_progress(0, Some(&pending), 2)
+            .await
+            .unwrap()
+            .is_empty());
+        reopened.check_progress(2, None, 2).await.unwrap();
+        let ahead = reopened.check_progress(1, None, 2).await.unwrap_err();
+        assert!(
+            format!("{ahead:#}").contains("is ahead of this dataset's authority"),
+            "{name}: {ahead:#}"
         );
     }
 }

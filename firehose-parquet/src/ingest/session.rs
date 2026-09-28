@@ -356,7 +356,8 @@ impl<'a> IngestionSession<'a> {
         shutdown: Option<&'a AtomicBool>,
         listing: &ListingStats,
     ) -> Result<Self> {
-        let resuming = existing(&expected.output, ownership).await?.is_some();
+        let resumed = existing(&expected.output, ownership).await?;
+        let resuming = resumed.is_some();
         super::maintenance::validate_ingestion_target(
             &expected.output,
             ownership,
@@ -376,19 +377,51 @@ impl<'a> IngestionSession<'a> {
         if let Some(shutdown) = shutdown {
             mirror = mirror.with_shutdown(shutdown);
         }
-        if !resuming {
-            super::eligibility::require_initializable(&expected, ownership, aws, &mirror, listing)
+        let authority = match resumed {
+            Some(authority) => authority,
+            None => {
+                super::eligibility::require_initializable(
+                    &expected, ownership, aws, &mirror, listing,
+                )
                 .await?;
-            if matches!(expected.output, StorageIdentity::Local { .. }) {
-                ownership.revalidate_local_paths()?;
-                // Keep lexical alias spelling here to sync both parent chains.
-                crate::writer::create_dir_all_durable(&config.output)?;
-                ownership.revalidate_local_paths()?;
+                if matches!(expected.output, StorageIdentity::Local { .. }) {
+                    ownership.revalidate_local_paths()?;
+                    // Keep lexical alias spelling here to sync both parent chains.
+                    crate::writer::create_dir_all_durable(&config.output)?;
+                    ownership.revalidate_local_paths()?;
+                }
+                states(&expected.output, ownership)?
+                    .initialize(AuthorityState::initial(expected.clone())?)
+                    .await?
+                    .payload
             }
-            states(&expected.output, ownership)?
-                .initialize(AuthorityState::initial(expected.clone())?)
-                .await?;
-        }
+        };
+        // Refuse another stream before any table is opened or created for it
+        // (the controller checks this again).
+        ensure!(
+            authority.descriptor == expected,
+            super::controller::STREAM_MISMATCH
+        );
+        // The Delta tables, before recovery, which rolls a Committed
+        // transaction forward into them (#643 L4). A table is created only
+        // while the stream has accepted nothing, which also completes a start
+        // interrupted between table creations (#643 L3).
+        let created = |table: &str| {
+            if super::controller::debug_fault("crash-after-delta-create", table) {
+                // An abrupt process death once this table is created.
+                std::process::abort();
+            }
+            Ok(())
+        };
+        let tables = DeltaTables::open_with(
+            delta_store(&expected.output, ownership)?,
+            DeltaIdentity::of(&expected)?,
+            delta_columns,
+            authority.checkpoint.ordinal == 0,
+            config.flush_concurrency.publications,
+            &created,
+        )
+        .await?;
         let parts = match &expected.output {
             StorageIdentity::Local { canonical_root } => TransactionParts::local(
                 Path::new(canonical_root),
@@ -408,20 +441,11 @@ impl<'a> IngestionSession<'a> {
             mirror,
             &expected,
             permit,
-        )
-        .await?
-        .with_concurrency(config.flush_concurrency)?;
-        // The Delta tables, after authority exists and recovery ran: a table
-        // is created only while the stream has accepted nothing (#643 L3).
-        let tables = DeltaTables::open(
-            delta_store(&expected.output, ownership)?,
-            DeltaIdentity::of(&expected)?,
-            delta_columns,
-            controller.authority().checkpoint.ordinal == 0,
-            config.flush_concurrency.publications,
+            Some(tables),
+            config.flush_concurrency,
         )
         .await?;
-        if let Some(metrics) = metrics {
+        if let (Some(metrics), Some(tables)) = (metrics, controller.delta_tables()) {
             for table in tables.names() {
                 metrics
                     .delta_log_tail_commits
@@ -431,7 +455,6 @@ impl<'a> IngestionSession<'a> {
                     .set(i64::try_from(tables.tail_commits(table)?).unwrap_or(i64::MAX));
             }
         }
-        let controller = controller.with_delta_tables(tables);
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =
             (metrics, controller.authority().checkpoint.event.as_ref())
