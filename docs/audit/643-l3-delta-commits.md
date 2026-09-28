@@ -1,6 +1,6 @@
 # Delta commit layer (#643, lane L3)
 
-Refs #643; part of #463. PR: [#PRNUM](https://github.com/pinax-network/firehose-parquet/pull/PRNUM). Design:
+Refs #643; part of #463. PR: [#671](https://github.com/pinax-network/firehose-parquet/pull/671). Design:
 [`docs/design/delta-lake.md`](../design/delta-lake.md) §1.3–1.6, §2, §3, §4, §8
 and the L3 row of §11. Index: the #643 rows of the [audit index](README.md).
 
