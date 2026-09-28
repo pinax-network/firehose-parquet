@@ -38,6 +38,7 @@ use deltalake_core::kernel::transaction::{
     CommitBuilder, CommitConflictError, CommitProperties, TransactionError,
 };
 use deltalake_core::kernel::{Action, Add, StructField, StructType, Transaction};
+use deltalake_core::logstore::LogStoreRef;
 use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::{DeltaTable, DeltaTableError};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -911,7 +912,7 @@ async fn open_or_create(
     created: CreatedHook<'_>,
 ) -> Result<OpenTable> {
     let log_store = store.log_store(name)?;
-    let opened = if store.lacks_local_log(name)? {
+    let opened = if lacks_log(store, &log_store, name, create_missing).await? {
         Err(DeltaTableError::NotATable(format!(
             "{name} has no _delta_log"
         )))
@@ -957,6 +958,36 @@ async fn open_or_create(
         checkpoint,
         checkpoint_read: Instant::now(),
     })
+}
+
+/// Whether table `name` has no Delta log yet, so that it is created without
+/// opening it first.
+///
+/// A local table without a `_delta_log/` directory has none (delta-rs would
+/// report an invalid location rather than a missing table). While tables may
+/// be created (`create_missing`), a log holding no Delta log file (a commit,
+/// a checkpoint or a checksum) also counts as none, as it does for
+/// `CreateBuilder`: opening such a table makes delta-rs's kernel emit its own
+/// ERROR event (`Generic delta kernel error: No files in log segment`, from
+/// its `snap.build` span) before fireparq sees the expected absence, once for
+/// every table of a new dataset (#680). That costs one LIST of the log.
+/// Otherwise the table is opened directly, and a missing log fails as before.
+async fn lacks_log(
+    store: &DeltaStore,
+    log_store: &LogStoreRef,
+    name: &str,
+    create_missing: bool,
+) -> Result<bool> {
+    if store.lacks_local_log(name)? {
+        return Ok(true);
+    }
+    if !create_missing {
+        return Ok(false);
+    }
+    Ok(!log_store
+        .is_delta_table_location()
+        .await
+        .with_context(|| format!("listing the Delta log of table `{name}`"))?)
 }
 
 /// The table must be exactly what [`create_table`] makes for this stream

@@ -704,3 +704,195 @@ async fn a_crash_after_every_delta_commit_restarts_without_a_duplicate() {
     build(&storage, &cwd, 102).await;
     check_logs(&root, 2);
 }
+
+/// The tracing lines of `text` logged at ERROR (ANSI colors removed).
+fn error_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            let mut plain = String::with_capacity(line.len());
+            let mut chars = line.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    // Skip a CSI sequence: ESC '[' ... final letter.
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    plain.push(c);
+                }
+            }
+            plain
+        })
+        .filter(|line| line.split_whitespace().nth(1) == Some("ERROR"))
+        .collect()
+}
+
+/// #680: a clean first start creates every table without an ERROR line. On
+/// S3, delta-rs's kernel logged `Generic delta kernel error: No files in log
+/// segment` at ERROR for each table fireparq opened before it existed;
+/// fireparq now lists the log first while tables may be created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clean_first_start_logs_no_error_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
+    for storage in [Storage::Local(cwd.join("dataset")), Storage::S3(&server)] {
+        let output = run(&storage, &cwd, 102, None).await;
+        let text = text(&output);
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains("INFO"), "logs at the default level: {text}");
+        assert_eq!(error_lines(&text), Vec::<String>::new(), "{text}");
+        assert!(!text.contains("No files in log segment"), "{text}");
+        let root = storage.local_copy(&cwd);
+        assert_eq!(check_logs(&root, 2)["blocks"], 2);
+    }
+}
+
+const READ_RETRY: &str = "retrying an idempotent Delta log read after a transient error";
+
+fn log_key(table: &str, object: &str) -> String {
+    format!("{CHAIN}/{table}/_delta_log/{object}")
+}
+
+fn commit_key(table: &str, version: u64) -> String {
+    log_key(table, &format!("{version:020}.json"))
+}
+
+/// #680: an idempotent Delta log read that meets a dropped connection, a 5xx
+/// or a 429 is sent again (logged at WARN), and `build` goes on: on a first
+/// start (the reads that create and load each table) and on a restart (the
+/// reads that load each snapshot).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_log_reads_retry_transient_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
+    let storage = Storage::S3(&server);
+    let checkpoint = log_key("blocks", "_last_checkpoint");
+
+    // First start: the first GET of `blocks`' checkpoint hint loses its
+    // connection, and the first listing of `transactions`' log answers 503.
+    server.inject("GET", &checkpoint, s3::Fault::Reset, 1);
+    server.inject_list(&log_key("transactions", ""), s3::Fault::Status(503), 1);
+    let output = run(&storage, &cwd, 102, None).await;
+    let first = text(&output);
+    assert!(output.status.success(), "{first}");
+    assert_eq!(first.matches(READ_RETRY).count(), 2, "{first}");
+    assert!(first.contains("_last_checkpoint"), "{first}");
+    assert_eq!(error_lines(&first), Vec::<String>::new(), "{first}");
+
+    // Restart: loading each snapshot lists and reads the log again. The
+    // first listing of `blocks`' log loses its connection, the first read of
+    // a `logs` commit answers 500 and the next one 502, and the checkpoint
+    // hint of `blocks` answers 429.
+    server.inject_list(&log_key("blocks", ""), s3::Fault::Reset, 1);
+    server.inject("GET", &commit_key("logs", 1), s3::Fault::Status(500), 1);
+    server.inject("GET", &commit_key("logs", 1), s3::Fault::Status(502), 1);
+    server.inject("GET", &checkpoint, s3::Fault::Status(429), 1);
+    let output = run(&storage, &cwd, 104, None).await;
+    let restart = text(&output);
+    assert!(output.status.success(), "{restart}");
+    assert_eq!(restart.matches(READ_RETRY).count(), 4, "{restart}");
+    assert_eq!(error_lines(&restart), Vec::<String>::new(), "{restart}");
+    for line in first.lines().chain(restart.lines()) {
+        if line.contains(READ_RETRY) {
+            eprintln!("{line}");
+        }
+    }
+
+    // Every injected fault was met, and each faulted read was answered by a
+    // later attempt.
+    let log = server.log();
+    let faulted: Vec<_> = log.iter().filter(|entry| entry.fault.is_some()).collect();
+    assert_eq!(faulted.len(), 6, "{faulted:?}");
+    for entry in &faulted {
+        assert_eq!(entry.method, "GET");
+        let answered = log.iter().any(|later| {
+            later.seq > entry.seq
+                && later.fault.is_none()
+                && later.method == "GET"
+                && later.key == entry.key
+                && later.prefix == entry.prefix
+                && matches!(later.status, 200 | 206 | 404)
+        });
+        assert!(answered, "{entry:?}");
+    }
+    let root = storage.local_copy(&cwd);
+    assert_eq!(check_logs(&root, 4)["blocks"], 4);
+    // No log write was sent twice.
+    let log_puts: Vec<&str> = log
+        .iter()
+        .filter(|entry| entry.method == "PUT" && entry.key.contains("/_delta_log/"))
+        .map(|entry| entry.key.as_str())
+        .collect();
+    let mut unique = log_puts.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), log_puts.len(), "{log_puts:?}");
+}
+
+/// #680: a Delta log commit stays a single conditional PUT. A commit that
+/// meets a 503, or lands and loses its answer, is never sent again: the run
+/// fails with an unknown outcome, the S3 owner is released (#675), and the
+/// next start reads the table's `txn` to commit only what did not land, so
+/// each table holds each transaction once (design §3.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_log_commits_are_sent_once_and_resolve_from_the_txn() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let server = s3_server(&cwd).await;
+    let storage = Storage::S3(&server);
+    let puts = |from: usize, key: &str| -> Vec<(u16, Option<s3::Fault>)> {
+        server.log()[from..]
+            .iter()
+            .filter(|entry| entry.method == "PUT" && entry.key == key)
+            .map(|entry| (entry.status, entry.fault))
+            .collect()
+    };
+
+    for (fault, version, stop, landed) in [
+        // Answered 503 without being applied: nothing landed.
+        (s3::Fault::Status(503), 1, 102, false),
+        // Applied, then the connection dropped: it landed, unknown to fireparq.
+        (s3::Fault::ApplyThenReset, 3, 104, true),
+    ] {
+        let commit = commit_key("blocks", version);
+        let next = commit_key("blocks", version + 1);
+        server.inject("PUT", &commit, fault, 1);
+        let from = server.log().len();
+        let output = run(&storage, &cwd, stop, None).await;
+        let failed = text(&output);
+        assert!(!output.status.success(), "{failed}");
+        assert!(
+            failed.contains("a Delta commit's outcome is unknown"),
+            "{fault:?}: {failed}"
+        );
+        assert!(!failed.contains(READ_RETRY), "{failed}");
+        // One PUT, never sent again, and no commit at a later version.
+        let status = if landed { 200 } else { 503 };
+        assert_eq!(
+            puts(from, &commit),
+            vec![(status, Some(fault))],
+            "{fault:?}"
+        );
+        assert!(puts(from, &next).is_empty(), "{fault:?}");
+        assert_eq!(server.objects(&commit).len(), usize::from(landed));
+
+        // The restart needs no `recovery release`, and commits to `blocks`
+        // only when its log lacks the transaction.
+        let from = server.log().len();
+        let output = run(&storage, &cwd, stop, None).await;
+        let restart = text(&output);
+        assert!(output.status.success(), "{restart}");
+        let resent = puts(from, &commit);
+        if landed {
+            assert!(resent.is_empty(), "{resent:?}");
+        } else {
+            assert_eq!(resent, vec![(200, None)]);
+        }
+        let root = storage.local_copy(&cwd);
+        check_logs(&root, stop - 100);
+    }
+}

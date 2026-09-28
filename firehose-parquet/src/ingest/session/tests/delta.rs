@@ -173,7 +173,7 @@ async fn an_unanswered_delta_commit_releases_ownership_and_the_next_start_reads_
         aws_endpoint_url: Some(server.endpoint.clone()),
     };
     let owner_with_log = || async {
-        let client = crate::delta::store::s3_builder(&aws, loopback_s3::BUCKET)
+        let client = crate::delta::store::s3_log_builder(&aws, loopback_s3::BUCKET)
             .unwrap()
             .with_allow_http(true)
             .build()

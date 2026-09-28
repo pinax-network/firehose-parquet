@@ -11,6 +11,9 @@
 //! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age.
 //! `If-Match` follows RFC 9110 by default; [`Server::set_if_match`] switches
 //! it to Ceph RGW 19.2's literal comparison or refuses every value (#678).
+//! [`Server::inject`] and [`Server::inject_list`] make chosen requests fail
+//! once or more: a 5xx, a dropped connection, or a write applied whose
+//! answer is lost (#680).
 //! Every request waits half its injected
 //! latency before it is applied and half after, like a symmetric round trip;
 //! with `slow_every = N`, every Nth request (by arrival) waits `slow` instead.
@@ -24,7 +27,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    convert::Infallible,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -59,6 +61,38 @@ pub struct Entry {
     pub if_match: Option<String>,
     /// For control-slot PUTs: `writing:<receipts>`, `committed`, `tombstone`.
     pub note: Option<String>,
+    /// A ListObjectsV2 request's `prefix`.
+    pub prefix: Option<String>,
+    /// The injected [`Fault`] this request met, if any.
+    pub fault: Option<Fault>,
+}
+
+/// A failure injected into a request instead of its normal answer (#680).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
+pub enum Fault {
+    /// Answer this status without applying the request.
+    Status(u16),
+    /// Drop the connection without applying or answering the request.
+    Reset,
+    /// Apply the request, then drop the connection without answering: a
+    /// write whose outcome the client cannot know.
+    ApplyThenReset,
+}
+
+/// Which requests an injected fault matches.
+enum Target {
+    /// A request for exactly this key.
+    Key(String),
+    /// A ListObjectsV2 request whose prefix starts with this.
+    List(String),
+}
+
+struct Injection {
+    method: &'static str,
+    target: Target,
+    fault: Fault,
+    remaining: u32,
 }
 
 struct Stored {
@@ -101,6 +135,7 @@ struct State {
     arrivals: AtomicU64,
     objects: Mutex<(BTreeMap<String, Stored>, u64)>,
     log: Mutex<Vec<Entry>>,
+    injections: Mutex<Vec<Injection>>,
 }
 
 pub struct Server {
@@ -220,6 +255,7 @@ impl Server {
             arrivals: AtomicU64::new(0),
             objects: Mutex::new((BTreeMap::new(), 0)),
             log: Mutex::new(Vec::new()),
+            injections: Mutex::new(Vec::new()),
         });
         let served = state.clone();
         let task = tokio::spawn(async move {
@@ -235,7 +271,16 @@ impl Server {
                     };
                     let service = hyper::service::service_fn(move |request| {
                         let state = state.clone();
-                        async move { Ok::<_, Infallible>(handle(state, request).await) }
+                        async move {
+                            // A service error makes hyper close the
+                            // connection without an answer.
+                            handle(state, request).await.ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "injected connection reset",
+                                )
+                            })
+                        }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .keep_alive(true)
@@ -254,6 +299,30 @@ impl Server {
 
     pub fn log(&self) -> Vec<Entry> {
         self.state.log.lock().unwrap().clone()
+    }
+
+    /// Makes the next `times` `method` requests for exactly `key` meet
+    /// `fault` (`blocks/tests/delta_tables.rs`, #680).
+    #[allow(dead_code)]
+    pub fn inject(&self, method: &'static str, key: &str, fault: Fault, times: u32) {
+        self.state.injections.lock().unwrap().push(Injection {
+            method,
+            target: Target::Key(key.to_string()),
+            fault,
+            remaining: times,
+        });
+    }
+
+    /// Makes the next `times` ListObjectsV2 requests whose prefix starts with
+    /// `prefix` meet `fault`.
+    #[allow(dead_code)]
+    pub fn inject_list(&self, prefix: &str, fault: Fault, times: u32) {
+        self.state.injections.lock().unwrap().push(Injection {
+            method: "GET",
+            target: Target::List(prefix.to_string()),
+            fault,
+            remaining: times,
+        });
     }
 
     /// How later requests compare `If-Match` (`blocks/tests/delta_tables.rs`
@@ -422,7 +491,25 @@ fn control_note(key: &str, body: &[u8]) -> Option<String> {
     }
 }
 
-async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Full<Bytes>> {
+/// The injected fault that `method` on `key` meets, if any; `listed` is the
+/// prefix of a ListObjectsV2 request. Each match uses one of its injection's
+/// times.
+fn injected(state: &State, method: &str, key: &str, listed: Option<&str>) -> Option<Fault> {
+    let mut injections = state.injections.lock().unwrap();
+    let injection = injections.iter_mut().find(|injection| {
+        injection.remaining > 0
+            && injection.method == method
+            && match &injection.target {
+                Target::Key(target) => listed.is_none() && key == target,
+                Target::List(prefix) => listed.is_some_and(|listed| listed.starts_with(prefix)),
+            }
+    })?;
+    injection.remaining -= 1;
+    Some(injection.fault)
+}
+
+/// Serves one request; `None` drops the connection without an answer.
+async fn handle(state: Arc<State>, request: Request<Incoming>) -> Option<Response<Full<Bytes>>> {
     let start = now();
     let arrived = tokio::time::Instant::now();
     let seq = state.arrivals.fetch_add(1, Ordering::SeqCst) + 1;
@@ -467,8 +554,19 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Full<
     let note = (method == "PUT")
         .then(|| control_note(key, &body))
         .flatten();
+    let prefix = (key.is_empty() && query.get("list-type").map(String::as_str) == Some("2"))
+        .then(|| query.get("prefix").cloned().unwrap_or_default());
+    let fault = injected(&state, &method, key, prefix.as_deref());
 
-    let (status, extra, payload) = if bucket != state.bucket {
+    let (status, extra, payload) = if let Some(Fault::Status(status)) = fault {
+        error(
+            StatusCode::from_u16(status).expect("an injected status is valid"),
+            "InjectedFault",
+        )
+    } else if fault == Some(Fault::Reset) {
+        // Logged as 599: no status was sent.
+        (StatusCode::from_u16(599).unwrap(), Vec::new(), Bytes::new())
+    } else if bucket != state.bucket {
         error(StatusCode::NOT_FOUND, "NoSuchBucket")
     } else if key.is_empty() {
         if method == "GET" && query.get("list-type").map(String::as_str) == Some("2") {
@@ -515,8 +613,13 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Full<
         pinned,
         if_match: header("if-match"),
         note,
+        prefix,
+        fault,
     });
-    response
+    match fault {
+        Some(Fault::Reset | Fault::ApplyThenReset) => None,
+        _ => Some(response),
+    }
 }
 
 fn list(
