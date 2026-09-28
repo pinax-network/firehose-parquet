@@ -50,7 +50,7 @@ the `decimal(20,0)` columns `withdrawals.amount_gwei` and
 now compare a number with a string and fail), and each `blocks` row gained its
 header `nonce` (`"0"`: both headers leave the proto3 field unset, as every
 proof-of-stake block does). The 26,000,004 oracle,
-`docs/audit/499-evm-golden-oracle.py`, emits the same strings and still
+[`docs/audit/499-evm-golden-oracle.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/499-evm-golden-oracle.py), emits the same strings and still
 reproduces its `expected.json` byte for byte.
 
 ## Fixture set

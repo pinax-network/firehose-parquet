@@ -40,7 +40,7 @@ Tests:
   offset into shared struct values and a null element, and `LargeList` parity)
   and `List<Struct<UInt64, List<Utf8>>>`. They were computed with an
   independent Python reference encoder,
-  [`validation-verify-struct-vectors.py`](validation-verify-struct-vectors.py),
+  [`validation-verify-struct-vectors.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/validation-verify-struct-vectors.py),
   written from the spec without Arrow or fireparq code.
 - An unsupported struct field is named in the error.
 - `verify_hashes_every_table_of_every_chain` (`blocks/src/schema_contract_tests.rs`)
@@ -338,7 +338,7 @@ Firehose endpoint or bucket was contacted. The branch release binary was
 compared with the main binary at `9372f99`.
 
 - **Cosmos.** The retained #510 fixture (`cosmos-33121486`) was prepared with
-  `510-qualify.py` (replay SHA-256 `0cc9f598…` as recorded) and replayed with
+  [`510-qualify.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/510-qualify.py) (replay SHA-256 `0cc9f598…` as recorded) and replayed with
   `replay_cosmos`. The main binary fails on `transactions` with `column
   fee_amount: Arrow type Struct(...) has no merkle_v2 encoding`. The branch
   records `blocks`, `events` (1,138 rows), `messages` and `transactions`, and a

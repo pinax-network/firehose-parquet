@@ -54,7 +54,7 @@ fn fixture_plan(rows: usize) -> PlannedPart {
     part
 }
 #[test]
-#[ignore = "local process qualification; run docs/audit/520-s3-spool-benchmark.py"]
+#[ignore = "local process qualification; driven by https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/520-s3-spool-benchmark.py"]
 fn native_spool_process_qualification() {
     let mode = std::env::var("FIREPARQ_520_MODE").unwrap();
     let rows: usize = std::env::var("FIREPARQ_520_ROWS").unwrap().parse().unwrap();

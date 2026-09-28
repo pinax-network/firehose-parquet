@@ -22,7 +22,8 @@ jobs:
           # The fireparq binary.
           - image: firehose-parquet
             dockerfile: Dockerfile
-          # The Delta maintenance job (scripts/delta_maintenance.py, #643).
+          # The Delta maintenance job: the Rust `fireparq-maintenance` binary
+          # (maintenance/, #643).
           - image: firehose-parquet-maintenance
             dockerfile: deploy/maintenance/Dockerfile
     permissions:

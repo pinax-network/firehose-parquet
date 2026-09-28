@@ -35,6 +35,14 @@ solana-vote-interface = { version = "=7.1.0", default-features = false, features
 futures = "0.3"
 parquet = { version = "60", features = ["arrow"] }
 tempfile = "3"
+# The Delta tests read the tables through delta-rs snapshots and VACUUM or
+# checkpoint them, with exactly `firehose-parquet`'s delta-rs and object_store
+# 0.13 features: no DataFusion, even in tests (`cargo tree -p blocks` lists
+# none). OPTIMIZE and the maintenance job run as the `fireparq-maintenance`
+# binary (`tests/common/mod.rs`).
+deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls"] }
+object_store_delta = { package = "object_store", version = "0.13.2", features = ["aws"] }
+chrono = { version = "0.4", default-features = false }
 tonic.workspace = true
 tonic-prost = "0.14"
 zstd = "0.14"

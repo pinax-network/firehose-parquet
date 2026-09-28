@@ -51,10 +51,11 @@ the upgrade guide.
   Delta table whose `txn` lacks it. `_fireparq/cursor.parquet` is an optional
   mirror. See [Cursor & Resume](#cursor--resume).
 - **Maintenance beside the writer.** fireparq's dataset ownership guards only
-  its writer and its state (`.fireparq-ingest/`, `_fireparq/`). An
-  off-the-shelf `deltalake` job compacts, vacuums and checkpoints the tables
-  beside it: [`scripts/delta_maintenance.py`](scripts/delta_maintenance.py) and
-  the example CronJobs in [`deploy/examples/`](deploy/examples/). See
+  its writer and its state (`.fireparq-ingest/`, `_fireparq/`). A separate job
+  of off-the-shelf delta-rs operations compacts, vacuums and checkpoints the
+  tables beside it: the `fireparq-maintenance` binary (up to v1.0.1, the
+  Python `scripts/delta_maintenance.py`) and the example CronJobs in
+  [`deploy/examples/`](deploy/examples/). See
   [Delta maintenance](#delta-maintenance).
 - **One consistent schema across chains, in Delta types.** Signed integers
   with checked casts, `decimal(20,0)` for currency amounts, `string` enums,
@@ -105,7 +106,7 @@ the upgrade guide.
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; an interrupted transaction is rolled forward exactly once into each Delta table, gated by its `txn`; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](#reading-the-tables), [engine compatibility](#engine-compatibility))
-- **Delta maintenance** — an off-the-shelf `deltalake` job compacts closed days, vacuums and checkpoints beside the writer, with a reference script and Kubernetes CronJob ([Delta maintenance](#delta-maintenance))
+- **Delta maintenance** — `fireparq-maintenance`, a separate binary of off-the-shelf delta-rs operations, compacts closed days, vacuums and checkpoints beside the writer, with an image and example Kubernetes CronJobs ([Delta maintenance](#delta-maintenance))
 - **Delta Lake types** — every part is a Delta data file: checked signed integers, `decimal(20,0)` for currency amounts and other unchecked 64-bit values, `string` enums and microsecond timestamps, mapped once per flush before anything is written ([type mapping](docs/schemas/README.md))
 - **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
@@ -644,7 +645,7 @@ requests are quiescent; stopping the process alone is insufficient. See the
 The owner guards one fireparq writer (`build`, or `recovery recover`) and the
 state only it changes: `.fireparq-ingest/` (authority and the pending
 journal), `_fireparq/cursor.parquet` and its own uncommitted parts. It does not
-make the Delta tables exclusive. The `deltalake` maintenance job (OPTIMIZE,
+make the Delta tables exclusive. The maintenance job (`fireparq-maintenance`: OPTIMIZE,
 VACUUM, checkpoints, log cleanup) commits to them through their logs beside a
 running `build` and never takes the owner (#636):
 
@@ -1975,6 +1976,11 @@ Use DuckDB 1.5 or later for S3: DuckDB 1.1's `delta` extension fails
 anonymous reads once a table has a checkpoint, which the maintenance job
 writes every hour.
 
+The Python examples here are for Polars users; no repository code needs Python,
+and CI does not run them. CI reads the same tables with DuckDB and through
+delta-rs, which Polars' `scan_delta` uses
+([engine compatibility](#engine-compatibility)).
+
 A table's files, rows (each file's `numRecords`), bytes and days come from
 its log alone, without reading any data file. This is what `fireparq scan`
 reported before v1.0.0:
@@ -2057,12 +2063,16 @@ WHERE date = DATE '2026-09-25';
 
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
 non-final) and Solana output with a mock Firehose, writes a checkpoint of
-every table, and reads every table with both engines through its Delta log
-(`blocks/tests/engine_compat.rs`), at pinned versions: DuckDB 1.5.5 with its
-`delta` extension `45c4087` (both checksum-verified), and Polars 1.44.2 with
-`deltalake` 1.6.6 (hash-pinned). `blocks/tests/delta_maintenance.rs` reads the
-tables again after the maintenance job compacted and vacuumed them beside a
-running `build`.
+every table, and reads every table through its Delta log
+(`blocks/tests/engine_compat.rs`) with the DuckDB 1.5.5 CLI and its `delta`
+extension `45c4087` (both checksum-verified), and with delta-rs itself
+(`deltalake-core` 1.0.0: each snapshot's schema, active files and partition
+pruning, then the rows of those files). Polars' `scan_delta` reads through
+delta-rs the same way, so the delta-rs reads cover it; CI installs no Python,
+and the Polars column below was last checked
+in CI with Polars 1.44.2 and `deltalake` 1.6.6 (v1.0.1).
+`blocks/tests/delta_maintenance.rs` reads the tables again after the
+maintenance job compacted and vacuumed them beside a running `build`.
 
 | Delta type written | DuckDB | Polars | Notes |
 |---|---|---|---|
@@ -2085,21 +2095,20 @@ running `build`.
   version 1 with no table features, but CI does not test these engines.
 
 To check anonymous reads of a deployment's public-read bucket (for example
-Ceph RGW) with both engines, run the opt-in test against it. It sends only
-unsigned requests, reads the newest closed day of `blocks` and one other
-table, and compares the engines' rows, block ranges and pruning:
+Ceph RGW) with DuckDB and delta-rs, run the opt-in test against it. It sends
+only unsigned requests, reads the newest closed day of `blocks` and one other
+table, and compares the two readers' rows, block ranges and pruning:
 
 ```bash
 FIREPARQ_RGW_ENDPOINT=https://storage.example.com FIREPARQ_RGW_BUCKET=ethereum-mainnet \
-FIREPARQ_DUCKDB=/path/to/duckdb FIREPARQ_POLARS_PYTHON=/path/to/venv/bin/python \
+FIREPARQ_DUCKDB=/path/to/duckdb \
 cargo test -p blocks --test engine_compat anonymous -- --nocapture
 ```
 
 `FIREPARQ_RGW_PREFIX` names a dataset below the bucket root,
 `FIREPARQ_RGW_REGION` the region (default `us-east-1`) and
-`FIREPARQ_RGW_TABLE` the other table (default `transactions`). The Python needs
-`blocks/tests/engines/requirements.txt`. Without `FIREPARQ_RGW_ENDPOINT` the
-test is skipped, as in CI.
+`FIREPARQ_RGW_TABLE` the other table (default `transactions`). Without
+`FIREPARQ_RGW_ENDPOINT` the test is skipped, as in CI.
 
 ### Single-network buckets
 
@@ -2129,13 +2138,15 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
 
 fireparq only appends: each flush adds one file per table and day, and one
 Delta commit per table. Compacting those files, deleting replaced ones and
-checkpointing the logs is platform-side policy, not a fireparq command (#643):
-[`scripts/delta_maintenance.py`](scripts/delta_maintenance.py) runs the
-off-the-shelf `deltalake` Python package (pinned to 1.6.6 in
-[`scripts/delta_maintenance.requirements.txt`](scripts/delta_maintenance.requirements.txt))
-on a schedule, beside a running `build`. It needs no fireparq ownership:
-fireparq's commits are blind appends that rebase over the job's commits, and
-the job never touches `.fireparq-ingest/` or `_fireparq/`.
+checkpointing the logs is platform-side policy, not a `fireparq` command (#643):
+the separate binary `fireparq-maintenance` (workspace crate
+[`maintenance/`](maintenance/)) runs on a schedule, beside a running `build`.
+It calls delta-rs's own operations (`deltalake-core` 1.0.0: OPTIMIZE, which
+needs DataFusion 55, VACUUM, `create_checkpoint` and `cleanup_metadata`) and has
+no compaction logic of its own. DataFusion is linked into this binary only,
+never into `fireparq`. The job needs no fireparq ownership: fireparq's commits
+are blind appends that rebase over the job's commits, and the job never touches
+`.fireparq-ingest/` or `_fireparq/`.
 
 For each table it runs, in order:
 
@@ -2154,20 +2165,47 @@ For each table it runs, in order:
 4. **Log cleanup** of commits older than `delta.logRetentionDuration`
    (7 days) behind a checkpoint.
 
+OPTIMIZE and VACUUM commit with their own post-commit checkpoint and log
+cleanup turned off, so the only checkpoint is step 3. A table that does not
+exist yet (the writer has not created it) is skipped, not failed.
+
 Every step is idempotent: a failed or conflicting run changes nothing that
 the next run cannot finish, and the writer never notices. One JSON object per
-line goes to stdout (`start`, one `table` line per table, `done`); the exit
-status is 0, 1 when a table failed, or 2 for a configuration error.
-Credentials are read from the environment and never printed.
+line goes to stdout:
+
+- `start`: `root`, `tables`, `full_vacuum`, `retention_hours`,
+  `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
+  `version` (the binary's);
+- one line per table: `table` with `version_before`, `dates_to_compact`,
+  `compacted` (`date`, `files_removed`, `files_added`), `vacuum` (`mode`,
+  `retention_hours`, `files_deleted`), `checkpoint_version`, `version_after`,
+  `conflicts`, `errors`, `open_date` and `seconds`; or `skipped` with `table`,
+  `reason` and `open_date` for a table that does not exist yet;
+- `blocks_error` when `blocks` cannot be read (no date is closed then);
+- `done`: `tables`, `failed`, `skipped`, `conflicts` and `seconds`.
+
+The exit status is 0 when every table was maintained or skipped, 1 when a
+table failed, or 2 for a configuration error (a single `config_error` line,
+before any request). A conflict is a lost commit race only (delta-rs's commit
+conflict, too many commit attempts, or a version that already exists), left to
+the next run; any other commit error fails the table. Credentials are read from
+the environment and redacted from every error.
+
+On S3, log commits are conditional creates (`If-None-Match: *`), as the
+writer's are, with no DynamoDB lock; the job sends no `If-Match` request, so
+Ceph RGW 19.2's `If-Match` quirk ([#678](docs/audit/rgw-if-match-etag.md)) does
+not apply to it. Requests use object_store's default retries.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LAKE_ROOT` or `LAKE_BUCKET` | (required) | The dataset root, `s3://bucket[/prefix]` or a local path; `LAKE_BUCKET=b` is `s3://b`, a dataset at the bucket root |
-| `LAKE_TABLES` | (required) | Comma-separated tables, for example every table of the network's [schema](docs/schemas/README.md); `blocks` must exist |
+| `LAKE_TABLES` | (required) | Comma-separated tables, for example every table of the network's [schema](docs/schemas/README.md); dates are closed by `blocks`, and a table that does not exist yet is skipped |
 | `S3_ENDPOINT` | AWS | S3 endpoint URL, for example the in-cluster RGW |
 | `AWS_REGION` | `us-east-1` | |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | (required on S3) | The maintenance user; `AWS_SESSION_TOKEN` is optional |
 | `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | `false` | Plain HTTP; virtual-hosted instead of path-style requests |
+| `SSL_CERT_FILE` | system roots | A PEM bundle of the CAs to trust instead, for example with the RGW's private CA |
+| `AWS_S3_ALLOW_UNSAFE_RENAME` | | Refused: unsafe beside a running writer |
 | `FULL_VACUUM` | `0` | `1` for the weekly full VACUUM |
 | `VACUUM_RETENTION_HOURS` | the table's 7 days | Lower only shortens how long readers of older snapshots find replaced files; a full VACUUM refuses less than 168 |
 | `OPTIMIZE_DATES` | `closed` | `all` also compacts the newest day: safe beside the writer, but repeated every run; use it once the writer has stopped for good |
@@ -2177,21 +2215,27 @@ Credentials are read from the environment and never printed.
 | `DRY_RUN` | `0` | `1` reports what would be compacted and deleted, and changes nothing |
 
 ```bash
-pip install --only-binary=:all: --require-hashes -r scripts/delta_maintenance.requirements.txt
+# From a checkout (the release tarballs also ship the binary)
+cargo build --release -p fireparq-maintenance
 DRY_RUN=1 LAKE_ROOT=output/mainnet LAKE_TABLES=blocks,transactions,logs \
-  python scripts/delta_maintenance.py
+  ./target/release/fireparq-maintenance
 ```
 
 Each release also publishes the job as an image,
 `ghcr.io/pinax-network/firehose-parquet-maintenance:<version>`
-([`deploy/maintenance/Dockerfile`](deploy/maintenance/Dockerfile)). It holds the
-script and its hash-pinned `deltalake`, so a pod needs no package index:
+([`deploy/maintenance/Dockerfile`](deploy/maintenance/Dockerfile)): the
+`fireparq-maintenance` binary as its entrypoint on `debian:bookworm-slim` with
+CA certificates, running as user `65534`:
 
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
 ```
+
+Images up to v1.0.1 hold the former Python job
+(`scripts/delta_maintenance.py` with `deltalake` 1.6.6), with the same
+settings, order and exit statuses.
 
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](deploy/examples/delta-maintenance-cronjob.yaml)
@@ -2211,9 +2255,15 @@ weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
   [Prometheus Metrics](#prometheus-metrics)) growing past a few hundred: the
   hourly checkpoints have stopped, and every reader and restart replays the
   whole tail.
-- `blocks/tests/delta_maintenance.rs` runs the job over and over beside a real
-  `build`, on local disk and on a loopback S3 endpoint, and checks the exact
-  rows, the `txn` versions and the file counts afterwards.
+- `blocks/tests/delta_maintenance.rs` runs the binary over and over beside a
+  real `build`, on local disk and on a loopback S3 endpoint, and checks the
+  exact rows (DuckDB and delta-rs), the `txn` versions and the file counts
+  afterwards; `maintenance/tests/cli.rs` checks its configuration errors,
+  exit statuses, redaction and skipped tables. The `blocks` tests find the
+  binary next to `fireparq` (`cargo test --workspace` or
+  `cargo build -p fireparq-maintenance` builds it) or at
+  `FIREPARQ_MAINTENANCE`, and skip without it unless
+  `FIREPARQ_REQUIRE_MAINTENANCE` is set, as in CI.
 
 ## Canonical Identity Columns
 
@@ -2588,14 +2638,16 @@ maps every module and where to edit for common tasks.
 
 ```
 firehose-parquet/
-├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks)
-├── Dockerfile                              # multi-stage Docker build
+├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks, maintenance)
+├── Dockerfile                              # multi-stage Docker build of `fireparq`
 ├── .env.example                            # environment variables template (drift-tested against the CLI)
 ├── .github/workflows/                      # ci, advisories, docker-publish, release, network-endpoints
 ├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
 ├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
-├── scripts/                                # generate_networks.rs, check_network_endpoints.sh,
-│                                           #   delta_maintenance.py (the Delta maintenance job)
+├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
+├── maintenance/                            # `fireparq-maintenance`: the Delta maintenance job (delta-rs
+│                                           #   OPTIMIZE with DataFusion, VACUUM, checkpoints, log cleanup)
+├── deploy/maintenance/Dockerfile           # the maintenance job's image
 ├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJob)
 ├── docs/                                   # design, schema reference, release notes, audit records
 ├── firehose-parquet/                       # core library
@@ -2637,12 +2689,26 @@ cargo build --workspace
 # Test
 cargo test --workspace
 
-# Build release
-cargo build --release --workspace
+# Build release: one package per command, so `fireparq` links no DataFusion
+# (a workspace build unifies features across the packages it builds)
+cargo build --release -p blocks
+cargo build --release -p fireparq-maintenance
 
 # Install
 cargo install --path blocks
+cargo install --path maintenance
 ```
+
+All code is Rust; building and testing need no Python. The DuckDB tests use the
+DuckDB CLI when it is installed (`FIREPARQ_DUCKDB`, required in CI by
+`FIREPARQ_REQUIRE_DUCKDB`), and the Delta maintenance tests the
+`fireparq-maintenance` binary (`FIREPARQ_MAINTENANCE`, required in CI by
+`FIREPARQ_REQUIRE_MAINTENANCE`). `cargo test --workspace` builds the binary
+first, but also compiles the writer with DataFusion's features (for example
+serde_json's `preserve_order`); CI therefore runs
+`cargo test -p fireparq-maintenance` and then
+`cargo test --workspace --exclude fireparq-maintenance`, which tests the
+writer with exactly its release features.
 
 ## License
 

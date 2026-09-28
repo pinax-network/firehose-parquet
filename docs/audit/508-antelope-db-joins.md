@@ -78,7 +78,9 @@ Action aliases equal canonical metadata in this sample; tests demonstrate why
 this is not a universal guarantee. The endpoint supplied `parent_num=0` with a
 nonempty parent ID; this change preserves it without an ancestry claim.
 
-Re-run the read-only comparison using a captured block, descriptor and outputs:
+Re-run the read-only comparison using a captured block, descriptor and outputs
+([`508-compare-antelope.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/508-compare-antelope.py),
+removed from the tree after v1.0.1; run it from that tag):
 
 ```sh
 protoc -I proto --include_imports --descriptor_set_out=/tmp/antelope.desc proto/antelope.proto

@@ -106,7 +106,7 @@ modules only gained a local helper for the removed walker name):
   bytes locally and on an in-memory object store; truncate selects identical files
   and sizes locally and in memory under eight filter sets.
 
-End-to-end, local data only, with [the harness](529-equivalence.py): the
+End-to-end, local data only, with [the harness](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/529-equivalence.py): the
 `origin/main` release binary and the branch release binary ran the same 24
 scenarios (33 CLI steps) on fresh copies of the retained mainnet blocks
 24000000-24000029 dataset (13 tables, 1,049,978 rows, minute partitions). This

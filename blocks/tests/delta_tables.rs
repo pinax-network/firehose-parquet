@@ -1,6 +1,6 @@
 //! #643 L3: every `fireparq build` writes Delta tables, and DuckDB
-//! (`delta_scan`) and Polars (`scan_delta`) read them through the log with
-//! exactly the rows the parts hold.
+//! (`delta_scan`) and delta-rs (the active files of a snapshot) read them
+//! through the log with exactly the rows the parts hold.
 //!
 //! A cursor-aware mock Firehose serves four final EVM blocks over two UTC
 //! days. `build` runs twice, `[100, 102)` then a clean restart to `[100,
@@ -16,7 +16,7 @@
 //!   `txn {appId: fireparq:<descriptor>, version: last ordinal}`, `blocks` last;
 //! - after the restart, each table's `txn` equals the authority's ordinal and
 //!   its version counts exactly one commit per transaction;
-//! - after the restart, DuckDB `delta_scan` and Polars `scan_delta` read
+//! - after the restart, DuckDB `delta_scan` and delta-rs read
 //!   exactly the rows the logs add, and a table that never had rows as empty.
 //!   Types, the `date` partition and pruning are `engine_compat.rs`'s (#643
 //!   L8).
@@ -457,10 +457,10 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
     rows
 }
 
-/// DuckDB `delta_scan` and Polars `scan_delta` read exactly the rows the logs
+/// DuckDB `delta_scan` and delta-rs read exactly the rows the logs
 /// add, and an empty table (one that never had rows) as empty.
 /// `engine_compat.rs` checks types, partitions and pruning in detail.
-fn read_with_engines(cwd: &Path, root: &Path, rows: &BTreeMap<String, u64>) {
+async fn read_with_engines(cwd: &Path, root: &Path, rows: &BTreeMap<String, u64>) {
     let mut tables: Vec<String> = rows.keys().cloned().collect();
     tables.push("withdrawals".into());
     let mut expected = rows.clone();
@@ -479,14 +479,11 @@ fn read_with_engines(cwd: &Path, root: &Path, rows: &BTreeMap<String, u64>) {
             tables.len()
         );
     }
-    if let Some(python) = common::python() {
-        assert_eq!(
-            common::polars_counts(&python, root, &tables),
-            expected,
-            "polars"
-        );
-        eprintln!("polars read {} Delta tables with exact rows", tables.len());
-    }
+    assert_eq!(
+        common::delta_counts(root, &tables).await,
+        expected,
+        "delta-rs"
+    );
 }
 
 async fn build_restart_and_read(storage: Storage<'_>, cwd: &Path) {
@@ -499,11 +496,11 @@ async fn build_restart_and_read(storage: Storage<'_>, cwd: &Path) {
     let root = storage.local_copy(cwd);
     let rows = check_logs(&root, 4);
 
-    read_with_engines(cwd, &root, &rows);
+    read_with_engines(cwd, &root, &rows).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_build_writes_delta_tables_that_duckdb_and_polars_read_after_a_restart() {
+async fn local_build_writes_delta_tables_that_duckdb_and_delta_rs_read_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     build_restart_and_read(Storage::Local(cwd.join("dataset")), &cwd).await;

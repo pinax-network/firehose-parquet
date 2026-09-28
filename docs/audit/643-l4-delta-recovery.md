@@ -5,6 +5,11 @@ Refs #643; closes #636; part of #463. PR: [#675](https://github.com/pinax-networ
 and the L4 row of §11. Ownership: [the #636 record](636-delta-ownership.md).
 Index: the #643 rows of the [audit index](README.md).
 
+> After v1.0.2 the repository is Rust-only ([record](rust-only.md)): the
+> maintenance between crash and restart runs through Rust helpers, and the
+> Python engine scripts named below (`blocks/tests/engines/`) are at the
+> [v1.0.1 tag](https://github.com/pinax-network/firehose-parquet/tree/v1.0.1/blocks/tests/engines).
+
 ## Diagnosis
 
 L3 ([record](643-l3-delta-commits.md)) commits every transaction to the Delta

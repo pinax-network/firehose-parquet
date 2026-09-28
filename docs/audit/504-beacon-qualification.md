@@ -62,7 +62,7 @@ directories contained exactly one `blocks` row each.
 
 ## Comparison
 
-[504-compare-beacon.py](504-compare-beacon.py) performs an offline comparison of
+[504-compare-beacon.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/504-compare-beacon.py) performs an offline comparison of
 cursor-stripped source JSON with DuckDB reads of actual Parquet files. Run:
 
 ```sh

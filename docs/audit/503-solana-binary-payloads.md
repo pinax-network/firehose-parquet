@@ -97,7 +97,7 @@ against raw source bytes or indices:
 All 19,714 rows matched, including 252 non-null error payloads and 41 present
 return-data values. Signatures and lookup keys matched their original raw bytes.
 The updated cursor's public block position was `300000001`. No production storage
-was written. The read-only comparison is `503-compare-solana.py`; it takes raw
+was written. The read-only comparison is [`503-compare-solana.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/503-compare-solana.py); it takes raw
 blocks, a protoc descriptor and baseline/updated dataset roots.
 
 ## Migration

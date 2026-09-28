@@ -183,6 +183,11 @@ qualification or #550's separate execution policy.
 
 ## Offline reproduction
 
+The scripts ([`509-tron-rpc.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/509-tron-rpc.py),
+[`509-tron-rpc-tests.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/509-tron-rpc-tests.py),
+[`509-compare-tron-rpc.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/509-compare-tron-rpc.py))
+were removed from the tree after v1.0.1; run them from that tag.
+
 Dependencies used: `protobuf==7.36.2`, `grpcio==1.84.0`, `pyarrow==25.0.1` and
 `googleapis-common-protos==1.75.4` for descriptor annotation imports. None are Rust
 runtime dependencies. Compile the descriptor with `protoc` from the pinned

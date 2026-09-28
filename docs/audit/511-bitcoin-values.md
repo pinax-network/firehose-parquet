@@ -92,7 +92,7 @@ included in this record.
 
 ## Repeating the offline comparison
 
-[511-compare-bitcoin.py](511-compare-bitcoin.py) makes no network requests. It
+[511-compare-bitcoin.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/511-compare-bitcoin.py) makes no network requests. It
 requires a raw block-900000 capture directory containing unchanged `block.pb`
 and a public `metadata.json` with block identity/time and `sha256`, plus the
 corresponding local Parquet chain root and cursor. Build the protobuf descriptor

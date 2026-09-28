@@ -5,6 +5,13 @@ Refs #643; part of #463. PR: [#673](https://github.com/pinax-network/firehose-pa
 §4.1, §9, §10 and the L8 and L9 rows of §11. Index: the #643 rows of the
 [audit index](README.md).
 
+> After v1.0.2 the repository is Rust-only ([record](rust-only.md)): the
+> job below is now the `fireparq-maintenance` binary, with the same settings
+> and order, and CI reads with DuckDB and delta-rs instead of Polars. The
+> Python files this record names are at the v1.0.1 tag:
+> [`scripts/delta_maintenance.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/scripts/delta_maintenance.py)
+> and [`blocks/tests/engines/`](https://github.com/pinax-network/firehose-parquet/tree/v1.0.1/blocks/tests/engines).
+
 ## Diagnosis
 
 Since L3 every `build` writes Delta tables, but:

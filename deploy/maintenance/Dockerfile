@@ -1,19 +1,17 @@
-# The Delta maintenance job (#643): scripts/delta_maintenance.py with its
-# hash-pinned `deltalake`, preinstalled so the CronJob needs no package index
-# at runtime. Published as ghcr.io/pinax-network/firehose-parquet-maintenance
-# next to the fireparq image (.github/workflows/docker-publish.yml).
-FROM python:3.12-slim-bookworm AS builder
-COPY scripts/delta_maintenance.requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --disable-pip-version-check \
-      --only-binary=:all: --require-hashes --target /opt/site \
-      -r /tmp/requirements.txt
+# The Delta maintenance job (#643): the `fireparq-maintenance` binary
+# (maintenance/: delta-rs OPTIMIZE, VACUUM, checkpoints and log cleanup),
+# configured by environment variables (README "Delta maintenance"). Published
+# as ghcr.io/pinax-network/firehose-parquet-maintenance next to the fireparq
+# image (.github/workflows/docker-publish.yml).
+FROM rust:1.98-bookworm AS builder
+WORKDIR /app
+COPY . .
+# Only this crate enables delta-rs's DataFusion; it needs no protoc.
+RUN cargo build --release --locked -p fireparq-maintenance --bin fireparq-maintenance
 
-FROM python:3.12-slim-bookworm
-COPY --from=builder /opt/site /opt/site
-COPY scripts/delta_maintenance.py /opt/delta_maintenance.py
-ENV PYTHONPATH=/opt/site \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    HOME=/tmp
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/fireparq-maintenance /usr/local/bin/
 USER 65534:65534
-ENTRYPOINT ["python", "/opt/delta_maintenance.py"]
+ENTRYPOINT ["fireparq-maintenance"]

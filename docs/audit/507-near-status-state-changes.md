@@ -12,7 +12,7 @@ Checked against `proto/near.proto` and the pinned producer:
 - `Block.state_changes` is the only state-change field. `IndexerShard` carries a
   chunk and receipt execution outcomes, but no state changes.
 - Every published version of `near-firehose-indexer` writes an empty
-  `Block.state_changes`. [507-producer-state-changes.py](507-producer-state-changes.py)
+  `Block.state_changes`. [507-producer-state-changes.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/507-producer-state-changes.py)
   read `src/codec/mod.rs` at all 46 commits that touched it (72e9359, 2021-08-20,
   through ebb0a2e, 2026-07-14), and every one contains `state_changes: vec![]`.
   The NEAR indexer does produce per-shard state changes (the retained NearData
@@ -83,7 +83,7 @@ schema issue; the mapper handles it.
 NearData JSON `794e00c1…`, converted `block.pb` `8bec28c8…`, with 70 receipts,
 one of which is a `SuccessReceiptId`. `replay_near` ran on baseline main
 `97dd244` and on the candidate, across 5 encodings × failed filter × fork
-column. [507-compare-near.py](507-compare-near.py) derives expected values from
+column. [507-compare-near.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/507-compare-near.py) derives expected values from
 the original JSON only, using the #509 comparator's byte encodings. All 20 cases
 passed:
 
@@ -93,7 +93,7 @@ passed:
 - `state_changes` is empty on both sides, and the candidate has the #507 layout.
 
 **Real state changes, hypothetical producer.**
-[507-near-state-changes.py](507-near-state-changes.py) copies that `block.pb`
+[507-near-state-changes.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/507-near-state-changes.py) copies that `block.pb`
 and fills `Block.state_changes` with the document's 221 per-shard state changes,
 in shard order and converted by nearcore's views. The changes are 111
 `account_update`, 73 `data_update` and 37 `access_key_update`, with causes 42
@@ -108,7 +108,7 @@ indices, labels, both hash columns (including the receipt hashes carried in
 strings. Every other table (4,480 rows) equals the producer-compatible replay.
 [Report](507-near-comparison.json).
 
-**README queries.** [507-final-status-query.py](507-final-status-query.py)
+**README queries.** [507-final-status-query.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/507-final-status-query.py)
 builds three synthetic blocks whose receipt chains cross block boundaries,
 replays them, and runs the two README queries exactly as written, with only the
 paths replaced. Results:

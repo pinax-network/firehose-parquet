@@ -9,18 +9,18 @@
 //! days, and `build` writes them with one transaction per block, locally and
 //! to the loopback HTTPS S3 endpoint of `examples/bench_live_flush/s3.rs`.
 //! OPTIMIZE is simulated with a commit that removes a day's files and adds
-//! their rows rewritten as one file (`docs/design/delta-lake.md` §7.3), and,
-//! with the Python in `FIREPARQ_POLARS_PYTHON` (`deltalake`), run for real
-//! together with a checkpoint. `FIREPARQ_REQUIRE_POLARS` (CI) makes a missing
-//! interpreter fail instead of skipping that part.
+//! their rows rewritten as one file (`docs/design/delta-lake.md` §7.3), and
+//! run for real by the maintenance job (the `fireparq-maintenance` binary,
+//! optional locally, required in CI) together with a checkpoint.
 use arrow::compute::concat_batches;
+use deltalake_core::DeltaTable;
 use firehose_parquet::config::Compression;
 use firehose_parquet::writer::{encode_parquet, read_parquet, ParquetFileMetadata};
 use firehose_protos::{eth, firehose};
 use prost::Message;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Output;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::codegen::{http, BoxFuture, Service};
@@ -28,6 +28,8 @@ use tonic::codegen::{http, BoxFuture, Service};
 #[path = "../examples/bench_live_flush/s3.rs"]
 #[allow(dead_code)]
 mod s3;
+
+mod common;
 
 const CHAIN: &str = "delta-readers-chain";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, 102 and 103
@@ -386,69 +388,24 @@ fn walked_block_rows(table: &Path) -> usize {
     rows
 }
 
-/// The Python with `deltalake` (and Polars), or `None` locally when missing.
-fn deltalake_python() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_POLARS_PYTHON").map(PathBuf::from);
-    let available = candidate.as_ref().is_some_and(|python| {
-        std::process::Command::new(python)
-            .args(["-c", "import polars, deltalake"])
-            .env_clear()
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    if available {
-        return candidate;
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_POLARS").is_none(),
-        "FIREPARQ_REQUIRE_POLARS is set but FIREPARQ_POLARS_PYTHON ({candidate:?}) cannot import polars and deltalake"
-    );
-    eprintln!(
-        "skipping the deltalake OPTIMIZE and README summary checks: set FIREPARQ_POLARS_PYTHON to a Python with polars and deltalake"
-    );
-    None
-}
-
-/// Runs a Python program and returns the JSON object on its last line.
-fn python_json(python: &Path, program: &str, args: &[&str]) -> Value {
-    let output = std::process::Command::new(python)
-        .env_clear()
-        .arg("-c")
-        .arg(program)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{program}\n{}", text(&output));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    serde_json::from_str(stdout.trim().lines().last().unwrap())
-        .unwrap_or_else(|error| panic!("{error}: {stdout}"))
-}
-
-/// The maintenance job's OPTIMIZE of one day and a checkpoint (design §9).
-const OPTIMIZE_AND_CHECKPOINT: &str = r#"
-import json, sys
-from deltalake import DeltaTable
-table = DeltaTable(sys.argv[1])
-metrics = table.optimize.compact(partition_filters=[("date", "=", sys.argv[2])])
-table.create_checkpoint()
-print(json.dumps({"version": table.version(), "removed": metrics["numFilesRemoved"]}))
-"#;
-
-/// The README's "Table summary from the Delta log" program, pointed at
-/// `table`, with its summary printed as JSON.
-fn readme_summary(table: &Path) -> String {
-    let readme =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md")).unwrap();
-    let program = readme
-        .split("```python\n")
-        .filter_map(|block| block.split("```").next())
-        .find(|block| block.starts_with("# Table summary from the Delta log"))
-        .expect("README table summary");
-    assert!(program.contains("\"output/mainnet/blocks\""), "{program}");
-    format!(
-        "{}\nimport json\nprint(json.dumps({{\"version\": table.version(), **summary.row(0, named=True)}}, default=str))\n",
-        program.replace("output/mainnet/blocks", table.to_str().unwrap())
-    )
+/// The README's "Table summary from the Delta log" (files, rows, bytes and
+/// days of the active files), from the delta-rs snapshot. The README's own
+/// Polars program reads the same `add` actions through delta-rs.
+fn readme_summary(table: &DeltaTable) -> Value {
+    let snapshot = table.snapshot().unwrap();
+    let files: Vec<_> = snapshot.log_data().iter().collect();
+    let days: Vec<String> = files
+        .iter()
+        .map(|file| file.partition_values_map()["date"].clone().unwrap())
+        .collect();
+    json!({
+        "version": table.version(),
+        "files": files.len(),
+        "rows": files.iter().map(|file| file.num_records().unwrap()).sum::<usize>(),
+        "bytes": files.iter().map(|file| file.size() as u64).sum::<u64>(),
+        "first_day": days.iter().min(),
+        "last_day": days.iter().max(),
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -494,11 +451,34 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
     assert_eq!(optimized.count("Duplicates"), 0);
     assert_eq!(optimized.summary["Partitions"], first.summary["Partitions"]);
 
-    // The real maintenance job: `deltalake` OPTIMIZE of the other day and a
-    // checkpoint, whose Parquet file sits in `_delta_log/`.
-    if let Some(python) = deltalake_python() {
-        let maintained = python_json(&python, OPTIMIZE_AND_CHECKPOINT, &[table_arg, SECOND_DAY]);
-        assert_eq!(maintained, json!({"version": 6, "removed": 2}));
+    // The real maintenance job (the `fireparq-maintenance` binary): OPTIMIZE
+    // of the other day, which alone has two files, and a checkpoint, whose
+    // Parquet file sits in `_delta_log/`.
+    if let Some(job) = common::maintenance_bin() {
+        let run = common::maintenance_job(
+            &job,
+            &[
+                ("LAKE_ROOT", root.to_str().unwrap().to_string()),
+                ("LAKE_TABLES", "blocks".into()),
+                ("OPTIMIZE_DATES", "all".into()),
+            ],
+        )
+        .await;
+        run.assert_clean();
+        let line = run.table("blocks");
+        assert_eq!(
+            (
+                &line["compacted"],
+                &line["checkpoint_version"],
+                &line["version_after"]
+            ),
+            (
+                &json!([{"date": SECOND_DAY, "files_removed": 2, "files_added": 1}]),
+                &json!(6),
+                &json!(6)
+            ),
+            "{run:?}"
+        );
         let checkpoint = table.join("_delta_log/00000000000000000006.checkpoint.parquet");
         assert!(checkpoint.is_file());
         assert_eq!(walked_block_rows(&table), 8);
@@ -516,7 +496,7 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
         assert!(inspected.status.success(), "{}", text(&inspected));
 
         // The README's summary, from the log alone, replaces `scan`.
-        let summary = python_json(&python, &readme_summary(&table), &[]);
+        let summary = readme_summary(&common::open_local(&root, "blocks").await);
         let sizes: u64 = active_files(&table)
             .keys()
             .map(|path| std::fs::metadata(table.join(path)).unwrap().len())

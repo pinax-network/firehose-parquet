@@ -1,5 +1,5 @@
-//! #643 L9: the reference maintenance job, `scripts/delta_maintenance.py`
-//! (`deltalake` 1.6.6), runs over and over beside a real `fireparq build`.
+//! #643 L9: the maintenance job, the `fireparq-maintenance` binary (delta-rs
+//! `deltalake-core` 1.0.0), runs over and over beside a real `fireparq build`.
 //!
 //! A cursor-aware mock Firehose serves final EVM blocks, 10 per UTC day, one
 //! transaction per block. It pauses on three blocks until three more
@@ -13,19 +13,28 @@
 //! the worst case), and a full VACUUM with the enforced 168 h retention.
 //! On local disk and on a loopback HTTPS S3 endpoint the test asserts:
 //!
+//! - before the writer created any table, a round skips every table (#680)
+//!   and succeeds;
 //! - the writer never fails, and no round reports an error or a conflict;
 //! - OPTIMIZE commits land between writer commits, also on the open date;
-//! - DuckDB `delta_scan` and Polars `scan_delta` read exactly the written
-//!   rows (each block once, with its rows), including a pruned closed date;
+//! - delta-rs (the active files of a snapshot) and DuckDB `delta_scan` read
+//!   exactly the written rows (each block once, with its rows), including a
+//!   pruned closed date;
 //! - every table's `txn` version is still the authority's ordinal;
 //! - each closed date is one active file, and one data file in storage (the
-//!   compacted parts are vacuumed), while the full VACUUM deleted nothing.
+//!   compacted parts are vacuumed), while the full VACUUM deleted nothing;
+//! - on S3, no request of delta-rs's client (the job, and the writer's log
+//!   commits) carries `If-Match` (#678: Ceph RGW 19.2 compares it literally).
 //!
 //! `vacuum_runs_before_the_checkpoint_and_never_deletes_untracked_parts`
 //! checks design §4.1: the VACUUM-then-checkpoint order (and that the reverse
-//! leaves orphans), and that the job never deletes a part fireparq published
-//! but has not committed. Engines: see `common/mod.rs`; the job runs with
-//! the Python in `FIREPARQ_POLARS_PYTHON`.
+//! leaves orphans), that the job never deletes a part fireparq published but
+//! has not committed, and that reruns change nothing.
+//!
+//! The job is the binary, run with a cleared environment
+//! (`common::maintenance_job`); without it (locally) these tests are skipped.
+//! `maintenance/tests/cli.rs` tests its settings, exit statuses, redaction
+//! and skipped tables. Engines: see `common/mod.rs`.
 use firehose_protos::{eth, firehose};
 use prost::Message;
 use serde_json::{json, Value};
@@ -33,11 +42,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tonic::codegen::{http, BoxFuture, Service};
 
 mod common;
-use common::{number, DuckDb};
+use common::{number, DuckDb, JobRun};
 
 #[path = "../examples/bench_live_flush/s3.rs"]
 #[allow(dead_code)]
@@ -364,74 +373,28 @@ impl Build {
     }
 }
 
-/// One run of the maintenance job over `tables`, with extra settings.
-struct Round {
-    settings: Vec<(&'static str, &'static str)>,
-    status: i32,
-    lines: Vec<Value>,
-    stderr: String,
-}
-
-impl Round {
-    fn done(&self) -> &Value {
-        self.lines
-            .iter()
-            .find(|line| line["event"] == "done")
-            .unwrap_or_else(|| panic!("no done line: {self:?}"))
-    }
-
-    fn tables(&self) -> impl Iterator<Item = &Value> {
-        self.lines.iter().filter(|line| line["event"] == "table")
-    }
-}
-
-impl std::fmt::Debug for Round {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:?} exit {}: {:?} {}",
-            self.settings, self.status, self.lines, self.stderr
-        )
-    }
-}
-
-fn script() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/delta_maintenance.py")
-}
-
+/// One run of the maintenance job over `tables` of `storage`'s lake, with
+/// extra settings.
 async fn maintain(
-    python: &Path,
+    job: &Path,
     storage: &Storage<'_>,
     tables: &[String],
     settings: &[(&'static str, &'static str)],
-) -> Round {
-    let mut command = tokio::process::Command::new(python);
-    command
-        .kill_on_drop(true)
-        .env_clear()
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .env("LAKE_ROOT", storage.root())
-        .env("LAKE_TABLES", tables.join(","))
-        .envs(storage.s3_env())
-        .envs(settings.iter().copied())
-        .arg(script());
+) -> JobRun {
+    let mut env: Vec<(&str, String)> = vec![
+        ("LAKE_ROOT", storage.root()),
+        ("LAKE_TABLES", tables.join(",")),
+    ];
+    env.extend(storage.s3_env());
     if let Storage::S3(server) = storage {
-        command.env("S3_ENDPOINT", &server.endpoint);
+        env.push(("S3_ENDPOINT", server.endpoint.clone()));
     }
-    let output = tokio::time::timeout(Duration::from_secs(120), command.output())
-        .await
-        .expect("maintenance timed out")
-        .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    Round {
-        settings: settings.to_vec(),
-        status: output.status.code().unwrap_or(-1),
-        lines: stdout
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
-            .collect(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+    env.extend(
+        settings
+            .iter()
+            .map(|(key, value)| (*key, value.to_string())),
+    );
+    common::maintenance_job(job, &env).await
 }
 
 /// The job's modes, cycled through while the writer runs.
@@ -443,19 +406,19 @@ const MODES: [&[(&str, &str)]; 3] = [
 
 /// Runs maintenance rounds until `build` exits; returns the rounds.
 async fn rounds_beside(
-    python: &Path,
+    job: &Path,
     storage: &Storage<'_>,
     tables: &[String],
     mut build: Build,
     counter: &AtomicU64,
-) -> Vec<Round> {
+) -> Vec<JobRun> {
     let mut rounds = Vec::new();
     let status = loop {
         if let Some(status) = build.child.try_wait().unwrap() {
             break status;
         }
         let mode = MODES[rounds.len() % MODES.len()];
-        rounds.push(maintain(python, storage, tables, mode).await);
+        rounds.push(maintain(job, storage, tables, mode).await);
         counter.fetch_add(1, Ordering::SeqCst);
         assert!(rounds.len() < 1_000, "the build does not finish");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -490,37 +453,50 @@ fn authority_ordinal(root: &Path) -> i64 {
     state["payload"]["checkpoint"]["ordinal"].as_i64().unwrap()
 }
 
+/// `(version, operation)` of every JSON commit of a local table.
+fn operations(table: &Path) -> Vec<(u64, String)> {
+    common::delta_log(table)
+        .into_iter()
+        .map(|(version, actions)| {
+            let info = common::action(&actions, "commitInfo").unwrap();
+            (version, info["operation"].as_str().unwrap().to_string())
+        })
+        .collect()
+}
+
 async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
-    let Some(python) = common::python() else {
+    let Some(job) = common::maintenance_bin() else {
         return;
     };
     let counter = Arc::new(AtomicU64::new(0));
     let (endpoint, server) = firehose(counter.clone()).await;
 
+    // Before the writer created any table, every table is skipped (#680).
+    let names: Vec<String> = TABLES.iter().map(|(table, _)| table.to_string()).collect();
+    let empty = maintain(&job, &storage, &names, MODES[0]).await;
+    empty.assert_clean();
+    assert_eq!(empty.done()["skipped"], json!(names), "{empty:?}");
+    assert_eq!(empty.tables().count(), 0, "{empty:?}");
+
     // Three days, then a clean restart over the maintained tables to a fourth.
     let first = Build::start(&storage, cwd, &endpoint, FIRST_STOP);
     let tables = tables_once_committed(&storage).await;
     assert!(tables.len() > TABLES.len(), "{tables:?}");
-    let mut rounds = rounds_beside(&python, &storage, &tables, first, &counter).await;
-    rounds.push(maintain(&python, &storage, &tables, MODES[0]).await);
+    let mut rounds = rounds_beside(&job, &storage, &tables, first, &counter).await;
+    rounds.push(maintain(&job, &storage, &tables, MODES[0]).await);
     let restart = Build::start(&storage, cwd, &endpoint, LAST_STOP);
-    rounds.extend(rounds_beside(&python, &storage, &tables, restart, &counter).await);
+    rounds.extend(rounds_beside(&job, &storage, &tables, restart, &counter).await);
     // The writer has stopped: a last round compacts every date, including the
     // last one (`OPTIMIZE_DATES=all`), and vacuums at once.
-    rounds.push(maintain(&python, &storage, &tables, MODES[1]).await);
+    rounds.push(maintain(&job, &storage, &tables, MODES[1]).await);
     server.abort();
 
     let (mut compactions, mut open_compactions, mut compacted, mut vacuumed) = (0, 0, 0, 0);
     for (index, round) in rounds.iter().enumerate() {
         // Every round but the last one ran beside a writer.
         let beside_writer = index + 1 < rounds.len();
-        assert_eq!(round.status, 0, "{round:?}");
-        let done = round.done();
-        assert_eq!(
-            (done["failed"].clone(), done["conflicts"].clone()),
-            (json!([]), json!(0)),
-            "{round:?}"
-        );
+        round.assert_clean();
+        assert_eq!(round.done()["skipped"], json!([]), "{round:?}");
         for table in round.tables() {
             assert_eq!(table["errors"], json!([]), "{table}");
             assert_eq!(table["conflicts"], json!([]), "{table}");
@@ -533,10 +509,15 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
             }
             let deleted = number(&table["vacuum"]["files_deleted"]);
             vacuumed += deleted;
-            if round.settings.contains(&("FULL_VACUUM", "1")) {
+            if round.has("FULL_VACUUM", "1") {
                 // The enforced 168 h retention: nothing here is that old.
                 assert_eq!(deleted, 0, "{table}");
             }
+            // A checkpoint after every VACUUM.
+            assert_eq!(
+                table["checkpoint_version"], table["version_after"],
+                "{table}"
+            );
         }
     }
     eprintln!(
@@ -562,54 +543,77 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
             assert_eq!(stored, 1, "{prefix}: {stored} data files after VACUUM");
         }
     }
+    // #678: delta-rs's client (object_store 0.13: the job, and the writer's
+    // log commits) never sends `If-Match`, which Ceph RGW 19.2 compares
+    // literally. The writer's own pinned part readbacks (object_store 0.12)
+    // do, in the owner's ETag form.
+    if let Storage::S3(server) = &storage {
+        let log = server.log();
+        let delta_rs = |entry: &&s3::Entry| {
+            entry
+                .user_agent
+                .as_deref()
+                .is_some_and(|agent| agent.starts_with("object_store/0.13."))
+        };
+        let delta_requests = log.iter().filter(delta_rs).count();
+        let conditional: Vec<String> = log
+            .iter()
+            .filter(delta_rs)
+            .filter(|entry| entry.if_match.is_some())
+            .map(|entry| format!("{} {}", entry.method, entry.key))
+            .collect();
+        assert!(delta_requests > 0, "no delta-rs request was logged");
+        assert!(conditional.is_empty(), "If-Match on {conditional:?}");
+        eprintln!(
+            "{delta_requests} delta-rs requests, none with If-Match; {} pinned writer readbacks",
+            log.iter()
+                .filter(|entry| entry.if_match.is_some() && !delta_rs(entry))
+                .count()
+        );
+    }
 
     let root = storage.local_copy(cwd);
     let blocks = LAST_STOP - FIRST;
     assert_eq!(authority_ordinal(&root), blocks as i64);
-    let names: Vec<String> = TABLES.iter().map(|(table, _)| table.to_string()).collect();
-    let report = common::python_report(
-        &python,
-        "delta_check.py",
-        &json!({"root": root, "tables": names, "day": CLOSED_DAYS[1], "history": true}),
-    );
     let mut interleaved = 0;
     for (table, per_block) in TABLES {
-        let seen = &report["tables"][table];
-        let context = format!("polars {table}");
-        assert_eq!(
-            number(&seen["rows"]),
-            per_block * blocks,
-            "{context}: {seen}"
-        );
-        assert_eq!(
-            (
-                number(&seen["distinct_blocks"]),
-                number(&seen["min_block"]),
-                number(&seen["max_block"])
-            ),
-            (blocks, FIRST, LAST_STOP - 1),
-            "{context}"
-        );
-        assert_eq!(seen["rows_per_block"], json!([per_block]), "{context}");
-        assert_eq!(number(&seen["day_rows"]), per_block * BLOCKS_PER_DAY);
-        assert_eq!(number(&seen["day_scan_files"]), 1, "{context}: pruned");
-        // The writer's `txn` survives every OPTIMIZE, VACUUM and checkpoint.
-        assert_eq!(number(&seen["txn"]), blocks, "{context}");
-        let expected: BTreeMap<String, Value> = CLOSED_DAYS
-            .iter()
-            .chain([&OPEN_DAY])
-            .map(|date| (date.to_string(), json!(1)))
+        let delta = common::open_local(&root, table).await;
+        let read = common::delta_read(&delta).await;
+        let context = format!("delta-rs {table}");
+        let block_nums = common::delta_block_nums(&root.join(table), &read);
+        let expected: Vec<i64> = (FIRST..LAST_STOP)
+            .flat_map(|block| std::iter::repeat_n(block as i64, per_block as usize))
             .collect();
         assert_eq!(
-            seen["active_files_per_date"],
-            json!(expected),
+            block_nums, expected,
+            "{context}: each block once, with its rows"
+        );
+        // The `date` filter prunes to the day's one file.
+        let day_files = common::delta_day_files(&delta, CLOSED_DAYS[1]).await;
+        assert_eq!(day_files.len(), 1, "{context}: pruned");
+        let day = read
+            .files
+            .iter()
+            .find(|file| file.date == CLOSED_DAYS[1])
+            .unwrap();
+        assert_eq!(day.rows, Some(per_block * BLOCKS_PER_DAY), "{context}");
+        // The writer's `txn` survives every OPTIMIZE, VACUUM and checkpoint.
+        assert_eq!(read.txn, Some(blocks as i64), "{context}");
+        let expected: BTreeMap<String, u64> = CLOSED_DAYS
+            .iter()
+            .chain([&OPEN_DAY])
+            .map(|date| (date.to_string(), 1))
+            .collect();
+        assert_eq!(
+            read.files_per_date(),
+            expected,
             "{context}: every date compacted"
         );
-        let operations = seen["operations"].as_array().unwrap();
+        let operations = operations(&root.join(table));
         let writes: Vec<u64> = operations
             .iter()
-            .filter(|entry| entry[1] == "WRITE")
-            .map(|entry| number(&entry[0]))
+            .filter(|(_, operation)| operation == "WRITE")
+            .map(|(version, _)| *version)
             .collect();
         assert_eq!(
             writes.len() as u64,
@@ -618,9 +622,11 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
         );
         interleaved += operations
             .iter()
-            .filter(|entry| entry[1] == "OPTIMIZE")
-            .map(|entry| number(&entry[0]))
-            .filter(|version| writes.first() < Some(version) && Some(version) < writes.last())
+            .filter(|(version, operation)| {
+                operation == "OPTIMIZE"
+                    && writes.first() < Some(version)
+                    && Some(version) < writes.last()
+            })
             .count();
     }
     assert!(interleaved > 0, "no OPTIMIZE landed between writer commits");
@@ -674,168 +680,277 @@ async fn maintenance_beside_an_s3_build_keeps_exact_rows() {
     maintenance_beside_build(Storage::S3(&server), &cwd).await;
 }
 
+/// The data files of a local table on disk, relative to it.
+fn data_files(table: &Path) -> Vec<String> {
+    let mut pending = vec![table.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.ends_with("_delta_log") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "parquet") {
+                let relative = path.strip_prefix(table).unwrap();
+                files.push(relative.to_str().unwrap().to_string());
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Data files on disk that no active `add` names.
+async fn orphans(table: &Path) -> usize {
+    let (root, name) = (table.parent().unwrap(), table.file_name().unwrap());
+    let active = common::delta_read(&common::open_local(root, name.to_str().unwrap()).await)
+        .await
+        .paths();
+    data_files(table)
+        .iter()
+        .filter(|file| !active.contains(file))
+        .count()
+}
+
+/// Seconds of `delta.deletedFileRetentionDuration` of the scratch tables.
+const SCRATCH_RETENTION_SECS: u64 = 4;
+
+/// A Delta table of three one-row appends on 2023-11-14, written by hand
+/// (commit 0 with `protocol` and `metaData`, then one `add` per commit), with
+/// a retention of [`SCRATCH_RETENTION_SECS`].
+fn scratch_table(table: &Path) {
+    let log = table.join("_delta_log");
+    std::fs::create_dir_all(&log).unwrap();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let schema = json!({"type": "struct", "fields": [
+        {"name": "block_num", "type": "long", "nullable": true, "metadata": {}},
+        {"name": "date", "type": "date", "nullable": true, "metadata": {}},
+    ]});
+    let mut commits = vec![vec![
+        json!({"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}),
+        json!({"metaData": {
+            "id": "00000000-0000-4000-8000-000000000643",
+            "format": {"provider": "parquet", "options": {}},
+            "schemaString": schema.to_string(),
+            "partitionColumns": ["date"],
+            "configuration": {
+                "delta.deletedFileRetentionDuration":
+                    format!("interval {SCRATCH_RETENTION_SECS} seconds"),
+            },
+            "createdTime": now,
+        }}),
+        json!({"commitInfo": {"timestamp": now, "operation": "CREATE TABLE"}}),
+    ]];
+    let arrow_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("block_num", arrow::datatypes::DataType::Int64, true),
+    ]));
+    for block in 0..3 {
+        let batch = arrow::array::RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![block]))],
+        )
+        .unwrap();
+        let bytes = firehose_parquet::writer::encode_parquet(
+            &batch,
+            firehose_parquet::config::Compression::Zstd,
+            &firehose_parquet::writer::ParquetFileMetadata::new(),
+        )
+        .unwrap();
+        let path = format!("date=2023-11-14/part-{block}.parquet");
+        std::fs::create_dir_all(table.join("date=2023-11-14")).unwrap();
+        std::fs::write(table.join(&path), &bytes).unwrap();
+        commits.push(vec![
+            json!({"commitInfo": {"timestamp": now, "operation": "WRITE"}}),
+            json!({"add": {
+                "path": path, "partitionValues": {"date": "2023-11-14"},
+                "size": bytes.len(), "modificationTime": now, "dataChange": true,
+                "stats": json!({"numRecords": 1}).to_string(),
+            }}),
+        ]);
+    }
+    for (version, actions) in commits.iter().enumerate() {
+        let lines: String = actions.iter().map(|action| format!("{action}\n")).collect();
+        std::fs::write(log.join(format!("{version:020}.json")), lines).unwrap();
+    }
+}
+
+/// The job over one table of a local lake.
+async fn job_on(job: &Path, root: &Path, table: &str, settings: &[(&str, &str)]) -> JobRun {
+    let mut env = vec![
+        ("LAKE_ROOT", root.to_str().unwrap().to_string()),
+        ("LAKE_TABLES", table.to_string()),
+    ];
+    env.extend(
+        settings
+            .iter()
+            .map(|(key, value)| (*key, value.to_string())),
+    );
+    common::maintenance_job(job, &env).await
+}
+
 /// Design §4.1, measured: the job's VACUUM-then-checkpoint order deletes
 /// expired tombstones' files, the reverse order leaves them as orphans, and
 /// no lite or enforced full VACUUM deletes a part that is not in the log yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vacuum_runs_before_the_checkpoint_and_never_deletes_untracked_parts() {
-    let Some(python) = common::python() else {
+    let Some(job) = common::maintenance_bin() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
+
+    // The order: three scratch tables, each compacted by the job (three
+    // files tombstoned; its VACUUM finds them too young, its checkpoint
+    // keeps them), then left until the tombstones are older than the
+    // retention.
+    let scratch = cwd.join("vacuum-order");
+    for table in ["checkpoint_first", "vacuum_first", "blocks"] {
+        scratch_table(&scratch.join(table));
+        let compacted = job_on(&job, &scratch, table, &[("OPTIMIZE_DATES", "all")]).await;
+        compacted.assert_clean();
+        let line = compacted.table(table);
+        assert_eq!(
+            line["compacted"][0]["files_removed"],
+            json!(3),
+            "{compacted:?}"
+        );
+        assert_eq!(line["vacuum"]["files_deleted"], json!(0), "{compacted:?}");
+    }
+    tokio::time::sleep(Duration::from_secs(SCRATCH_RETENTION_SECS + 1)).await;
+    // A checkpoint drops the expired tombstones: the next run's VACUUM (a
+    // fresh snapshot) finds nothing to delete, and the files stay orphans.
+    // (The job's checkpoint is at the OPTIMIZE version; a later commit gives
+    // this one a version of its own, as the next hourly run would.)
+    let first = scratch.join("checkpoint_first");
+    let next = common::delta_log(&first).keys().max().unwrap() + 1;
+    std::fs::write(
+        first.join(format!("_delta_log/{next:020}.json")),
+        format!(
+            "{}\n",
+            json!({"commitInfo": {"timestamp": 1_700_000_000_000u64, "operation": "WRITE"}})
+        ),
+    )
+    .unwrap();
+    common::delta_checkpoint(&common::open_local(&scratch, "checkpoint_first").await).await;
+    let (_, reverse) = common::open_local(&scratch, "checkpoint_first")
+        .await
+        .vacuum()
+        .await
+        .unwrap();
+    assert_eq!(reverse.files_deleted.len(), 0);
+    assert_eq!(orphans(&scratch.join("checkpoint_first")).await, 3);
+    let (table, forward) = common::open_local(&scratch, "vacuum_first")
+        .await
+        .vacuum()
+        .await
+        .unwrap();
+    common::delta_checkpoint(&table).await;
+    assert_eq!(forward.files_deleted.len(), 3);
+    assert_eq!(orphans(&scratch.join("vacuum_first")).await, 0);
+    // The job itself: VACUUM, then its checkpoint.
+    let run = job_on(&job, &scratch, "blocks", &[]).await;
+    run.assert_clean();
+    assert_eq!(
+        run.table("blocks")["vacuum"]["files_deleted"],
+        json!(3),
+        "{run:?}"
+    );
+    assert_eq!(orphans(&scratch.join("blocks")).await, 0);
+
+    // A fireparq lake of two days, and no gate reached.
     let storage = Storage::Local(cwd.join("dataset"));
     let counter = Arc::new(AtomicU64::new(0));
     let (endpoint, server) = firehose(counter).await;
-    // Two days, and no gate reached.
     Build::start(&storage, &cwd, &endpoint, FIRST + BLOCKS_PER_DAY + 4)
         .wait()
         .await;
     server.abort();
-    let report = common::python_report(
-        &python,
-        "vacuum_check.py",
-        &json!({
-            "script": script(),
-            "lake": storage.root(),
-            "tables": common::delta_tables(Path::new(&storage.root())),
-            "scratch": cwd.join("vacuum-order"),
-        }),
-    );
-    eprintln!("{report:#}");
-    // The reverse order orphans the expired tombstones' files; the job's
-    // order and the job itself delete them.
-    let order = &report["order"];
-    assert_eq!(order["checkpoint_then_vacuum"]["deleted"], json!(0));
-    assert_eq!(order["checkpoint_then_vacuum"]["orphans"], json!(3));
-    assert_eq!(order["vacuum_then_checkpoint"]["deleted"], json!(3));
-    assert_eq!(order["vacuum_then_checkpoint"]["orphans"], json!(0));
-    assert_eq!(order["job"]["deleted"], json!(3));
-    assert_eq!(order["job"]["orphans"], json!(0));
-    // A published but uncommitted part.
-    let untracked = &report["untracked"];
-    assert_eq!(untracked["lite_retention_0"]["kept"], json!(true));
-    assert_eq!(untracked["full_enforced"]["kept"], json!(true));
-    assert_eq!(untracked["full_retention_0"]["exit"], json!(2));
-    assert_eq!(untracked["full_retention_0"]["kept"], json!(true));
-    assert_eq!(untracked["unguarded_full_vacuum_would_delete"], json!(true));
-    assert_eq!(
-        untracked["full_enforced_after_8_days"]["kept"],
-        json!(false)
-    );
-    assert_eq!(
-        untracked["rows_before"], untracked["rows_after"],
-        "the committed rows are untouched"
-    );
+    let root = cwd.join("dataset");
+    let tables = common::delta_tables(&root);
+
     // The default run compacts the closed date of every table with rows (the
     // other date is still open), and a second run changes nothing.
-    let closed: Vec<String> = TABLES
+    let first = maintain(&job, &storage, &tables, &[]).await;
+    first.assert_clean();
+    let compacted: std::collections::BTreeSet<String> = first
+        .tables()
+        .flat_map(|line| {
+            let table = line["table"].as_str().unwrap().to_string();
+            line["compacted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |compaction| format!("{table}/{}", compaction["date"].as_str().unwrap()))
+        })
+        .collect();
+    let closed: std::collections::BTreeSet<String> = TABLES
         .iter()
         .map(|(table, _)| format!("{table}/{}", CLOSED_DAYS[0]))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
         .collect();
-    assert_eq!(report["idempotent"]["first_run_compacted"], json!(closed));
-    assert_eq!(report["idempotent"]["versions_changed"], json!([]));
-}
+    assert_eq!(compacted, closed);
+    let second = maintain(&job, &storage, &tables, &[]).await;
+    second.assert_clean();
+    let changed: Vec<&Value> = second
+        .tables()
+        .filter(|line| line["version_before"] != line["version_after"])
+        .map(|line| &line["table"])
+        .collect();
+    assert!(changed.is_empty(), "{changed:?}");
 
-/// Settings that would make the job unsafe or incomplete are refused before
-/// any request, and credentials never appear in its output, not even in an
-/// error from the store (here a refused loopback connection).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_job_refuses_unsafe_settings_and_never_prints_credentials() {
-    let Some(python) = common::python() else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let local = Storage::Local(dir.path().join("lake"));
-    let tables = ["blocks".to_string()];
-    let secret = "sekrit-loopback-secret-key";
-    let s3 = [
-        ("LAKE_ROOT", "s3://delta-lake/nothing-here"),
-        ("S3_ENDPOINT", "https://127.0.0.1:9"),
-        ("AWS_ACCESS_KEY_ID", "loopback-access-key"),
-        ("AWS_SECRET_ACCESS_KEY", secret),
-    ];
-    let cases: Vec<(&str, Vec<(&'static str, &'static str)>)> = vec![
-        ("no root", vec![("LAKE_ROOT", "")]),
-        ("two roots", vec![("LAKE_BUCKET", "ethereum-mainnet")]),
-        ("no tables", vec![("LAKE_TABLES", "")]),
-        ("a path as a table", vec![("LAKE_TABLES", "blocks/../x")]),
-        (
-            "full VACUUM below 168 h",
-            vec![("FULL_VACUUM", "1"), ("VACUUM_RETENTION_HOURS", "167")],
-        ),
-        ("an unknown flag value", vec![("FULL_VACUUM", "maybe")]),
-        ("an unknown date scope", vec![("OPTIMIZE_DATES", "open")]),
-        (
-            "S3 without credentials",
-            vec![
-                ("LAKE_ROOT", "s3://delta-lake/x"),
-                ("AWS_SECRET_ACCESS_KEY", ""),
-            ],
-        ),
-        (
-            "unsafe renames on S3",
-            s3.iter()
-                .copied()
-                .chain([("AWS_S3_ALLOW_UNSAFE_RENAME", "true")])
-                .collect(),
-        ),
-    ];
-    for (case, settings) in cases {
-        let round = maintain(&python, &local, &tables, &settings).await;
-        assert_eq!(round.status, 2, "{case}: {round:?}");
-        assert_eq!(round.lines.len(), 1, "{case}: {round:?}");
-        assert_eq!(round.lines[0]["event"], "config_error", "{case}: {round:?}");
-    }
-    // A store error: reported per table, exit 1, the secret redacted.
-    let round = maintain(&python, &local, &tables, &s3).await;
-    assert_eq!(round.status, 1, "{round:?}");
-    assert_eq!(round.done()["failed"], json!(["blocks"]), "{round:?}");
-    let output = format!("{:?}{}", round.lines, round.stderr);
-    assert!(!output.contains(secret), "{output}");
-}
-
-/// `name==version` and the hashes of each package of a hash-pinned
-/// requirements file.
-fn pins(path: &Path) -> BTreeMap<String, Vec<String>> {
-    let mut pins: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut current = None;
-    for line in std::fs::read_to_string(path).unwrap().lines() {
-        let line = line.trim().trim_end_matches('\\').trim();
-        if let Some(hash) = line.strip_prefix("--hash=") {
-            let package: &String = current.as_ref().unwrap();
-            pins.get_mut(package).unwrap().push(hash.to_string());
-        } else if !line.is_empty() && !line.starts_with('#') {
-            current = Some(line.to_string());
-            pins.insert(line.to_string(), Vec::new());
-        }
-    }
-    pins
-}
-
-/// The job runs in CI with the engine tests' `deltalake`, so its own pins
-/// (what a CronJob installs) must be the same, and the version the script
-/// requires.
-#[test]
-fn the_job_pins_the_deltalake_that_ci_tests() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let job = pins(&manifest.join("../scripts/delta_maintenance.requirements.txt"));
-    let engines = pins(&manifest.join("tests/engines/requirements.txt"));
-    for (package, hashes) in &job {
-        assert!(!hashes.is_empty(), "{package} is not hash-pinned");
-        assert_eq!(engines.get(package), Some(hashes), "{package}");
-    }
-    let source = std::fs::read_to_string(script()).unwrap();
-    let required = source
-        .lines()
-        .find_map(|line| line.strip_prefix("REQUIRED_DELTALAKE = "))
-        .unwrap()
-        .trim_matches('"');
+    // A published but uncommitted part: a copy of a `blocks` data file that
+    // no log entry names.
+    let blocks = common::delta_read(&common::open_local(&root, "blocks").await).await;
+    let source = root.join("blocks").join(&blocks.files[0].path);
+    let part = source.with_file_name("part-v1-untracked-copy.parquet");
+    std::fs::copy(&source, &part).unwrap();
+    let rows_before = common::delta_counts(&root, &tables).await;
+    let lite = maintain(&job, &storage, &tables, &[("VACUUM_RETENTION_HOURS", "0")]).await;
+    lite.assert_clean();
+    assert!(part.exists(), "a lite VACUUM kept the part: {lite:?}");
+    let full = maintain(&job, &storage, &tables, &[("FULL_VACUUM", "1")]).await;
+    full.assert_clean();
     assert!(
-        job.contains_key(&format!("deltalake=={required}")),
-        "{required}: {:?}",
-        job.keys()
+        part.exists(),
+        "a full VACUUM of 168 h kept the part: {full:?}"
+    );
+    let refused = maintain(
+        &job,
+        &storage,
+        &tables,
+        &[("FULL_VACUUM", "1"), ("VACUUM_RETENTION_HOURS", "0")],
+    )
+    .await;
+    assert_eq!((refused.status, part.exists()), (2, true), "{refused:?}");
+    assert_eq!(refused.lines.len(), 1, "{refused:?}");
+    assert_eq!(refused.lines[0]["event"], "config_error");
+    // An unguarded full VACUUM (retention 0, not enforced) would delete it.
+    let would =
+        common::delta_vacuum_now(common::open_local(&root, "blocks").await, true, true).await;
+    assert!(
+        would
+            .iter()
+            .any(|path| path.ends_with("part-v1-untracked-copy.parquet")),
+        "{would:?}"
+    );
+    // Once older than the enforced 168 h, the weekly full VACUUM deletes it.
+    let eight_days_ago = SystemTime::now() - Duration::from_secs(8 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&part)
+        .unwrap()
+        .set_modified(eight_days_ago)
+        .unwrap();
+    let weekly = maintain(&job, &storage, &tables, &[("FULL_VACUUM", "1")]).await;
+    weekly.assert_clean();
+    assert!(!part.exists(), "{weekly:?}");
+    assert_eq!(
+        common::delta_counts(&root, &tables).await,
+        rows_before,
+        "the committed rows are untouched"
     );
 }

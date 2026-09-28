@@ -115,7 +115,7 @@ Unit and integration tests:
 #529; 1,173 passed, 0 failed, 14 ignored after rebasing on `97dd244` (16 more than #529
 alone).
 
-End to end ([script](maintenance-safety-e2e.py), [report](maintenance-safety-e2e.json)),
+End to end ([script](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/maintenance-safety-e2e.py), [report](maintenance-safety-e2e.json)),
 local data only: the retained mainnet 24000000–24000029 dataset (13 tables, 1,049,978
 rows), the `origin/main` `050f9ec` release binary and the fixed release binary:
 

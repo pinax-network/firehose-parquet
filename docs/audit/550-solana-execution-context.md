@@ -127,7 +127,10 @@ establish per-instruction execution status.
 ### Reproduction
 
 Build `blocks/examples/replay_solana_context.rs` at the baseline and candidate
-sources and keep distinct binaries. Use fresh, separate output directories:
+sources and keep distinct binaries. Use fresh, separate output directories. The
+comparison,
+[`550-compare-solana-context.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/550-compare-solana-context.py),
+was removed from the tree after v1.0.1; run it from that tag:
 
 ```sh
 cargo build --locked -p blocks --example replay_solana_context

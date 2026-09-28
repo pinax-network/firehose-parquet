@@ -103,7 +103,9 @@ results; it is not the production CLI path. These measurements establish gains
 on retained fixtures, not an end-to-end ingestion or universal chain speedup.
 
 Reproduce the comparison with preserved binaries (input flags can select a
-subset; use `--iterations 5000` for the Beacon-only run):
+subset; use `--iterations 5000` for the Beacon-only run) and
+[`518-benchmark.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/518-benchmark.py),
+removed from the tree after v1.0.1 (run it from that tag):
 
 ```sh
 python3 docs/audit/518-benchmark.py --before /path/to/before \

@@ -57,8 +57,8 @@ The fee, energy and bandwidth are still charged.
 **Bounded RPC capture.** The capture used the #509 plan's official public
 Solidity endpoint `grpc.trongrid.io:50052`. It ran on one credential-free
 plaintext channel, with no retries and a 20-second deadline per call.
-[550-tron-rpc.py](550-tron-rpc.py) reuses the reviewed
-[509 converter](509-tron-rpc.py) unchanged: a check reproduced the #509 block
+[550-tron-rpc.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/550-tron-rpc.py) reuses the reviewed
+[509 converter](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/509-tron-rpc.py) unchanged: a check reproduced the #509 block
 `c2ddd99e…` byte for byte. It searched up to 10 listed heights, using one
 `GetTransactionInfoByBlockNum` per height, and stopped at the first `REVERT`
 receipt:
@@ -88,7 +88,7 @@ The three failures all have a true/`SUCCESS` wrapper, `TransactionInfo`
 `FAILED`, no logs and no internal transactions, and they paid fees of 500,
 1,207,400 and 200 sun. On main they are written by default, which is the bug.
 
-**Offline comparison.** [550-compare-tron.py](550-compare-tron.py) generates the
+**Offline comparison.** [550-compare-tron.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/550-compare-tron.py) generates the
 expected rows from the upstream protocol messages with the #509 generator, then
 applies the rule above independently of the Rust mapper. It covers baseline
 (main `8462692`) and candidate `replay_tron` across 5 encodings × fork column ×
@@ -173,7 +173,7 @@ block 50002747 and `HARDFAIL` without a handler in block 50002749.
 | 50002747 | 349,142 | `5560fe2765d19f0a0114a30cc13a4e1d2f31d6ae2b95dc1953bdbc20ecc5cb89` | `DELAYED` |
 | 50002749 | 175,157 | `c6bc28fa3bbee1196b42bf91da9057a6defa15d7a9289b7cc27f5d9966b3a9e4` | the same transaction `HARDFAIL` |
 
-[550-compare-antelope.py](550-compare-antelope.py) derives selection and labels
+[550-compare-antelope.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/550-compare-antelope.py) derives selection and labels
 from the raw protobufs. It compared baseline and candidate
 [`replay_antelope`](../../blocks/examples/replay_antelope.rs) output over 20
 cases, and all passed:
@@ -231,7 +231,7 @@ The outcome keeps the logs emitted before the failure.
 The retained #506 capture of block 150000000 (NearData JSON `794e00c1…`,
 converted `block.pb` `8bec28c8…`) contains 70 receipts: 68 `SuccessValue`,
 1 `SuccessReceiptId` and 1 `Failure` (a `Delegate` action with no logs). No new
-request was made. [550-compare-near.py](550-compare-near.py) keys the expected
+request was made. [550-compare-near.py](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/550-compare-near.py) keys the expected
 statuses by receipt ID from the original JSON. It compared baseline and
 candidate `replay_near` across 20 cases, and all passed:
 

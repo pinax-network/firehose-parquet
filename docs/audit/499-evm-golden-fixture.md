@@ -82,7 +82,7 @@ A later validation pass found two gaps. The test only called the borrowed
   authorizations from one authority.
 - Its oracle (20 table counts, 14,001 extended rows, 304 selected values on 27
   rows) came from an independent Python protobuf decode and the documented
-  persistence rules, retained as [`499-evm-golden-oracle.py`](499-evm-golden-oracle.py),
+  persistence rules, retained as [`499-evm-golden-oracle.py`](https://github.com/pinax-network/firehose-parquet/blob/v1.0.1/docs/audit/499-evm-golden-oracle.py),
   which regenerates the committed file byte for byte. The mapper test passed
   against it on the first run. A
   targeted test checks transaction 130's raw shape and its persisted rows:
