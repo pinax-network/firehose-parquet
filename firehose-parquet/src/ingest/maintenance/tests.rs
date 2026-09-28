@@ -290,8 +290,56 @@ async fn selected_file_acquires_its_protected_root() {
     prepared.ownership.release().await.unwrap();
 }
 
+/// The `blocks` data file schema of [`committed_dataset`]: Delta types.
+fn delta_schema() -> std::sync::Arc<arrow::datatypes::Schema> {
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    std::sync::Arc::new(Schema::new(vec![
+        Field::new("block_num", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+    ]))
+}
+
+/// One `blocks` row in [`delta_schema`], at 1_700_000_000 + (number - 100) s.
+fn delta_row(number: u64) -> arrow::record_batch::RecordBatch {
+    use arrow::array::{Array, Int64Array, TimestampMicrosecondArray};
+    let timestamp = 1_700_000_000 + (number - 100) as i64;
+    let columns: Vec<std::sync::Arc<dyn Array>> = vec![
+        std::sync::Arc::new(Int64Array::from(vec![number as i64])),
+        std::sync::Arc::new(Int64Array::from(vec![number as i64 * 2])),
+        std::sync::Arc::new(
+            TimestampMicrosecondArray::from(vec![timestamp * 1_000_000]).with_timezone("UTC"),
+        ),
+    ];
+    arrow::record_batch::RecordBatch::try_new(delta_schema(), columns).unwrap()
+}
+
+/// The Delta tables of [`committed_dataset`], opened (with `create`, created).
+async fn delta_tables(
+    root: &Path,
+    descriptor: &StreamDescriptor,
+    create: bool,
+) -> crate::delta::commit::DeltaTables {
+    crate::delta::commit::DeltaTables::open(
+        crate::delta::store::DeltaStore::local(&fs::canonicalize(root).unwrap()).unwrap(),
+        crate::delta::DeltaIdentity::of(descriptor).unwrap(),
+        &std::collections::BTreeMap::from([(
+            "blocks".to_string(),
+            crate::delta::delta_columns(&delta_schema()).unwrap(),
+        )]),
+        create,
+        1,
+    )
+    .await
+    .unwrap()
+}
+
 /// A protected root with blocks 100 and 101 committed in two transactions, both in
-/// `blocks/date=2023-11-14/`.
+/// `blocks/date=2023-11-14/`, and in the `blocks` Delta table.
 async fn committed_dataset(root: &Path) -> StreamDescriptor {
     use crate::config::{BlockMetadata, Compression};
     use crate::ingest::{
@@ -302,22 +350,9 @@ async fn committed_dataset(root: &Path) -> StreamDescriptor {
         },
     };
     use crate::writer::{protected::schema_sha256, ParquetFileMetadata};
-    use arrow::{
-        array::{Array, TimestampMillisecondArray, UInt64Array},
-        datatypes::{DataType, Field, Schema, TimeUnit},
-        record_batch::RecordBatch,
-    };
-    use std::{collections::HashMap, sync::Arc};
+    use std::collections::HashMap;
     fs::create_dir_all(root).unwrap();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("block_num", DataType::UInt64, false),
-        Field::new("value", DataType::UInt64, false),
-        Field::new(
-            "timestamp",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            false,
-        ),
-    ]));
+    let schema = delta_schema();
     let mut descriptor = descriptor(RoutingPolicy::GenesisLookaheadV1);
     descriptor.output = resolve_output_identity(root.to_str().unwrap(), &empty_aws()).unwrap();
     descriptor.tables = std::collections::BTreeMap::from([(
@@ -338,11 +373,13 @@ async fn committed_dataset(root: &Path) -> StreamDescriptor {
         .await
         .unwrap();
     let mirror = ProtectedMirror::new(&ownership, &MirrorBinding::Disabled, None).unwrap();
-    let mut controller = TransactionController::open(
+    let mut controller = TransactionController::open_with_delta(
         TransactionStateStore::local(root, local).unwrap(),
         TransactionParts::local(root, local).unwrap(),
         &mirror,
         &descriptor,
+        Some(delta_tables(root, &descriptor, true).await),
+        crate::config::FlushConcurrency::SERIAL,
     )
     .await
     .unwrap();
@@ -355,12 +392,7 @@ async fn committed_dataset(root: &Path) -> StreamDescriptor {
         frontier
             .accept(ordinal, routing(RoutingPolicy::GenesisLookaheadV1))
             .unwrap();
-        let columns: Vec<Arc<dyn Array>> = vec![
-            Arc::new(UInt64Array::from(vec![number])),
-            Arc::new(UInt64Array::from(vec![number * 2])),
-            Arc::new(TimestampMillisecondArray::from(vec![timestamp * 1000]).with_timezone("UTC")),
-        ];
-        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let batch = delta_row(number);
         let mut metadata = ParquetFileMetadata::new();
         metadata.add("chain", "mainnet");
         controller
@@ -425,12 +457,7 @@ async fn recovery_rolls_back_writing_or_finishes_committed_before_returning_guar
         config::{BlockMetadata, Compression},
         writer::{protected::PreparedFlush, ParquetFileMetadata},
     };
-    use arrow::{
-        array::{TimestampMillisecondArray, UInt64Array},
-        datatypes::{DataType, Field, Schema, TimeUnit},
-        record_batch::RecordBatch,
-    };
-    use std::{collections::HashMap, sync::Arc};
+    use std::collections::HashMap;
     for committed in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -466,26 +493,7 @@ async fn recovery_rolls_back_writing_or_finishes_committed_before_returning_guar
             PartCompression::Zstd,
         )
         .unwrap();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("block_num", DataType::UInt64, false),
-            Field::new("value", DataType::UInt64, false),
-            Field::new(
-                "timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-                false,
-            ),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(UInt64Array::from(vec![102])),
-                Arc::new(UInt64Array::from(vec![204])),
-                Arc::new(
-                    TimestampMillisecondArray::from(vec![1_700_000_002_000]).with_timezone("UTC"),
-                ),
-            ],
-        )
-        .unwrap();
+        let batch = delta_row(102);
         let prepared = PreparedFlush::new(
             HashMap::from([("blocks".into(), batch)]),
             &descriptor
@@ -554,6 +562,17 @@ async fn recovery_rolls_back_writing_or_finishes_committed_before_returning_guar
             .unwrap()
             .payload;
         assert_eq!(state.checkpoint.ordinal, if committed { 3 } else { 2 });
+        // A Committed transaction was rolled forward into its Delta table
+        // (#643 L4), once; a rolled-back one never reached it.
+        let tables = delta_tables(root, &descriptor, false).await;
+        assert_eq!(
+            tables.txn_version("blocks").await.unwrap(),
+            Some(if committed { 3 } else { 2 })
+        );
+        assert_eq!(
+            tables.version("blocks").unwrap(),
+            if committed { 3 } else { 2 }
+        );
         prepared.ownership.release().await.unwrap();
     }
 }

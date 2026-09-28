@@ -20,8 +20,16 @@
 //! delta-rs retry at the next version, while a winning commit with the same
 //! `appId` fails with `ConcurrentTransaction` instead of adding a second copy.
 //! Writers never checkpoint or clean up the log; the maintenance job does.
+//!
+//! Recovery (#643 L4, design §3.5 and §4) reads each table's `txn` for this
+//! stream at every start: [`DeltaTables::check_progress`] refuses a log
+//! ahead of authority and names the tables of a Committed transaction whose
+//! logs do not hold it yet, and [`DeltaTables::roll_forward`] commits
+//! exactly those, `blocks` last, resolving a same-`appId` conflict (a delayed
+//! copy of an earlier commit whose outcome was unknown) from the log instead
+//! of failing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -62,6 +70,11 @@ pub struct TableCommit {
     pub elapsed: Duration,
     /// Commits a reader replays after the last checkpoint (design §8).
     pub tail_commits: u64,
+    /// The commit lost to a winning commit of this stream that already holds
+    /// the transaction (a delayed copy of an earlier commit whose outcome was
+    /// unknown), so `version` is the table's version after it, not a new one.
+    /// Only a roll-forward resolves a conflict this way.
+    pub found_in_log: bool,
 }
 
 /// A failed [`DeltaTables::commit`].
@@ -71,8 +84,28 @@ pub struct CommitFailure {
     /// Whether a log write may have been sent without a definite outcome
     /// (a transport error, a timeout, a lost response). A conflict, an
     /// exhausted retry budget or a failure before any request is definite.
+    /// Either way the log resolves it at the next start: the commit landed
+    /// exactly when the table's `txn` is the transaction's (design §3.5).
     pub unresolved: bool,
 }
+
+/// Called once for each table [`DeltaTables::open_with`] created, after its
+/// version 0 is durable. An error stops the open.
+pub type CreatedHook<'h> = &'h (dyn Fn(&str) -> Result<()> + Sync);
+
+/// An error a [`CommitHooks::after`] hook returns for a commit whose outcome
+/// the process must treat as unknown (a lost response), which makes the
+/// failure [`CommitFailure::unresolved`]. Real-binary fault tests use it.
+#[derive(Debug)]
+pub struct UnknownOutcome;
+
+impl fmt::Display for UnknownOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the commit's response was lost")
+    }
+}
+
+impl std::error::Error for UnknownOutcome {}
 
 impl fmt::Display for CommitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -197,19 +230,77 @@ impl DeltaTables {
         create_missing: bool,
         concurrency: usize,
     ) -> Result<Self> {
-        ensure!(
-            !columns.is_empty(),
-            "a dataset has at least one Delta table"
-        );
+        Self::open_with(
+            store,
+            identity,
+            columns,
+            create_missing,
+            concurrency,
+            &|_| Ok(()),
+        )
+        .await
+    }
+
+    /// [`Self::open`], calling `created` after each table it creates.
+    /// Creation is idempotent: a start interrupted between creations finds
+    /// some tables, validates them and creates the others (design §4).
+    pub async fn open_with(
+        store: DeltaStore,
+        identity: DeltaIdentity,
+        columns: &BTreeMap<String, Vec<StructField>>,
+        create_missing: bool,
+        concurrency: usize,
+        created: CreatedHook<'_>,
+    ) -> Result<Self> {
+        let specs = columns
+            .iter()
+            .map(|(name, columns)| (name.clone(), Some(columns.as_slice())))
+            .collect();
+        Self::open_specs(store, identity, specs, create_missing, concurrency, created).await
+    }
+
+    /// Opens the existing Delta tables `names` of the stream `identity`,
+    /// never creating one: `recovery recover`, which has no mapper and so no
+    /// table schemas. Everything [`Self::open`] validates is checked except
+    /// the schema, which the next `build` checks.
+    pub async fn open_existing<'n>(
+        store: DeltaStore,
+        identity: DeltaIdentity,
+        names: impl IntoIterator<Item = &'n str>,
+        concurrency: usize,
+    ) -> Result<Self> {
+        let specs = names
+            .into_iter()
+            .map(|name| (name.to_string(), None))
+            .collect();
+        Self::open_specs(store, identity, specs, false, concurrency, &|_| Ok(())).await
+    }
+
+    async fn open_specs(
+        store: DeltaStore,
+        identity: DeltaIdentity,
+        specs: Vec<(String, Option<&[StructField]>)>,
+        create_missing: bool,
+        concurrency: usize,
+        created: CreatedHook<'_>,
+    ) -> Result<Self> {
+        ensure!(!specs.is_empty(), "a dataset has at least one Delta table");
         let expected = identity.configuration();
-        let mut opened = futures::stream::iter(columns.iter().map(|(name, columns)| {
+        let mut opened = futures::stream::iter(specs.into_iter().map(|(name, columns)| {
             let (store, identity, expected) = (&store, &identity, &expected);
             async move {
-                let table =
-                    open_or_create(store, identity, expected, name, columns, create_missing)
-                        .await
-                        .with_context(|| format!("opening the Delta table `{name}`"))?;
-                Ok::<_, anyhow::Error>((name.clone(), table))
+                let table = open_or_create(
+                    store,
+                    identity,
+                    expected,
+                    &name,
+                    columns,
+                    create_missing,
+                    created,
+                )
+                .await
+                .with_context(|| format!("opening the Delta table `{name}`"))?;
+                Ok::<_, anyhow::Error>((name, table))
             }
         }))
         .buffer_unordered(concurrency.max(1));
@@ -263,6 +354,120 @@ impl DeltaTables {
             .with_context(|| format!("`{table}` is not a Delta table of this dataset"))
     }
 
+    /// The `txn` version of this stream in each of `tables`, at most
+    /// `concurrency` reads at a time. Each read stops at the newest commit
+    /// holding this stream's `txn`, usually the last one.
+    async fn txn_versions<'t>(
+        &self,
+        tables: impl IntoIterator<Item = &'t str>,
+        concurrency: usize,
+    ) -> Result<Vec<(&'t str, Option<i64>)>> {
+        futures::stream::iter(tables.into_iter().map(|table| async move {
+            let version = self
+                .txn_version(table)
+                .await
+                .with_context(|| format!("reading the `txn` of Delta table `{table}`"))?;
+            Ok::<_, anyhow::Error>((table, version))
+        }))
+        .buffered(concurrency.max(1))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect()
+    }
+
+    /// Checks every table's `txn` for this stream against authority, whose
+    /// accepted ordinal is `authority`, before startup changes anything, and
+    /// returns the tables of `committed` whose logs do not hold it yet, in
+    /// the order of its parts.
+    ///
+    /// `committed` is a Committed transaction whose authority has not
+    /// advanced (its predecessor is at `authority`). Its last ordinal `L` in a
+    /// table with one of its parts means that commit landed, and the part is
+    /// never read again: OPTIMIZE and VACUUM may have rewritten it (design
+    /// §4). Otherwise every `txn` must be at most `authority` (or absent);
+    /// anything else is a log ahead of authority, refused: only another
+    /// writer using this stream's `appId`, or an authority restored from an
+    /// older copy, leads there. On local disk, a table whose log already holds
+    /// `committed` has its log tail synced again, since the process that
+    /// committed it may have died before that commit was durable.
+    pub async fn check_progress(
+        &self,
+        authority: u64,
+        committed: Option<&PendingTransaction>,
+        concurrency: usize,
+    ) -> Result<Vec<String>> {
+        let last = committed
+            .map(|pending| txn_version_of(pending.prefix.last_ordinal))
+            .transpose()?;
+        let with_parts: BTreeSet<&str> = committed
+            .map(|pending| {
+                pending
+                    .parts
+                    .iter()
+                    .map(|part| part.table.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut holding = BTreeSet::new();
+        for (table, txn) in self.txn_versions(self.names(), concurrency).await? {
+            match txn {
+                Some(version) if Some(version) == last && with_parts.contains(table) => {
+                    let open = self.open_table(table)?;
+                    sync_log_tail(&self.store, table, open.checkpoint).await?;
+                    holding.insert(table);
+                }
+                Some(version) if u64::try_from(version).is_ok_and(|v| v <= authority) => {}
+                None => {}
+                Some(version) => {
+                    return Err(log_ahead(
+                        table,
+                        version,
+                        authority,
+                        committed.map(|pending| pending.prefix.last_ordinal),
+                        &self.app_id(),
+                    ))
+                }
+            }
+        }
+        Ok(committed
+            .into_iter()
+            .flat_map(|pending| &pending.parts)
+            .map(|part| part.table.as_str())
+            .filter(|table| !holding.contains(table))
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Rolls the Committed transaction `pending` forward into `tables` (from
+    /// [`Self::check_progress`]): the commits [`Self::commit`] makes, restricted
+    /// to those tables, [`LAST_TABLE`] last. A commit that loses to a winning
+    /// commit of this stream (`ConcurrentTransaction`: a delayed copy of an
+    /// earlier commit whose outcome was unknown) is resolved from the log:
+    /// the table is reloaded, and when its `txn` is the transaction's the
+    /// commit counts as done ([`TableCommit::found_in_log`]), so the parts
+    /// are added exactly once (design §3.5).
+    pub async fn roll_forward(
+        &mut self,
+        pending: &PendingTransaction,
+        tables: &[String],
+        concurrency: usize,
+        hooks: &CommitHooks<'_>,
+    ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
+        let wanted: BTreeSet<&str> = tables.iter().map(String::as_str).collect();
+        let adds = self
+            .adds(pending)
+            .map_err(|error| CommitFailure {
+                error,
+                unresolved: false,
+            })?
+            .into_iter()
+            .filter(|add| wanted.contains(add.table.as_str()))
+            .collect();
+        self.commit_transaction(pending, adds, concurrency, hooks, true)
+            .await
+    }
+
     /// Commits every part of the Committed transaction `pending`: one commit
     /// per table that has a part, the others first (at most `concurrency` at
     /// a time) and [`LAST_TABLE`] last. Returns the commits in the order they
@@ -278,10 +483,23 @@ impl DeltaTables {
             error,
             unresolved: false,
         })?;
-        let version = i64::try_from(pending.prefix.last_ordinal).map_err(|_| CommitFailure {
-            error: anyhow!("the transaction's last ordinal does not fit a Delta txn version"),
-            unresolved: false,
-        })?;
+        self.commit_transaction(pending, adds, concurrency, hooks, false)
+            .await
+    }
+
+    async fn commit_transaction(
+        &mut self,
+        pending: &PendingTransaction,
+        adds: Vec<PartAdd>,
+        concurrency: usize,
+        hooks: &CommitHooks<'_>,
+        resolve_from_log: bool,
+    ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
+        let version =
+            txn_version_of(pending.prefix.last_ordinal).map_err(|error| CommitFailure {
+                error,
+                unresolved: false,
+            })?;
         let metadata = HashMap::from([
             (
                 "fireparq.transaction".to_string(),
@@ -296,8 +514,15 @@ impl DeltaTables {
                 json!(pending.prefix.last_ordinal),
             ),
         ]);
-        self.commit_parts(adds, version, metadata, concurrency, hooks)
-            .await
+        self.commit_parts_with(
+            adds,
+            version,
+            metadata,
+            concurrency,
+            hooks,
+            resolve_from_log,
+        )
+        .await
     }
 
     /// Commits `parts` with `txn {appId, version: txn_version}`: one commit
@@ -308,9 +533,22 @@ impl DeltaTables {
         &mut self,
         parts: Vec<PartAdd>,
         txn_version: i64,
+        metadata: HashMap<String, Value>,
+        concurrency: usize,
+        hooks: &CommitHooks<'_>,
+    ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
+        self.commit_parts_with(parts, txn_version, metadata, concurrency, hooks, false)
+            .await
+    }
+
+    async fn commit_parts_with(
+        &mut self,
+        parts: Vec<PartAdd>,
+        txn_version: i64,
         mut metadata: HashMap<String, Value>,
         concurrency: usize,
         hooks: &CommitHooks<'_>,
+        resolve_from_log: bool,
     ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
         let mut seen = std::collections::BTreeSet::new();
         for part in &parts {
@@ -334,6 +572,7 @@ impl DeltaTables {
             version: txn_version,
             metadata: &metadata,
             hooks,
+            resolve_from_log,
         };
         let mut committed = Vec::new();
         for (group, limit) in [(others, concurrency.max(1)), (last, 1)] {
@@ -410,6 +649,48 @@ struct CommitContext<'c> {
     version: i64,
     metadata: &'c HashMap<String, Value>,
     hooks: &'c CommitHooks<'c>,
+    /// Resolve a same-`appId` conflict from the log (roll-forward only).
+    resolve_from_log: bool,
+}
+
+/// The `txn` version of a transaction whose last accepted ordinal is
+/// `ordinal`: a checked `u64` to `i64` conversion (design §3.2).
+fn txn_version_of(ordinal: u64) -> Result<i64> {
+    i64::try_from(ordinal)
+        .map_err(|_| anyhow!("the transaction's last ordinal does not fit a Delta txn version"))
+}
+
+fn log_ahead(
+    table: &str,
+    txn: i64,
+    authority: u64,
+    pending: Option<u64>,
+    app_id: &str,
+) -> anyhow::Error {
+    let pending = pending.map_or(String::new(), |last| {
+        format!(" (the pending transaction ends at ordinal {last})")
+    });
+    anyhow!(
+        "the Delta log of table `{table}` is ahead of this dataset's authority: it holds \
+         transaction {txn} of this stream (`txn` appId {app_id}), but authority has accepted \
+         only up to ordinal {authority}{pending}. Only another writer using this stream's appId, \
+         or an authority restored from an older copy of `.fireparq-ingest/`, leads there. \
+         Nothing was changed; keep the dataset as evidence and build into a new, empty output \
+         root"
+    )
+}
+
+/// On local disk, syncs `table`'s commit files after the checkpoint
+/// `checkpoint` and its `_delta_log/` directory. Remote commits are durable
+/// once they are visible.
+async fn sync_log_tail(store: &DeltaStore, table: &str, checkpoint: Option<u64>) -> Result<()> {
+    if !matches!(store, DeltaStore::Local { .. }) {
+        return Ok(());
+    }
+    let (store, table) = (store.clone(), table.to_string());
+    tokio::task::spawn_blocking(move || store.sync_log_tail(&table, checkpoint))
+        .await
+        .context("the Delta log sync task failed")?
 }
 
 /// Runs the commits of `queue`, at most `limit` at a time. After the first
@@ -482,23 +763,51 @@ async fn commit_table(
     let snapshot = open.table.snapshot().map_err(|error| {
         definite(anyhow::Error::new(error).context(format!("Delta table `{table}` is not loaded")))
     })?;
-    let finalized = CommitBuilder::from(properties)
+    let committed = CommitBuilder::from(properties)
         .with_actions(vec![Action::Add(add)])
         .build(Some(snapshot), open.table.log_store(), operation)
-        .await
-        .map_err(|error| CommitFailure {
-            unresolved: !is_definite(&error),
-            error: anyhow::Error::new(error)
-                .context(format!("committing to the Delta log of table `{table}`")),
-        })?;
-    let version = finalized.version();
-    let retries = finalized.metrics.num_retries;
-    open.table.state = Some(finalized.snapshot());
-    // The commit landed. A failure to make it durable (local disk) is not an
-    // unresolved remote write: local roots have no uncertainty latch.
-    sync_commit(context.store, &table, version, false)
-        .await
-        .map_err(definite)?;
+        .await;
+    let (version, retries, found_in_log) = match committed {
+        Ok(finalized) => {
+            let version = finalized.version();
+            let retries = finalized.metrics.num_retries;
+            open.table.state = Some(finalized.snapshot());
+            // The commit landed. A failure to make it durable (local disk) is
+            // not an unresolved remote write.
+            sync_commit(context.store, &table, version, false)
+                .await
+                .map_err(definite)?;
+            (version, retries, false)
+        }
+        Err(error) if context.resolve_from_log && is_same_app(&error) => {
+            // A winning commit of this stream: an earlier commit of this
+            // transaction whose outcome was unknown landed after all. Its
+            // `txn` decides, never a second copy of the part.
+            let version = resolve_from_log(context, open, &table)
+                .await
+                .map_err(|resolution| {
+                    definite(
+                        anyhow::Error::new(error)
+                            .context(format!("committing to the Delta log of table `{table}`"))
+                            .context(format!("{resolution:#}")),
+                    )
+                })?;
+            tracing::info!(
+                table = %table,
+                version,
+                txn = context.version,
+                "a winning commit of this stream already holds the transaction; its outcome was resolved from the Delta log"
+            );
+            (version, 0, true)
+        }
+        Err(error) => {
+            return Err(CommitFailure {
+                unresolved: !is_definite(&error),
+                error: anyhow::Error::new(error)
+                    .context(format!("committing to the Delta log of table `{table}`")),
+            })
+        }
+    };
     if open.checkpoint_read.elapsed() >= CHECKPOINT_HINT_REFRESH {
         open.checkpoint = read_checkpoint_hint(&open.table, &table).await;
         open.checkpoint_read = Instant::now();
@@ -509,9 +818,42 @@ async fn commit_table(
         version,
         retries,
         elapsed: started.elapsed(),
+        found_in_log,
     };
-    (context.hooks.after)(&commit.table, entry_index).map_err(definite)?;
+    (context.hooks.after)(&commit.table, entry_index).map_err(|error| CommitFailure {
+        unresolved: error.chain().any(|cause| cause.is::<UnknownOutcome>()),
+        error,
+    })?;
     Ok(commit)
+}
+
+/// After a same-`appId` conflict: reloads `open` and returns its version when
+/// its `txn` for this stream is the transaction's, which then holds the part
+/// once. On local disk the log tail is synced first, like a skipped table's.
+async fn resolve_from_log(
+    context: &CommitContext<'_>,
+    open: &mut OpenTable,
+    table: &str,
+) -> Result<u64> {
+    open.table
+        .update_state()
+        .await
+        .with_context(|| format!("reloading Delta table `{table}` after a conflict"))?;
+    let txn = open
+        .table
+        .snapshot()?
+        .transaction_version(open.table.log_store().as_ref(), context.app_id)
+        .await?;
+    ensure!(
+        txn == Some(context.version),
+        "a winning commit of this stream left table `{table}` at `txn` {txn:?}, not the \
+         transaction's {}",
+        context.version
+    );
+    open.checkpoint = read_checkpoint_hint(&open.table, table).await;
+    open.checkpoint_read = Instant::now();
+    sync_log_tail(context.store, table, open.checkpoint).await?;
+    open.version()
 }
 
 /// Whether a failed commit certainly wrote nothing: a conflict with a winning
@@ -531,15 +873,19 @@ fn is_definite(error: &DeltaTableError) -> bool {
 /// stream (`ConcurrentTransaction`): the parts are not added twice.
 pub fn is_same_app_conflict(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<DeltaTableError>(),
-            Some(DeltaTableError::Transaction {
-                source: TransactionError::CommitConflict(
-                    CommitConflictError::ConcurrentTransaction
-                )
-            })
-        )
+        cause
+            .downcast_ref::<DeltaTableError>()
+            .is_some_and(is_same_app)
     })
+}
+
+fn is_same_app(error: &DeltaTableError) -> bool {
+    matches!(
+        error,
+        DeltaTableError::Transaction {
+            source: TransactionError::CommitConflict(CommitConflictError::ConcurrentTransaction)
+        }
+    )
 }
 
 async fn sync_commit(store: &DeltaStore, table: &str, version: u64, created: bool) -> Result<()> {
@@ -552,13 +898,17 @@ async fn sync_commit(store: &DeltaStore, table: &str, version: u64, created: boo
         .context("the Delta commit sync task failed")?
 }
 
+/// Opens table `name`, creating it when it is missing and `create_missing`
+/// (which needs its `columns`). Without `columns` the table must exist, and
+/// its schema is not validated.
 async fn open_or_create(
     store: &DeltaStore,
     identity: &DeltaIdentity,
     expected: &HashMap<String, String>,
     name: &str,
-    columns: &[StructField],
+    columns: Option<&[StructField]>,
     create_missing: bool,
+    created: CreatedHook<'_>,
 ) -> Result<OpenTable> {
     let log_store = store.log_store(name)?;
     let opened = if store.lacks_local_log(name)? {
@@ -571,18 +921,28 @@ async fn open_or_create(
     let table = match opened {
         Ok(table) => table,
         Err(DeltaTableError::NotATable(_)) => {
-            ensure!(
-                create_missing,
-                "the stream has committed transactions, but table `{name}` has no Delta log: \
-                 its rows are unreachable. A dataset written before Delta commits (or whose \
-                 `_delta_log/` was removed) cannot be resumed; build into a new, empty output root"
-            );
+            let columns = match columns {
+                Some(columns) if create_missing => columns,
+                Some(_) => bail!(
+                    "the stream has committed transactions, but table `{name}` has no Delta log: \
+                     its rows are unreachable. A dataset written before Delta commits (or whose \
+                     `_delta_log/` was removed) cannot be resumed; build into a new, empty output \
+                     root"
+                ),
+                None => bail!(
+                    "table `{name}` has no Delta log. A dataset interrupted while its tables were \
+                     being created is completed by the next `build`, which creates them; \
+                     otherwise the log was removed and the dataset cannot be recovered"
+                ),
+            };
             match create_table(log_store.clone(), name, columns.to_vec(), identity).await {
                 Ok(table) => {
                     sync_commit(store, name, 0, true).await?;
+                    created(name)?;
                     table
                 }
-                // Another writer may have created it first: validate theirs.
+                // Another writer, or an earlier start whose request had no
+                // answer, created it first: validate theirs.
                 Err(error) => open_table(log_store)
                     .await
                     .map_err(|_| anyhow::Error::new(error).context("creating the Delta table"))?,
@@ -599,11 +959,12 @@ async fn open_or_create(
     })
 }
 
-/// The table must be exactly what [`create_table`] makes for this stream.
+/// The table must be exactly what [`create_table`] makes for this stream
+/// (its schema only when `columns` are given).
 fn validate(
     table: &DeltaTable,
     name: &str,
-    columns: &[StructField],
+    columns: Option<&[StructField]>,
     expected: &HashMap<String, String>,
 ) -> Result<()> {
     let snapshot = table.snapshot()?;
@@ -651,6 +1012,9 @@ fn validate(
         metadata.partition_columns() == &[PARTITION_COLUMN.to_string()],
         "Delta table `{name}` is not partitioned by `{PARTITION_COLUMN}` alone"
     );
+    let Some(columns) = columns else {
+        return Ok(());
+    };
     let expected_schema = StructType::try_new(columns.to_vec())?;
     ensure!(
         *snapshot.schema() == expected_schema,

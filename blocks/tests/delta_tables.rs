@@ -807,8 +807,9 @@ async fn s3_build_writes_delta_tables_with_conditional_log_commits() {
 /// (`docs/design/delta-lake.md` §4): every Delta commit of a transaction is
 /// durable, `blocks` last, and the process dies before authority advances.
 /// The restart advances authority and continues; each table holds each
-/// transaction exactly once. (A crash between table commits needs the
-/// `txn`-gated roll-forward of #643 L4.)
+/// transaction exactly once. (Every row of the crash matrix, with
+/// maintenance between the crash and the restart, is in
+/// `delta_recovery.rs`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crash_after_every_delta_commit_restarts_without_a_duplicate() {
     let dir = tempfile::tempdir().unwrap();

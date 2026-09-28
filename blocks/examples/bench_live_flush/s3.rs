@@ -4,7 +4,9 @@
 //!
 //! Semantics are the subset protected ingestion uses: path-style GET/HEAD/PUT/
 //! DELETE, `If-None-Match: *` and `If-Match` conditions, pinned `versionId`
-//! reads, byte ranges and ListObjectsV2. Every request waits half its injected
+//! reads, byte ranges and ListObjectsV2, plus the `DeleteObjects` batch that
+//! `deltalake`'s VACUUM sends (`blocks/tests/delta_recovery.rs` runs it
+//! against this endpoint). Every request waits half its injected
 //! latency before it is applied and half after, like a symmetric round trip;
 //! with `slow_every = N`, every Nth request (by arrival) waits `slow` instead.
 //! Each request is logged with wall-clock start/end times for phase analysis.
@@ -232,6 +234,35 @@ impl Server {
             .collect()
     }
 
+    /// Stores `bytes` at `key` without any condition, as an operator
+    /// restoring an older copy would (`blocks/tests/delta_recovery.rs`).
+    pub fn put(&self, key: &str, bytes: Bytes) {
+        let mut objects = self.state.objects.lock().unwrap();
+        objects.1 += 1;
+        let digest = Sha256::digest(&bytes);
+        let etag = format!(
+            "\"{}\"",
+            digest[..16]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let version = format!("v{:010}", objects.1);
+        objects.0.insert(
+            key.to_string(),
+            Stored {
+                bytes,
+                etag,
+                version,
+            },
+        );
+    }
+
+    /// Deletes `key`, as an external cleanup would; whether it existed.
+    pub fn remove(&self, key: &str) -> bool {
+        self.state.objects.lock().unwrap().0.remove(key).is_some()
+    }
+
     /// `(objects, bytes)` of data parts (`*.parquet` outside `_fireparq/`).
     pub fn data_objects(&self) -> (usize, u64) {
         let objects = self.state.objects.lock().unwrap();
@@ -367,6 +398,8 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Full<
     } else if key.is_empty() {
         if method == "GET" && query.get("list-type").map(String::as_str) == Some("2") {
             list(&state, &query)
+        } else if method == "POST" && query.contains_key("delete") {
+            delete_objects(&state, &body)
         } else if method == "HEAD" {
             (StatusCode::OK, Vec::new(), Bytes::new())
         } else {
@@ -498,6 +531,37 @@ fn list(
         StatusCode::OK,
         vec![("content-type", "application/xml".into())],
         Bytes::from(xml),
+    )
+}
+
+/// `DeleteObjects` (`POST /?delete`), which `deltalake`'s VACUUM uses: every
+/// `<Key>` of the request is deleted and reported deleted.
+fn delete_objects(state: &State, body: &[u8]) -> (StatusCode, Vec<(&'static str, String)>, Bytes) {
+    let request = String::from_utf8_lossy(body);
+    let mut objects = state.objects.lock().unwrap();
+    let mut deleted = String::new();
+    for piece in request.split("<Key>").skip(1) {
+        let Some((key, _)) = piece.split_once("</Key>") else {
+            return error(StatusCode::BAD_REQUEST, "MalformedXML");
+        };
+        let key = key
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&");
+        objects.0.remove(&key);
+        deleted.push_str(&format!(
+            "<Deleted><Key>{}</Key></Deleted>",
+            xml_escape(&key)
+        ));
+    }
+    (
+        StatusCode::OK,
+        vec![("content-type", "application/xml".into())],
+        Bytes::from(format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{deleted}</DeleteResult>"
+        )),
     )
 }
 
