@@ -22,7 +22,15 @@ For each table it runs, in order:
    tombstone older than the retention names, and never a part that `build`
    published but has not committed yet. A full VACUUM (`FULL_VACUUM=1`, run
    weekly) also deletes untracked files older than the retention (the files of
-   a failed OPTIMIZE), so the job refuses it below 168 hours.
+   a failed OPTIMIZE), so the job refuses it below 168 hours. It never deletes
+   anything in a table's top-level `metadata/` directory, where an Apache
+   XTable sync writes the table's Iceberg metadata (`*.metadata.json`,
+   `snap-*.avro`, manifests, `version-hint.text`) over the same Parquet files;
+   Delta writes nothing there. delta-rs's full VACUUM would take those files
+   for orphans, so the job has delta-rs plan it (a dry run) and deletes every
+   planned file outside `metadata/` itself. A full VACUUM therefore adds no
+   `VACUUM START` or `VACUUM END` entry to the log (a lite one still does);
+   its record is the job's `table` line.
 3. **A checkpoint**, after VACUUM: a checkpoint drops expired tombstones, and
    a VACUUM after it would leave their files behind. It is skipped when
    VACUUM failed.
@@ -42,7 +50,9 @@ line goes to stdout:
   `version` (the binary's);
 - one line per table: `table` with `version_before`, `dates_to_compact`,
   `compacted` (`date`, `files_removed`, `files_added`), `vacuum` (`mode`,
-  `retention_hours`, `files_deleted`), `checkpoint_version`, `version_after`,
+  `retention_hours`, `files_deleted`, and for a full VACUUM
+  `iceberg_metadata_kept`: the files in `metadata/` that were old enough to
+  delete and were kept), `checkpoint_version`, `version_after`,
   `conflicts`, `errors`, `open_date` and `seconds`; or `skipped` with `table`,
   `reason` and `open_date` for a table that does not exist yet;
 - `blocks_error` when `blocks` cannot be read (no date is closed then);
@@ -123,7 +133,8 @@ weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
   real `build`, on local disk and on a loopback S3 endpoint, and checks the
   exact rows (DuckDB and delta-rs), the `txn` versions and the file counts
   afterwards; `maintenance/tests/cli.rs` checks its configuration errors,
-  exit statuses, redaction and skipped tables. The `blocks` tests find the
+  exit statuses, redaction, skipped tables, and a full VACUUM that deletes
+  old orphans but keeps `metadata/`. The `blocks` tests find the
   binary next to `fireparq` (`cargo test --workspace` or
   `cargo build -p fireparq-maintenance` builds it) or at
   `FIREPARQ_MAINTENANCE`, and skip without it unless

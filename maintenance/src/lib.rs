@@ -21,7 +21,11 @@
 //!    published but has not committed yet. Full (`FULL_VACUUM=1`, weekly)
 //!    also deletes untracked files older than the retention, so it runs only
 //!    with the enforced retention of at least 168 h
-//!    (`delta.deletedFileRetentionDuration`).
+//!    (`delta.deletedFileRetentionDuration`). It never deletes the table's
+//!    top-level `metadata/` directory ([`ICEBERG_METADATA_DIR`]), the Iceberg
+//!    metadata of an Apache XTable sync: delta-rs plans it (a dry run), and
+//!    the job deletes the other planned files itself, without delta-rs's
+//!    `VACUUM START` and `VACUUM END` commits.
 //! 3. A checkpoint, after VACUUM: a checkpoint drops expired tombstones, so a
 //!    lite VACUUM after it would never see them and their files would stay as
 //!    orphans. The checkpoint is skipped when VACUUM failed, and no OPTIMIZE
@@ -83,8 +87,10 @@ use deltalake_core::operations::vacuum::VacuumMode;
 use deltalake_core::parquet::basic::{Compression, ZstdLevel};
 use deltalake_core::parquet::file::properties::WriterProperties;
 use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError, FilterOp, FilterValue};
+use futures::stream::{self, StreamExt};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjectPath;
 use object_store::{ClientOptions, ObjectStore};
 use serde_json::{json, Map, Value};
 use url::Url;
@@ -92,6 +98,14 @@ use url::Url;
 /// A full VACUUM deletes untracked files, so it never runs with a shorter
 /// retention (design §4.1).
 pub const MIN_FULL_VACUUM_HOURS: u64 = 168;
+
+/// The top-level directory of a table where an Apache XTable sync writes the
+/// table's Iceberg metadata (`*.metadata.json`, `snap-*.avro`, manifests and
+/// `version-hint.text`), beside `_delta_log/` and over the same Parquet
+/// files. Delta never writes there (the data is under `date=<day>/`), but
+/// delta-rs's full VACUUM takes every file that the log does not name, outside
+/// `_` and `.` directories, for an orphan: the job never deletes it.
+pub const ICEBERG_METADATA_DIR: &str = "metadata";
 
 /// Where the job reads its settings: the process environment in the binary,
 /// an explicit map in tests. `None` is an unset variable.
@@ -530,6 +544,48 @@ fn is_conflict(error: &DeltaTableError) -> bool {
     )
 }
 
+/// Deletes the files of a full VACUUM's plan (delta-rs's dry run, paths
+/// relative to the table root) but those in [`ICEBERG_METADATA_DIR`], and none
+/// in a dry run. Returns the number of files deleted (or that would be) and of
+/// Iceberg metadata files kept.
+async fn delete_planned(
+    table: &DeltaTable,
+    planned: &[String],
+    dry_run: bool,
+) -> DeltaResult<(usize, usize)> {
+    let mut to_delete = Vec::with_capacity(planned.len());
+    let mut kept = 0;
+    for path in planned {
+        // As delta-rs deletes: `Path::parse` keeps the plan's percent-encoding,
+        // where `Path::from` would encode each `%` again.
+        let path = ObjectPath::parse(path).map_err(object_store::Error::from)?;
+        if path
+            .parts()
+            .next()
+            .is_some_and(|part| part.as_ref() == ICEBERG_METADATA_DIR)
+        {
+            kept += 1;
+        } else {
+            to_delete.push(path);
+        }
+    }
+    let deleted = to_delete.len();
+    if dry_run {
+        return Ok((deleted, kept));
+    }
+    let mut results = table
+        .object_store()
+        .delete_stream(stream::iter(to_delete.into_iter().map(Ok)).boxed());
+    while let Some(result) = results.next().await {
+        match result {
+            // Already gone (a concurrent run): deleted, as delta-rs counts it.
+            Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok((deleted, kept))
+}
+
 /// No checkpoint and no log cleanup after an OPTIMIZE or VACUUM commit: the
 /// job checkpoints once, after VACUUM.
 fn no_post_commit_hooks() -> CommitProperties {
@@ -694,7 +750,9 @@ async fn maintain(
         let mut builder = table
             .clone()
             .vacuum()
-            .with_dry_run(settings.dry_run)
+            // A full VACUUM only plans here: the job deletes the planned
+            // files itself, keeping the Iceberg metadata (`delete_planned`).
+            .with_dry_run(settings.dry_run || settings.full_vacuum)
             .with_enforce_retention_duration(enforce)
             .with_mode(if settings.full_vacuum {
                 VacuumMode::Full
@@ -707,10 +765,25 @@ async fn maintain(
                 i64::try_from(hours).unwrap_or(i64::MAX / 3_600_000),
             ));
         }
-        match builder.await {
+        let deleted = match builder.await {
+            Ok((after, metrics)) if settings.full_vacuum => {
+                table = after;
+                delete_planned(&table, &metrics.files_deleted, settings.dry_run)
+                    .await
+                    .map(|(deleted, kept)| {
+                        vacuum.insert("iceberg_metadata_kept".into(), json!(kept));
+                        deleted
+                    })
+            }
             Ok((after, metrics)) => {
                 table = after;
-                vacuum.insert("files_deleted".into(), json!(metrics.files_deleted.len()));
+                Ok(metrics.files_deleted.len())
+            }
+            Err(error) => Err(error),
+        };
+        match deleted {
+            Ok(deleted) => {
+                vacuum.insert("files_deleted".into(), json!(deleted));
                 vacuumed = true;
             }
             Err(error) => report.failed("vacuum", &error),
