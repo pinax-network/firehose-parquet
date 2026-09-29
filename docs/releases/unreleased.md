@@ -16,7 +16,7 @@ empty when the release is cut.
 
 ## Fixes
 
-- **A provider blip no longer strands S3 ownership** ([#646](https://github.com/pinax-network/firehose-parquet/issues/646), option 3;
+- **A provider blip no longer strands S3 ownership** ([#646](https://github.com/pinax-network/firehose-parquet/issues/646), option 3, [#686](https://github.com/pinax-network/firehose-parquet/pull/686);
   [record](../audit/646-uncertain-mutation-readback.md)).
   - **Readback.** When a PUT's outcome is unknown (timeout, lost
     acknowledgement, connection reset, gateway 5xx), `build` now reads the key
