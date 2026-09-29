@@ -4,7 +4,7 @@
 # beside a running `fireparq build`
 # on one network bucket: hourly OPTIMIZE of closed dates, lite VACUUM, a
 # checkpoint and log cleanup, and a weekly full VACUUM with the enforced 168 h
-# retention. See README "Delta maintenance" and docs/design/delta-lake.md §9.
+# retention. See docs/delta-maintenance.md and docs/design/delta-lake.md §9.
 #
 # Placeholders: the namespace `lake`, the bucket `ethereum-mainnet`, the
 # endpoint `https://rgw.example.internal` and the Secret `delta-maintenance-s3`.

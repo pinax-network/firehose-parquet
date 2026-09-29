@@ -1,7 +1,7 @@
 //! Helpers shared by the tests that read fireparq's Delta tables with the
 //! target engines (#643): `engine_compat.rs`, `delta_tables.rs`,
 //! `delta_maintenance.rs`, `delta_recovery.rs`, `delta_readers.rs` and
-//! `non_final_stream.rs` (the README live view).
+//! `non_final_stream.rs` (the live view of docs/non-final-streams.md).
 //!
 //! Readers and tools:
 //!

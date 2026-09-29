@@ -45,7 +45,7 @@ NEW(A), NEW(A), UNDO(A) have the same unordered rows but opposite terminal state
 Anti-joining every UNDO loses the re-added A; signed event counts are unsafe with
 repeated deliveries. Retaining block height/timestamp does not resolve the tie.
 
-The [README query](../../README.md#non-final-streams-and-reorgs) therefore returns
+The [README query](../non-final-streams.md) therefore returns
 a deliberately narrower, correct result: distinct block identities that are both
 observed positive events and present in a separate finalized-only same-chain
 reference. The reference supplies canonical finality, independently of event

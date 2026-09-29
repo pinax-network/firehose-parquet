@@ -2805,7 +2805,8 @@ mod tests {
     }
 
     /// `scan` is removed (#643): DuckDB `delta_scan` and Polars `scan_delta`
-    /// read the tables, and `deltalake` summarizes a table's log (README).
+    /// read the tables, and `deltalake` summarizes a table's log
+    /// (docs/reading-tables.md).
     /// `validate` reads a pinned Delta snapshot, `inspect` one file.
     #[test]
     fn test_scan_is_removed_and_readers_follow_the_delta_log() {

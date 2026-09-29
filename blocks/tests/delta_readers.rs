@@ -2,8 +2,8 @@
 //! reads the active files of a pinned snapshot, never a directory listing, so
 //! a file that OPTIMIZE replaced (tombstoned but still on disk) and the log's
 //! checkpoint Parquet files are not read as data. `inspect` reads one file.
-//! The README's table summary from the Delta log, which replaced `scan`,
-//! runs against the same table.
+//! The table summary from the Delta log of docs/reading-tables.md, which
+//! replaced `scan`, runs against the same table.
 //!
 //! A cursor-aware mock Firehose serves four final EVM blocks over two UTC
 //! days, and `build` writes them with one transaction per block, locally and
@@ -388,9 +388,9 @@ fn walked_block_rows(table: &Path) -> usize {
     rows
 }
 
-/// The README's "Table summary from the Delta log" (files, rows, bytes and
-/// days of the active files), from the delta-rs snapshot. The README's own
-/// Polars program reads the same `add` actions through delta-rs.
+/// The "Table summary from the Delta log" of docs/reading-tables.md (files,
+/// rows, bytes and days of the active files), from the delta-rs snapshot. The
+/// documented Polars program reads the same `add` actions through delta-rs.
 fn readme_summary(table: &DeltaTable) -> Value {
     let snapshot = table.snapshot().unwrap();
     let files: Vec<_> = snapshot.log_data().iter().collect();
@@ -495,7 +495,7 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
         let inspected = fireparq(&cwd, &["inspect", checkpoint.to_str().unwrap()], &[]).await;
         assert!(inspected.status.success(), "{}", text(&inspected));
 
-        // The README's summary, from the log alone, replaces `scan`.
+        // The documented summary, from the log alone, replaces `scan`.
         let summary = readme_summary(&common::open_local(&root, "blocks").await);
         let sizes: u64 = active_files(&table)
             .keys()

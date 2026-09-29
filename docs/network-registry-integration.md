@@ -59,7 +59,7 @@ Current fallbacks, all verified by streaming blocks with a StreamingFast-compati
 | `tron` | `mainnet.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 | `tron-evm` | `mainnet-evm.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 
-StreamingFast endpoints need a credential that StreamingFast accepts, for example a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. Since #562, legacy `SUBSTREAMS_*` variables are Pinax-only defaults; custom endpoints require explicit credential selectors. See the README Authentication section.
+StreamingFast endpoints need a credential that StreamingFast accepts, for example a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. Since #562, legacy `SUBSTREAMS_*` variables are Pinax-only defaults; custom endpoints require explicit credential selectors. See [Authentication](authentication.md).
 
 Current exclusions:
 

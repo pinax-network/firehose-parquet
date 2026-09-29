@@ -1,0 +1,26 @@
+# Features
+
+What `fireparq` does; each item links to the page that documents it.
+
+- **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection ([details](cli.md))
+- **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules ([details](chains/README.md))
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is a Delta `timestamp` (Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)`, so DuckDB, Polars and ClickHouse read it as a timestamp) and keeps sub-second block times, to the millisecond, where Firehose provides them; `date` is the partition column, the UTC day of the block time, stored as the `date=YYYY-MM-DD` directory rather than in the files. For Solana, canonical `timestamp` stays null when `block_time` is missing, and such a row's `date` is its routing day, the last known block time. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit) ([details](output-layout.md#canonical-identity-columns))
+- **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth ([details](authentication.md))
+- **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides ([details](cli.md#network-aliases))
+- **Automatic retry / resume** — exponential back-off on connection errors; restarts from the authoritative output checkpoint ([details](cli.md#connection-errors))
+- **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts ([details](cli.md#advanced-recovery--override-behavior))
+- **Crash recovery** — all-table transactions and an authoritative output checkpoint; an interrupted transaction is rolled forward exactly once into each Delta table, gated by its `txn`; `_fireparq/cursor.parquet` remains an optional compatible mirror ([details](cursor-and-resume.md#crash-recovery))
+- **S3-aware cursor** — cursor automatically stored alongside output (local or S3) ([details](cursor-and-resume.md#s3-aware-cursor))
+- **Delta Lake tables** — every table is a Delta table: its log in `<table>/_delta_log/`, its data files in `<table>/date=YYYY-MM-DD/`, and `date` its partition column; DuckDB (`delta_scan`) and Polars (`scan_delta`) read it through the log ([reading the tables](reading-tables.md), [engine compatibility](reading-tables.md#engine-compatibility))
+- **Delta maintenance** — `fireparq-maintenance`, a separate binary of off-the-shelf delta-rs operations, compacts closed days, vacuums and checkpoints beside the writer, with an image and example Kubernetes CronJobs ([Delta maintenance](delta-maintenance.md))
+- **Delta Lake types** — every part is a Delta data file: checked signed integers, `decimal(20,0)` for currency amounts and other unchecked 64-bit values, `string` enums and microsecond timestamps, mapped once per flush before anything is written ([type mapping](schemas/README.md))
+- **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](cli.md#flush-interval-and-catch-up))
+- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](non-final-streams.md#canonical-live-view))
+- **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](chains/failed-transactions.md))
+- **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads are `binary` and account indices `array<short>` ([details](output-layout.md#output-encoding-by-block-type))
+- **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none ([details](output-layout.md#parquet-lookup-metadata))
+- **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer ([details](output-layout.md#parquet-file-metadata))
+- **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors ([details](metrics.md))
+- **Graceful shutdown** — SIGINT/SIGTERM and write/stream errors never save the cursor past unwritten data; the next run resumes from the last committed flush ([details](cursor-and-resume.md#graceful-shutdown))
+- **Docker support** — multi-stage Dockerfile, published to GHCR ([details](getting-started.md#docker))
+- **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet parts, committed to the Delta tables as they are ([details](development.md#repository-structure))

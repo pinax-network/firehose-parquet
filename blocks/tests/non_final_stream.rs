@@ -1,5 +1,5 @@
 //! Exercise reversible CLI selection, append-only events and the bounded warning,
-//! the durable per-row `stream_ordinal`, the README canonical live view (over
+//! the durable per-row `stream_ordinal`, the documented canonical live view (over
 //! the Delta tables, with DuckDB's `delta` extension), and a non-final build
 //! whose committed parts disappear under it.
 mod common;
@@ -256,7 +256,7 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
 }
 
 // ---------------------------------------------------------------------------
-// Cursor-aware replay: `stream_ordinal`, the README live view and expired parts
+// Cursor-aware replay: `stream_ordinal`, the documented live view and expired parts
 // ---------------------------------------------------------------------------
 
 const CHAIN: &str = "nonfinal-test";
@@ -633,16 +633,19 @@ fn scalars_as_text(value: &Value) -> Value {
         other => other.clone(),
     }
 }
-/// The SQL blocks of the README "Non-final streams and reorgs" section: the
-/// canonical live view.
-fn readme_sql() -> Vec<String> {
-    let readme =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md")).unwrap();
-    let section = readme
-        .split("### Non-final streams and reorgs\n")
+/// The SQL blocks of the "Canonical live view" section of
+/// `docs/non-final-streams.md`.
+fn live_view_sql() -> Vec<String> {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/non-final-streams.md"
+    ))
+    .unwrap();
+    let section = doc
+        .split("\n## Canonical live view\n")
         .nth(1)
-        .expect("README non-final section")
-        .split("\n### ")
+        .expect("docs/non-final-streams.md live view section")
+        .split("\n## ")
         .next()
         .unwrap();
     section
@@ -669,9 +672,10 @@ const HISTORY: [Envelope; 8] = [
 /// `stream_ordinal` is the accepted-event ordinal: one per delivered envelope,
 /// strictly increasing in delivery order, continued across an in-process
 /// reconnect and a restarted build, identical for the rows of one envelope in
-/// every table and inside its part's recorded window. The README live view,
-/// read through the Delta logs with `delta_scan`, then selects exactly the
-/// canonical head: B at 100, C at 101 once (the later NEW), nothing at 102.
+/// every table and inside its part's recorded window. The live view of
+/// `docs/non-final-streams.md` (formerly in the README), read through the
+/// Delta logs with `delta_scan`, then selects exactly the canonical head: B at
+/// 100, C at 101 once (the later NEW), nothing at 102.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canonical_head() {
     let dir = tempfile::tempdir().unwrap();
@@ -759,8 +763,8 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
     let Some(duckdb) = common::DuckDb::open(dir.path()) else {
         return;
     };
-    let sql = readme_sql();
-    assert_eq!(sql.len(), 1, "README live view: {sql:?}");
+    let sql = live_view_sql();
+    assert_eq!(sql.len(), 1, "documented live view: {sql:?}");
     assert!(
         sql[0].contains("delta_scan('live/mainnet/blocks')"),
         "{}",
