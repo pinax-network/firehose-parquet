@@ -24,6 +24,14 @@ pub(crate) enum Fault {
     ForbiddenPart,
     /// Refuse every control-record PUT with HTTP 403 without storing it.
     ForbiddenControl,
+    /// Drop the connection of a part PUT without storing it: the request was
+    /// cut before the provider applied it (#646).
+    ResetPartUnstored,
+    /// Drop the connection of a part PUT, then apply the PUT after this delay,
+    /// as a provider still processing it would (#646).
+    LatePart(Duration),
+    /// The same for every control-record PUT (#646).
+    LateControl(Duration),
 }
 #[derive(Clone)]
 pub(crate) struct Stored {
@@ -159,6 +167,12 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
     tokio::time::sleep_until(arrived + delay / 2).await;
     let is_part = path.ends_with(".parquet");
     let listing = query.get("list-type").is_some_and(|s| s == "2");
+    let late_control = match state.lock().unwrap().fault {
+        Fault::LateControl(after) if method == "PUT" && path.contains("/.fireparq-ingest/") => {
+            Some(after)
+        }
+        _ => None,
+    };
     let (status, mut body, stored, fault) = {
         let mut state = state.lock().unwrap();
         let receipt_verified = if is_part && method == "PUT" {
@@ -200,7 +214,6 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
                 None => (404, error("NoSuchKey"), None, Fault::None),
             },
             "PUT" => {
-                let existing = state.objects.get(&path);
                 let forbidden = match state.fault {
                     Fault::ForbiddenPart => is_part,
                     Fault::ForbiddenControl => path.contains("/.fireparq-ingest/"),
@@ -208,20 +221,40 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
                 };
                 if forbidden {
                     (403, error("AccessDenied"), None, Fault::None)
-                } else if headers.get("if-none-match").is_some_and(|s|s=="*" && existing.is_some())
-                    || headers.get("if-match").is_some_and(|s|existing.is_none_or(|o|s!=&o.etag)) {
-                    (412, error("PreconditionFailed"), None, Fault::None)
+                } else if late_control.is_some()
+                    || (is_part && matches!(fault, Fault::ResetPartUnstored | Fault::LatePart(_)))
+                {
+                    // Applied later, or never, after the connection is dropped below.
+                    (0, Vec::new(), None, fault)
                 } else {
-                    state.revision += 1;
-                    let object = Stored { bytes: payload, etag: format!("\"etag-{}\"",state.revision), version:format!("v{}",state.revision) };
-                    state.objects.insert(path.clone(), object.clone());
-                    (200, Vec::new(), Some(object), fault)
+                    match apply_put(&mut state, &path, &headers, payload.clone()) {
+                        Some(object) => (200, Vec::new(), Some(object), fault),
+                        None => (412, error("PreconditionFailed"), None, Fault::None),
+                    }
                 }
             }
             "DELETE" => { state.objects.remove(&path); (204, Vec::new(), None, Fault::None) }
             _ => panic!("unexpected fixture request"),
         }
     };
+    if let Some(after) = late_control {
+        let _ = socket.shutdown().await;
+        tokio::time::sleep(after).await;
+        let mut state = state.lock().unwrap();
+        let _ = apply_put(&mut state, &path, &headers, payload);
+        return;
+    }
+    if method == "PUT" && matches!(fault, Fault::ResetPartUnstored) {
+        let _ = socket.shutdown().await;
+        return;
+    }
+    if let (true, Fault::LatePart(after)) = (method == "PUT", fault) {
+        let _ = socket.shutdown().await;
+        tokio::time::sleep(after).await;
+        let mut state = state.lock().unwrap();
+        let _ = apply_put(&mut state, &path, &headers, payload);
+        return;
+    }
     if method == "PUT" && matches!(fault, Fault::DelayedPartAck) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -274,4 +307,31 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
 }
 fn error(code: &str) -> Vec<u8> {
     format!("<Error><Code>{code}</Code><Message>fixture</Message></Error>").into_bytes()
+}
+
+/// Apply one PUT with its S3 preconditions: `None` when refused (412).
+fn apply_put(
+    state: &mut State,
+    path: &str,
+    headers: &HashMap<String, String>,
+    payload: Vec<u8>,
+) -> Option<Stored> {
+    let existing = state.objects.get(path);
+    if headers
+        .get("if-none-match")
+        .is_some_and(|s| s == "*" && existing.is_some())
+        || headers
+            .get("if-match")
+            .is_some_and(|s| existing.is_none_or(|o| s != &o.etag))
+    {
+        return None;
+    }
+    state.revision += 1;
+    let object = Stored {
+        bytes: payload,
+        etag: format!("\"etag-{}\"", state.revision),
+        version: format!("v{}", state.revision),
+    };
+    state.objects.insert(path.to_owned(), object.clone());
+    Some(object)
 }

@@ -180,6 +180,17 @@ impl NativeS3Upload {
     }
 }
 
+/// The provider refused the conditional upload with 412 or 409: another
+/// request occupies or is writing the name. Not this request's object, so it
+/// is never read back as proof, and it stays uncertain ([`condition_refusal`]).
+///
+/// [`condition_refusal`]: crate::dataset_lock_s3::condition_refusal
+#[derive(Debug, thiserror::Error)]
+#[error("native conditional upload returned HTTP {status}; retain ownership")]
+pub(crate) struct ConditionRefused {
+    pub(crate) status: u16,
+}
+
 pub(crate) struct PreparedUpload {
     http: Client,
     request: reqwest::Request,
@@ -200,6 +211,15 @@ impl PreparedUpload {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
         ) {
             return Err(ProviderRejected {
+                status: status.as_u16(),
+            }
+            .into());
+        }
+        if matches!(
+            status,
+            reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
+        ) {
+            return Err(ConditionRefused {
                 status: status.as_u16(),
             }
             .into());

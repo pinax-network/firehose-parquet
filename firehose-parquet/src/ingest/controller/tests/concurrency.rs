@@ -102,7 +102,7 @@ struct Remote {
     part_puts: AtomicUsize,
     journal_puts: AtomicUsize,
     violations: Mutex<Vec<String>>,
-    lose_ack_suffix: Mutex<Option<String>>,
+    cut_suffix: Mutex<Option<String>>,
 }
 impl std::fmt::Display for Remote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -175,21 +175,23 @@ impl ObjectStore for Remote {
             self.violations.lock().unwrap().push(key.clone());
         }
         tokio::time::sleep(Duration::from_millis(self.put_delay_ms)).await;
-        let result = self.inner.put_opts(path, payload, opts).await;
-        self.running.fetch_sub(1, Ordering::SeqCst);
-        let lose = self
-            .lose_ack_suffix
+        // A request cut before the provider applied it: its outcome is unknown
+        // to the writer, and no readback can prove it (#646).
+        let cut = self
+            .cut_suffix
             .lock()
             .unwrap()
             .as_deref()
             .is_some_and(|suffix| key.contains(suffix));
-        if lose {
-            result?;
+        if cut {
+            self.running.fetch_sub(1, Ordering::SeqCst);
             return Err(object_store::Error::Generic {
                 store: "fixture",
-                source: "acknowledgement lost after acceptance".into(),
+                source: "request cut before the provider applied it".into(),
             });
         }
+        let result = self.inner.put_opts(path, payload, opts).await;
+        self.running.fetch_sub(1, Ordering::SeqCst);
         result
     }
     async fn get_opts(
@@ -406,11 +408,11 @@ async fn byte_budget_bounds_inflight_parts_and_reencodes_refused_growth() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_lost_acknowledgement_drains_parallel_work_without_advancing_authority() {
+async fn remote_uncertain_publication_drains_parallel_work_without_advancing_authority() {
     let backend_suffix = "-2.parquet";
     let backend = Arc::new(Remote {
         put_delay_ms: 20,
-        lose_ack_suffix: Mutex::new(Some(backend_suffix.into())),
+        cut_suffix: Mutex::new(Some(backend_suffix.into())),
         ..Default::default()
     });
     let store: Arc<dyn ObjectStore> = backend.clone();
@@ -450,7 +452,7 @@ async fn remote_lost_acknowledgement_drains_parallel_work_without_advancing_auth
         .await
         .err()
         .unwrap();
-    assert!(!format!("{error:#}").contains("acknowledgement lost after acceptance"));
+    assert!(!format!("{error:#}").contains("request cut before the provider applied it"));
     assert_eq!(controller.authority().checkpoint.ordinal, 0);
     // The mirror still reflects only the initial authority.
     assert_eq!(mirror.head.borrow().as_ref().unwrap().ordinal, 0);

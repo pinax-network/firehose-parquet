@@ -7,7 +7,10 @@ use super::state::{
 };
 use crate::cursor::CursorState;
 use crate::dataset_lock::{DatasetOwnership, LocalOwnership};
-use crate::dataset_lock_s3::{provider_rejection, usable_version, S3Ownership};
+use crate::dataset_lock_s3::{
+    condition_refusal, provider_rejection, reconcile_by_readback, usable_version, Observed,
+    S3Ownership,
+};
 use crate::metrics::{ErrorLabels, PipelineMetrics};
 use crate::writer::ParquetFileMetadata;
 use anyhow::{bail, ensure, Context, Result};
@@ -286,7 +289,7 @@ impl<'a> ProtectedMirror<'a> {
                     failures,
                     resolved: false,
                 };
-                let result = match tokio::time::timeout(
+                let sent = tokio::time::timeout(
                     REQUEST_TIMEOUT,
                     owner.object_store().put_opts(
                         &ObjectPath::from(key.as_str()),
@@ -294,11 +297,10 @@ impl<'a> ProtectedMirror<'a> {
                         options,
                     ),
                 )
-                .await
-                .map_err(|_| anyhow::anyhow!("protected mirror upload timed out"))?
-                {
-                    Ok(result) => result,
-                    Err(error) => {
+                .await;
+                let failure = match sent {
+                    Ok(Ok(result)) => Ok(result),
+                    Ok(Err(error)) => {
                         if let Some(rejected) = provider_rejection(&error) {
                             // A refused request cannot complete later: resolved,
                             // not uncertain. FailureCount still records the save.
@@ -306,7 +308,41 @@ impl<'a> ProtectedMirror<'a> {
                             return Err(anyhow::Error::new(rejected)
                                 .context("publishing the protected cursor mirror"));
                         }
-                        bail!("protected mirror conditional upload failed; retain owner for quiescent recovery")
+                        if condition_refusal(&error) {
+                            // Another request changed the mirror: nothing to read back.
+                            bail!("protected mirror conditional upload failed; retain owner for quiescent recovery")
+                        }
+                        Err("protected mirror conditional upload failed")
+                    }
+                    Err(_) => Err("protected mirror upload timed out"),
+                };
+                let result = match failure {
+                    Ok(result) => result,
+                    Err(failure) => {
+                        // #646: exactly the new checkpoint, read back, proves the
+                        // save. The mirror is rewritten only when it changes, so no
+                        // earlier contents match; absence or the old checkpoint may
+                        // still be followed by the request landing.
+                        let bytes = &bytes;
+                        let exact = reconcile_by_readback(|| async move {
+                            match read_remote(owner, key).await {
+                                Ok(Some((observed, _))) if observed == *bytes => {
+                                    Observed::Exact(observed)
+                                }
+                                _ => Observed::Pending,
+                            }
+                        })
+                        .await;
+                        let Some(observed) = exact else {
+                            bail!("{failure}; retain owner for quiescent recovery")
+                        };
+                        decode(observed, &authority.descriptor)?;
+                        attempt.resolved = true;
+                        tracing::warn!(
+                            "{failure}, but the exact checkpoint is stored: the mirror save is proven"
+                        );
+                        record_success(self.metrics, authority);
+                        return Ok(MirrorOutcome::Repaired);
                     }
                 };
                 let version = UpdateVersion {
