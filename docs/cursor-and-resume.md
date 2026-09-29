@@ -271,11 +271,16 @@ describes an opt-in check of a disposable bucket). Unresolved remote errors reta
 ownership without an expiry or automatic takeover, and the next run fails until
 it is released. A failed `build` releases S3 ownership on exit when every request
 it sent had a definite outcome, including when its failed transaction is still
-pending: the next `build` recovers that transaction before streaming. It keeps
-ownership after an uncertain request (timeout, lost acknowledgement, connection
-reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
-panic, and its error then says why and prints the exact `recovery status` and
-`recovery release` commands. A Delta log commit is the exception: the next
+pending: the next `build` recovers that transaction before streaming. When a
+PUT's outcome is unknown (timeout, lost acknowledgement, connection reset, 5xx),
+it reads the key back for about 15 s: exactly the part, control record, mirror
+or owner record the request writes proves the request, and the build continues
+([#646](audit/646-uncertain-mutation-readback.md)). Absence is never
+proof. It keeps ownership after a request that no readback proves, an ambiguous
+DELETE, a 409/412, a second shutdown signal or a panic, and its error then says
+why and prints the exact `recovery status` and `recovery release` commands. The
+release itself is retried for about two minutes while the provider does not
+answer. A Delta log commit is the exception: the next
 start reads the table's `txn` to learn whether it landed, so an uncertain one
 does not keep the owner. A commit is never resent, but reads of the Delta logs
 (GET, HEAD and listings of log objects and checkpoints) are: up to 3 attempts
@@ -359,7 +364,8 @@ If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
 non-zero. Recovery removes verified parts from an uncommitted transaction before
 replaying its window, or finishes a committed transaction without remapping it.
-S3 ownership is released on exit unless a request had an uncertain outcome.
+S3 ownership is released on exit unless a request had an uncertain outcome
+that an exact readback could not prove.
 S3 recovery additionally requires explicit release after provider-confirmed
 request quiescence whenever the prior owner remains retained.
 
