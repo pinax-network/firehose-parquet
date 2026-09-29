@@ -2452,6 +2452,7 @@ version = "1.0.2"
 dependencies = [
  "chrono",
  "deltalake-core",
+ "futures",
  "object_store 0.13.2",
  "serde_json",
  "tempfile",

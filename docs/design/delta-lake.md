@@ -914,6 +914,11 @@ additions ([Delta maintenance](../delta-maintenance.md) lists every setting):
   `delta.deletedFileRetentionDuration` is below that;
 - `OPTIMIZE_DATES=all`, which also compacts the open date, for a lake whose
   writer has stopped;
+- a full VACUUM never deletes a table's top-level `metadata/` directory, the
+  Iceberg metadata of an Apache XTable sync, which delta-rs's full VACUUM
+  takes for orphans: delta-rs plans it (a dry run), and the job deletes the
+  other planned files itself, so a full VACUUM writes no `VACUUM START` or
+  `VACUUM END` commit;
 - OPTIMIZE and VACUUM run with their post-commit checkpoint and log cleanup
   off, the checkpoint follows only a successful VACUUM, and a lost commit
   race is reported as a conflict for the next run. A conflict is only a lost

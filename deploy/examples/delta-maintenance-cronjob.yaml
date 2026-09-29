@@ -114,7 +114,8 @@ spec:
                 sizeLimit: 4Gi
 ---
 # Weekly full VACUUM: also deletes untracked files older than the enforced
-# 168 h retention (files of a failed OPTIMIZE). It runs half an hour away from
+# 168 h retention (files of a failed OPTIMIZE), but never a table's top-level
+# metadata/ (Iceberg metadata of an XTable sync). It runs half an hour away from
 # the hourly job; an overlap is safe (a lost commit race is retried next run),
 # only wasteful.
 apiVersion: batch/v1
