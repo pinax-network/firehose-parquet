@@ -1166,7 +1166,7 @@ fn test_validate_prefers_existing_local_paths_over_configured_s3_bucket() {
 }
 
 /// `scan` is removed (#643): engines read the tables through their Delta
-/// logs, and `deltalake` summarizes a log (README "Reading the tables").
+/// logs, and `deltalake` summarizes a log (docs/reading-tables.md).
 #[test]
 fn scan_subcommand_is_removed() {
     let error =

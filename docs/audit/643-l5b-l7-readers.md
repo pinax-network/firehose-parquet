@@ -36,7 +36,7 @@ minimal configuration.
   subcommand, its flags, table discovery at a dataset root and its output
   format for what `deltalake` already prints from the log. DuckDB and Polars
   read rows, schemas and samples, and the README's
-  [`deltalake` program](../../README.md#reading-the-tables) gives a table's
+  [`deltalake` program](../reading-tables.md) gives a table's
   files, rows (`numRecords`), bytes and first and last day from the log alone.
   A test runs that README program against a real `build`, so the documented
   replacement cannot drift.

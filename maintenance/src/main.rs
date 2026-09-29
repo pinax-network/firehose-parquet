@@ -1,6 +1,6 @@
 //! `fireparq-maintenance`: the Delta maintenance job of a fireparq lake. The
 //! settings are environment variables, the output is JSON lines on stdout;
-//! see the library docs and README "Delta maintenance".
+//! see the library docs and docs/delta-maintenance.md.
 
 use std::process::ExitCode;
 

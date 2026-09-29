@@ -853,7 +853,7 @@ async fn duckdb_and_delta_rs_read_every_delta_table() {
 /// is unsigned: no credential is read or sent. DuckDB and delta-rs must read
 /// the newest closed day of `blocks` (found from its log) and the child
 /// table: the same rows and block range, pruned to that day's files, with the
-/// canonical types, and the frontier cut of README "Reading the tables".
+/// canonical types, and the frontier cut of docs/reading-tables.md.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_reads_of_a_public_deployment_bucket() {
     let (Ok(endpoint), Ok(bucket)) = (

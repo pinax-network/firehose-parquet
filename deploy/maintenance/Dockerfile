@@ -1,6 +1,6 @@
 # The Delta maintenance job (#643): the `fireparq-maintenance` binary
 # (maintenance/: delta-rs OPTIMIZE, VACUUM, checkpoints and log cleanup),
-# configured by environment variables (README "Delta maintenance"). Published
+# configured by environment variables (docs/delta-maintenance.md). Published
 # as ghcr.io/pinax-network/firehose-parquet-maintenance next to the fireparq
 # image (.github/workflows/docker-publish.yml).
 FROM rust:1.98-bookworm AS builder

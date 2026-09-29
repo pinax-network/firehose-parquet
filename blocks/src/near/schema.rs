@@ -57,7 +57,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("actions", DataType::Utf8, false),
         // The transaction's own outcome: its inclusion and conversion into a
         // receipt. `SuccessReceiptId` does not mean the contract calls succeeded;
-        // the final outcome follows `receipts.success_receipt_id` (#507, README).
+        // the final outcome follows `receipts.success_receipt_id` (#507, docs/chains/near.md).
         Field::new("status", DataType::Utf8, false),
         Field::new("gas_burnt", DataType::UInt64, false),
         // yoctoNEAR, as a decimal string.

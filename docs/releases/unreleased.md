@@ -19,3 +19,15 @@ empty when the release is cut.
 ## Performance
 
 ## Internal
+
+- **Documentation layout.** `README.md` is now a short front page: what
+  `fireparq` does, supported chains, install, a quick start, the recommended
+  deployment in brief and a table of every documentation page. Its detailed
+  sections moved, unchanged, to pages under `docs/`: `getting-started.md`,
+  `authentication.md`, `cli.md`, `features.md`, `non-final-streams.md`,
+  `output-layout.md`, `reading-tables.md`, `deployment.md`,
+  `cursor-and-resume.md`, `delta-maintenance.md`, `metrics.md`,
+  `development.md` and the per-chain notes in `docs/chains/`. The "What's new
+  in v1.0.0" summary is covered by the release notes. The live-view SQL that
+  `blocks/tests/non_final_stream.rs` runs is now read from
+  `docs/non-final-streams.md`.

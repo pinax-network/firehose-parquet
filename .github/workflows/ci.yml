@@ -48,11 +48,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
-      # DuckDB, and blocks/tests/engine_compat.rs, delta_tables.rs and
-      # delta_maintenance.rs read the Delta tables with `delta_scan`, next to
-      # delta-rs (blocks/tests/common/mod.rs); FIREPARQ_REQUIRE_DUCKDB makes a
-      # missing CLI fail instead of skip.
+      # blocks/tests/non_final_stream.rs runs the live-view SQL of
+      # docs/non-final-streams.md in DuckDB, and blocks/tests/engine_compat.rs,
+      # delta_tables.rs and delta_maintenance.rs read the Delta tables with
+      # `delta_scan`, next to delta-rs (blocks/tests/common/mod.rs);
+      # FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
           DUCKDB_VERSION: v1.5.5

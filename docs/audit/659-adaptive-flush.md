@@ -142,7 +142,7 @@ file. The writer switches back to catching up 30 s after the replay resumes.
   `firehose_parquet_flushes_total` gains a `pace` label next to `trigger`, so
   its per-trigger series split by pace.
 - The `--flush-interval-secs` help, `.env.example`, the README flush section
-  ([Flush interval and catch-up](../../README.md#flush-interval-and-catch-up)),
+  ([Flush interval and catch-up](../cli.md#flush-interval-and-catch-up)),
   the two-bucket settings and the metrics table describe the rule.
 
 ## Tests

@@ -300,7 +300,7 @@ The anonymous-S3 results come from moto, not RGW. moto refused some unsigned
 `HEAD` requests that a public-read RGW bucket would allow. L8 added an opt-in
 check against a deployment's bucket
 (`blocks/tests/engine_compat.rs::anonymous_reads_of_a_public_deployment_bucket`,
-README "Engine compatibility"), off in CI; it has not been run against RGW
+[Engine compatibility](../reading-tables.md#engine-compatibility)), off in CI; it has not been run against RGW
 yet.
 
 ### 1.9 Resume-cost measurements
@@ -840,8 +840,8 @@ must still see logs. A test runs `validate` after a simulated OPTIMIZE and
 after a real `deltalake` OPTIMIZE and checkpoint, with the same result. See
 [the L5b/L7 record](../audit/643-l5b-l7-readers.md). Since the Rust-only
 change the real OPTIMIZE and checkpoint are delta-rs's, and the test computes
-the README summary through delta-rs; the README's Python program is kept for
-users but no longer run.
+the table summary of [Reading the tables](../reading-tables.md) through
+delta-rs; its Python program is kept for users but no longer run.
 
 ## 8. Resume cost independent of data size (#655)
 
@@ -905,7 +905,7 @@ beside a running
 `build` (`blocks/tests/delta_maintenance.rs`, which replaced the spike's
 `concurrent_maintenance.py`) and tests of the binary itself
 (`maintenance/tests/cli.rs`). The job follows the sketch below, with these
-additions (README "Delta Maintenance" lists every setting):
+additions ([Delta maintenance](../delta-maintenance.md) lists every setting):
 
 - `LAKE_ROOT` (a dataset below the bucket root, or a local path) besides
   `LAKE_BUCKET`, and `DRY_RUN`;
