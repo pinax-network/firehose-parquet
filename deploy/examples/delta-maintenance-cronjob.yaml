@@ -86,7 +86,7 @@ spec:
               # The fireparq-maintenance binary is the ENTRYPOINT
               # (deploy/maintenance/Dockerfile). Pin the digest of the release's
               # image in production.
-              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.3
+              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.4
               envFrom:
                 - configMapRef:
                     name: delta-maintenance-settings
@@ -151,7 +151,7 @@ spec:
               # The fireparq-maintenance binary is the ENTRYPOINT
               # (deploy/maintenance/Dockerfile). Pin the digest of the release's
               # image in production.
-              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.3
+              image: ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.4
               env:
                 - name: FULL_VACUUM
                   value: "1"
