@@ -659,9 +659,42 @@ async fn remote_binding_and_conditional_repair_preserve_current_authority() {
         .is_mutation_uncertain());
     ownership.release().await.unwrap();
 }
+/// #646: the provider stored the new checkpoint but the response was lost.
+/// Reading back exactly those bytes proves the save: it counts as one
+/// successful save, sends no retry, and leaves the latch clear.
+#[tokio::test]
+async fn lost_remote_mirror_acknowledgement_is_resolved_by_exact_readback() {
+    let (store, ownership, initial, service) = remote_fixture().await;
+    let current = advance(&initial, 100);
+    let metrics = metrics();
+    store.faults.lock().unwrap().lose = true;
+    let adapter = ProtectedMirror::new(&ownership, &current.descriptor.mirror, Some(&service))
+        .unwrap()
+        .with_metrics(&metrics);
+    assert_eq!(
+        adapter.reconcile(&current).await.unwrap(),
+        MirrorOutcome::Repaired
+    );
+    assert_eq!(store.faults.lock().unwrap().writes.len(), 1, "no retry");
+    assert!(!ownership
+        .remote("cursor-bucket")
+        .unwrap()
+        .is_mutation_uncertain());
+    assert_eq!(metrics.cursor_saves_total.get(), 1);
+    assert_eq!(metrics.cursor_save_failures_total.get(), 0);
+    store.faults.lock().unwrap().lose = false;
+    assert_eq!(
+        adapter.reconcile(&current).await.unwrap(),
+        MirrorOutcome::Unchanged
+    );
+    ownership.release().await.unwrap();
+}
+
 #[tokio::test]
 async fn ambiguous_remote_writes_or_cancel_never_retry_or_release() {
-    for mode in 0..5 {
+    // Mode 0 (a lost response after the provider stored the checkpoint) is
+    // resolved by readback; see the test above.
+    for mode in 1..5 {
         let (store, ownership, initial, service) = remote_fixture().await;
         let current = advance(&initial, 100);
         let metrics = metrics();

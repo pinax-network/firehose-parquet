@@ -8,7 +8,10 @@
 use super::{local, ParquetFileMetadata};
 use crate::config::{BlockMetadata, Compression};
 use crate::dataset_lock::LocalOwnership;
-use crate::dataset_lock_s3::{provider_rejection, usable_version, ProviderRejected, S3Ownership};
+use crate::dataset_lock_s3::{
+    condition_refusal, provider_rejection, reconcile_by_readback, usable_version, Observed,
+    ProviderRejected, S3Ownership,
+};
 use anyhow::{bail, ensure, Context, Result};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -1004,15 +1007,39 @@ impl<'a> S3PartStore<'a> {
                 .put_opts(&key, encoded.bytes.clone().into(), options),
         )
         .await;
-        let result = match result.map_err(|_| anyhow::anyhow!("protected part upload timed out"))? {
-            Ok(result) => result,
-            Err(error) => {
+        let failure = match result {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => {
                 if let Some(rejected) = provider_rejection(&error) {
                     // A refused request cannot complete later: resolved, not uncertain.
                     attempt.resolved = true;
                     return Err(anyhow::Error::new(rejected).context("publishing a protected part"));
                 }
-                bail!("protected part conditional upload failed; retain ownership for quiescent recovery")
+                if condition_refusal(&error) {
+                    // Another request wrote the name: nothing to read back.
+                    bail!("protected part conditional upload failed; retain ownership for quiescent recovery")
+                }
+                Err("protected part conditional upload failed")
+            }
+            Err(_) => Err("protected part upload timed out"),
+        };
+        let result = match failure {
+            Ok(result) => result,
+            Err(failure) => {
+                // #646: the provider may have stored the part. Only the exact
+                // part, read back and verified, proves it; absence never does.
+                if reconcile_by_readback(|| self.observe_part(&key, encoded))
+                    .await
+                    .is_some()
+                {
+                    attempt.resolved = true;
+                    tracing::warn!(
+                        table = %encoded.plan.table,
+                        "{failure}, but the exact part is stored: its publication is proven"
+                    );
+                    return Ok(());
+                }
+                bail!("{failure}; retain ownership for quiescent recovery")
             }
         };
         let version = UpdateVersion {
@@ -1089,17 +1116,52 @@ impl<'a> S3PartStore<'a> {
             ownership: self.ownership,
             resolved: false,
         };
-        let sent = tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, upload.send())
-            .await
-            .map_err(|_| anyhow::anyhow!("native part upload timed out; retain ownership"))?;
-        let version = match sent {
-            Ok(version) => version,
-            Err(error) if error.is::<ProviderRejected>() => {
+        let sent = tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, upload.send()).await;
+        let failure = match sent {
+            Ok(Ok(version)) => Ok(version),
+            Ok(Err(error)) if error.is::<ProviderRejected>() => {
                 // A refused request cannot complete later: resolved, not uncertain.
                 attempt.resolved = true;
                 return Err(error.context("publishing a protected part"));
             }
-            Err(error) => return Err(error),
+            // Another request wrote the name: nothing to read back.
+            Ok(Err(error)) if error.is::<crate::s3::upload::ConditionRefused>() => {
+                return Err(error)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(anyhow::anyhow!(
+                "native part upload timed out; retain ownership"
+            )),
+        };
+        let version = match failure {
+            Ok(version) => version,
+            Err(failure) => {
+                // #646: the provider may have stored the part. Only the exact
+                // part, read back and verified, proves it; absence never does.
+                let observe = || async {
+                    match self
+                        .verify_native(&encoded.plan, &encoded.receipt, None)
+                        .await
+                    {
+                        Ok(PartPresence::Present) => Observed::Exact(()),
+                        Ok(PartPresence::Missing) => Observed::Pending,
+                        // Stored bytes that fail verification are not this part.
+                        Err(_) if self.native_part_present(&encoded.plan).await => {
+                            Observed::Refuted
+                        }
+                        Err(_) => Observed::Pending,
+                    }
+                };
+                if reconcile_by_readback(observe).await.is_some() {
+                    attempt.resolved = true;
+                    tracing::warn!(
+                        table = %encoded.plan.table,
+                        "{failure:#}, but the exact part is stored: its publication is proven"
+                    );
+                    return Ok(());
+                }
+                return Err(failure);
+            }
         };
         ensure!(
             self.verify_native(&encoded.plan, &encoded.receipt, Some(version))
@@ -1109,6 +1171,37 @@ impl<'a> S3PartStore<'a> {
         );
         attempt.resolved = true;
         Ok(())
+    }
+
+    /// One #646 readback of an unacknowledged `object_store` part publication.
+    async fn observe_part(&self, key: &ObjectPath, encoded: &EncodedPart) -> Observed<()> {
+        match self.read(key, &encoded.receipt).await {
+            Ok(Some((bytes, _))) => {
+                match verify_bytes_off_thread(&encoded.plan, &encoded.receipt, bytes).await {
+                    Ok(()) => Observed::Exact(()),
+                    // Other contents occupy the name: this Create cannot land.
+                    Err(_) => Observed::Refuted,
+                }
+            }
+            Ok(None) => Observed::Pending,
+            // A failed read, or an object of another size under the name.
+            Err(_) => Observed::Pending,
+        }
+    }
+
+    /// Whether an object exists under the part's name, whatever its contents.
+    async fn native_part_present(&self, plan: &PlannedPart) -> bool {
+        let Ok(key) = self.key(plan) else {
+            return false;
+        };
+        matches!(
+            tokio::time::timeout(
+                crate::s3::upload::DATA_TIMEOUT,
+                self.ownership.object_store().head(&key)
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 
     async fn verify_native(

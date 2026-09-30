@@ -658,6 +658,8 @@ enum RemoteFault {
     #[default]
     None,
     LostResponse,
+    /// A transport error without storing: the request was not applied (#646).
+    UnstoredResponse,
     CancelledResponse,
     MissingVersion,
     BadReadVersion,
@@ -700,6 +702,9 @@ impl ObjectStore for Remote {
             self.puts.lock().unwrap().push(opts.mode.clone());
             if matches!(fault, RemoteFault::Unsupported) {
                 return Err(object_store::Error::NotImplemented);
+            }
+            if matches!(fault, RemoteFault::UnstoredResponse) {
+                return Err(remote_error());
             }
         }
         let mut result = self.inner.put_opts(path, payload, opts).await?;
@@ -809,10 +814,30 @@ async fn remote_create_roundtrip_is_conditional_and_existing_foreign_file_is_pre
     assert!(owner.is_mutation_uncertain());
 }
 
+/// #646: the provider stored the part but its response was lost. Reading back
+/// the exact part proves the publication: one PUT, a clear latch, a release.
+#[tokio::test]
+async fn remote_lost_response_is_resolved_by_exact_readback() {
+    let remote = Arc::new(Remote::default());
+    let owner = remote_owner(&remote).await;
+    *remote.fault.lock().unwrap() = RemoteFault::LostResponse;
+    let store = S3PartStore::new(&owner, "mainnet").unwrap();
+    let encoded = encoded();
+    store.publish(&encoded).await.unwrap();
+    assert_eq!(remote.puts.lock().unwrap().len(), 1, "no retry");
+    assert!(!owner.is_mutation_uncertain());
+    *remote.fault.lock().unwrap() = RemoteFault::None;
+    assert_eq!(
+        store.verify(&encoded.plan, &encoded.receipt).await.unwrap(),
+        PartPresence::Present
+    );
+    owner.release().await.unwrap();
+}
+
 #[tokio::test]
 async fn remote_lost_response_or_uncertain_read_never_retries_or_releases_owner() {
     for fault in [
-        RemoteFault::LostResponse,
+        RemoteFault::UnstoredResponse,
         RemoteFault::MissingVersion,
         RemoteFault::BadReadVersion,
         RemoteFault::Unsupported,

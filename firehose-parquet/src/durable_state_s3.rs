@@ -10,7 +10,9 @@ use object_store::{path::Path, Attribute, PutMode, PutOptions, UpdateVersion};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
-use crate::dataset_lock_s3::{provider_rejection, usable_version, S3Ownership};
+use crate::dataset_lock_s3::{
+    provider_rejection, reconcile_by_readback, usable_version, Observed, S3Ownership,
+};
 use crate::durable_state::{
     decode_slot, encode, encode_tombstone, ControlKey, ControlVersion, CONTROL_DIRECTORY,
     MAX_CONTROL_BYTES,
@@ -257,25 +259,35 @@ impl<'a> S3StateStore<'a> {
             Ok(Ok(result)) => Some(result),
             _ => None,
         };
-        let current = self
-            .read_slot(key)
-            .await?
-            .context("control mutation could not be reconciled")?;
-        if current.bytes != bytes
-            || reported.as_ref().is_some_and(|result| {
-                result
-                    .e_tag
-                    .as_ref()
-                    .is_some_and(|etag| Some(etag) != current.version.object.e_tag.as_ref())
-                    || result.version.as_ref().is_some_and(|version| {
-                        Some(version) != current.version.object.version.as_ref()
-                    })
-            })
-        {
+        let (reported, bytes) = (&reported, &bytes);
+        // The exact record, read back on the #646 schedule, resolves a lost or
+        // failed response. Absent or other contents are never proof.
+        let exact = reconcile_by_readback(|| async move {
+            match self.read_slot(key).await {
+                Ok(Some(current))
+                    if current.bytes == *bytes
+                        && reported.as_ref().is_none_or(|result| {
+                            result.e_tag.as_ref().is_none_or(|etag| {
+                                Some(etag) == current.version.object.e_tag.as_ref()
+                            }) && result.version.as_ref().is_none_or(|version| {
+                                Some(version) == current.version.object.version.as_ref()
+                            })
+                        }) =>
+                {
+                    Observed::Exact(current.version)
+                }
+                // Absent, the previous record, or a failed read: the request
+                // may still land. Records carry fresh incarnations, so no
+                // earlier record can match these bytes.
+                _ => Observed::Pending,
+            }
+        })
+        .await;
+        let Some(version) = exact else {
             bail!("control mutation could not be reconciled to the exact expected record");
-        }
+        };
         attempt.resolved = true;
-        Ok(current.version)
+        Ok(version)
     }
 }
 

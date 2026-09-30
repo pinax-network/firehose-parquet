@@ -33,7 +33,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 type Result<T> = std::result::Result<T, OwnershipError>;
 
 /// Errors intentionally omit backend errors, payloads, paths and opaque versions.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OwnershipError {
     #[error("invalid non-secret ownership operation or bucket-relative scopes")]
     InvalidRequest,
@@ -405,22 +405,51 @@ impl S3Ownership {
     }
 
     /// Release only after all data mutations and their responses are resolved.
+    ///
+    /// The release is retried while the owner record cannot be read or the
+    /// release's outcome is unknown, on a bounded schedule of about two
+    /// minutes (#646), so a provider outage at exit does not strand the owner.
+    /// Resending is safe: every attempt is a compare-and-swap from this
+    /// owner's exact Owned version to the same Released record, so any
+    /// arrival order ends in that record, and an attempt delayed until after a
+    /// successor acquired fails its `If-Match` because the Owned version never
+    /// recurs. A changed or foreign record, a missing version and an uncertain
+    /// data mutation stop at once.
     pub async fn release(self) -> Result<()> {
         let _control = self.lock_control_mutation().await;
         if self.is_mutation_uncertain() {
             return Err(OwnershipError::DataMutationUncertain);
         }
+        let mut released = self.owned.clone();
+        released.state = OwnerState::Released;
+        let mut outcome = Err(OwnershipError::ReadFailed);
+        for delay in RELEASE_DELAYS {
+            tokio::time::sleep(delay).await;
+            outcome = self.release_once(&released).await;
+            match &outcome {
+                Err(OwnershipError::ReadFailed | OwnershipError::MutationUncertain) => {
+                    tracing::warn!("S3 bucket ownership release was not confirmed; retrying");
+                }
+                _ => break,
+            }
+        }
+        outcome
+    }
+
+    async fn release_once(&self, released: &OwnerRecord) -> Result<()> {
         let Some((current, version)) = read_record(&self.store).await? else {
             return Err(OwnershipError::StateChanged);
         };
+        // An earlier attempt of this release landed; only it writes this record.
+        if current == *released {
+            return Ok(());
+        }
         if current != self.owned || version != self.version {
             return Err(OwnershipError::StateChanged);
         }
-        let mut released = self.owned.clone();
-        released.state = OwnerState::Released;
         transition(
             &self.store,
-            &released,
+            released,
             update(self.etag_form, &self.version)?,
         )
         .await?;
@@ -513,6 +542,90 @@ pub(crate) fn provider_rejection(error: &object_store::Error) -> Option<Provider
         object_store::Error::Unauthenticated { .. } => Some(ProviderRejected { status: 401 }),
         _ => None,
     }
+}
+
+/// A conditional write refused because another request occupies or is writing
+/// the key: 412 (`Precondition`) or 409 (`AlreadyExists`). The object under
+/// the key is not this request's, so it is never read back as proof; like any
+/// other response except 401/403 it keeps the uncertainty latch, because it
+/// shows another writer (#591, #646).
+pub(crate) fn condition_refusal(error: &object_store::Error) -> bool {
+    matches!(
+        error,
+        object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. }
+    )
+}
+
+/// What one readback after an unacknowledged mutation observed (#646).
+pub(crate) enum Observed<T> {
+    /// Exactly the state the request writes: it was applied.
+    Exact(T),
+    /// Not yet: absent, the previous state, or a read that failed. The request
+    /// may still be applied, so reading again later can still prove it.
+    Pending,
+    /// A state that no later read can turn into proof, such as other contents
+    /// under the key or a store without usable versions. Stop reading.
+    Refuted,
+}
+
+/// When the readbacks run after an unacknowledged mutation, from its failure.
+#[cfg(not(test))]
+const READBACK_DELAYS: [Duration; 5] = [
+    Duration::ZERO,
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+];
+/// When the owner release is attempted, from the first attempt (#646).
+#[cfg(not(test))]
+const RELEASE_DELAYS: [Duration; 5] = [
+    Duration::ZERO,
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
+#[cfg(test)]
+const RELEASE_DELAYS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+];
+#[cfg(test)]
+const READBACK_DELAYS: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+];
+
+/// Resolve one conditional mutation whose outcome is unknown (a lost or failed
+/// response, or a timeout) by reading back on a bounded schedule (#646).
+///
+/// `observe` reads the key and reports [`Observed::Exact`] only for exactly
+/// the state the request writes. That proves the request was applied: a
+/// mutation client sends one attempt, the key is written only under this
+/// owner, the bytes could not have been there before (a Create of a name
+/// proven absent, a fresh control incarnation, a changed mirror, this owner's
+/// record), an object is visible only once its PUT has committed, and a
+/// duplicate of a conditional request would be refused. Nothing else is proof.
+/// Absence or the previous state may still be followed by the request landing,
+/// so the attempt stays unresolved and its latch is set. No request is resent.
+/// See `docs/audit/646-uncertain-mutation-readback.md`.
+pub(crate) async fn reconcile_by_readback<T, F, Fut>(mut observe: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Observed<T>>,
+{
+    for delay in READBACK_DELAYS {
+        tokio::time::sleep(delay).await;
+        match observe().await {
+            Observed::Exact(value) => return Some(value),
+            Observed::Pending => {}
+            Observed::Refuted => return None,
+        }
+    }
+    None
 }
 
 pub(crate) fn usable_version(version: &UpdateVersion) -> bool {
@@ -620,24 +733,65 @@ async fn write_and_verify(
 ) -> Result<UpdateVersion> {
     let response = tokio::time::timeout(
         REQUEST_TIMEOUT,
-        store.put_opts(key, bytes.clone().into(), options(mode)),
+        store.put_opts(key, bytes.clone().into(), options(mode.clone())),
     )
     .await;
     let reported = match response {
         Ok(Ok(result)) => Some(result),
         _ => None,
     };
-    let Some((current, version)) = read_bytes(store, key).await? else {
-        return Err(OwnershipError::MutationUncertain);
+    // The exact record, read back on the #646 schedule, resolves a lost
+    // response. Reading again helps only while the key still holds the
+    // request's precondition state (absent for a Create, the expected version
+    // for a compare-and-swap) or cannot be read: the request may still land.
+    // Any other record means another request won, so it fails at once. The
+    // last reason is reported if nothing proves the request.
+    let failure = std::sync::Mutex::new(OwnershipError::MutationUncertain);
+    let (failure, reported, bytes, mode) = (&failure, &reported, &bytes, &mode);
+    reconcile_by_readback(|| async move {
+        let observed = read_bytes(store, key).await;
+        let pending = match &observed {
+            Ok(Some((current, version))) => {
+                if current == bytes
+                    && reported
+                        .as_ref()
+                        .is_none_or(|result| reported_version_matches(result, version))
+                {
+                    return Observed::Exact(version.clone());
+                }
+                matches!(mode, PutMode::Update(expected) if same_version(expected, version))
+            }
+            Ok(None) => matches!(mode, PutMode::Create),
+            // A record without a usable version or with malformed contents
+            // cannot become proof; only a failed read can succeed later.
+            Err(error) => matches!(error, OwnershipError::ReadFailed),
+        };
+        *failure.lock().unwrap() = match observed {
+            Err(error) => error,
+            Ok(_) => OwnershipError::MutationUncertain,
+        };
+        if pending {
+            Observed::Pending
+        } else {
+            Observed::Refuted
+        }
+    })
+    .await
+    .ok_or_else(|| failure.lock().unwrap().clone())
+}
+
+/// Whether `observed` is the version a compare-and-swap names. The request
+/// may carry its ETag unquoted (#678) while reads return it quoted.
+fn same_version(expected: &UpdateVersion, observed: &UpdateVersion) -> bool {
+    let unquoted = |etag: &Option<String>| {
+        etag.as_deref()
+            .map(|value| value.trim_matches('"').to_owned())
     };
-    if current != bytes
-        || reported
+    unquoted(&expected.e_tag) == unquoted(&observed.e_tag)
+        && expected
+            .version
             .as_ref()
-            .is_some_and(|result| !reported_version_matches(result, &version))
-    {
-        return Err(OwnershipError::MutationUncertain);
-    }
-    Ok(version)
+            .is_none_or(|version| observed.version.as_ref() == Some(version))
 }
 
 fn reported_version_matches(reported: &PutResult, current: &UpdateVersion) -> bool {

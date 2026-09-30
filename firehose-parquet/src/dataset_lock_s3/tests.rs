@@ -20,6 +20,13 @@ struct Faults {
     old_modified_time: bool,
     lie_about_size: bool,
     owner_put_barrier: Option<Arc<tokio::sync::Barrier>>,
+    /// Fail this many owner-record reads, then read normally (#646).
+    fail_owner_reads: usize,
+    /// After the next applied owner-record PUT, fail this many reads (#646).
+    fail_reads_after_owner_put: Option<usize>,
+    /// Hold this many owner-record PUTs without applying them and report a
+    /// transport error, as a request still in flight at the provider (#646).
+    defer_owner_puts: usize,
 }
 
 #[derive(Default)]
@@ -28,6 +35,7 @@ struct StatefulStore {
     faults: Mutex<Faults>,
     writes: Mutex<Vec<(String, PutMode)>>,
     deletes: Mutex<Vec<String>>,
+    deferred: Mutex<Vec<(PutPayload, PutOptions)>>,
 }
 
 impl fmt::Display for StatefulStore {
@@ -69,6 +77,11 @@ impl ObjectStore for StatefulStore {
         let owner = key.as_ref() == OWNER_KEY;
         let (ignore, unsupported, lose) = {
             let mut faults = self.faults.lock().unwrap();
+            if owner && faults.defer_owner_puts > 0 {
+                faults.defer_owner_puts -= 1;
+                self.deferred.lock().unwrap().push((payload, opts));
+                return Err(backend_error());
+            }
             let lose = owner && faults.lose_owner_responses > 0;
             if lose {
                 faults.lose_owner_responses -= 1;
@@ -99,6 +112,9 @@ impl ObjectStore for StatefulStore {
             if let Some(stale) = faults.stale_after_owner_put.take() {
                 faults.stale_owner_read = Some(stale);
             }
+            if let Some(reads) = faults.fail_reads_after_owner_put.take() {
+                faults.fail_owner_reads = reads;
+            }
         }
         if lose {
             Err(backend_error())
@@ -107,6 +123,13 @@ impl ObjectStore for StatefulStore {
         }
     }
     async fn get_opts(&self, key: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
+        {
+            let mut faults = self.faults.lock().unwrap();
+            if key.as_ref() == OWNER_KEY && faults.fail_owner_reads > 0 {
+                faults.fail_owner_reads -= 1;
+                return Err(backend_error());
+            }
+        }
         let mut result = self.inner.get_opts(key, opts).await?;
         let faults = self.faults.lock().unwrap();
         if key.as_ref() == OWNER_KEY {
@@ -263,6 +286,97 @@ async fn lost_success_responses_are_resolved_by_exact_records_and_versions() {
         OwnerState::Released
     );
     assert_owner_never_overwritten_or_deleted(&fake);
+}
+
+/// #646: a lost acquisition response whose first readback fails is resolved
+/// by a later readback of the exact record.
+#[tokio::test]
+async fn lost_response_is_resolved_after_a_failed_readback() {
+    let (fake, store) = store();
+    {
+        let mut faults = fake.faults.lock().unwrap();
+        faults.lose_owner_responses = 1;
+        faults.fail_reads_after_owner_put = Some(2);
+    }
+    let guard = acquire(&store).await;
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap(),
+        *guard.record()
+    );
+    guard.release().await.unwrap();
+    assert_owner_never_overwritten_or_deleted(&fake);
+}
+
+/// #646: a release sent while the provider cannot answer is retried until the
+/// exact Released record is proven.
+#[tokio::test]
+async fn release_is_retried_while_the_provider_is_unavailable() {
+    let (fake, store) = store();
+    let guard = acquire(&store).await;
+    let generation = guard.record().generation();
+    {
+        let mut faults = fake.faults.lock().unwrap();
+        // The first attempt cannot read the record; the second CAS is held
+        // at the provider and never applied.
+        faults.fail_owner_reads = 1;
+        faults.defer_owner_puts = 1;
+    }
+    guard.release().await.unwrap();
+    let record = S3Ownership::status(&store).await.unwrap().unwrap();
+    assert_eq!(record.state(), OwnerState::Released);
+    assert_eq!(record.generation(), generation);
+    assert_owner_never_overwritten_or_deleted(&fake);
+}
+
+/// #646: resending the release is safe. A release CAS still in flight when
+/// the retry landed, and delivered only after a successor acquired the
+/// bucket, fails its `If-Match`: the successor's record is untouched.
+#[tokio::test]
+async fn delayed_release_attempt_after_takeover_is_refused() {
+    let (fake, store) = store();
+    let guard = acquire(&store).await;
+    fake.faults.lock().unwrap().defer_owner_puts = 1;
+    guard.release().await.unwrap();
+    let successor = acquire(&store).await;
+    assert_eq!(successor.record().generation(), 2);
+    let (payload, opts) = fake.deferred.lock().unwrap().pop().expect("held release");
+    assert!(matches!(opts.mode, PutMode::Update(_)));
+    let late = fake
+        .inner
+        .put_opts(&Path::from(OWNER_KEY), payload, opts)
+        .await;
+    assert!(
+        matches!(late, Err(object_store::Error::Precondition { .. })),
+        "a late release must not apply: {late:?}"
+    );
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap(),
+        *successor.record()
+    );
+    successor.release().await.unwrap();
+    assert_owner_never_overwritten_or_deleted(&fake);
+}
+
+/// A foreign record stops the release at once instead of being retried.
+#[tokio::test]
+async fn release_stops_at_once_on_a_changed_record() {
+    let (fake, store) = store();
+    let guard = acquire(&store).await;
+    let mut foreign = guard.record().clone();
+    foreign.owner_id = Uuid::new_v4().to_string();
+    fake.inner
+        .put(
+            &Path::from(OWNER_KEY),
+            serde_json::to_vec(&foreign).unwrap().into(),
+        )
+        .await
+        .unwrap();
+    let writes = fake.writes.lock().unwrap().len();
+    assert_eq!(
+        guard.release().await.unwrap_err(),
+        OwnershipError::StateChanged
+    );
+    assert_eq!(fake.writes.lock().unwrap().len(), writes, "no CAS sent");
 }
 
 #[tokio::test]

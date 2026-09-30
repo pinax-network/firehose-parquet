@@ -80,8 +80,10 @@ async fn native_controller_spools_receipts_before_put_then_commits_verified_part
 
 #[tokio::test]
 async fn native_controller_retains_writing_owner_and_cursor_on_uncertain_publication() {
+    // A lost acknowledgement of a stored part is now resolved by readback
+    // (#646, safe_release.rs); a PUT cut before it was applied stays uncertain.
     for fault in [
-        Fault::LostPartAck,
+        Fault::ResetPartUnstored,
         Fault::DuplicateEtag,
         Fault::DuplicateVersion,
         Fault::WildcardEtag,

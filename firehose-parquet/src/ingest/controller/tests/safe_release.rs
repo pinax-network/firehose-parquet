@@ -164,8 +164,58 @@ async fn resolved_failure_after_publication_releases_and_next_owner_removes_the_
     assert_eq!(part_requests(&server, "DELETE"), deletes + 1);
 }
 
+/// #646: the provider stored both parts but dropped their connections before
+/// acknowledging. The exact readback proves each publication, so the latch
+/// stays clear, the transaction commits without a retry, and the owner is
+/// released on success.
 #[tokio::test]
-async fn lost_part_acknowledgement_keeps_owner_and_names_recovery_commands() {
+async fn lost_part_acknowledgement_is_resolved_by_exact_readback() {
+    let server = Server::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, descriptor) = initialized(&server, temp.path()).await;
+    let store = owner.object_store().clone();
+    let mirror = Mirror::default();
+    let mut controller = open_s3(&owner, &mirror, &descriptor).await.unwrap();
+    server.state.lock().unwrap().fault = Fault::LostPartAck;
+    commit(&mut controller).await.unwrap();
+    assert_eq!(controller.authority().checkpoint.ordinal, 2);
+    drop(controller);
+    assert_eq!(stored_parts(&server), 2);
+    assert_eq!(
+        part_requests(&server, "PUT"),
+        2,
+        "one PUT per part, no retry"
+    );
+    assert_eq!(part_requests(&server, "DELETE"), 0);
+    assert!(!owner.is_mutation_uncertain());
+    assert_eq!(pending_phase(&owner).await, None);
+    let ownership = DatasetOwnership::from_remote_for_test("bucket", owner);
+    ownership.finish(Ok(())).await.unwrap();
+    assert_eq!(owner_state(&store).await, OwnerState::Released);
+}
+
+/// #646: a PUT the provider applies shortly after the connection dropped is
+/// proven by a later readback in the window.
+#[tokio::test]
+async fn part_stored_within_the_readback_window_is_resolved() {
+    let server = Server::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, descriptor) = initialized(&server, temp.path()).await;
+    let mirror = Mirror::default();
+    let mut controller = open_s3(&owner, &mirror, &descriptor).await.unwrap();
+    server.state.lock().unwrap().fault = Fault::LatePart(Duration::from_millis(10));
+    commit(&mut controller).await.unwrap();
+    drop(controller);
+    assert_eq!(stored_parts(&server), 2);
+    assert!(!owner.is_mutation_uncertain());
+    owner.release().await.unwrap();
+}
+
+/// A part PUT cut before the provider applied it is never proven: absence may
+/// still be followed by the request landing. The owner is kept with the exact
+/// recovery commands, nothing is resent and nothing is rolled back.
+#[tokio::test]
+async fn unstored_part_keeps_owner_and_names_recovery_commands() {
     let server = Server::start().await;
     let temp = tempfile::tempdir().unwrap();
     let (owner, descriptor) = initialized(&server, temp.path()).await;
@@ -173,14 +223,10 @@ async fn lost_part_acknowledgement_keeps_owner_and_names_recovery_commands() {
     let record = owner.record().clone();
     let mirror = Mirror::default();
     let mut controller = open_s3(&owner, &mirror, &descriptor).await.unwrap();
-    server.state.lock().unwrap().fault = Fault::LostPartAck;
-    let error = commit(&mut controller)
-        .await
-        .err()
-        .expect("lost acknowledgement");
+    server.state.lock().unwrap().fault = Fault::ResetPartUnstored;
+    let error = commit(&mut controller).await.err().expect("unstored part");
     drop(controller);
-    // The provider stored the part, but its acknowledgement was lost.
-    assert_eq!(stored_parts(&server), 1);
+    assert_eq!(stored_parts(&server), 0);
     assert!(owner.is_mutation_uncertain());
 
     let ownership = DatasetOwnership::from_remote_for_test("bucket", owner);
@@ -220,8 +266,59 @@ async fn lost_part_acknowledgement_keeps_owner_and_names_recovery_commands() {
         try_owner(&server).await,
         Err(OwnershipError::Busy)
     ));
-    assert_eq!(part_requests(&server, "PUT"), 1, "no retry");
+    let puts = part_requests(&server, "PUT");
+    assert!((1..=2).contains(&puts), "no retry: {puts} part PUTs");
     assert_eq!(part_requests(&server, "DELETE"), 0, "no rollback");
+}
+
+/// The delayed-PUT case: a part the provider applies only after the readback
+/// window lands while the owner is still Owned. Absence was not taken as
+/// proof, so no successor could have acquired the bucket and rolled the
+/// Writing journal back before the late arrival.
+#[tokio::test]
+async fn part_landing_after_the_window_meets_a_retained_owner() {
+    let server = Server::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, descriptor) = initialized(&server, temp.path()).await;
+    let store = owner.object_store().clone();
+    let record = owner.record().clone();
+    let mirror = Mirror::default();
+    let mut controller = open_s3(&owner, &mirror, &descriptor).await.unwrap();
+    server.state.lock().unwrap().fault = Fault::LatePart(Duration::from_millis(400));
+    let error = commit(&mut controller).await.err().expect("late part");
+    drop(controller);
+    assert!(owner.is_mutation_uncertain());
+    let ownership = DatasetOwnership::from_remote_for_test("bucket", owner);
+    assert!(ownership.finish::<()>(Err(error)).await.is_err());
+    assert_eq!(stored_parts(&server), 0, "not yet applied");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(stored_parts(&server) >= 1, "the delayed PUT arrived");
+    assert_eq!(S3Ownership::status(&store).await.unwrap().unwrap(), record);
+    assert!(matches!(
+        try_owner(&server).await,
+        Err(OwnershipError::Busy)
+    ));
+    assert_eq!(part_requests(&server, "DELETE"), 0);
+}
+
+/// #646: control records (the pending journal and authority) whose PUTs the
+/// provider applies shortly after dropping the connection are proven by a
+/// later readback; one immediate read would have seen the old record.
+#[tokio::test]
+async fn control_records_stored_within_the_readback_window_are_resolved() {
+    let server = Server::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, descriptor) = initialized(&server, temp.path()).await;
+    let mirror = Mirror::default();
+    let mut controller = open_s3(&owner, &mirror, &descriptor).await.unwrap();
+    server.state.lock().unwrap().fault = Fault::LateControl(Duration::from_millis(10));
+    commit(&mut controller).await.unwrap();
+    assert_eq!(controller.authority().checkpoint.ordinal, 2);
+    drop(controller);
+    assert!(!owner.is_mutation_uncertain());
+    server.state.lock().unwrap().fault = Fault::None;
+    assert_eq!(pending_phase(&owner).await, None);
+    owner.release().await.unwrap();
 }
 
 #[tokio::test]
