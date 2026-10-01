@@ -17,7 +17,23 @@ For each table it runs, in order:
 1. **OPTIMIZE** each closed `date` with more than one file, to the table's
    `delta.targetFileSize` (256 MiB). A day is closed once `blocks` holds a
    later day: `blocks` commits last, so every earlier day is complete in every
-   table.
+   table. delta-rs writes the compacted file with its own Parquet writer, which
+   keeps none of the parts' footer metadata, so the job first reads the day's
+   footers and gives the compacted file:
+   - every `firehose-parquet.*` key (chain, aliases, endpoint, block type and
+     features, encodings, compression, version, first streamable block) with
+     one value among the parts that have it. A key whose values differ, such as
+     `firehose-parquet.version` on a day that spans a writer upgrade, is left
+     out, and a file without the key (one compacted by an earlier job) doesn't
+     drop it;
+   - `fireparq-maintenance.version`, the job's version.
+
+   The parts' `fireparq.ingest.*` keys (their ordinals, transaction and
+   stream) describe the parts being merged, not the compacted file, and aren't
+   carried. When a footer can't be read, the day is left for the next run
+   (reported as an error) rather than compacted without its metadata. Days
+   compacted by an earlier job keep no metadata until they are compacted
+   again.
 2. **VACUUM**, lite by default: it deletes only files that a `remove`
    tombstone older than the retention names, and never a part that `build`
    published but has not committed yet. A full VACUUM (`FULL_VACUUM=1`, run
@@ -49,7 +65,8 @@ line goes to stdout:
   `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
   `version` (the binary's);
 - one line per table: `table` with `version_before`, `dates_to_compact`,
-  `compacted` (`date`, `files_removed`, `files_added`), `vacuum` (`mode`,
+  `compacted` (`date`, `files_removed`, `files_added`, and `footer_keys`: the
+  footer keys the compacted file was given), `vacuum` (`mode`,
   `retention_hours`, `files_deleted`, and for a full VACUUM
   `iceberg_metadata_kept`: the files in `metadata/` that were old enough to
   delete and were kept), `checkpoint_version`, `version_after`,

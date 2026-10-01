@@ -473,7 +473,8 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
                 &line["version_after"]
             ),
             (
-                &json!([{"date": SECOND_DAY, "files_removed": 2, "files_added": 1}]),
+                // footer_keys: the writer's 8 dataset-level keys and the job's.
+                &json!([{"date": SECOND_DAY, "files_removed": 2, "files_added": 1, "footer_keys": 9}]),
                 &json!(6),
                 &json!(6)
             ),

@@ -576,6 +576,7 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
     let blocks = LAST_STOP - FIRST;
     assert_eq!(authority_ordinal(&root), blocks as i64);
     let mut interleaved = 0;
+    let mut compacted_files = 0;
     for (table, per_block) in TABLES {
         let delta = common::open_local(&root, table).await;
         let read = common::delta_read(&delta).await;
@@ -609,6 +610,38 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
             expected,
             "{context}: every date compacted"
         );
+        // A compacted file keeps the writer's dataset-level footer metadata
+        // and names the job, without the merged parts' ingest provenance.
+        for file in &read.files {
+            let name = file.path.rsplit('/').next().unwrap();
+            if name.starts_with("part-v1-") {
+                continue; // a part fireparq wrote, never compacted
+            }
+            let metadata = footer_metadata(&root.join(table).join(&file.path));
+            let keys: Vec<&str> = metadata.keys().map(String::as_str).collect();
+            for key in [
+                "firehose-parquet.chain_name",
+                "firehose-parquet.block_type",
+                "firehose-parquet.version",
+            ] {
+                assert!(
+                    metadata.contains_key(key),
+                    "{context} {name}: no {key} in {keys:?}"
+                );
+            }
+            assert_eq!(
+                metadata
+                    .get("fireparq-maintenance.version")
+                    .map(String::as_str),
+                Some(env!("CARGO_PKG_VERSION")),
+                "{context} {name}: {keys:?}"
+            );
+            assert!(
+                !keys.iter().any(|key| key.starts_with("fireparq.ingest.")),
+                "{context} {name}: ingest provenance carried over: {keys:?}"
+            );
+            compacted_files += 1;
+        }
         let operations = operations(&root.join(table));
         let writes: Vec<u64> = operations
             .iter()
@@ -630,6 +663,7 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
             .count();
     }
     assert!(interleaved > 0, "no OPTIMIZE landed between writer commits");
+    assert!(compacted_files > 0, "no compacted file was checked");
 
     if let Some(duckdb) = DuckDb::open(cwd) {
         let counts = common::duckdb_counts(&duckdb, &root, &names);
@@ -681,6 +715,20 @@ async fn maintenance_beside_an_s3_build_keeps_exact_rows() {
 }
 
 /// The data files of a local table on disk, relative to it.
+/// A local Parquet file's footer key-value metadata.
+fn footer_metadata(path: &Path) -> BTreeMap<String, String> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let reader = SerializedFileReader::new(std::fs::File::open(path).unwrap()).unwrap();
+    reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .filter_map(|pair| Some((pair.key.clone(), pair.value.clone()?)))
+        .collect()
+}
+
 fn data_files(table: &Path) -> Vec<String> {
     let mut pending = vec![table.to_path_buf()];
     let mut files = Vec::new();
