@@ -15,7 +15,9 @@
 //! 1. OPTIMIZE (compact) each closed `date` partition that has more than one
 //!    file, to the table's `delta.targetFileSize`. A date is closed once
 //!    `blocks` holds a later date: `blocks` commits last in every fireparq
-//!    transaction, so every earlier date is complete in every table.
+//!    transaction, so every earlier date is complete in every table. The
+//!    compacted files keep fireparq's dataset-level footer metadata
+//!    ([`carried_metadata`]), which delta-rs's writer would otherwise drop.
 //! 2. VACUUM. Lite (the default) deletes only files that a `remove` tombstone
 //!    older than the retention names, and never a part that fireparq
 //!    published but has not committed yet. Full (`FULL_VACUUM=1`, weekly)
@@ -85,7 +87,10 @@ use deltalake_core::logstore::{
 };
 use deltalake_core::operations::vacuum::VacuumMode;
 use deltalake_core::parquet::basic::{Compression, ZstdLevel};
+use deltalake_core::parquet::errors::ParquetError;
+use deltalake_core::parquet::file::metadata::{FooterTail, KeyValue, ParquetMetaDataReader};
 use deltalake_core::parquet::file::properties::WriterProperties;
+use deltalake_core::parquet::file::FOOTER_SIZE;
 use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError, FilterOp, FilterValue};
 use futures::stream::{self, StreamExt};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
@@ -106,6 +111,18 @@ pub const MIN_FULL_VACUUM_HOURS: u64 = 168;
 /// delta-rs's full VACUUM takes every file that the log does not name, outside
 /// `_` and `.` directories, for an orphan: the job never deletes it.
 pub const ICEBERG_METADATA_DIR: &str = "metadata";
+
+/// The prefix of fireparq's dataset-level footer metadata (chain, endpoint,
+/// block type, encodings, version, ...), which a compaction carries over. Its
+/// per-part `fireparq.ingest.*` provenance (ordinals, transaction, stream)
+/// describes the parts being merged, not the compacted file, and is not.
+pub const CARRIED_METADATA_PREFIX: &str = "firehose-parquet.";
+
+/// The footer key naming the job, and its version, that compacted a file.
+pub const COMPACTED_BY_KEY: &str = "fireparq-maintenance.version";
+
+/// Footers read at once while planning a compaction.
+const FOOTER_READS: usize = 16;
 
 /// Where the job reads its settings: the process environment in the binary,
 /// an explicit map in tests. `None` is an unset variable.
@@ -509,6 +526,110 @@ fn active_files_per_date(table: &DeltaTable) -> DeltaResult<BTreeMap<String, u64
     Ok(counts)
 }
 
+/// The footer metadata of a compaction of `date`: each `firehose-parquet.*`
+/// key with the same value in every file of the date that has it, and
+/// [`COMPACTED_BY_KEY`]. A key whose values differ (for example
+/// `firehose-parquet.version` on a day that spans a writer upgrade) is left
+/// out; a file without the key (compacted before the job kept metadata) does
+/// not drop it. delta-rs's OPTIMIZE writes new files with its own writer and
+/// would keep none of it.
+pub async fn carried_metadata(table: &DeltaTable, date: &str) -> DeltaResult<Vec<KeyValue>> {
+    let snapshot = table.snapshot()?;
+    let files: Vec<_> = snapshot
+        .log_data()
+        .iter()
+        .filter(|file| {
+            file.partition_values_map()
+                .get("date")
+                .cloned()
+                .flatten()
+                .is_some_and(|value| value == date)
+        })
+        .map(|file| (file.object_store_path(), file.size()))
+        .collect();
+    let store = table.object_store();
+    let mut footers = stream::iter(files.into_iter().map(|(path, size)| {
+        let store = store.clone();
+        async move { footer_metadata(store.as_ref(), &path, size).await }
+    }))
+    .buffer_unordered(FOOTER_READS);
+    let mut files = Vec::new();
+    while let Some(pairs) = footers.next().await {
+        files.push(pairs?);
+    }
+    Ok(agreed_metadata(files))
+}
+
+/// The carried footer metadata of files with these `firehose-parquet.*`
+/// pairs: each key with one value among the files that have it, and
+/// [`COMPACTED_BY_KEY`].
+fn agreed_metadata(files: Vec<Vec<(String, String)>>) -> Vec<KeyValue> {
+    // Some(value) while every file with the key agrees; None once two differ.
+    let mut agreed: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (key, value) in files.into_iter().flatten() {
+        agreed
+            .entry(key)
+            .and_modify(|seen| {
+                if seen.as_ref() != Some(&value) {
+                    *seen = None;
+                }
+            })
+            .or_insert(Some(value));
+    }
+    let mut metadata: Vec<KeyValue> = agreed
+        .into_iter()
+        .filter_map(|(key, value)| Some(KeyValue::new(key, value?)))
+        .collect();
+    metadata.push(KeyValue::new(
+        COMPACTED_BY_KEY.to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    ));
+    metadata
+}
+
+/// The `firehose-parquet.*` pairs of one data file's footer: its last 8 bytes
+/// give the metadata length, then one more range read the metadata itself.
+async fn footer_metadata(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    size: i64,
+) -> DeltaResult<Vec<(String, String)>> {
+    let size = u64::try_from(size).unwrap_or(0);
+    let footer_size = FOOTER_SIZE as u64;
+    if size < footer_size {
+        return Err(
+            ParquetError::General(format!("{path}: {size} bytes is not a Parquet file")).into(),
+        );
+    }
+    let tail = read_range(store, path, size - footer_size..size).await?;
+    let tail = <[u8; FOOTER_SIZE]>::try_from(&tail[..])
+        .map_err(|_| ParquetError::General(format!("{path}: short read of the footer")))?;
+    let length = FooterTail::try_new(&tail)?.metadata_length() as u64;
+    let start = size
+        .checked_sub(footer_size + length)
+        .ok_or_else(|| ParquetError::General(format!("{path}: metadata longer than the file")))?;
+    let bytes = read_range(store, path, start..size - footer_size).await?;
+    let metadata = ParquetMetaDataReader::decode_metadata(&bytes)?;
+    Ok(metadata
+        .file_metadata()
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .filter(|pair| pair.key.starts_with(CARRIED_METADATA_PREFIX))
+        .filter_map(|pair| Some((pair.key.clone(), pair.value.clone()?)))
+        .collect())
+}
+
+/// One byte range of a file (a footer is a few KB, so it is copied out).
+async fn read_range(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    range: std::ops::Range<u64>,
+) -> DeltaResult<Vec<u8>> {
+    let mut ranges = store.get_ranges(path, &[range]).await?;
+    Ok(ranges.pop().map(|range| range.to_vec()).unwrap_or_default())
+}
+
 /// The newest `date` of `blocks` (still being written), or `None`.
 async fn open_date_of(lake: &Lake) -> DeltaResult<Option<String>> {
     let table = lake.open("blocks").await?;
@@ -688,16 +809,27 @@ async fn maintain(
         .collect();
     report.set("dates_to_compact", json!(dates));
     let level = ZstdLevel::try_new(settings.zstd_level).expect("checked to be 1..=22");
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(level))
-        .build();
     for date in dates.iter().filter(|_| !settings.dry_run) {
+        // A footer that can't be read leaves the date for the next run rather
+        // than compacting it without its metadata.
+        let metadata = match carried_metadata(&table, date).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                report.failed(&format!("optimize {date}: footer metadata"), &error);
+                continue;
+            }
+        };
+        let footer_keys = metadata.len();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(level))
+            .set_key_value_metadata(Some(metadata))
+            .build();
         let filters = [("date", FilterOp::Eq, FilterValue::Scalar(date.as_str()))];
         let mut optimize = table
             .clone()
             .optimize()
             .with_filters(&filters)
-            .with_writer_properties(properties.clone())
+            .with_writer_properties(properties)
             .with_commit_properties(no_post_commit_hooks());
         if let Some(size) = settings.target_size.and_then(NonZeroU64::new) {
             optimize = optimize.with_target_size(size);
@@ -712,6 +844,7 @@ async fn maintain(
                     "date": date,
                     "files_removed": metrics.num_files_removed,
                     "files_added": metrics.num_files_added,
+                    "footer_keys": footer_keys,
                 }));
             }
             Err(error) => report.failed(&format!("optimize {date}"), &error),
@@ -927,6 +1060,56 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compactions_carry_the_footer_keys_the_files_agree_on() {
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let metadata = agreed_metadata(vec![
+            pairs(&[
+                ("firehose-parquet.chain_name", "mainnet"),
+                ("firehose-parquet.version", "1.0.3"),
+                (
+                    "firehose-parquet.endpoint",
+                    "https://eth.firehose.pinax.network:443",
+                ),
+            ]),
+            // A writer upgrade within the day: the version differs.
+            pairs(&[
+                ("firehose-parquet.chain_name", "mainnet"),
+                ("firehose-parquet.version", "1.0.4"),
+                (
+                    "firehose-parquet.endpoint",
+                    "https://eth.firehose.pinax.network:443",
+                ),
+            ]),
+            // A file compacted before the job kept metadata has none.
+            pairs(&[]),
+        ]);
+        let found: Vec<(&str, &str)> = metadata
+            .iter()
+            .map(|pair| (pair.key.as_str(), pair.value.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("firehose-parquet.chain_name", "mainnet"),
+                (
+                    "firehose-parquet.endpoint",
+                    "https://eth.firehose.pinax.network:443"
+                ),
+                (COMPACTED_BY_KEY, env!("CARGO_PKG_VERSION")),
+            ]
+        );
+        // Files with no metadata at all still name the compaction.
+        let bare = agreed_metadata(vec![pairs(&[]), pairs(&[])]);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].key, COMPACTED_BY_KEY);
+    }
 
     #[test]
     fn retention_intervals_parse_like_delta() {

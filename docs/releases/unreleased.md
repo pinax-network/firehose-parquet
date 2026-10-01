@@ -16,6 +16,21 @@ empty when the release is cut.
 
 ## Fixes
 
+- **Compacted files keep fireparq's footer metadata** (`fireparq-maintenance`).
+  delta-rs's OPTIMIZE wrote compacted files with its own Parquet writer, so
+  they lost every `firehose-parquet.*` key the writer puts in a part's footer
+  (chain, endpoint, block type, encodings, version, first streamable block)
+  and kept only `ARROW:schema`. The job now reads the day's footers before
+  compacting it and gives the compacted file each `firehose-parquet.*` key the
+  parts agree on, plus `fireparq-maintenance.version`. The parts'
+  `fireparq.ingest.*` provenance isn't carried, a key whose values differ
+  (for example `version` across a writer upgrade) is left out, and an
+  unreadable footer leaves the day for the next run. Days compacted by an
+  earlier job keep no metadata until compacted again; the table's Delta
+  metadata (`fireparq.chain`, `fireparq.blockType`, `fireparq.descriptor`)
+  was never affected. The `table` line's `compacted` entries gain
+  `footer_keys`. See [Delta maintenance](../delta-maintenance.md).
+
 ## Performance
 
 ## Internal
