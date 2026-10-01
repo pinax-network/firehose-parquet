@@ -52,13 +52,13 @@ Each GitHub release attaches `fireparq` and `fireparq-maintenance` binaries for
 Linux and macOS (`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
-curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.4/fireparq-linux-x86_64.tar.gz
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.5/fireparq-linux-x86_64.tar.gz
 tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
 
 Each release also publishes two images to GitHub Container Registry; this
-release is tagged `1.0.4`, `1.0`, `1` and `latest`:
+release is tagged `1.0.5`, `1.0`, `1` and `latest`:
 
 | Image | Entrypoint |
 |---|---|
@@ -165,7 +165,7 @@ the maintenance CronJobs.
 | | [Audit records](docs/audit/README.md) | Implementation and validation records of the September 2026 audit (#463) |
 | Development | [Development](docs/development.md) | Build and test, repository structure, CLI architecture |
 | | [Repository navigation](docs/repo-navigation.md) | Module map, data flow and where to edit |
-| Releases | [v1.0.4](docs/releases/v1.0.4.md), [v1.0.3](docs/releases/v1.0.3.md), [v1.0.2](docs/releases/v1.0.2.md), [v1.0.1](docs/releases/v1.0.1.md), [v1.0.0](docs/releases/v1.0.0.md) | Release notes; v1.0.0 has the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first) from v0.7 |
+| Releases | [v1.0.5](docs/releases/v1.0.5.md), [v1.0.4](docs/releases/v1.0.4.md), [v1.0.3](docs/releases/v1.0.3.md), [v1.0.2](docs/releases/v1.0.2.md), [v1.0.1](docs/releases/v1.0.1.md), [v1.0.0](docs/releases/v1.0.0.md) | Release notes; v1.0.0 has the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first) from v0.7 |
 | | [Unreleased](docs/releases/unreleased.md), [all releases](docs/releases/) | Changes since the last release, and older notes |
 
 ## License
