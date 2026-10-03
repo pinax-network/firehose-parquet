@@ -94,7 +94,14 @@ fn configuration_errors_exit_2_before_any_request() {
         ("an unknown date scope", vec![("OPTIMIZE_DATES", "open")]),
         ("a zero target size", vec![("OPTIMIZE_TARGET_SIZE", "0")]),
         ("a zstd level above 22", vec![("OPTIMIZE_ZSTD_LEVEL", "23")]),
-        ("no tasks", vec![("OPTIMIZE_MAX_CONCURRENT_TASKS", "0")]),
+        (
+            "a negative repair count",
+            vec![("OPTIMIZE_REPAIR_DATES", "-1")],
+        ),
+        (
+            "a repair window below 1 MiB",
+            vec![("OPTIMIZE_REPAIR_WINDOW_BYTES", "1000")],
+        ),
         (
             "S3 without credentials",
             on_s3(&[("AWS_SECRET_ACCESS_KEY", "")]),

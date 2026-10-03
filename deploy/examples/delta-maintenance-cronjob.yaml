@@ -49,9 +49,9 @@ data:
   S3_ENDPOINT: https://rgw.example.internal
   AWS_REGION: us-east-1
   AWS_ALLOW_HTTP: "false"
-  # Bounds OPTIMIZE's memory: each task compacts one bin of up to
-  # delta.targetFileSize (256 MiB).
-  OPTIMIZE_MAX_CONCURRENT_TASKS: "2"
+  # Days per table a run sorts back into the writer's row order (days an
+  # OPTIMIZE up to 1.0.5 left out of it); new days are only concatenated.
+  OPTIMIZE_REPAIR_DATES: "1"
 ---
 apiVersion: batch/v1
 kind: CronJob

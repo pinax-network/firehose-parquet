@@ -52,6 +52,11 @@ use common::{number, DuckDb, JobRun};
 #[allow(dead_code)]
 mod s3;
 
+/// The writer's in-block row order, as the maintenance job keeps it.
+#[path = "../../maintenance/src/row_order.rs"]
+#[allow(dead_code)]
+mod row_order;
+
 const CHAIN: &str = "maintenance-test";
 const BUCKET: &str = "delta-lake";
 /// Block 100 is at 2023-11-14T00:00:00Z; `BLOCKS_PER_DAY` blocks per UTC day.
@@ -614,6 +619,9 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
         // and names the job, without the merged parts' ingest provenance.
         for file in &read.files {
             let name = file.path.rsplit('/').next().unwrap();
+            // Every file holds its rows as the writer wrote them: blocks in
+            // order, and each block's rows in its order.
+            assert_writer_order(&root.join(table).join(&file.path), table, &context);
             if name.starts_with("part-v1-") {
                 continue; // a part fireparq wrote, never compacted
             }
@@ -639,6 +647,13 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
             assert!(
                 !keys.iter().any(|key| key.starts_with("fireparq.ingest.")),
                 "{context} {name}: ingest provenance carried over: {keys:?}"
+            );
+            assert_eq!(
+                metadata
+                    .get("fireparq-maintenance.row_order")
+                    .map(String::as_str),
+                Some("writer"),
+                "{context} {name}: {keys:?}"
             );
             compacted_files += 1;
         }
@@ -712,6 +727,48 @@ async fn maintenance_beside_an_s3_build_keeps_exact_rows() {
     .await
     .unwrap();
     maintenance_beside_build(Storage::S3(&server), &cwd).await;
+}
+
+/// A local data file's rows strictly increase on `block_num` and then the
+/// table's row-order key, in the order they are in the file.
+fn assert_writer_order(path: &Path, table: &str, context: &str) {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::Int64Type;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let key = row_order::row_order_key(table).unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut previous: Option<Vec<i64>> = None;
+    for batch in reader {
+        let batch = batch.unwrap();
+        let mut columns = vec![batch.column_by_name("block_num").unwrap().clone()];
+        for part in key {
+            let (row_order::KeyPart::Column(name) | row_order::KeyPart::IsSet(name)) = part;
+            columns.push(batch.column_by_name(name).unwrap().clone());
+        }
+        for row in 0..batch.num_rows() {
+            let values: Vec<i64> = columns
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, column)| match index.checked_sub(1).map(|part| key[part]) {
+                        Some(row_order::KeyPart::IsSet(_)) => i64::from(column.is_valid(row)),
+                        _ => column.as_primitive::<Int64Type>().value(row),
+                    },
+                )
+                .collect();
+            if let Some(before) = &previous {
+                assert!(
+                    before < &values,
+                    "{context} {}: {before:?} then {values:?}, not in writer order",
+                    path.display()
+                );
+            }
+            previous = Some(values);
+        }
+    }
 }
 
 /// The data files of a local table on disk, relative to it.
@@ -809,7 +866,9 @@ fn scratch_table(table: &Path) {
             &firehose_parquet::writer::ParquetFileMetadata::new(),
         )
         .unwrap();
-        let path = format!("date=2023-11-14/part-{block}.parquet");
+        // A writer part, as `fireparq build` names it, with its `block_num`
+        // stats: the job plans a compaction by block range.
+        let path = format!("date=2023-11-14/part-v1-scratch-{block}.parquet");
         std::fs::create_dir_all(table.join("date=2023-11-14")).unwrap();
         std::fs::write(table.join(&path), &bytes).unwrap();
         commits.push(vec![
@@ -817,7 +876,11 @@ fn scratch_table(table: &Path) {
             json!({"add": {
                 "path": path, "partitionValues": {"date": "2023-11-14"},
                 "size": bytes.len(), "modificationTime": now, "dataChange": true,
-                "stats": json!({"numRecords": 1}).to_string(),
+                "stats": json!({
+                    "numRecords": 1,
+                    "minValues": {"block_num": block},
+                    "maxValues": {"block_num": block},
+                }).to_string(),
             }}),
         ]);
     }

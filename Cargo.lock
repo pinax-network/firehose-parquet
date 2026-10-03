@@ -2450,6 +2450,7 @@ dependencies = [
 name = "fireparq-maintenance"
 version = "1.0.5"
 dependencies = [
+ "bytes",
  "chrono",
  "deltalake-core",
  "futures",

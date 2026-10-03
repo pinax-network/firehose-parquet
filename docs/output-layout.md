@@ -205,7 +205,8 @@ lookups; readers without Bloom pruning may only see the storage overhead.
 
 Complete ingestion parts declare ascending `block_num` only when every observed
 height proves that order. Ingestion neither sorts nor reconstructs
-reversible-chain history. The maintenance job's compacted files keep neither the
+reversible-chain history. The maintenance job's compacted files keep the parts'
+row order ([Row order](delta-maintenance.md#row-order)), but neither the
 Bloom filters nor the sort metadata unless its `WriterProperties` enable them;
 the `add.stats` of every file (`block_num` and `timestamp` bounds) still prune
 reads.
