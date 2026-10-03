@@ -39,7 +39,9 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value`: a control record's checksum is verified over its payload exactly
+# as stored (durable_state.rs).
+serde_json = { version = "1", features = ["raw_value"] }
 # Delta Lake log (#643, docs/design/delta-lake.md). delta-rs 1.0.0 brings its own
 # Arrow/Parquet 59 and object_store 0.13 next to the workspace's 60 and 0.12; no
 # Arrow value crosses between them. `default-features = false` alone does not

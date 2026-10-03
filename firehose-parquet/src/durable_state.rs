@@ -48,14 +48,27 @@ pub struct ControlDocument<T> {
     pub payload: T,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize)]
 struct Envelope {
     format_version: u32,
     incarnation: String,
     revision: u64,
     deleted: bool,
     payload: serde_json::Value,
+    sha256: String,
+}
+
+/// An envelope as stored: the payload is its exact JSON text, which the
+/// checksum covers.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEnvelope<'a> {
+    format_version: u32,
+    incarnation: String,
+    revision: u64,
+    deleted: bool,
+    #[serde(borrow)]
+    payload: &'a serde_json::value::RawValue,
     sha256: String,
 }
 
@@ -66,9 +79,26 @@ fn payload_digest(
     deleted: bool,
     payload: &serde_json::Value,
 ) -> Result<String> {
-    // serde_json::Value's default map representation sorts object keys. The
-    // tuple layout is versioned and excludes its own checksum.
+    // The tuple layout is versioned and excludes its own checksum. The payload
+    // is serialized as it is written, so its key order is the build's
+    // (`serde_json`'s `preserve_order` keeps a struct's field order, and
+    // without it keys are sorted). A reader checks the stored text
+    // (`stored_payload_digest`), so either order verifies with either build.
     let bytes = serde_json::to_vec(&(version, incarnation, revision, deleted, payload))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// The digest of a stored record, over its payload's exact text: the same
+/// bytes `payload_digest` hashed when the record was written, whatever key
+/// order the writing build used.
+fn stored_payload_digest(record: &StoredEnvelope<'_>) -> Result<String> {
+    let bytes = serde_json::to_vec(&(
+        record.format_version,
+        &record.incarnation,
+        record.revision,
+        record.deleted,
+        record.payload,
+    ))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -136,7 +166,7 @@ pub(crate) fn decode_slot(bytes: &[u8]) -> Result<(ControlVersion, Option<serde_
         bail!("control record exceeds the {MAX_CONTROL_BYTES}-byte limit");
     }
     // Do not include raw record contents in parse/validation errors.
-    let record: Envelope = serde_json::from_slice(bytes).map_err(|error| {
+    let record: StoredEnvelope<'_> = serde_json::from_slice(bytes).map_err(|error| {
         anyhow::anyhow!(
             "invalid control record JSON at line {}, column {}",
             error.line(),
@@ -151,18 +181,12 @@ pub(crate) fn decode_slot(bytes: &[u8]) -> Result<(ControlVersion, Option<serde_
     }
     uuid::Uuid::parse_str(&record.incarnation)
         .map_err(|_| anyhow::anyhow!("invalid control record incarnation"))?;
-    if record.sha256
-        != payload_digest(
-            record.format_version,
-            &record.incarnation,
-            record.revision,
-            record.deleted,
-            &record.payload,
-        )?
-    {
+    if record.sha256 != stored_payload_digest(&record)? {
         bail!("control record checksum mismatch");
     }
-    if record.deleted && !record.payload.is_null() {
+    let payload: serde_json::Value = serde_json::from_str(record.payload.get())
+        .map_err(|_| anyhow::anyhow!("invalid control record payload"))?;
+    if record.deleted && !payload.is_null() {
         bail!("invalid control tombstone payload");
     }
     Ok((
@@ -171,7 +195,7 @@ pub(crate) fn decode_slot(bytes: &[u8]) -> Result<(ControlVersion, Option<serde_
             revision: record.revision,
             digest: record.sha256,
         },
-        (!record.deleted).then_some(record.payload),
+        (!record.deleted).then_some(payload),
     ))
 }
 
@@ -614,5 +638,58 @@ mod tests {
                 .payload,
             1
         );
+    }
+}
+
+/// A record's checksum covers its payload as written, so it verifies whatever
+/// key order the writing build used (#698: the v1.1.0 writers could not read
+/// the records of builds with `preserve_order`, which keep a struct's field
+/// order).
+#[cfg(test)]
+mod key_order_tests {
+    use super::*;
+
+    const INCARNATION: &str = "00000000-0000-4000-8000-000000000690";
+
+    /// The record a build wrote for `payload` (its exact JSON text): the
+    /// digest of the tuple `[version, incarnation, revision, deleted, payload]`.
+    fn written(payload: &str) -> Vec<u8> {
+        let tuple = format!(r#"[1,"{INCARNATION}",7,false,{payload}]"#);
+        let digest = hex::encode(Sha256::digest(tuple.as_bytes()));
+        format!(
+            r#"{{"format_version":1,"incarnation":"{INCARNATION}","revision":7,"deleted":false,"payload":{payload},"sha256":"{digest}"}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_record_verifies_whatever_key_order_its_writer_used() {
+        let expected = serde_json::json!({"descriptor": {"chain": "mainnet", "bucket": "eth"}, "checkpoint": 3});
+        // In field order (a build with `preserve_order`), then sorted.
+        for payload in [
+            r#"{"descriptor":{"chain":"mainnet","bucket":"eth"},"checkpoint":3}"#,
+            r#"{"checkpoint":3,"descriptor":{"bucket":"eth","chain":"mainnet"}}"#,
+        ] {
+            let (version, decoded) = decode_slot(&written(payload)).unwrap();
+            assert_eq!(decoded, Some(expected.clone()), "{payload}");
+            assert_eq!(version.revision, 7);
+        }
+    }
+
+    #[test]
+    fn a_changed_payload_fails_its_checksum() {
+        let record = String::from_utf8(written(r#"{"checkpoint":3}"#)).unwrap();
+        let changed = record.replace(r#""checkpoint":3"#, r#""checkpoint":4"#);
+        let error = decode_slot(changed.as_bytes()).err().unwrap();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    fn records_this_build_writes_verify() {
+        let payload = serde_json::json!({"z": 1, "a": {"y": 2, "b": 3}});
+        let (bytes, version) = encode(&payload, INCARNATION, 2).unwrap();
+        let (decoded_version, decoded) = decode_slot(&bytes).unwrap();
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded, Some(payload));
     }
 }
