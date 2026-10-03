@@ -57,3 +57,19 @@ Release build, local disk, from a copy of the riv-dev1 files and their `add` sta
 - **Concatenation (eth calls 2026-10-02).** 223 writer parts (17 million rows, 979 MiB) became 4 files in 25 s, peaking at 0.9 GiB.
   - Rows and checksum are equal, and the order is exact.
   - A second run found nothing to compact.
+
+## Rollout on riv-dev1 (2026-10-03)
+
+v1.0.6 replaced v1.0.5 at 01:25 UTC.
+
+| | eth | Base | BSC |
+|---|---|---|---|
+| First run | 6 min | 35 min | 90 min |
+| Slowest table | | `calls`: 17 min, 190 million rows | `calls`: 44 min, 446 million rows |
+
+- **Deadline.** The Job's 50 min `activeDeadlineSeconds` would have killed every BSC run in `calls`. It is now 3 h (k8s-parquet#46; the running Job was patched), and the example CronJob follows (#694).
+- **Base check.** Base `calls` 2026-10-02 was checked on the bucket after its repair: 190,030,147 rows in the new files, as in the old, with no block out of order or in pieces and no row out of `(tx_index, call_index)` order.
+- **A loop, fixed in v1.0.7 (#694).**
+  - **Cause:** v1.0.6 rolled a repaired bin to a second file at the 256 MiB target. The delta-rs files of Base and BSC `storage_changes` were just over that size, so the split fell inside a block.
+  - **Effect:** the planner took the two files, which share that block, for an overlap and sorted them again every run, so those tables never reached their older days. The rows were rewritten unchanged.
+  - **Fix:** v1.0.7 writes each bin as one file. Files in writer order that only share a boundary block are not an overlap.
