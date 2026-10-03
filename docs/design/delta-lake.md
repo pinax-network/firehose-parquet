@@ -12,7 +12,7 @@ and L9 added the maintenance job (`scripts/delta_maintenance.py`) with its CI
 test beside a real `build`
 ([record](../audit/643-l8-l9-engines-maintenance.md)). From v1.0.2 the
 repository is Rust-only ([record](../audit/rust-only.md)): the job is the
-`fireparq-maintenance` binary (§9; after v1.0.7, `fireparq maintenance`), and CI reads with DuckDB and delta-rs
+`fireparq-maintenance` binary (§9; from v1.1.0, `fireparq maintenance`), and CI reads with DuckDB and delta-rs
 instead of Polars, which reads through delta-rs. The spike crate
 (`spikes/delta-lake/`) and its `delta-spike` CI job were removed in L8/L9
 once those tests covered it (§1.11); its files are in git history at
@@ -898,7 +898,7 @@ exit statuses. Up to v1.0.5 it called `deltalake-core` 1.0.0's `optimize`
 delta-rs's Parquet writer and commit, keeping the writer's row order
 ([#690](../audit/690-compaction-row-order.md)), and calls `vacuum` (lite or
 full), `checkpoints::create_checkpoint` and `checkpoints::cleanup_metadata`.
-After v1.0.7 the crate is a library run as `fireparq maintenance`: one binary
+From v1.1.0 the crate is a library run as `fireparq maintenance`: one binary
 and one version with the writer, and nothing links DataFusion (CI checks
 `cargo tree --workspace`). The repository also has an
 example manifest (`deploy/examples/delta-maintenance-cronjob.yaml`), a CI test
