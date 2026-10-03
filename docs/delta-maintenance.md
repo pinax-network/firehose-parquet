@@ -170,7 +170,7 @@ In a container, the writer's image runs it, `fireparq` being its entrypoint:
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/pinax-network/firehose-parquet:1.1.0 maintenance
+  ghcr.io/pinax-network/firehose-parquet:1.1.1 maintenance
 ```
 
 Up to v1.0.7 the job was a separate binary, `fireparq-maintenance`, published

@@ -52,14 +52,14 @@ Each GitHub release attaches the `fireparq` binary for Linux and macOS
 (`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
-curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.1.0/fireparq-linux-x86_64.tar.gz
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.1.1/fireparq-linux-x86_64.tar.gz
 tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
 
 Each release also publishes the image `ghcr.io/pinax-network/firehose-parquet`
 to GitHub Container Registry, with `fireparq` as its entrypoint
-([Docker](docs/getting-started.md#docker)); this release is tagged `1.1.0`,
+([Docker](docs/getting-started.md#docker)); this release is tagged `1.1.1`,
 `1.1`, `1` and `latest`. The writer runs it as `fireparq build`, the
 [Delta maintenance](docs/delta-maintenance.md) job as `fireparq maintenance`.
 
@@ -163,7 +163,7 @@ the maintenance CronJobs.
 | | [Audit records](docs/audit/README.md) | Implementation and validation records of the September 2026 audit (#463) |
 | Development | [Development](docs/development.md) | Build and test, repository structure, CLI architecture |
 | | [Repository navigation](docs/repo-navigation.md) | Module map, data flow and where to edit |
-| Releases | [v1.1.0](docs/releases/v1.1.0.md), [v1.0.7](docs/releases/v1.0.7.md), [v1.0.6](docs/releases/v1.0.6.md), [v1.0.5](docs/releases/v1.0.5.md), [v1.0.4](docs/releases/v1.0.4.md), [v1.0.3](docs/releases/v1.0.3.md), [v1.0.2](docs/releases/v1.0.2.md), [v1.0.1](docs/releases/v1.0.1.md), [v1.0.0](docs/releases/v1.0.0.md) | Release notes; v1.0.0 has the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first) from v0.7 |
+| Releases | [v1.1.1](docs/releases/v1.1.1.md), [v1.1.0](docs/releases/v1.1.0.md), [v1.0.7](docs/releases/v1.0.7.md), [v1.0.6](docs/releases/v1.0.6.md), [v1.0.5](docs/releases/v1.0.5.md), [v1.0.4](docs/releases/v1.0.4.md), [v1.0.3](docs/releases/v1.0.3.md), [v1.0.2](docs/releases/v1.0.2.md), [v1.0.1](docs/releases/v1.0.1.md), [v1.0.0](docs/releases/v1.0.0.md) | Release notes; v1.0.0 has the [upgrade guide](docs/releases/v1.0.0.md#upgrade-guide-read-first) from v0.7 |
 | | [Unreleased](docs/releases/unreleased.md), [all releases](docs/releases/) | Changes since the last release, and older notes |
 
 ## License

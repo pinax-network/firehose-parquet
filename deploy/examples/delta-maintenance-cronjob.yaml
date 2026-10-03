@@ -86,7 +86,7 @@ spec:
             - name: maintenance
               # `fireparq` is the ENTRYPOINT. Pin the digest of the release's
               # image in production, the writer's.
-              image: ghcr.io/pinax-network/firehose-parquet:1.1.0
+              image: ghcr.io/pinax-network/firehose-parquet:1.1.1
               args: ["maintenance"]
               envFrom:
                 - configMapRef:
@@ -152,7 +152,7 @@ spec:
             - name: maintenance
               # `fireparq` is the ENTRYPOINT. Pin the digest of the release's
               # image in production, the writer's.
-              image: ghcr.io/pinax-network/firehose-parquet:1.1.0
+              image: ghcr.io/pinax-network/firehose-parquet:1.1.1
               args: ["maintenance"]
               env:
                 - name: FULL_VACUUM
