@@ -10,8 +10,8 @@
 //! to the loopback HTTPS S3 endpoint of `examples/bench_live_flush/s3.rs`.
 //! OPTIMIZE is simulated with a commit that removes a day's files and adds
 //! their rows rewritten as one file (`docs/design/delta-lake.md` §7.3), and
-//! run for real by the maintenance job (the `fireparq-maintenance` binary,
-//! optional locally, required in CI) together with a checkpoint.
+//! run for real by the maintenance job (`fireparq maintenance`) together with
+//! a checkpoint.
 use arrow::array::AsArray;
 use arrow::compute::concat_batches;
 use deltalake_core::DeltaTable;
@@ -465,10 +465,11 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
     assert_eq!(optimized.count("Duplicates"), 0);
     assert_eq!(optimized.summary["Partitions"], first.summary["Partitions"]);
 
-    // The real maintenance job (the `fireparq-maintenance` binary): OPTIMIZE
-    // of the other day, which alone has two files, and a checkpoint, whose
-    // Parquet file sits in `_delta_log/`.
-    if let Some(job) = common::maintenance_bin() {
+    // The real maintenance job (`fireparq maintenance`): OPTIMIZE of the other
+    // day, which alone has two files, and a checkpoint, whose Parquet file
+    // sits in `_delta_log/`.
+    {
+        let job = common::maintenance_bin();
         let run = common::maintenance_job(
             &job,
             &[
@@ -487,10 +488,10 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
                 &line["version_after"]
             ),
             (
-                // footer_keys: the writer's 8 dataset-level keys and the job's
-                // two (its version, and the row order).
+                // footer_keys: the writer's 8 dataset-level keys and the row
+                // order.
                 &json!([{
-                    "date": SECOND_DAY, "files_removed": 2, "files_added": 1, "footer_keys": 10,
+                    "date": SECOND_DAY, "files_removed": 2, "files_added": 1, "footer_keys": 9,
                     "rows": 2, "repaired_bins": 0,
                 }]),
                 &json!(6),

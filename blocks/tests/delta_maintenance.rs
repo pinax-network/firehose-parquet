@@ -1,4 +1,4 @@
-//! #643 L9: the maintenance job, the `fireparq-maintenance` binary (delta-rs
+//! #643 L9: the maintenance job, `fireparq maintenance` (delta-rs
 //! `deltalake-core` 1.0.0), runs over and over beside a real `fireparq build`.
 //!
 //! A cursor-aware mock Firehose serves final EVM blocks, 10 per UTC day, one
@@ -31,10 +31,9 @@
 //! leaves orphans), that the job never deletes a part fireparq published but
 //! has not committed, and that reruns change nothing.
 //!
-//! The job is the binary, run with a cleared environment
-//! (`common::maintenance_job`); without it (locally) these tests are skipped.
-//! `maintenance/tests/cli.rs` tests its settings, exit statuses, redaction
-//! and skipped tables. Engines: see `common/mod.rs`.
+//! The job is `fireparq maintenance`, run with a cleared environment
+//! (`common::maintenance_job`). `maintenance_cli.rs` tests its settings, exit
+//! statuses, redaction and skipped tables. Engines: see `common/mod.rs`.
 use firehose_protos::{eth, firehose};
 use prost::Message;
 use serde_json::{json, Value};
@@ -470,9 +469,7 @@ fn operations(table: &Path) -> Vec<(u64, String)> {
 }
 
 async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
-    let Some(job) = common::maintenance_bin() else {
-        return;
-    };
+    let job = common::maintenance_bin();
     let counter = Arc::new(AtomicU64::new(0));
     let (endpoint, server) = firehose(counter.clone()).await;
 
@@ -637,21 +634,12 @@ async fn maintenance_beside_build(storage: Storage<'_>, cwd: &Path) {
                     "{context} {name}: no {key} in {keys:?}"
                 );
             }
-            assert_eq!(
-                metadata
-                    .get("fireparq-maintenance.version")
-                    .map(String::as_str),
-                Some(env!("CARGO_PKG_VERSION")),
-                "{context} {name}: {keys:?}"
-            );
             assert!(
                 !keys.iter().any(|key| key.starts_with("fireparq.ingest.")),
                 "{context} {name}: ingest provenance carried over: {keys:?}"
             );
             assert_eq!(
-                metadata
-                    .get("fireparq-maintenance.row_order")
-                    .map(String::as_str),
+                metadata.get("fireparq.row_order").map(String::as_str),
                 Some("writer"),
                 "{context} {name}: {keys:?}"
             );
@@ -909,9 +897,7 @@ async fn job_on(job: &Path, root: &Path, table: &str, settings: &[(&str, &str)])
 /// no lite or enforced full VACUUM deletes a part that is not in the log yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vacuum_runs_before_the_checkpoint_and_never_deletes_untracked_parts() {
-    let Some(job) = common::maintenance_bin() else {
-        return;
-    };
+    let job = common::maintenance_bin();
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
 

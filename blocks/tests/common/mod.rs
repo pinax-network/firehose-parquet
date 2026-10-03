@@ -10,13 +10,9 @@
 //!   values, `txn`, the Arrow schema), partition pruning, and the rows of the
 //!   active files ([`delta_batches`]), the way Polars' `scan_delta` reads: the
 //!   file list from delta-rs, then the Parquet files. Always available;
-//! - the maintenance job, the `fireparq-maintenance` binary
-//!   ([`maintenance_bin`]): `FIREPARQ_MAINTENANCE`, else next to the
-//!   `fireparq` binary under test (`cargo test --workspace` and
-//!   `cargo build -p fireparq-maintenance` build it there). Optional locally,
-//!   required by `FIREPARQ_REQUIRE_MAINTENANCE` (CI). It is the only OPTIMIZE:
-//!   these tests link no DataFusion, so the writer under test is built with
-//!   exactly its release features;
+//! - the maintenance job, `fireparq maintenance` of the binary under test
+//!   ([`maintenance_bin`], [`maintenance_job`]). It is the only compaction:
+//!   these tests link no DataFusion, and neither does `fireparq`;
 //! - the DuckDB CLI from `FIREPARQ_DUCKDB` (else `duckdb` on `PATH`), optional
 //!   locally and required by `FIREPARQ_REQUIRE_DUCKDB` (CI). Its `delta`
 //!   extension is loaded from `FIREPARQ_DUCKDB_EXTENSION_DIR` (else a
@@ -487,26 +483,9 @@ pub async fn delta_vacuum_now(table: DeltaTable, full: bool, dry_run: bool) -> V
     metrics.files_deleted
 }
 
-/// The `fireparq-maintenance` binary, or `None` locally when it is missing.
-pub fn maintenance_bin() -> Option<PathBuf> {
-    let candidate = std::env::var_os("FIREPARQ_MAINTENANCE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_BIN_EXE_fireparq")).with_file_name("fireparq-maintenance")
-        });
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    assert!(
-        std::env::var_os("FIREPARQ_REQUIRE_MAINTENANCE").is_none(),
-        "FIREPARQ_REQUIRE_MAINTENANCE is set but {candidate:?} is missing: \
-         run `cargo build -p fireparq-maintenance` first"
-    );
-    eprintln!(
-        "skipping the maintenance job: {candidate:?} is missing \
-         (`cargo build -p fireparq-maintenance`, or set FIREPARQ_MAINTENANCE)"
-    );
-    None
+/// The binary whose `maintenance` subcommand is the maintenance job.
+pub fn maintenance_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fireparq"))
 }
 
 /// One run of the maintenance job.
@@ -569,6 +548,7 @@ impl std::fmt::Debug for JobRun {
 pub async fn maintenance_job(bin: &Path, env: &[(&str, String)]) -> JobRun {
     let mut command = tokio::process::Command::new(bin);
     command
+        .arg("maintenance")
         .kill_on_drop(true)
         .env_clear()
         .envs(env.iter().map(|(key, value)| (*key, value.as_str())));

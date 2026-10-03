@@ -78,13 +78,10 @@ jobs:
             . -> target
           save-if: false
 
-      # Two builds: cargo unifies features across the packages of one build,
-      # and only fireparq-maintenance enables delta-rs's DataFusion. The
-      # writer's own build links none.
+      # `fireparq` includes the maintenance job (`fireparq maintenance`).
       - name: Build release binaries
         run: |
           cargo build --release --locked --target ${{ matrix.target }} -p blocks -p firehose-parquet
-          cargo build --release --locked --target ${{ matrix.target }} -p fireparq-maintenance
 
       - name: Package binaries
         shell: bash
@@ -93,7 +90,6 @@ jobs:
           mkdir -p "$STAGING"
           cp "target/${{ matrix.target }}/release/fireparq" "$STAGING/"
           cp "target/${{ matrix.target }}/release/generate-networks" "$STAGING/"
-          cp "target/${{ matrix.target }}/release/fireparq-maintenance" "$STAGING/"
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 

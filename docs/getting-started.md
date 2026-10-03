@@ -136,5 +136,5 @@ docker run --rm \
   --output /output
 ```
 
-The maintenance job's image, `ghcr.io/pinax-network/firehose-parquet-maintenance`,
-is described in [Delta maintenance](delta-maintenance.md).
+The same image runs the Delta maintenance job, `fireparq maintenance`
+([Delta maintenance](delta-maintenance.md)).

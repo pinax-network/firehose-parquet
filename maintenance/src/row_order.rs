@@ -3,7 +3,7 @@
 //! `fireparq build` writes each block's rows in the order the Firehose block
 //! holds them (`blocks/src/evm/mapper.rs`), and a block's rows in block order.
 //! A compaction keeps that order by concatenating parts; only the repair of a
-//! file compacted out of order (delta-rs's OPTIMIZE, fireparq-maintenance up
+//! file compacted out of order (delta-rs's OPTIMIZE, the maintenance job up
 //! to 1.0.5) sorts, by `block_num` and then the table's key below. Each key is
 //! strictly increasing in the writer's order, so sorting by it gives that
 //! order back exactly: `blocks/tests/evm_golden.rs` checks every table of the

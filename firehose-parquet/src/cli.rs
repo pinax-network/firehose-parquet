@@ -565,6 +565,37 @@ pub enum Commands {
     /// `_fireparq/cursor.parquet` is only an optional mirror (`--cursor none`
     /// disables it).
     Build(BuildArgs),
+    /// Maintain a dataset's Delta tables: compact, VACUUM and checkpoint.
+    ///
+    /// The Delta maintenance job, run on a schedule beside `build` (a
+    /// Kubernetes CronJob in deploy/examples/delta-maintenance-cronjob.yaml).
+    /// For each table: compact closed dates in the writer's row order, VACUUM,
+    /// checkpoint, and clean up the log. Settings are environment variables
+    /// (or an --env-file); it prints one JSON object per line and exits 0 when
+    /// every table was maintained or skipped, 1 when a table failed, 2 for a
+    /// configuration error. See docs/delta-maintenance.md.
+    #[command(after_long_help = "\
+Settings (environment variables):
+  LAKE_ROOT or LAKE_BUCKET        Dataset root: s3://bucket[/prefix] or a local path (LAKE_BUCKET=b is s3://b)
+  LAKE_TABLES                     Comma-separated tables, for example blocks,transactions,logs (required)
+  S3_ENDPOINT, AWS_REGION         S3 endpoint URL (default AWS) and region (default us-east-1)
+  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+                                  Credentials (required on S3; never printed)
+  AWS_ALLOW_HTTP, AWS_VIRTUAL_HOSTED_STYLE_REQUEST
+                                  Plain HTTP; virtual-hosted requests (default false, path-style)
+  FULL_VACUUM                     1 for the weekly full VACUUM (refused below 168 h of retention)
+  VACUUM_RETENTION_HOURS          Default the table's delta.deletedFileRetentionDuration (7 days)
+  OPTIMIZE_DATES                  closed (default) or all (also the newest date)
+  OPTIMIZE_TARGET_SIZE            Bytes; default the table's delta.targetFileSize
+  OPTIMIZE_ZSTD_LEVEL             Compression of compacted files (default 3)
+  OPTIMIZE_REPAIR_DATES           Days per table a run sorts back into the writer's order (default 1)
+  OPTIMIZE_REPAIR_WINDOW_BYTES    Decoded bytes a repair sorts at once (default 256 MiB)
+  DRY_RUN                         1 reports what would be compacted and deleted, and changes nothing
+
+Example:
+  DRY_RUN=1 LAKE_ROOT=./output/mainnet LAKE_TABLES=blocks,transactions fireparq maintenance
+")]
+    Maintenance,
     /// Validate the block sequence of a Delta `blocks` table.
     ///
     /// Reads the active data files of the table's latest Delta snapshot, from

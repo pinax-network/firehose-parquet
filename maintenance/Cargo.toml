@@ -2,22 +2,18 @@
 name = "fireparq-maintenance"
 version.workspace = true
 edition.workspace = true
-description = "Delta maintenance job for a fireparq lake: OPTIMIZE, VACUUM, checkpoints and log cleanup"
+description = "Delta maintenance of a fireparq lake (`fireparq maintenance`): order-keeping compaction, VACUUM, checkpoints and log cleanup"
 
 [lib]
 name = "fireparq_maintenance"
 path = "src/lib.rs"
 
-[[bin]]
-name = "fireparq-maintenance"
-path = "src/main.rs"
-
 [dependencies]
-# delta-rs's own operations (#643 design §9). `datafusion` is required by
-# OPTIMIZE and brings DataFusion 55, the version deltalake-core 1.0.0 is built
-# on. Only this crate enables it: the writer (`blocks`, `firehose-parquet`)
-# must not link DataFusion, and CI checks that with `cargo tree -p blocks`.
-deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls", "datafusion"] }
+# delta-rs (#643 design §9): VACUUM, checkpoints, its Parquet file writer and
+# commits, as `firehose-parquet` builds it. No `datafusion`: the compaction is
+# this crate's own (src/compact.rs), and `fireparq`, which links this crate for
+# `fireparq maintenance`, must not link DataFusion (CI checks it).
+deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls"] }
 # delta-rs's object_store major, as in `firehose-parquet`'s Delta log store.
 object_store = { version = "0.13.2", features = ["aws"] }
 # The `Bytes` of the Parquet reader the compaction reads files with.

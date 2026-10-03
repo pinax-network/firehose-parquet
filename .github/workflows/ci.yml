@@ -90,9 +90,8 @@ jobs:
 
       # The repository is Rust-only: no Python is installed. The Delta tests
       # read through delta-rs snapshots (blocks/tests/common/mod.rs) and run
-      # the maintenance job, the fireparq-maintenance binary (maintenance/),
-      # whose OPTIMIZE needs DataFusion. Only that crate may enable it: the
-      # writer links no DataFusion, not even in its tests.
+      # the maintenance job, `fireparq maintenance` (maintenance/). Nothing
+      # links DataFusion: the compaction is the maintenance crate's own.
       - name: Check that the repository is Rust-only
         run: |
           if git ls-files | grep -E '\.py$|requirements.*\.txt$'; then
@@ -100,24 +99,16 @@ jobs:
             exit 1
           fi
 
-      - name: Check that the writer links no DataFusion
+      - name: Check that nothing links DataFusion
         run: |
-          if cargo tree --locked -p blocks --prefix none | grep -E '^datafusion'; then
-            echo "::error::blocks (fireparq) depends on DataFusion; only fireparq-maintenance may"
+          if cargo tree --locked --workspace --prefix none | grep -E '^datafusion'; then
+            echo "::error::the workspace depends on DataFusion; fireparq (maintenance included) must not"
             exit 1
           fi
-          cargo tree --locked -p fireparq-maintenance -e normal --prefix none | grep -q '^datafusion v'
 
-      # Two runs: cargo unifies features across the packages of one run, and
-      # DataFusion's (serde_json `preserve_order`, delta-rs `datafusion`)
-      # would change the writer under test. The maintenance tests build the
-      # binary that the blocks tests then run (FIREPARQ_REQUIRE_MAINTENANCE).
       - name: Run tests
-        env:
-          FIREPARQ_REQUIRE_MAINTENANCE: "1"
         run: |
-          cargo test -p fireparq-maintenance --locked
-          cargo test --workspace --exclude fireparq-maintenance --locked
+          cargo test --workspace --locked
           cargo test -p blocks --example refresh_evm_golden --locked
 
       - name: Build fireparq binary

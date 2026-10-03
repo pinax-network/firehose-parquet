@@ -12,7 +12,7 @@ and L9 added the maintenance job (`scripts/delta_maintenance.py`) with its CI
 test beside a real `build`
 ([record](../audit/643-l8-l9-engines-maintenance.md)). From v1.0.2 the
 repository is Rust-only ([record](../audit/rust-only.md)): the job is the
-`fireparq-maintenance` binary (§9), and CI reads with DuckDB and delta-rs
+`fireparq-maintenance` binary (§9; after v1.0.7, `fireparq maintenance`), and CI reads with DuckDB and delta-rs
 instead of Polars, which reads through delta-rs. The spike crate
 (`spikes/delta-lake/`) and its `delta-spike` CI job were removed in L8/L9
 once those tests covered it (§1.11); its files are in git history at
@@ -385,11 +385,10 @@ Its checks are now covered by the workspace's tests against fireparq itself:
 | `py/loopback_s3.py` (moto) | The Rust loopback S3 endpoint (`blocks/examples/bench_live_flush/s3.rs`), which gained DeleteObjects and real `Last-Modified` times in L9 |
 | `bench-load` (§1.9) | Measurements, not a test; L3's `the_log_tail_counts_commits_after_the_last_checkpoint` and the tail metric |
 
-Locally, the Delta tests run with the pinned DuckDB CLI and the maintenance
-binary (the delta-rs reads need nothing else):
+Locally, the Delta tests run with the pinned DuckDB CLI (the delta-rs reads
+and `fireparq maintenance` need nothing else):
 
 ```sh
-cargo build -p fireparq-maintenance
 FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 \
 cargo test -p blocks --test engine_compat --test delta_tables --test delta_maintenance
 ```
@@ -894,17 +893,19 @@ with no compaction logic of its own. L9 added it as the `deltalake` Python
 package (`deltalake==1.6.6`, `scripts/delta_maintenance.py`); from v1.0.2 it
 is the Rust binary `fireparq-maintenance` (crate `maintenance/`,
 [record](../audit/rust-only.md)), with the same settings, order, output and
-exit statuses. It calls `deltalake-core` 1.0.0: `optimize` (compact, with a
-`date` partition filter; this needs the crate's `datafusion` feature, which
-brings DataFusion 55), `vacuum` (lite or full), `checkpoints::create_checkpoint`
-and `checkpoints::cleanup_metadata`. Only `maintenance/` enables `datafusion`:
-the writer (`blocks`, `firehose-parquet`) links no DataFusion, and CI checks
-that with `cargo tree -p blocks`. The repository also has an
+exit statuses. Up to v1.0.5 it called `deltalake-core` 1.0.0's `optimize`
+(which needs DataFusion); from v1.0.6 it compacts with its own planner over
+delta-rs's Parquet writer and commit, keeping the writer's row order
+([#690](../audit/690-compaction-row-order.md)), and calls `vacuum` (lite or
+full), `checkpoints::create_checkpoint` and `checkpoints::cleanup_metadata`.
+After v1.0.7 the crate is a library run as `fireparq maintenance`: one binary
+and one version with the writer, and nothing links DataFusion (CI checks
+`cargo tree --workspace`). The repository also has an
 example manifest (`deploy/examples/delta-maintenance-cronjob.yaml`), a CI test
 beside a running
 `build` (`blocks/tests/delta_maintenance.rs`, which replaced the spike's
-`concurrent_maintenance.py`) and tests of the binary itself
-(`maintenance/tests/cli.rs`). The job follows the sketch below, with these
+`concurrent_maintenance.py`) and tests of the command itself
+(`blocks/tests/maintenance_cli.rs`). The job follows the sketch below, with these
 additions ([Delta maintenance](../delta-maintenance.md) lists every setting):
 
 - `LAKE_ROOT` (a dataset below the bucket root, or a local path) besides
@@ -995,9 +996,10 @@ Notes:
   - hourly, for example `17 * * * *`, with `concurrencyPolicy: Forbid` and
     `activeDeadlineSeconds: 3000`;
   - a second weekly CronJob (`FULL_VACUUM=1`) at a quiet hour;
-  - the image is the `fireparq-maintenance` binary on `debian:bookworm-slim`
-    with CA certificates, as user 65534 (up to v1.0.1: `python:3.12-slim` plus
-    the pinned wheel). It runs as an RGW user limited as in §5.
+  - the image is the writer's, `fireparq` with `args: ["maintenance"]`, as
+    user 65534 (up to v1.0.7 a separate image of the `fireparq-maintenance`
+    binary; up to v1.0.1 `python:3.12-slim` plus the pinned wheel). It runs as
+    an RGW user limited as in §5.
 - **Failure behavior:** a failed or conflicting run is simply retried next
   hour. OPTIMIZE files that failed to commit are untracked and are removed by
   the weekly full VACUUM after 7 days. The writer is never affected.

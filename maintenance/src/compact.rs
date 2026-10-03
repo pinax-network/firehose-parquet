@@ -1,6 +1,6 @@
 //! Compaction that keeps the writer's row order.
 //!
-//! delta-rs's OPTIMIZE (fireparq-maintenance up to 1.0.5) bins a date's files
+//! delta-rs's OPTIMIZE (the maintenance job up to 1.0.5) bins a date's files
 //! newest first and reads each bin through a parallel DataFusion scan, writing
 //! batches in the order they arrive: its files hold a date's blocks out of
 //! order, some blocks in pieces, and now and then a block's rows out of their
@@ -77,7 +77,7 @@ use crate::row_order::{row_order_key, KeyPart};
 pub const ROW_ORDER_TAG: &str = "fireparq.rowOrder";
 
 /// The footer key of a compacted file whose rows are in the writer's order.
-pub const ROW_ORDER_KEY: &str = "fireparq-maintenance.row_order";
+pub const ROW_ORDER_KEY: &str = "fireparq.row_order";
 
 /// The value of [`ROW_ORDER_TAG`] and [`ROW_ORDER_KEY`].
 pub const WRITER_ORDER: &str = "writer";
@@ -340,13 +340,10 @@ impl Compaction<'_> {
         };
         CommitBuilder::from(self.commit.clone())
             .with_actions(actions)
-            .with_app_metadata(HashMap::from([
-                (
-                    crate::COMPACTED_BY_KEY.to_string(),
-                    json!(env!("CARGO_PKG_VERSION")),
-                ),
-                (ROW_ORDER_KEY.to_string(), json!(WRITER_ORDER)),
-            ]))
+            .with_app_metadata(HashMap::from([(
+                ROW_ORDER_KEY.to_string(),
+                json!(WRITER_ORDER),
+            )]))
             .build(
                 Some(self.table.snapshot()?),
                 self.table.log_store(),
