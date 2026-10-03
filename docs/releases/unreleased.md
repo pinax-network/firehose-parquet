@@ -27,6 +27,12 @@ empty when the release is cut.
   - **The fix:** each bin is now written as one file, as delta-rs writes a
     bin. Two files in writer order that only share a boundary block are no
     longer an overlap.
+- The example maintenance CronJob
+  (`deploy/examples/delta-maintenance-cronjob.yaml`) gives a run 3 h instead of
+  50 min. With v1.0.6, a table's day is repaired all or nothing, and the first
+  run on riv-dev1 took 90 min on BSC (`calls` alone 44 min). A shorter
+  deadline kills every run in the same table, so that table and the ones after
+  it are never compacted.
 
 ## Performance
 
