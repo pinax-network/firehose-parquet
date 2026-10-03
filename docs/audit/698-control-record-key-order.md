@@ -13,7 +13,8 @@ riv-dev1's writers to v1.1.0. Every writer crash-looped at startup with:
 Error: control record checksum mismatch
 ```
 
-This hit eth, base, bsc and the `n*` backfills. At 20:37 UTC,
+This hit all three writers, eth, base and bsc: each restarted 6 times and
+never became ready. At 20:37 UTC,
 [k8s-parquet#49](https://github.com/pinax-network/k8s-parquet/pull/49)
 reverted them to v1.0.4, and they resumed from their state and committed
 again. The writers were down for about 11 minutes. v1.1.0 failed while
