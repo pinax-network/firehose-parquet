@@ -67,7 +67,10 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0 # the next hourly run is the retry
-      activeDeadlineSeconds: 3000
+      # A day's repair into the writer's row order commits a table's day all
+      # or nothing, and takes about 90 min on BSC (calls alone 44): leave runs
+      # the time for one, or every run is killed in the same table.
+      activeDeadlineSeconds: 10800
       template:
         metadata:
           labels:

@@ -182,7 +182,10 @@ settings, order and exit statuses.
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml)
 runs that image hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
-weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
+weekly. Its `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
+table's day, which commits all or nothing: on riv-dev1 the first run of 1.0.6
+took 6 min on eth, 35 min on Base and 90 min on BSC (`calls` alone 44 min).
+It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
 `emptyDir`. Give the job its own S3 user, limited to the table prefixes
 (their `_delta_log/` included), with no access to `.fireparq-ingest/`,
 `_fireparq/` or the owner record, and give the writer no delete permission on
