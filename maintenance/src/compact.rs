@@ -8,9 +8,11 @@
 //!
 //! - A date's active files are planned by block range (their `block_num`
 //!   stats): files whose ranges overlap form one unit, and units are packed, in
-//!   block order, into bins of at most the target size. A unit larger than the
-//!   target is a bin of its own, and a bin of one file in writer order is left
-//!   as it is.
+//!   block order, into bins of at most the target size. Two files in writer
+//!   order that only share a boundary block (a block split across them) don't
+//!   overlap: in block order, the first holds the block's earlier rows. A unit
+//!   larger than the target is a bin of its own, and a bin of one file in
+//!   writer order is left as it is.
 //! - A bin of files in writer order (fireparq's `part-v1-*` parts, and files
 //!   this job wrote, tagged [`ROW_ORDER_TAG`]) is concatenated: each file is
 //!   read start to finish, one after the other, and its rows are written as
@@ -19,6 +21,9 @@
 //!   its rows are sorted by `block_num` and the table's in-block key
 //!   ([`row_order_key`]), a window of blocks at a time. Two rows of a block that
 //!   tie on the key stop the bin, since their order can't be recovered.
+//!
+//! Each bin is written as one file, as delta-rs writes a bin: rolling to a new
+//! file at the target size would split a block across two files.
 //!
 //! Every file written is tagged [`ROW_ORDER_TAG`] in the log and carries
 //! [`ROW_ORDER_KEY`] in its footer. A bin's row count must equal its files'
@@ -172,12 +177,18 @@ pub fn plan(mut files: Vec<DateFile>, target: u64) -> Vec<Bin> {
     files.sort_by(|a, b| {
         (a.first_block, a.last_block, &a.path).cmp(&(b.first_block, b.last_block, &b.path))
     });
-    // Units: runs of files whose block ranges overlap.
+    // Units: runs of files whose block ranges overlap. Files in writer order
+    // that only touch (the last block of one is the first of the next) stay
+    // apart: concatenated in this order, the split block's rows stay in order.
     let mut units: Vec<Vec<DateFile>> = Vec::new();
     let mut unit_last = i64::MIN;
     for file in files {
         match units.last_mut() {
-            Some(unit) if file.first_block <= unit_last => {
+            Some(unit)
+                if file.first_block < unit_last
+                    || (file.first_block == unit_last
+                        && !(file.ordered && unit.iter().all(|file| file.ordered))) =>
+            {
                 unit_last = unit_last.max(file.last_block);
                 unit.push(file);
             }
@@ -383,7 +394,8 @@ impl Compaction<'_> {
             file_schema.clone(),
             Default::default(),
             Some(self.properties.clone()),
-            Some(self.target),
+            // One file per bin (see the module documentation).
+            None,
             None,
             None,
             Some(ObjectPath::parse(format!("date={}", self.date))?),
@@ -799,6 +811,36 @@ mod tests {
         assert_eq!(
             names(&plan(small, 100)),
             vec![(vec!["part-v1-a", "legacy"], true)]
+        );
+    }
+
+    #[test]
+    fn files_in_writer_order_that_share_a_boundary_block_stay_as_they_are() {
+        // A bin 1.0.6 wrote, rolled at the target size inside block 20.
+        let full = vec![
+            file("compacted-a", (1, 20), 95, true),
+            file("compacted-b", (20, 40), 10, true),
+            file("compacted-c", (41, 60), 95, true),
+        ];
+        assert!(plan(full, 100).is_empty(), "never repaired again");
+        // Small enough to pack: concatenated in block order, not sorted.
+        let small = vec![
+            file("compacted-b", (20, 40), 10, true),
+            file("compacted-a", (1, 20), 40, true),
+            file("compacted-c", (41, 60), 40, true),
+        ];
+        assert_eq!(
+            names(&plan(small, 100)),
+            vec![(vec!["compacted-a", "compacted-b", "compacted-c"], false)]
+        );
+        // A shared block with a file out of order is an overlap to repair.
+        let mixed = vec![
+            file("compacted-a", (1, 20), 40, true),
+            file("legacy", (20, 40), 40, false),
+        ];
+        assert_eq!(
+            names(&plan(mixed, 100)),
+            vec![(vec!["compacted-a", "legacy"], true)]
         );
     }
 

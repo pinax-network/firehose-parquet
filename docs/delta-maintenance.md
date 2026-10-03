@@ -124,8 +124,11 @@ state changes in the order it recorded them). The job keeps that order
 
 - It plans a day by the files' `block_num` ranges, from the log's stats: files
   whose ranges overlap form one unit, and units are packed, oldest first, into
-  bins of at most the target size. A unit larger than the target is a bin of
-  its own, and a bin of one file already in writer order is left as it is.
+  bins of at most the target size. Two files in writer order that only share a
+  boundary block don't overlap: the first holds the block's earlier rows. A
+  unit larger than the target is a bin of its own, and a bin of one file
+  already in writer order is left as it is. Each bin is written as one file,
+  as delta-rs writes a bin, so no block is split across two files.
 - A bin of files in writer order (`part-v1-*` parts, and files the job wrote,
   tagged `fireparq.rowOrder = writer` in the log) is **concatenated**: each
   file is read start to finish, one after the other, and its rows written as
@@ -182,7 +185,10 @@ settings, order and exit statuses.
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml)
 runs that image hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
-weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
+weekly. Its `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
+table's day, which commits all or nothing: on riv-dev1 the first run of 1.0.6
+took 6 min on eth, 35 min on Base and 90 min on BSC (`calls` alone 44 min).
+It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
 `emptyDir`. Give the job its own S3 user, limited to the table prefixes
 (their `_delta_log/` included), with no access to `.fireparq-ingest/`,
 `_fireparq/` or the owner record, and give the writer no delete permission on

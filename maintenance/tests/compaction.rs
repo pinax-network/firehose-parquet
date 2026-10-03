@@ -203,11 +203,18 @@ async fn a_file_out_of_order_is_sorted_back_into_the_writer_order() {
     assert!(!ordered, "a delta-rs compaction is not in writer order");
     assert_ne!(before, expected(&rows), "the file is out of order");
 
-    let (status, lines) = job(root, &[("OPTIMIZE_REPAIR_WINDOW_BYTES", "1048576")]).await;
+    // A target below the file's size: the bin is still one file, never split
+    // inside a block (1.0.6 rolled it, and then repaired the pair every run).
+    let small_target = [
+        ("OPTIMIZE_REPAIR_WINDOW_BYTES", "1048576"),
+        ("OPTIMIZE_TARGET_SIZE", "1048576"),
+    ];
+    let (status, lines) = job(root, &small_target).await;
     assert_eq!(status, 0, "{lines:?}");
     let line = table_line(&lines);
     assert_eq!(line["errors"], serde_json::json!([]), "{line}");
     assert_eq!(line["compacted"][0]["repaired_bins"], 1, "{line}");
+    assert_eq!(line["compacted"][0]["files_added"], 1, "{line}");
     assert_eq!(line["compacted"][0]["rows"], rows.len(), "{line}");
 
     let (after, files, ordered) = date_rows(root, DAYS[0].0).await;
@@ -230,7 +237,7 @@ async fn a_file_out_of_order_is_sorted_back_into_the_writer_order() {
     }
 
     // A second run finds nothing to do.
-    let (status, lines) = job(root, &[]).await;
+    let (status, lines) = job(root, &small_target).await;
     assert_eq!(status, 0, "{lines:?}");
     assert_eq!(
         table_line(&lines)["dates_to_compact"],
