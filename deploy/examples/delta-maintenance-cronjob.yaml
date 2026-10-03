@@ -135,7 +135,8 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0 # the next weekly run is the retry
-      activeDeadlineSeconds: 3000
+      # Every run compacts first, so a full VACUUM run may repair a day too.
+      activeDeadlineSeconds: 10800
       template:
         metadata:
           labels:
