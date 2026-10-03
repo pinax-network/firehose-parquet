@@ -1,5 +1,6 @@
-//! `fireparq-maintenance`: the Delta maintenance job of a fireparq lake
-//! (#643, `docs/design/delta-lake.md` §9).
+//! The Delta maintenance job of a fireparq lake (#643,
+//! `docs/design/delta-lake.md` §9), run as `fireparq maintenance`: one binary
+//! and one version with the writer.
 //!
 //! Compaction and cleanup of fireparq's Delta tables are platform-side policy:
 //! this job runs on a schedule, a Kubernetes CronJob in
@@ -129,9 +130,6 @@ pub const ICEBERG_METADATA_DIR: &str = "metadata";
 /// per-part `fireparq.ingest.*` provenance (ordinals, transaction, stream)
 /// describes the parts being merged, not the compacted file, and is not.
 pub const CARRIED_METADATA_PREFIX: &str = "firehose-parquet.";
-
-/// The footer key naming the job, and its version, that compacted a file.
-pub const COMPACTED_BY_KEY: &str = "fireparq-maintenance.version";
 
 /// Footers read at once while planning a compaction.
 const FOOTER_READS: usize = 16;
@@ -542,8 +540,8 @@ fn active_files_per_date(table: &DeltaTable) -> DeltaResult<BTreeMap<String, u64
 }
 
 /// The footer metadata of a compaction of `date`: each `firehose-parquet.*`
-/// key with the same value in every file of the date that has it, and
-/// [`COMPACTED_BY_KEY`]. A key whose values differ (for example
+/// key with the same value in every file of the date that has it. A key whose
+/// values differ (for example
 /// `firehose-parquet.version` on a day that spans a writer upgrade) is left
 /// out; a file without the key (compacted before the job kept metadata) does
 /// not drop it. delta-rs's OPTIMIZE writes new files with its own writer and
@@ -576,8 +574,7 @@ pub async fn carried_metadata(table: &DeltaTable, date: &str) -> DeltaResult<Vec
 }
 
 /// The carried footer metadata of files with these `firehose-parquet.*`
-/// pairs: each key with one value among the files that have it, and
-/// [`COMPACTED_BY_KEY`].
+/// pairs: each key with one value among the files that have it.
 fn agreed_metadata(files: Vec<Vec<(String, String)>>) -> Vec<KeyValue> {
     // Some(value) while every file with the key agrees; None once two differ.
     let mut agreed: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -591,15 +588,10 @@ fn agreed_metadata(files: Vec<Vec<(String, String)>>) -> Vec<KeyValue> {
             })
             .or_insert(Some(value));
     }
-    let mut metadata: Vec<KeyValue> = agreed
+    agreed
         .into_iter()
         .filter_map(|(key, value)| Some(KeyValue::new(key, value?)))
-        .collect();
-    metadata.push(KeyValue::new(
-        COMPACTED_BY_KEY.to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-    ));
-    metadata
+        .collect()
 }
 
 /// The `firehose-parquet.*` pairs of one data file's footer: its last 8 bytes
@@ -1166,13 +1158,9 @@ mod tests {
                     "firehose-parquet.endpoint",
                     "https://eth.firehose.pinax.network:443"
                 ),
-                (COMPACTED_BY_KEY, env!("CARGO_PKG_VERSION")),
             ]
         );
-        // Files with no metadata at all still name the compaction.
-        let bare = agreed_metadata(vec![pairs(&[]), pairs(&[])]);
-        assert_eq!(bare.len(), 1);
-        assert_eq!(bare[0].key, COMPACTED_BY_KEY);
+        assert!(agreed_metadata(vec![pairs(&[]), pairs(&[])]).is_empty());
     }
 
     #[test]

@@ -298,7 +298,7 @@ requests are quiescent; stopping the process alone is insufficient. See the
 The owner guards one fireparq writer (`build`, or `recovery recover`) and the
 state only it changes: `.fireparq-ingest/` (authority and the pending
 journal), `_fireparq/cursor.parquet` and its own uncommitted parts. It does not
-make the Delta tables exclusive. The maintenance job (`fireparq-maintenance`: OPTIMIZE,
+make the Delta tables exclusive. The maintenance job (`fireparq maintenance`: OPTIMIZE,
 VACUUM, checkpoints, log cleanup) commits to them through their logs beside a
 running `build` and never takes the owner (#636):
 

@@ -4,16 +4,20 @@
 //! over runs. The concatenation of real writer parts is checked beside a real
 //! `fireparq build` in `blocks/tests/delta_maintenance.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
 use deltalake_core::arrow::array::{AsArray, Date32Array, Int64Array, RecordBatch, StringArray};
 use deltalake_core::arrow::datatypes::{DataType as ArrowType, Field, Int64Type, Schema};
-use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
+use deltalake_core::datafile::writer::{PartitionWriter, PartitionWriterConfig};
+use deltalake_core::kernel::transaction::CommitBuilder;
+use deltalake_core::kernel::{Action, DataType, PrimitiveType, StructField};
 use deltalake_core::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use deltalake_core::parquet::file::reader::{FileReader, SerializedFileReader};
-use deltalake_core::{DeltaTable, TableProperty};
+use deltalake_core::protocol::{DeltaOperation, SaveMode};
+use deltalake_core::table::config::TablePropertiesExt as _;
+use deltalake_core::{DeltaTable, Path as ObjectPath, TableProperty};
 use fireparq_maintenance::compact::{date_files, ROW_ORDER_KEY, WRITER_ORDER};
 use fireparq_maintenance::Lake;
 use serde_json::Value;
@@ -91,8 +95,59 @@ fn scrambled(rows: &[Row], per_block: i64) -> Vec<Row> {
     out
 }
 
-async fn write(table: DeltaTable, rows: &[Row], day: i32) -> DeltaTable {
-    table.write(vec![batch(rows, day)]).await.unwrap()
+/// Appends one data file of `rows`, in this order, to the day's partition, as
+/// the compaction writes and commits files (delta-rs's write operation would
+/// need DataFusion, which this crate doesn't link).
+async fn write(mut table: DeltaTable, rows: &[Row], day: i32) -> DeltaTable {
+    let date = DAYS.iter().find(|(_, days)| *days == day).unwrap().0;
+    // The data file holds no partition column.
+    let data = batch(rows, day).project(&[0, 1, 2]).unwrap();
+    let snapshot = table.snapshot().unwrap();
+    let config = snapshot.table_config();
+    let stats_columns = config
+        .data_skipping_stats_columns
+        .as_ref()
+        .map(|columns| columns.iter().map(ToString::to_string).collect());
+    let writer_config = PartitionWriterConfig::try_new(
+        data.schema(),
+        Default::default(),
+        None,
+        None,
+        None,
+        None,
+        Some(ObjectPath::parse(format!("date={date}")).unwrap()),
+    )
+    .unwrap();
+    let mut writer = PartitionWriter::try_with_config(
+        table.object_store(),
+        writer_config,
+        config.num_indexed_cols(),
+        stats_columns,
+    )
+    .unwrap();
+    writer.write(&data).await.unwrap();
+    let actions = writer
+        .close()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|mut add| {
+            add.partition_values = HashMap::from([("date".to_string(), Some(date.to_string()))]);
+            Action::Add(add)
+        })
+        .collect();
+    let operation = DeltaOperation::Write {
+        mode: SaveMode::Append,
+        partition_by: None,
+        predicate: None,
+    };
+    CommitBuilder::default()
+        .with_actions(actions)
+        .build(Some(snapshot), table.log_store(), operation)
+        .await
+        .unwrap();
+    table.load().await.unwrap();
+    table
 }
 
 /// A local file's rows, in their order in the file.

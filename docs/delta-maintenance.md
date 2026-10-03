@@ -2,14 +2,13 @@
 
 fireparq only appends: each flush adds one file per table and day, and one
 Delta commit per table. Compacting those files, deleting replaced ones and
-checkpointing the logs is platform-side policy, not a `fireparq` command (#643):
-the separate binary `fireparq-maintenance` (workspace crate
-[`maintenance/`](../maintenance/)) runs on a schedule, beside a running `build`.
-It uses delta-rs (`deltalake-core` 1.0.0, with DataFusion 55) for VACUUM,
-`create_checkpoint` and `cleanup_metadata`, and compacts with its own planner
-over delta-rs's Parquet writer and commit, so that compacted files keep the
-rows in the order `build` wrote them ([Row order](#row-order)). DataFusion is
-linked into this binary only, never into `fireparq`. The job needs no fireparq ownership: fireparq's commits
+checkpointing the logs is platform-side policy, run on a schedule beside a
+running `build` (#643): `fireparq maintenance`, the same binary and version as
+the writer (workspace crate [`maintenance/`](../maintenance/)). It uses delta-rs
+(`deltalake-core` 1.0.0) for VACUUM, `create_checkpoint` and
+`cleanup_metadata`, and compacts with its own planner over delta-rs's Parquet
+writer and commit, so that compacted files keep the rows in the order `build`
+wrote them ([Row order](#row-order)). Nothing links DataFusion. The job needs no fireparq ownership: fireparq's commits
 are blind appends that rebase over the job's commits, and the job never touches
 `.fireparq-ingest/` or `_fireparq/`.
 
@@ -27,8 +26,9 @@ For each table it runs, in order:
      `firehose-parquet.version` on a day that spans a writer upgrade, is left
      out, and a file without the key (one compacted by an earlier job) doesn't
      drop it;
-   - `fireparq-maintenance.version`, the job's version, and
-     `fireparq-maintenance.row_order = writer`.
+   - `fireparq.row_order = writer` (files compacted by 1.0.6 and 1.0.7 have
+     `fireparq-maintenance.row_order` and `fireparq-maintenance.version`
+     instead).
 
    The parts' `fireparq.ingest.*` keys (their ordinals, transaction and
    stream) describe the parts being merged, not the compacted file, and aren't
@@ -160,31 +160,27 @@ order: a query that needs one should still `ORDER BY` it.
 ## Running the job
 
 ```bash
-# From a checkout (the release tarballs also ship the binary)
-cargo build --release -p fireparq-maintenance
+# Settings are environment variables, or an --env-file
 DRY_RUN=1 LAKE_ROOT=output/mainnet LAKE_TABLES=blocks,transactions,logs \
-  ./target/release/fireparq-maintenance
+  fireparq maintenance
 ```
 
-Each release also publishes the job as an image,
-`ghcr.io/pinax-network/firehose-parquet-maintenance:<version>`
-([`deploy/maintenance/Dockerfile`](../deploy/maintenance/Dockerfile)): the
-`fireparq-maintenance` binary as its entrypoint on `debian:bookworm-slim` with
-CA certificates, running as user `65534`:
+In a container, the writer's image runs it, `fireparq` being its entrypoint:
 
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/pinax-network/firehose-parquet-maintenance:1.0.2
+  ghcr.io/pinax-network/firehose-parquet:1.0.7 maintenance
 ```
 
-Images up to v1.0.1 hold the former Python job
-(`scripts/delta_maintenance.py` with `deltalake` 1.6.6), with the same
-settings, order and exit statuses.
+Up to v1.0.7 the job was a separate binary, `fireparq-maintenance`, published
+as the image `ghcr.io/pinax-network/firehose-parquet-maintenance` with the same
+settings, output and exit statuses; images up to v1.0.1 held the former Python
+job (`scripts/delta_maintenance.py`).
 
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml)
-runs that image hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
+runs the writer's image with `args: ["maintenance"]` hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
 weekly. Its `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
 table's day, which commits all or nothing: on riv-dev1 the first run of 1.0.6
 took 6 min on eth, 35 min on Base and 90 min on BSC (`calls` alone 44 min).
@@ -203,16 +199,12 @@ It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
   [Prometheus Metrics](metrics.md)) growing past a few hundred: the
   hourly checkpoints have stopped, and every reader and restart replays the
   whole tail.
-- `blocks/tests/delta_maintenance.rs` runs the binary over and over beside a
-  real `build`, on local disk and on a loopback S3 endpoint, and checks the
+- `blocks/tests/delta_maintenance.rs` runs `fireparq maintenance` over and over
+  beside a real `build`, on local disk and on a loopback S3 endpoint, and checks the
   exact rows (DuckDB and delta-rs), that every file holds its rows in writer
   order, the `txn` versions and the file counts afterwards;
   `maintenance/tests/compaction.rs` checks that a file out of order is sorted
   back into it (several windows), that a tie leaves it as it is, and that
-  repairs are spread over runs; `maintenance/tests/cli.rs` checks its configuration errors,
-  exit statuses, redaction, skipped tables, and a full VACUUM that deletes
-  old orphans but keeps `metadata/`. The `blocks` tests find the
-  binary next to `fireparq` (`cargo test --workspace` or
-  `cargo build -p fireparq-maintenance` builds it) or at
-  `FIREPARQ_MAINTENANCE`, and skip without it unless
-  `FIREPARQ_REQUIRE_MAINTENANCE` is set, as in CI.
+  repairs are spread over runs; `blocks/tests/maintenance_cli.rs` checks its
+  configuration errors, exit statuses, redaction, skipped tables, and a full
+  VACUUM that deletes old orphans but keeps `metadata/`.

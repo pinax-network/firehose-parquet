@@ -15,6 +15,9 @@ path = "src/bin/main.rs"
 [dependencies]
 firehose-parquet = { path = "../firehose-parquet" }
 firehose-protos = { path = "../firehose-protos" }
+# `fireparq maintenance` (maintenance/): one binary and one version with the
+# writer. It links no DataFusion either.
+fireparq-maintenance = { path = "../maintenance" }
 arrow.workspace = true
 prost.workspace = true
 prost-types.workspace = true

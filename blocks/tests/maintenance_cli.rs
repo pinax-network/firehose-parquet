@@ -1,8 +1,8 @@
-//! The real `fireparq-maintenance` binary, with a cleared environment: its
+//! `fireparq maintenance`, the real binary with a cleared environment: its
 //! settings, exit statuses and JSON lines, and a full VACUUM beside a table's
 //! Iceberg metadata. The maintenance itself, beside a real `fireparq build` on
-//! local disk and loopback S3, is `blocks/tests/delta_maintenance.rs`, which
-//! runs this binary too.
+//! local disk and loopback S3, is `delta_maintenance.rs`; the compaction's
+//! row order is `maintenance/tests/compaction.rs`.
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
@@ -39,7 +39,8 @@ impl Run {
 /// The job over the local lake `root` with `LAKE_TABLES=blocks`, then
 /// `settings` (which may override both).
 fn job(root: &Path, settings: &[(&str, &str)]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_fireparq-maintenance"))
+    let output = Command::new(env!("CARGO_BIN_EXE_fireparq"))
+        .arg("maintenance")
         .env_clear()
         .env("LAKE_ROOT", root)
         .env("LAKE_TABLES", "blocks")

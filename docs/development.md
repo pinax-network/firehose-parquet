@@ -11,26 +11,18 @@ cargo build --workspace
 # Test
 cargo test --workspace
 
-# Build release: one package per command, so `fireparq` links no DataFusion
-# (a workspace build unifies features across the packages it builds)
+# Build release (`fireparq`, the maintenance job included)
 cargo build --release -p blocks
-cargo build --release -p fireparq-maintenance
 
 # Install
 cargo install --path blocks
-cargo install --path maintenance
 ```
 
-All code is Rust; building and testing need no Python. The DuckDB tests use the
-DuckDB CLI when it is installed (`FIREPARQ_DUCKDB`, required in CI by
-`FIREPARQ_REQUIRE_DUCKDB`), and the Delta maintenance tests the
-`fireparq-maintenance` binary (`FIREPARQ_MAINTENANCE`, required in CI by
-`FIREPARQ_REQUIRE_MAINTENANCE`). `cargo test --workspace` builds the binary
-first, but also compiles the writer with DataFusion's features (for example
-serde_json's `preserve_order`); CI therefore runs
-`cargo test -p fireparq-maintenance` and then
-`cargo test --workspace --exclude fireparq-maintenance`, which tests the
-writer with exactly its release features.
+All code is Rust; building and testing need no Python, and nothing links
+DataFusion (a CI step checks it). The DuckDB tests use the DuckDB CLI when it is
+installed (`FIREPARQ_DUCKDB`, required in CI by `FIREPARQ_REQUIRE_DUCKDB`), and
+the Delta maintenance tests run `fireparq maintenance` of the binary under
+test.
 
 ## Repository structure
 
@@ -46,9 +38,8 @@ firehose-parquet/
 ├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
 ├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
 ├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
-├── maintenance/                            # `fireparq-maintenance`: the Delta maintenance job (delta-rs
-│                                           #   OPTIMIZE with DataFusion, VACUUM, checkpoints, log cleanup)
-├── deploy/maintenance/Dockerfile           # the maintenance job's image
+├── maintenance/                            # `fireparq maintenance`: the Delta maintenance job (row-order
+│                                           #   compaction, delta-rs VACUUM, checkpoints, log cleanup)
 ├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJob)
 ├── docs/                                   # user guides, chain notes, design, schema reference, release notes, audit records
 ├── firehose-parquet/                       # core library

@@ -22,14 +22,12 @@
 //! increasing by one commit per transaction up to the authority's ordinal,
 //! and `blocks` committed last in every transaction.
 //!
-//! Maintenance is the `fireparq-maintenance` binary (`common::maintenance_bin`,
-//! required in CI by `FIREPARQ_REQUIRE_MAINTENANCE`): OPTIMIZE of every date
-//! with a lite VACUUM of retention 0 (it deletes compacted parts at once) and
-//! a checkpoint. A full VACUUM of retention 0 (it deletes untracked parts),
-//! which the job refuses, is delta-rs's own VACUUM in this process. Without
-//! the binary, a test deletes exactly the files that VACUUM would, and skips
-//! the row reads those files would serve; the maintenance-beside-`build`
-//! tests are skipped. Those also read the final tables through delta-rs.
+//! Maintenance is `fireparq maintenance` (`common::maintenance_bin`): OPTIMIZE
+//! of every date with a lite VACUUM of retention 0 (it deletes compacted parts
+//! at once) and a checkpoint. A full VACUUM of retention 0 (it deletes
+//! untracked parts), which the job refuses, is delta-rs's own VACUUM in this
+//! process. The maintenance-beside-`build` tests also read the final tables
+//! through delta-rs.
 use firehose_parquet::delta::store::DeltaStore;
 use firehose_parquet::writer::read_parquet;
 use firehose_protos::{eth, firehose};
@@ -262,16 +260,6 @@ impl Storage {
         match self {
             Storage::Local(root) => std::fs::write(root.join(relative), bytes).unwrap(),
             Storage::S3(server) => server.put(&format!("{CHAIN}/{relative}"), bytes.into()),
-        }
-    }
-
-    /// Deletes dataset files (paths relative to the root), as a cleanup would.
-    fn delete(&self, relative: &[String]) {
-        for path in relative {
-            match self {
-                Storage::Local(root) => std::fs::remove_file(root.join(path)).unwrap(),
-                Storage::S3(server) => assert!(server.remove(&format!("{CHAIN}/{path}"))),
-            }
         }
     }
 
@@ -854,30 +842,19 @@ async fn committed_parts_compacted_before_the_restart(s3: bool, fault: &str) {
     let parts = pending_parts(&root, &row_tables());
     assert_eq!(parts.len(), ROW_TABLES.len());
     // Both dates have two parts per table: one OPTIMIZE commit each.
-    let rows = match common::maintenance_bin() {
-        Some(job) => {
-            let run = compact(&job, &storage, &row_tables()).await;
-            for table in row_tables() {
-                assert_eq!(compacted_dates(&run, table), 2, "{run:?}");
-            }
-            true
-        }
-        None => {
-            storage.delete(&parts);
-            false
-        }
-    };
+    let run = compact(&common::maintenance_bin(), &storage, &row_tables()).await;
+    for table in row_tables() {
+        assert_eq!(compacted_dates(&run, table), 2, "{run:?}");
+    }
     let root = storage.copy(&cwd);
     for part in &parts {
         assert!(!root.join(part).exists(), "{part} was vacuumed");
     }
     release_after_abort(&storage, &cwd).await;
     build(&storage, &cwd, 104, &[]).await;
-    let logs = check_lake(&storage.copy(&cwd), 100..104, rows);
-    if rows {
-        for table in row_tables() {
-            assert_eq!(logs[table].optimize_versions().len(), 2, "{table}");
-        }
+    let logs = check_lake(&storage.copy(&cwd), 100..104, true);
+    for table in row_tables() {
+        assert_eq!(logs[table].optimize_versions().len(), 2, "{table}");
     }
 }
 
@@ -1064,9 +1041,7 @@ async fn recovery_recover(s3: bool) {
 async fn maintenance_beside_build(s3: bool) {
     let (_dir, cwd) = scratch();
     let storage = Arc::new(Storage::new(s3, &cwd).await);
-    let Some(job) = common::maintenance_bin() else {
-        return;
-    };
+    let job = common::maintenance_bin();
     // The tables exist once a first run has started.
     build(&storage, &cwd, 101, &[]).await;
     // Compact rounds until the builds are done, at least two of them.

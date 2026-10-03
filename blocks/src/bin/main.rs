@@ -1470,6 +1470,12 @@ async fn main() -> Result<()> {
                 run_ingestion(build_args, &cli.global).await?;
                 return Ok(());
             }
+            Commands::Maintenance => {
+                // Its JSON lines are stdout; the exit status is the job's.
+                let env = |name: &str| std::env::var(name).ok();
+                let status = fireparq_maintenance::run(&env, &mut std::io::stdout()).await;
+                std::process::exit(status);
+            }
             Commands::Inspect {
                 path,
                 schema_only,

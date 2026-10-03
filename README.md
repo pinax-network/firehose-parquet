@@ -9,7 +9,7 @@ final-only lake with one bucket per network and one continuous writer per
 bucket. Ingestion is crash-safe: every flush commits all tables in one
 protected transaction, and a restart finishes an interrupted one exactly once
 before it streams again. DuckDB (`delta_scan`) and Polars (`scan_delta`) read
-the tables directly, and a separate `fireparq-maintenance` binary compacts,
+the tables directly, and `fireparq maintenance`, the same binary, compacts,
 vacuums and checkpoints them beside the writer.
 
 ## Supported chains
@@ -48,8 +48,8 @@ The [full feature list](docs/features.md) links each feature to its page.
 
 ## Install
 
-Each GitHub release attaches `fireparq` and `fireparq-maintenance` binaries for
-Linux and macOS (`x86_64` and `aarch64`), with build provenance attestations:
+Each GitHub release attaches the `fireparq` binary for Linux and macOS
+(`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
 curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.0.7/fireparq-linux-x86_64.tar.gz
@@ -57,13 +57,11 @@ tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
 
-Each release also publishes two images to GitHub Container Registry; this
-release is tagged `1.0.7`, `1.0`, `1` and `latest`:
-
-| Image | Entrypoint |
-|---|---|
-| `ghcr.io/pinax-network/firehose-parquet` | `fireparq` ([Docker](docs/getting-started.md#docker)) |
-| `ghcr.io/pinax-network/firehose-parquet-maintenance` | `fireparq-maintenance` ([Delta maintenance](docs/delta-maintenance.md)) |
+Each release also publishes the image `ghcr.io/pinax-network/firehose-parquet`
+to GitHub Container Registry, with `fireparq` as its entrypoint
+([Docker](docs/getting-started.md#docker)); this release is tagged `1.0.7`,
+`1.0`, `1` and `latest`. The writer runs it as `fireparq build`, the
+[Delta maintenance](docs/delta-maintenance.md) job as `fireparq maintenance`.
 
 To build from source, run `cargo install --path blocks` (and
 `cargo install --path maintenance` for the maintenance job). See
@@ -126,7 +124,7 @@ across tables and engine compatibility.
 A **final-only lake**: one bucket per network with the dataset at the bucket
 root, one continuous final-only `build` per network (a single replica: a second
 writer on the bucket fails with `bucket ownership is held`), and the
-`fireparq-maintenance` job hourly beside it, with a weekly full VACUUM.
+`fireparq maintenance` job hourly beside it, with a weekly full VACUUM.
 
 ```bash
 OUTPUT=s3://ethereum-mainnet \
@@ -158,7 +156,7 @@ the maintenance CronJobs.
 | | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md) | Joins, ordering and example queries per chain |
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
-| | [Delta maintenance](docs/delta-maintenance.md) | `fireparq-maintenance`: OPTIMIZE, VACUUM, checkpoints, image and CronJobs |
+| | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |
 | | [Prometheus metrics](docs/metrics.md) | Metrics, `/health` and `/ready` |
 | | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases, provider policy, endpoint check |
 | Design and audit | [Delta Lake design](docs/design/delta-lake.md) | The v1.0.0 Delta Lake output design (#643) |
