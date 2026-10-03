@@ -2,22 +2,26 @@
 //! (#643, `docs/design/delta-lake.md` §9).
 //!
 //! Compaction and cleanup of fireparq's Delta tables are platform-side policy:
-//! this job runs delta-rs's own operations (`deltalake-core` 1.0.0, with
-//! DataFusion for OPTIMIZE) on a schedule, a Kubernetes CronJob in
-//! `deploy/examples/delta-maintenance-cronjob.yaml`, and has no compaction
-//! logic of its own. It is safe beside a running `fireparq build`: fireparq's
-//! commits are blind appends that rebase over OPTIMIZE, and VACUUM follows the
-//! rule of design §4.1. Every step is idempotent, so a failed or conflicting
-//! run is simply repeated by the next one.
+//! this job runs on a schedule, a Kubernetes CronJob in
+//! `deploy/examples/delta-maintenance-cronjob.yaml`, with delta-rs
+//! (`deltalake-core` 1.0.0) for VACUUM, checkpoints and log cleanup, and its
+//! own compaction ([`compact`]), which keeps the writer's row order. It is safe
+//! beside a running `fireparq build`: fireparq's commits are blind appends that
+//! rebase over OPTIMIZE, and VACUUM follows the rule of design §4.1. Every step
+//! is idempotent, so a failed or conflicting run is simply repeated by the next
+//! one.
 //!
 //! For each table, in this order:
 //!
-//! 1. OPTIMIZE (compact) each closed `date` partition that has more than one
-//!    file, to the table's `delta.targetFileSize`. A date is closed once
-//!    `blocks` holds a later date: `blocks` commits last in every fireparq
-//!    transaction, so every earlier date is complete in every table. The
-//!    compacted files keep fireparq's dataset-level footer metadata
-//!    ([`carried_metadata`]), which delta-rs's writer would otherwise drop.
+//! 1. OPTIMIZE (compact) each closed `date` partition, to the table's
+//!    `delta.targetFileSize`, keeping the rows in the order `fireparq build`
+//!    wrote them ([`compact`]): writer parts are concatenated in block order,
+//!    and a file an earlier compaction left out of that order (delta-rs's
+//!    OPTIMIZE, up to 1.0.5) is sorted back into it, a few dates per run. A
+//!    date is closed once `blocks` holds a later date: `blocks` commits last in
+//!    every fireparq transaction, so every earlier date is complete in every
+//!    table. The compacted files keep fireparq's dataset-level footer metadata
+//!    ([`carried_metadata`]).
 //! 2. VACUUM. Lite (the default) deletes only files that a `remove` tombstone
 //!    older than the retention names, and never a part that fireparq
 //!    published but has not committed yet. Full (`FULL_VACUUM=1`, weekly)
@@ -63,7 +67,11 @@
 //!   whose writer has stopped).
 //! - `OPTIMIZE_TARGET_SIZE`: bytes, default the table's `delta.targetFileSize`.
 //! - `OPTIMIZE_ZSTD_LEVEL`: default 3, as fireparq writes.
-//! - `OPTIMIZE_MAX_CONCURRENT_TASKS`: default the CPU count.
+//! - `OPTIMIZE_REPAIR_DATES`: how many dates per table a run sorts back into
+//!   the writer's order (default 1; `0` repairs none). New dates are never
+//!   sorted, only concatenated.
+//! - `OPTIMIZE_REPAIR_WINDOW_BYTES`: uncompressed bytes a repair sorts at once
+//!   (default 256 MiB); memory peaks at about three times as much.
 //! - `DRY_RUN`: `1` reports the plan and the files VACUUM would delete, and
 //!   changes nothing.
 //!
@@ -71,6 +79,9 @@
 //! or `skipped` line per table, `done`). Exit status: 0 when every table was
 //! maintained or skipped (a lost commit race is reported as a conflict and
 //! left to the next run), 1 when a table failed, 2 for a configuration error.
+
+pub mod compact;
+pub mod row_order;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -91,7 +102,8 @@ use deltalake_core::parquet::errors::ParquetError;
 use deltalake_core::parquet::file::metadata::{FooterTail, KeyValue, ParquetMetaDataReader};
 use deltalake_core::parquet::file::properties::WriterProperties;
 use deltalake_core::parquet::file::FOOTER_SIZE;
-use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError, FilterOp, FilterValue};
+use deltalake_core::table::config::TablePropertiesExt as _;
+use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
 use futures::stream::{self, StreamExt};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::local::LocalFileSystem;
@@ -336,7 +348,8 @@ pub struct Settings {
     pub optimize_all_dates: bool,
     pub target_size: Option<u64>,
     pub zstd_level: i32,
-    pub max_concurrent_tasks: Option<usize>,
+    pub repair_dates: u64,
+    pub repair_window_bytes: u64,
     s3: Option<S3Options>,
     secrets: Vec<String>,
 }
@@ -391,7 +404,9 @@ impl Settings {
         }
         let target_size = integer(env, "OPTIMIZE_TARGET_SIZE", 1, None)?;
         let zstd_level = integer(env, "OPTIMIZE_ZSTD_LEVEL", 1, Some(22))?.unwrap_or(3);
-        let max_concurrent_tasks = integer(env, "OPTIMIZE_MAX_CONCURRENT_TASKS", 1, None)?;
+        let repair_dates = integer(env, "OPTIMIZE_REPAIR_DATES", 0, None)?.unwrap_or(1);
+        let repair_window_bytes =
+            integer(env, "OPTIMIZE_REPAIR_WINDOW_BYTES", 1 << 20, None)?.unwrap_or(256 << 20);
         let mut settings = Self {
             root,
             tables,
@@ -401,8 +416,8 @@ impl Settings {
             optimize_all_dates: dates == "all",
             target_size,
             zstd_level: zstd_level as i32,
-            max_concurrent_tasks: max_concurrent_tasks
-                .map(|tasks| usize::try_from(tasks).unwrap_or(usize::MAX)),
+            repair_dates,
+            repair_window_bytes,
             s3: None,
             secrets: Vec::new(),
         };
@@ -797,59 +812,108 @@ async fn maintain(
         }
     };
 
-    // 1. OPTIMIZE closed dates (or all, OPTIMIZE_DATES=all) with several files.
-    let dates: Vec<String> = files
-        .iter()
-        .filter(|(date, count)| {
-            **count > 1
-                && (settings.optimize_all_dates
-                    || open_date.is_some_and(|open| date.as_str() < open))
-        })
-        .map(|(date, _)| date.clone())
-        .collect();
-    report.set("dates_to_compact", json!(dates));
+    // 1. OPTIMIZE closed dates (or all, OPTIMIZE_DATES=all): concatenate
+    // writer parts, and repair up to OPTIMIZE_REPAIR_DATES dates out of order.
+    let target = match settings.target_size.and_then(NonZeroU64::new) {
+        Some(size) => size,
+        None => match table.snapshot() {
+            Ok(snapshot) => snapshot.table_config().target_file_size(),
+            Err(error) => {
+                report.failed("optimize", &error);
+                return Outcome::Maintained(report.finish(started));
+            }
+        },
+    };
+    // Newest first, so a repair reaches the most read dates first.
+    let mut plans: Vec<(String, Vec<compact::Bin>)> = Vec::new();
+    for date in files.keys().rev() {
+        let closed = open_date.is_some_and(|open| date.as_str() < open);
+        if !(settings.optimize_all_dates || closed) {
+            continue;
+        }
+        match compact::date_files(&table, date) {
+            Ok(date_files) => plans.push((date.clone(), compact::plan(date_files, target.get()))),
+            Err(error) => report.failed(&format!("optimize {date}"), &error),
+        }
+    }
+    // A repair counts against OPTIMIZE_REPAIR_DATES once it is committed, so a
+    // date that keeps failing (reported every run) holds back no other. A
+    // table with no known row order keeps its files out of order: nothing to
+    // fail for, and nothing to repair them with.
+    let known_order = row_order::row_order_key(name).is_some();
+    let mut repairs_left = settings.repair_dates;
+    let (mut deferred, mut unrepairable) = (0, 0);
+    let mut attempted = Vec::new();
     let level = ZstdLevel::try_new(settings.zstd_level).expect("checked to be 1..=22");
-    for date in dates.iter().filter(|_| !settings.dry_run) {
+    for (date, mut bins) in plans {
+        let repairs = bins.iter().any(|bin| bin.repair);
+        if repairs && (!known_order || repairs_left == 0) {
+            if known_order {
+                deferred += 1;
+            } else {
+                unrepairable += 1;
+            }
+            bins.retain(|bin| !bin.repair);
+        }
+        if bins.is_empty() {
+            continue;
+        }
+        let repairing = bins.iter().any(|bin| bin.repair);
+        attempted.push(date.clone());
+        if settings.dry_run {
+            repairs_left -= u64::from(repairing);
+            continue;
+        }
         // A footer that can't be read leaves the date for the next run rather
         // than compacting it without its metadata.
-        let metadata = match carried_metadata(&table, date).await {
+        let mut metadata = match carried_metadata(&table, &date).await {
             Ok(metadata) => metadata,
             Err(error) => {
                 report.failed(&format!("optimize {date}: footer metadata"), &error);
                 continue;
             }
         };
+        metadata.push(KeyValue::new(
+            compact::ROW_ORDER_KEY.to_string(),
+            compact::WRITER_ORDER.to_string(),
+        ));
         let footer_keys = metadata.len();
         let properties = WriterProperties::builder()
             .set_compression(Compression::ZSTD(level))
             .set_key_value_metadata(Some(metadata))
             .build();
-        let filters = [("date", FilterOp::Eq, FilterValue::Scalar(date.as_str()))];
-        let mut optimize = table
-            .clone()
-            .optimize()
-            .with_filters(&filters)
-            .with_writer_properties(properties)
-            .with_commit_properties(no_post_commit_hooks());
-        if let Some(size) = settings.target_size.and_then(NonZeroU64::new) {
-            optimize = optimize.with_target_size(size);
-        }
-        if let Some(tasks) = settings.max_concurrent_tasks {
-            optimize = optimize.with_max_concurrent_tasks(tasks);
-        }
-        match optimize.await {
-            Ok((optimized, metrics)) => {
-                table = optimized;
+        let compaction = compact::Compaction {
+            table: &table,
+            name,
+            date: &date,
+            target,
+            properties,
+            window_bytes: settings.repair_window_bytes,
+            commit: no_post_commit_hooks(),
+        };
+        match compaction.run(&bins).await {
+            Ok(done) => {
+                repairs_left -= u64::from(repairing);
                 report.compacted.push(json!({
                     "date": date,
-                    "files_removed": metrics.num_files_removed,
-                    "files_added": metrics.num_files_added,
+                    "files_removed": done.files_removed,
+                    "files_added": done.files_added,
                     "footer_keys": footer_keys,
+                    "rows": done.rows,
+                    "repaired_bins": done.repaired_bins,
                 }));
+                if let Err(error) = table.update_state().await {
+                    report.failed(&format!("optimize {date}: reload"), &error);
+                    break;
+                }
             }
             Err(error) => report.failed(&format!("optimize {date}"), &error),
         }
     }
+    attempted.reverse();
+    report.set("dates_to_compact", json!(attempted));
+    report.set("repairs_deferred", json!(deferred));
+    report.set("repairs_unsupported", json!(unrepairable));
 
     // 2. VACUUM, lite unless FULL_VACUUM=1 (weekly, >= 168 h enforced).
     let table_hours = table

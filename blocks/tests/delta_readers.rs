@@ -12,6 +12,7 @@
 //! their rows rewritten as one file (`docs/design/delta-lake.md` §7.3), and
 //! run for real by the maintenance job (the `fireparq-maintenance` binary,
 //! optional locally, required in CI) together with a checkpoint.
+use arrow::array::AsArray;
 use arrow::compute::concat_batches;
 use deltalake_core::DeltaTable;
 use firehose_parquet::config::Compression;
@@ -322,14 +323,16 @@ fn now_millis() -> i64 {
 
 /// What OPTIMIZE commits for one day (design §1.7): its active files are
 /// `remove`d with `dataChange: false`, tombstoned but left on disk for
-/// readers of older snapshots, and their rows `add`ed back as one new file.
-/// Returns the number of files it replaced.
+/// readers of older snapshots, and their rows `add`ed back as one new file,
+/// in block order and tagged so, as the maintenance job writes it. Returns
+/// the number of files it replaced.
 fn simulate_optimize(table: &Path, day: &str) -> usize {
-    let replaced: Vec<String> = active_files(table)
+    let mut replaced: Vec<String> = active_files(table)
         .into_iter()
         .filter(|(_, date)| date == day)
         .map(|(path, _)| path)
         .collect();
+    replaced.sort();
     let batches: Vec<_> = replaced
         .iter()
         .flat_map(|path| read_parquet(&table.join(path)).unwrap())
@@ -350,10 +353,21 @@ fn simulate_optimize(table: &Path, day: &str) -> usize {
             "size": std::fs::metadata(table.join(old)).unwrap().len(),
         }}));
     }
+    let blocks = rows
+        .column_by_name("block_num")
+        .unwrap()
+        .as_primitive::<arrow::datatypes::Int64Type>();
+    let (first, last) = (blocks.value(0), blocks.value(blocks.len() - 1));
+    assert!(first <= last, "the parts are in block order");
     actions.push(json!({"add": {
         "path": path, "partitionValues": {"date": day}, "size": bytes.len(),
         "modificationTime": now, "dataChange": false,
-        "stats": json!({"numRecords": rows.num_rows()}).to_string(),
+        "stats": json!({
+            "numRecords": rows.num_rows(),
+            "minValues": {"block_num": first},
+            "maxValues": {"block_num": last},
+        }).to_string(),
+        "tags": {"fireparq.rowOrder": "writer"},
     }}));
     commit(table, &actions);
     replaced.len()
@@ -473,8 +487,12 @@ async fn validate_reads_a_pinned_snapshot_through_optimize_and_checkpoints() {
                 &line["version_after"]
             ),
             (
-                // footer_keys: the writer's 8 dataset-level keys and the job's.
-                &json!([{"date": SECOND_DAY, "files_removed": 2, "files_added": 1, "footer_keys": 9}]),
+                // footer_keys: the writer's 8 dataset-level keys and the job's
+                // two (its version, and the row order).
+                &json!([{
+                    "date": SECOND_DAY, "files_removed": 2, "files_added": 1, "footer_keys": 10,
+                    "rows": 2, "repaired_bins": 0,
+                }]),
                 &json!(6),
                 &json!(6)
             ),

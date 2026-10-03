@@ -23,6 +23,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
+/// The writer's in-block row order, as the maintenance job's repair sorts by it.
+#[path = "../../maintenance/src/row_order.rs"]
+mod row_order;
+
 const STANDARD_TABLES: [&str; 6] = [
     "blocks",
     "transactions",
@@ -256,6 +260,48 @@ fn map_both_ways(
     delta_batches(borrowed, identity)
 }
 
+/// The rows of one block's `batch` are strictly increasing on the table's
+/// row-order key.
+fn assert_writer_row_order(table: &str, batch: &RecordBatch, source: &str) {
+    let key = row_order::row_order_key(table)
+        .unwrap_or_else(|| panic!("{source}: no row order for {table}"));
+    assert!(row_order::EVM_TABLES.contains(&table), "{table}");
+    let columns: Vec<(row_order::KeyPart, ArrayRef)> = key
+        .iter()
+        .map(|part| {
+            let name = match part {
+                row_order::KeyPart::Column(name) | row_order::KeyPart::IsSet(name) => name,
+            };
+            let column = batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{source}: {table} has no {name}"));
+            (*part, column.clone())
+        })
+        .collect();
+    let key_of = |row: usize| -> Vec<i64> {
+        columns
+            .iter()
+            .map(|(part, column)| match part {
+                row_order::KeyPart::IsSet(_) => i64::from(column.is_valid(row)),
+                row_order::KeyPart::Column(name) => {
+                    let values = arrow::compute::cast(column, &DataType::Int64).unwrap();
+                    let values = values.as_primitive::<arrow::datatypes::Int64Type>();
+                    assert!(values.is_valid(row), "{source}: {table}.{name} is null");
+                    values.value(row)
+                }
+            })
+            .collect()
+    };
+    for row in 1..batch.num_rows() {
+        let (before, after) = (key_of(row - 1), key_of(row));
+        assert!(
+            before < after,
+            "{source}: {table} rows {} and {row} are not in key order: {before:?}, {after:?}",
+            row - 1
+        );
+    }
+}
+
 fn check_fixture(fixture: &Fixture) {
     let identity = fixture_identity(fixture);
     let expected: Value = serde_json::from_str(fixture.expected).unwrap();
@@ -333,6 +379,11 @@ fn check_fixture(fixture: &Fixture) {
                             &DataType::Utf8
                         }
                     );
+                }
+                // Each table's rows follow its row-order key strictly: sorting
+                // by it gives the writer's order back (`maintenance/src/row_order.rs`).
+                for (table, batch) in &batches {
+                    assert_writer_row_order(table, batch, fixture.name);
                 }
                 for selection in expected["selections"].as_array().unwrap() {
                     let table = selection["table"].as_str().unwrap();

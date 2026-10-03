@@ -5,28 +5,30 @@ Delta commit per table. Compacting those files, deleting replaced ones and
 checkpointing the logs is platform-side policy, not a `fireparq` command (#643):
 the separate binary `fireparq-maintenance` (workspace crate
 [`maintenance/`](../maintenance/)) runs on a schedule, beside a running `build`.
-It calls delta-rs's own operations (`deltalake-core` 1.0.0: OPTIMIZE, which
-needs DataFusion 55, VACUUM, `create_checkpoint` and `cleanup_metadata`) and has
-no compaction logic of its own. DataFusion is linked into this binary only,
-never into `fireparq`. The job needs no fireparq ownership: fireparq's commits
+It uses delta-rs (`deltalake-core` 1.0.0, with DataFusion 55) for VACUUM,
+`create_checkpoint` and `cleanup_metadata`, and compacts with its own planner
+over delta-rs's Parquet writer and commit, so that compacted files keep the
+rows in the order `build` wrote them ([Row order](#row-order)). DataFusion is
+linked into this binary only, never into `fireparq`. The job needs no fireparq ownership: fireparq's commits
 are blind appends that rebase over the job's commits, and the job never touches
 `.fireparq-ingest/` or `_fireparq/`.
 
 For each table it runs, in order:
 
-1. **OPTIMIZE** each closed `date` with more than one file, to the table's
-   `delta.targetFileSize` (256 MiB). A day is closed once `blocks` holds a
-   later day: `blocks` commits last, so every earlier day is complete in every
-   table. delta-rs writes the compacted file with its own Parquet writer, which
-   keeps none of the parts' footer metadata, so the job first reads the day's
-   footers and gives the compacted file:
+1. **OPTIMIZE** each closed `date`, to the table's `delta.targetFileSize`
+   (256 MiB), keeping the writer's row order ([Row order](#row-order)). A day
+   is closed once `blocks` holds a later day: `blocks` commits last, so every
+   earlier day is complete in every table. delta-rs's Parquet writer keeps none
+   of the parts' footer metadata, so the job first reads the day's footers and
+   gives each compacted file:
    - every `firehose-parquet.*` key (chain, aliases, endpoint, block type and
      features, encodings, compression, version, first streamable block) with
      one value among the parts that have it. A key whose values differ, such as
      `firehose-parquet.version` on a day that spans a writer upgrade, is left
      out, and a file without the key (one compacted by an earlier job) doesn't
      drop it;
-   - `fireparq-maintenance.version`, the job's version.
+   - `fireparq-maintenance.version`, the job's version, and
+     `fireparq-maintenance.row_order = writer`.
 
    The parts' `fireparq.ingest.*` keys (their ordinals, transaction and
    stream) describe the parts being merged, not the compacted file, and aren't
@@ -54,7 +56,9 @@ For each table it runs, in order:
    (7 days) behind a checkpoint.
 
 OPTIMIZE and VACUUM commit with their own post-commit checkpoint and log
-cleanup turned off, so the only checkpoint is step 3. A table that does not
+cleanup turned off, so the only checkpoint is step 3. A day's OPTIMIZE is one
+commit (`OPTIMIZE`, `dataChange: false`, as delta-rs's), which tables with
+`delta.appendOnly` accept. A table that does not
 exist yet (the writer has not created it) is skipped, not failed.
 
 Every step is idempotent: a failed or conflicting run changes nothing that
@@ -65,8 +69,12 @@ line goes to stdout:
   `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
   `version` (the binary's);
 - one line per table: `table` with `version_before`, `dates_to_compact`,
-  `compacted` (`date`, `files_removed`, `files_added`, and `footer_keys`: the
-  footer keys the compacted file was given), `vacuum` (`mode`,
+  `compacted` (`date`, `files_removed`, `files_added`, `rows`,
+  `repaired_bins`: the bins sorted back into the writer's order, and
+  `footer_keys`: the footer keys the compacted files were given),
+  `repairs_deferred` (days out of order left for a later run),
+  `repairs_unsupported` (days out of order in a table with no known row order,
+  left as they are), `vacuum` (`mode`,
   `retention_hours`, `files_deleted`, and for a full VACUUM
   `iceberg_metadata_kept`: the files in `metadata/` that were old enough to
   delete and were kept), `checkpoint_version`, `version_after`,
@@ -102,8 +110,51 @@ not apply to it. Requests use object_store's default retries.
 | `OPTIMIZE_DATES` | `closed` | `all` also compacts the newest day: safe beside the writer, but repeated every run; use it once the writer has stopped for good |
 | `OPTIMIZE_TARGET_SIZE` | `delta.targetFileSize` | Bytes |
 | `OPTIMIZE_ZSTD_LEVEL` | `3` | Compression of the compacted files |
-| `OPTIMIZE_MAX_CONCURRENT_TASKS` | CPU count | Bounds OPTIMIZE's memory |
+| `OPTIMIZE_REPAIR_DATES` | `1` | Days per table a run sorts back into the writer's order ([Row order](#row-order)); `0` repairs none. New days are only concatenated |
+| `OPTIMIZE_REPAIR_WINDOW_BYTES` | 256 MiB | Decoded bytes a repair sorts at once, at least 1 MiB; a 256 MiB window peaks at about 1.3 GiB on Ethereum `calls` |
 | `DRY_RUN` | `0` | `1` reports what would be compacted and deleted, and changes nothing |
+
+## Row order
+
+`build` writes each day's rows in the stream's order: blocks ascending, and
+each block's rows in the order the Firehose block holds them (transactions by
+`index`, logs by `block_index`, calls by `tx_index` and `call_index`, a call's
+state changes in the order it recorded them). The job keeps that order
+(`maintenance/src/compact.rs`):
+
+- It plans a day by the files' `block_num` ranges, from the log's stats: files
+  whose ranges overlap form one unit, and units are packed, oldest first, into
+  bins of at most the target size. A unit larger than the target is a bin of
+  its own, and a bin of one file already in writer order is left as it is.
+- A bin of files in writer order (`part-v1-*` parts, and files the job wrote,
+  tagged `fireparq.rowOrder = writer` in the log) is **concatenated**: each
+  file is read start to finish, one after the other, and its rows written as
+  they are. A block lower than the one before it fails the bin.
+- A bin with a file out of that order is **repaired**: its rows are sorted by
+  `block_num` and the table's in-block key
+  ([`maintenance/src/row_order.rs`](../maintenance/src/row_order.rs)), a window
+  of blocks at a time. Each key is strictly increasing in the writer's order:
+  `blocks/tests/evm_golden.rs` checks every table of the reviewed mainnet
+  blocks, and on riv-dev1 the writer parts of eth, Base and BSC
+  (about 560 million rows) held no tie and no row out of key order
+  ([#690](audit/690-compaction-row-order.md)). Two rows of a block that tie on the
+  key fail the bin, since their order can't be recovered. A table without a
+  known key (another chain's) is never repaired.
+
+A bin's written rows must equal its files' `numRecords`. Files written for a
+bin or commit that fails are aborted or deleted; anything left behind is an
+orphan the weekly full VACUUM reclaims.
+
+Up to 1.0.5 the job ran delta-rs's own OPTIMIZE, which bins a day's files
+newest first and reads each bin through a parallel DataFusion scan, writing
+batches as they arrive. Its files hold the day's blocks in runs out of order,
+some blocks in pieces, and now and then a block's rows out of their order
+(on riv-dev1, one block a day in eth `logs` and in `calls`). No row was lost or
+changed. From 1.0.6 the job repairs those days, `OPTIMIZE_REPAIR_DATES` per
+table per run, newest first. Delta and Parquet don't promise readers any row
+order: a query that needs one should still `ORDER BY` it.
+
+## Running the job
 
 ```bash
 # From a checkout (the release tarballs also ship the binary)
@@ -148,8 +199,11 @@ weekly, as an unprivileged user with a read-only root filesystem and a `/tmp`
   whole tail.
 - `blocks/tests/delta_maintenance.rs` runs the binary over and over beside a
   real `build`, on local disk and on a loopback S3 endpoint, and checks the
-  exact rows (DuckDB and delta-rs), the `txn` versions and the file counts
-  afterwards; `maintenance/tests/cli.rs` checks its configuration errors,
+  exact rows (DuckDB and delta-rs), that every file holds its rows in writer
+  order, the `txn` versions and the file counts afterwards;
+  `maintenance/tests/compaction.rs` checks that a file out of order is sorted
+  back into it (several windows), that a tie leaves it as it is, and that
+  repairs are spread over runs; `maintenance/tests/cli.rs` checks its configuration errors,
   exit statuses, redaction, skipped tables, and a full VACUUM that deletes
   old orphans but keeps `metadata/`. The `blocks` tests find the
   binary next to `fireparq` (`cargo test --workspace` or
