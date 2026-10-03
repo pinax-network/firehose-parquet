@@ -124,8 +124,11 @@ state changes in the order it recorded them). The job keeps that order
 
 - It plans a day by the files' `block_num` ranges, from the log's stats: files
   whose ranges overlap form one unit, and units are packed, oldest first, into
-  bins of at most the target size. A unit larger than the target is a bin of
-  its own, and a bin of one file already in writer order is left as it is.
+  bins of at most the target size. Two files in writer order that only share a
+  boundary block don't overlap: the first holds the block's earlier rows. A
+  unit larger than the target is a bin of its own, and a bin of one file
+  already in writer order is left as it is. Each bin is written as one file,
+  as delta-rs writes a bin, so no block is split across two files.
 - A bin of files in writer order (`part-v1-*` parts, and files the job wrote,
   tagged `fireparq.rowOrder = writer` in the log) is **concatenated**: each
   file is read start to finish, one after the other, and its rows written as
