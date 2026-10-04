@@ -150,5 +150,17 @@ Checks:
   manual runs' VACUUM commits produced the last ones, as each daily run will
   once a day.
 - **Weekly full VACUUM.** It renders with `FULL_VACUUM=1` and
-  `VACUUM_RETENTION_HOURS=168`. Its first run is Sunday 2026-10-11 at
-  03:47 UTC (eth).
+  `VACUUM_RETENTION_HOURS=168`. It was run once by hand for each network at
+  18:16–18:17 UTC. Each run reported version 1.1.2, full mode at 168 h and 20
+  tables, with no failure, in about 25 s. Each deleted 0 files and kept 0
+  Iceberg metadata files: every table was created on 2026-09-29, so no file
+  was older than 168 h yet.
+- **Alerts arm on scheduled runs only.** A Job made with
+  `kubectl create job --from=cronjob` gets an owner reference without
+  `controller: true`, so the CronJob controller ignores it, and the manual
+  runs set no `lastSuccessfulTime`.
+  - `ParquetDailyVacuumNotSucceeding` covers the daily jobs from their first
+    scheduled run, 2026-10-05 at 06:09 UTC (eth). It fires 4 h after that run
+    if it fails.
+  - `ParquetFullVacuumNotSucceeding` covers the full VACUUM only from its
+    first scheduled success, Sunday 2026-10-11 at 03:47 UTC (eth).
