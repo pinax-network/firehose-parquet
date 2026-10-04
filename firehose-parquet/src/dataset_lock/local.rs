@@ -177,6 +177,16 @@ mod supported {
             &self.roots
         }
 
+        /// Copies of the locked descriptors: what a process spawned while the
+        /// guard is held inherits until it execs.
+        #[cfg(test)]
+        pub(crate) fn inherited_descriptors(&self) -> Vec<File> {
+            self.held
+                .values()
+                .map(|(file, _)| file.try_clone().unwrap())
+                .collect()
+        }
+
         // Other stores may borrow this same OS guard. Serialize their version
         // validation and publication as one critical section too.
         pub(crate) fn lock_control_mutation(&self) -> Result<MutexGuard<'_, ()>> {
@@ -219,6 +229,18 @@ mod supported {
                 self.held.insert(*identity, (file, requirement.mode));
             }
             Ok(())
+        }
+    }
+
+    impl Drop for LocalOwnership {
+        /// Unlocks before the descriptors close. A process spawned while the
+        /// guard is held keeps a copy of each descriptor until it execs, and a
+        /// flock lock belongs to the open file description that copy shares:
+        /// closing ours alone would leave the lock held until the child execs.
+        fn drop(&mut self) {
+            for (file, _) in self.held.values() {
+                let _ = file.unlock();
+            }
         }
     }
 
@@ -458,6 +480,25 @@ mod tests {
         assert!(LocalOwnership::acquire(&[first.clone(), second]).is_err());
         assert!(child(&first, "free").status().unwrap().success());
         drop(held);
+    }
+
+    /// Another test's child process can inherit a guard's locked descriptors;
+    /// the guard's locks must still end with it. Before the guard unlocked on
+    /// drop, a release followed by a new acquisition failed with "lock
+    /// acquisition failed because the operation would block" whenever such a
+    /// child had not exec'd yet (dataset_lock::operation's
+    /// nested_symlinks_fail_before_mutation_but_explicit_root_aliases_work, CI).
+    #[test]
+    fn a_dropped_guard_releases_its_locks_while_inherited_descriptors_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("output");
+        let held = LocalOwnership::acquire(std::slice::from_ref(&scope)).unwrap();
+        let inherited = held.inherited_descriptors();
+        assert!(!inherited.is_empty());
+        drop(held);
+        let again = LocalOwnership::acquire(&[scope]).unwrap();
+        drop(again);
+        drop(inherited);
     }
 
     #[test]
