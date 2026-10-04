@@ -89,6 +89,11 @@ fn configuration_errors_exit_2_before_any_request() {
         ),
         ("an unknown flag value", vec![("FULL_VACUUM", "maybe")]),
         (
+            "a full VACUUM with VACUUM off",
+            vec![("FULL_VACUUM", "1"), ("VACUUM", "0")],
+        ),
+        ("an unknown VACUUM value", vec![("VACUUM", "sometimes")]),
+        (
             "a negative retention",
             vec![("VACUUM_RETENTION_HOURS", "-1")],
         ),

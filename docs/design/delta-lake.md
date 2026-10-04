@@ -626,6 +626,15 @@ it lasts until the writer restarts.
   still sees the tombstones, so the hazard is across runs. The job also turns
   off the checkpoint of OPTIMIZE's and VACUUM's post-commit hooks, and skips
   the checkpoint when VACUUM failed.
+  Update (#702): with a retention below `deletedFileRetentionDuration`, a
+  lite VACUUM every run deletes again the files of every tombstone between the
+  two ages (on riv-dev1, 24 h every 15 min: 10 million deletes a day).
+  `VACUUM=0` skips VACUUM in the frequent runs, and a daily run vacuums. A
+  `VACUUM=0` run checkpoints too, which is safe while the daily run's
+  retention plus its interval stays below `deletedFileRetentionDuration`
+  (24 h + 24 h against 7 days): its checkpoint drops only tombstones whose
+  files the daily VACUUM deleted days before. A file whose tombstone expires
+  first is untracked, and the weekly full VACUUM deletes it.
 
 ## 5. Ownership (#636)
 

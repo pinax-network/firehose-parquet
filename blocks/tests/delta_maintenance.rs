@@ -892,6 +892,64 @@ async fn job_on(job: &Path, root: &Path, table: &str, settings: &[(&str, &str)])
     common::maintenance_job(job, &env).await
 }
 
+/// `VACUUM=0` (#702), for the frequent runs beside a daily VACUUM: a run
+/// compacts and checkpoints, but plans, deletes and commits no VACUUM, and the
+/// replaced files stay until a run with VACUUM deletes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vacuum_off_compacts_and_checkpoints_but_deletes_nothing() {
+    let job = common::maintenance_bin();
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = std::fs::canonicalize(dir.path()).unwrap();
+    let table = scratch.join("blocks");
+    scratch_table(&table);
+    let vacuum_commits = |table: &Path| {
+        operations(table)
+            .into_iter()
+            .filter(|(_, operation)| operation.starts_with("VACUUM"))
+            .count()
+    };
+
+    // A retention of 0: any VACUUM would delete the three replaced parts.
+    let frequent = job_on(
+        &job,
+        &scratch,
+        "blocks",
+        &[
+            ("VACUUM", "0"),
+            ("VACUUM_RETENTION_HOURS", "0"),
+            ("OPTIMIZE_DATES", "all"),
+        ],
+    )
+    .await;
+    frequent.assert_clean();
+    let start = frequent.events("start").next().unwrap();
+    assert_eq!(start["vacuum"], json!(false), "{frequent:?}");
+    let line = frequent.table("blocks");
+    assert_eq!(
+        line["compacted"][0]["files_removed"],
+        json!(3),
+        "{frequent:?}"
+    );
+    assert_eq!(line["vacuum"], json!({"mode": "off"}), "{frequent:?}");
+    // Checkpointed at the run's last commit, the OPTIMIZE.
+    assert_eq!(
+        line["checkpoint_version"], line["version_after"],
+        "{frequent:?}"
+    );
+    assert!(table.join("_delta_log/_last_checkpoint").exists());
+    assert_eq!(orphans(&table).await, 3);
+    assert_eq!(vacuum_commits(&table), 0);
+
+    // The daily run: its VACUUM deletes them, with its START and END commits.
+    let daily = job_on(&job, &scratch, "blocks", &[("VACUUM_RETENTION_HOURS", "0")]).await;
+    daily.assert_clean();
+    let line = daily.table("blocks");
+    assert_eq!(line["vacuum"]["mode"], json!("lite"), "{daily:?}");
+    assert_eq!(line["vacuum"]["files_deleted"], json!(3), "{daily:?}");
+    assert_eq!(orphans(&table).await, 0);
+    assert_eq!(vacuum_commits(&table), 2);
+}
+
 /// Design §4.1, measured: the job's VACUUM-then-checkpoint order deletes
 /// expired tombstones' files, the reverse order leaves them as orphans, and
 /// no lite or enforced full VACUUM deletes a part that is not in the log yet.
