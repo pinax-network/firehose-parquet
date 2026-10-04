@@ -32,11 +32,17 @@
 //!    top-level `metadata/` directory ([`ICEBERG_METADATA_DIR`]), the Iceberg
 //!    metadata of an Apache XTable sync: delta-rs plans it (a dry run), and
 //!    the job deletes the other planned files itself, without delta-rs's
-//!    `VACUUM START` and `VACUUM END` commits.
+//!    `VACUUM START` and `VACUUM END` commits. `VACUUM=0` skips this step
+//!    (#702): a lite VACUUM with a retention below the table's deletes again,
+//!    every run, the files of every tombstone between the two ages, so
+//!    frequent runs leave it to a daily one.
 //! 3. A checkpoint, after VACUUM: a checkpoint drops expired tombstones, so a
 //!    lite VACUUM after it would never see them and their files would stay as
 //!    orphans. The checkpoint is skipped when VACUUM failed, and no OPTIMIZE
-//!    or VACUUM commit writes one on its own.
+//!    or VACUUM commit writes one on its own. A run with `VACUUM=0`
+//!    checkpoints too: its checkpoint drops only tombstones older than
+//!    `delta.deletedFileRetentionDuration` (7 days), whose files the daily
+//!    VACUUM (24 h) deleted days before.
 //! 4. Log cleanup: commits older than `delta.logRetentionDuration` behind a
 //!    checkpoint.
 //!
@@ -58,6 +64,9 @@
 //!   commits use conditional puts (`If-None-Match: *`), and no request sends
 //!   `If-Match`; `SSL_CERT_FILE` names a private CA.
 //!   `AWS_S3_ALLOW_UNSAFE_RENAME` is refused.
+//! - `VACUUM`: `0` skips VACUUM (default `1`); refused with `FULL_VACUUM=1`.
+//!   For the frequent runs beside a daily VACUUM, when `VACUUM_RETENTION_HOURS`
+//!   is below the table's `delta.deletedFileRetentionDuration`.
 //! - `FULL_VACUUM`: `1` for a full VACUUM (default `0`, lite).
 //! - `VACUUM_RETENTION_HOURS`: default the table's
 //!   `delta.deletedFileRetentionDuration` (7 days). A lite VACUUM may go
@@ -160,9 +169,15 @@ fn var(env: Env<'_>, name: &str, default: &str) -> String {
 
 fn flag(env: Env<'_>, name: &str, default: &str) -> Result<bool, ConfigError> {
     let value = var(env, name, default).trim().to_lowercase();
+    // An empty value is unset: `VACUUM=` must not turn VACUUM off.
+    let value = if value.is_empty() {
+        default.to_string()
+    } else {
+        value
+    };
     match value.as_str() {
         "1" | "true" | "yes" => Ok(true),
-        "0" | "false" | "no" | "" => Ok(false),
+        "0" | "false" | "no" => Ok(false),
         _ => config(format!("{name} must be 0 or 1, got '{value}'")),
     }
 }
@@ -340,6 +355,8 @@ pub struct Settings {
     /// `LAKE_ROOT` without a trailing `/`, or `s3://<LAKE_BUCKET>`.
     pub root: String,
     pub tables: Vec<String>,
+    /// `VACUUM=0` skips step 2 (#702).
+    pub vacuum: bool,
     pub full_vacuum: bool,
     pub dry_run: bool,
     pub retention_hours: Option<u64>,
@@ -385,7 +402,11 @@ impl Settings {
                 return config(format!("not a table name: '{table}'"));
             }
         }
+        let vacuum = flag(env, "VACUUM", "1")?;
         let full_vacuum = flag(env, "FULL_VACUUM", "0")?;
+        if full_vacuum && !vacuum {
+            return config("FULL_VACUUM=1 runs a VACUUM: it needs VACUUM=1");
+        }
         let dry_run = flag(env, "DRY_RUN", "0")?;
         let retention_hours = integer(env, "VACUUM_RETENTION_HOURS", 0, None)?;
         if full_vacuum && retention_hours.is_some_and(|hours| hours < MIN_FULL_VACUUM_HOURS) {
@@ -408,6 +429,7 @@ impl Settings {
         let mut settings = Self {
             root,
             tables,
+            vacuum,
             full_vacuum,
             dry_run,
             retention_hours,
@@ -907,82 +929,90 @@ async fn maintain(
     report.set("repairs_deferred", json!(deferred));
     report.set("repairs_unsupported", json!(unrepairable));
 
-    // 2. VACUUM, lite unless FULL_VACUUM=1 (weekly, >= 168 h enforced).
+    // 2. VACUUM, lite unless FULL_VACUUM=1 (weekly, >= 168 h enforced), and
+    // none with VACUUM=0 (#702).
     let table_hours = table
         .snapshot()
         .ok()
         .and_then(|snapshot| table_retention_hours(snapshot.metadata().configuration()));
     let hours = settings.retention_hours;
     let mut vacuum = Map::new();
-    vacuum.insert(
-        "mode".into(),
-        json!(if settings.full_vacuum { "full" } else { "lite" }),
-    );
-    vacuum.insert("retention_hours".into(), json!(hours));
     let mut vacuumed = false;
-    if settings.full_vacuum
-        && table_hours.is_none_or(|table_hours| table_hours < MIN_FULL_VACUUM_HOURS as f64)
-    {
-        report.refused(
-            "vacuum",
-            &format!(
-                "refusing a full VACUUM: delta.deletedFileRetentionDuration is below \
-                 {MIN_FULL_VACUUM_HOURS} h"
-            ),
+    if settings.vacuum {
+        vacuum.insert(
+            "mode".into(),
+            json!(if settings.full_vacuum { "full" } else { "lite" }),
         );
+        vacuum.insert("retention_hours".into(), json!(hours));
+        if settings.full_vacuum
+            && table_hours.is_none_or(|table_hours| table_hours < MIN_FULL_VACUUM_HOURS as f64)
+        {
+            report.refused(
+                "vacuum",
+                &format!(
+                    "refusing a full VACUUM: delta.deletedFileRetentionDuration is below \
+                     {MIN_FULL_VACUUM_HOURS} h"
+                ),
+            );
+        } else {
+            // A full VACUUM always enforces the table's retention; a lite one may
+            // go below it (it never deletes an untracked part).
+            let enforce = settings.full_vacuum
+                || hours.is_none()
+                || table_hours.is_some_and(|table_hours| hours.unwrap() as f64 >= table_hours);
+            let mut builder = table
+                .clone()
+                .vacuum()
+                // A full VACUUM only plans here: the job deletes the planned
+                // files itself, keeping the Iceberg metadata (`delete_planned`).
+                .with_dry_run(settings.dry_run || settings.full_vacuum)
+                .with_enforce_retention_duration(enforce)
+                .with_mode(if settings.full_vacuum {
+                    VacuumMode::Full
+                } else {
+                    VacuumMode::Lite
+                })
+                .with_commit_properties(no_post_commit_hooks());
+            if let Some(hours) = hours {
+                builder = builder.with_retention_period(chrono::Duration::hours(
+                    i64::try_from(hours).unwrap_or(i64::MAX / 3_600_000),
+                ));
+            }
+            let deleted = match builder.await {
+                Ok((after, metrics)) if settings.full_vacuum => {
+                    table = after;
+                    delete_planned(&table, &metrics.files_deleted, settings.dry_run)
+                        .await
+                        .map(|(deleted, kept)| {
+                            vacuum.insert("iceberg_metadata_kept".into(), json!(kept));
+                            deleted
+                        })
+                }
+                Ok((after, metrics)) => {
+                    table = after;
+                    Ok(metrics.files_deleted.len())
+                }
+                Err(error) => Err(error),
+            };
+            match deleted {
+                Ok(deleted) => {
+                    vacuum.insert("files_deleted".into(), json!(deleted));
+                    vacuumed = true;
+                }
+                Err(error) => report.failed("vacuum", &error),
+            }
+        }
     } else {
-        // A full VACUUM always enforces the table's retention; a lite one may
-        // go below it (it never deletes an untracked part).
-        let enforce = settings.full_vacuum
-            || hours.is_none()
-            || table_hours.is_some_and(|table_hours| hours.unwrap() as f64 >= table_hours);
-        let mut builder = table
-            .clone()
-            .vacuum()
-            // A full VACUUM only plans here: the job deletes the planned
-            // files itself, keeping the Iceberg metadata (`delete_planned`).
-            .with_dry_run(settings.dry_run || settings.full_vacuum)
-            .with_enforce_retention_duration(enforce)
-            .with_mode(if settings.full_vacuum {
-                VacuumMode::Full
-            } else {
-                VacuumMode::Lite
-            })
-            .with_commit_properties(no_post_commit_hooks());
-        if let Some(hours) = hours {
-            builder = builder.with_retention_period(chrono::Duration::hours(
-                i64::try_from(hours).unwrap_or(i64::MAX / 3_600_000),
-            ));
-        }
-        let deleted = match builder.await {
-            Ok((after, metrics)) if settings.full_vacuum => {
-                table = after;
-                delete_planned(&table, &metrics.files_deleted, settings.dry_run)
-                    .await
-                    .map(|(deleted, kept)| {
-                        vacuum.insert("iceberg_metadata_kept".into(), json!(kept));
-                        deleted
-                    })
-            }
-            Ok((after, metrics)) => {
-                table = after;
-                Ok(metrics.files_deleted.len())
-            }
-            Err(error) => Err(error),
-        };
-        match deleted {
-            Ok(deleted) => {
-                vacuum.insert("files_deleted".into(), json!(deleted));
-                vacuumed = true;
-            }
-            Err(error) => report.failed("vacuum", &error),
-        }
+        // VACUUM=0: nothing is planned, deleted or committed.
+        vacuum.insert("mode".into(), json!("off"));
     }
     report.set("vacuum", Value::Object(vacuum));
 
-    // 3. Checkpoint, only after a successful VACUUM (design §4.1), then
-    // 4. log cleanup behind it.
-    if vacuumed && !settings.dry_run {
+    // 3. Checkpoint, only after a successful VACUUM (design §4.1), or with
+    // VACUUM=0: its checkpoint drops only tombstones older than the table's
+    // retention (7 days), whose files the daily VACUUM deleted days before.
+    // Then 4. log cleanup behind it.
+    if (vacuumed || !settings.vacuum) && !settings.dry_run {
         match create_checkpoint(&table, None).await {
             Ok(()) => {
                 report.set("checkpoint_version", json!(table.version()));
@@ -1048,6 +1078,7 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
         object(json!({
             "root": settings.root,
             "tables": settings.tables.len(),
+            "vacuum": settings.vacuum,
             "full_vacuum": settings.full_vacuum,
             "retention_hours": settings.retention_hours,
             "optimize_dates": if settings.optimize_all_dates { "all" } else { "closed" },
@@ -1184,6 +1215,25 @@ mod tests {
         ] {
             assert_eq!(hours(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn vacuum_is_on_unless_turned_off() {
+        let vacuum = |value: Option<&str>| {
+            let mut env = BTreeMap::from([("LAKE_ROOT", "/lake"), ("LAKE_TABLES", "blocks")]);
+            if let Some(value) = value {
+                env.insert("VACUUM", value);
+            }
+            let lookup = |name: &str| env.get(name).map(|value| value.to_string());
+            Settings::from_env(&lookup).map(|settings| settings.vacuum)
+        };
+        assert!(vacuum(None).unwrap());
+        // An empty value is unset, not off.
+        assert!(vacuum(Some("")).unwrap());
+        assert!(vacuum(Some(" 1 ")).unwrap());
+        assert!(!vacuum(Some("0")).unwrap());
+        assert!(!vacuum(Some("false")).unwrap());
+        assert!(vacuum(Some("sometimes")).is_err());
     }
 
     #[test]

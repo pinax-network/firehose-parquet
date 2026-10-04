@@ -50,6 +50,10 @@ data:
   # Days per table a run sorts back into the writer's row order (days an
   # OPTIMIZE up to 1.0.5 left out of it); new days are only concatenated.
   OPTIMIZE_REPAIR_DATES: "1"
+  # VACUUM_RETENTION_HOURS (default the table's 7 days): lower deletes replaced
+  # files sooner, but then every run deletes them again until their tombstones
+  # expire. With a lower value, set VACUUM=0 on the hourly job and VACUUM once a
+  # day (docs/delta-maintenance.md, "VACUUM retention and schedule").
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -157,6 +161,10 @@ spec:
               env:
                 - name: FULL_VACUUM
                   value: "1"
+                # A full VACUUM refuses less than 168 h: this overrides a lower
+                # VACUUM_RETENTION_HOURS in the shared settings.
+                - name: VACUUM_RETENTION_HOURS
+                  value: "168"
               envFrom:
                 - configMapRef:
                     name: delta-maintenance-settings

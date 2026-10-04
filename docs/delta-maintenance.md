@@ -48,10 +48,12 @@ For each table it runs, in order:
    for orphans, so the job has delta-rs plan it (a dry run) and deletes every
    planned file outside `metadata/` itself. A full VACUUM therefore adds no
    `VACUUM START` or `VACUUM END` entry to the log (a lite one still does);
-   its record is the job's `table` line.
+   its record is the job's `table` line. `VACUUM=0` skips this step, for
+   frequent runs beside a daily VACUUM
+   ([VACUUM retention and schedule](#vacuum-retention-and-schedule)).
 3. **A checkpoint**, after VACUUM: a checkpoint drops expired tombstones, and
    a VACUUM after it would leave their files behind. It is skipped when
-   VACUUM failed.
+   VACUUM failed. A run with `VACUUM=0` checkpoints too.
 4. **Log cleanup** of commits older than `delta.logRetentionDuration`
    (7 days) behind a checkpoint.
 
@@ -65,7 +67,7 @@ Every step is idempotent: a failed or conflicting run changes nothing that
 the next run cannot finish, and the writer never notices. One JSON object per
 line goes to stdout:
 
-- `start`: `root`, `tables`, `full_vacuum`, `retention_hours`,
+- `start`: `root`, `tables`, `vacuum`, `full_vacuum`, `retention_hours`,
   `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
   `version` (the binary's);
 - one line per table: `table` with `version_before`, `dates_to_compact`,
@@ -74,7 +76,7 @@ line goes to stdout:
   `footer_keys`: the footer keys the compacted files were given),
   `repairs_deferred` (days out of order left for a later run),
   `repairs_unsupported` (days out of order in a table with no known row order,
-  left as they are), `vacuum` (`mode`,
+  left as they are), `vacuum` (`mode`: `lite`, `full` or `off`;
   `retention_hours`, `files_deleted`, and for a full VACUUM
   `iceberg_metadata_kept`: the files in `metadata/` that were old enough to
   delete and were kept), `checkpoint_version`, `version_after`,
@@ -105,8 +107,9 @@ not apply to it. Requests use object_store's default retries.
 | `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | `false` | Plain HTTP; virtual-hosted instead of path-style requests |
 | `SSL_CERT_FILE` | system roots | A PEM bundle of the CAs to trust instead, for example with the RGW's private CA |
 | `AWS_S3_ALLOW_UNSAFE_RENAME` | | Refused: unsafe beside a running writer |
+| `VACUUM` | `1` | `0` skips VACUUM: for the frequent runs beside a daily VACUUM, when `VACUUM_RETENTION_HOURS` is below the table's retention ([VACUUM retention and schedule](#vacuum-retention-and-schedule)). Refused with `FULL_VACUUM=1` |
 | `FULL_VACUUM` | `0` | `1` for the weekly full VACUUM |
-| `VACUUM_RETENTION_HOURS` | the table's 7 days | Lower only shortens how long readers of older snapshots find replaced files; a full VACUUM refuses less than 168 |
+| `VACUUM_RETENTION_HOURS` | the table's 7 days | Lower only shortens how long readers of older snapshots find replaced files; a full VACUUM refuses less than 168 (override a lower shared value in its environment) |
 | `OPTIMIZE_DATES` | `closed` | `all` also compacts the newest day: safe beside the writer, but repeated every run; use it once the writer has stopped for good |
 | `OPTIMIZE_TARGET_SIZE` | `delta.targetFileSize` | Bytes |
 | `OPTIMIZE_ZSTD_LEVEL` | `3` | Compression of the compacted files |
@@ -208,3 +211,35 @@ It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
   repairs are spread over runs; `blocks/tests/maintenance_cli.rs` checks its
   configuration errors, exit statuses, redaction, skipped tables, and a full
   VACUUM that deletes old orphans but keeps `metadata/`.
+
+### VACUUM retention and schedule
+
+A replaced file's `remove` tombstone stays in the log for the table's
+`delta.deletedFileRetentionDuration` (7 days), and a checkpoint drops it after
+that. A lite VACUUM deletes the file of every tombstone older than its
+retention, and doesn't check that the file still exists: deleting a missing
+key succeeds. So:
+
+- **With the default retention** (the table's 7 days), each file is deleted
+  once, by the first run after its tombstone expires. That run's checkpoint
+  then drops the tombstone. This is the example CronJob's setup.
+- **With a shorter `VACUUM_RETENTION_HOURS`**, replaced files go sooner, but
+  every run deletes again the files of every tombstone between the two ages.
+  On riv-dev1 (24 h, every 15 min; [#702](https://github.com/pinax-network/firehose-parquet/issues/702))
+  that was about 1,700 files per table per run, 10 million deletes a day over
+  three networks, and a `VACUUM START`/`VACUUM END` pair per table per run, a
+  third to a half of every table's log. There, set `VACUUM=0` on the frequent
+  runs and add a run once a day with VACUUM, at an hour when no closed day is
+  being compacted. Each file is then deleted about six times, once a day until
+  its tombstone expires.
+
+A run with `VACUUM=0` still checkpoints, so readers keep a short log tail. Its
+checkpoint drops only tombstones older than the table's retention, which is
+safe while the daily run's retention plus its interval stays below it (24 h +
+24 h against 7 days). If the daily run fails for about five days in a row, a
+file it missed loses its tombstone, and the weekly full VACUUM deletes it as an
+untracked file.
+
+The full VACUUM refuses a retention below 168 hours (exit 2,
+`config_error`). When the settings the runs share set a shorter
+`VACUUM_RETENTION_HOURS`, set it to `168` in the full VACUUM's own environment.

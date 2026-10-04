@@ -583,6 +583,7 @@ Settings (environment variables):
                                   Credentials (required on S3; never printed)
   AWS_ALLOW_HTTP, AWS_VIRTUAL_HOSTED_STYLE_REQUEST
                                   Plain HTTP; virtual-hosted requests (default false, path-style)
+  VACUUM                          0 skips VACUUM: frequent runs beside a daily one (default 1)
   FULL_VACUUM                     1 for the weekly full VACUUM (refused below 168 h of retention)
   VACUUM_RETENTION_HOURS          Default the table's delta.deletedFileRetentionDuration (7 days)
   OPTIMIZE_DATES                  closed (default) or all (also the newest date)
