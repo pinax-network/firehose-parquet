@@ -14,7 +14,16 @@ mod legacy {
     use firehose_parquet::grpc::EndpointInfo;
 
     pub const BLOCK_TYPES: &[&str] = &[
-        "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+        "auto",
+        "evm",
+        "bitcoin",
+        "solana",
+        "near",
+        "antelope",
+        "cosmos",
+        "tron",
+        "beacon",
+        "hypercore",
     ];
 
     pub fn output_encoding_policy_bytes(
@@ -23,7 +32,7 @@ mod legacy {
     ) -> Option<EncodeBytes> {
         match block_type {
             "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
-            "evm" | "bitcoin" | "cosmos" | "beacon" => Some(EncodeBytes::Hex),
+            "evm" | "bitcoin" | "cosmos" | "beacon" | "hypercore" => Some(EncodeBytes::Hex),
             "antelope" => Some(EncodeBytes::HexNoPrefix),
             "solana" | "near" => Some(EncodeBytes::Base58),
             "tron" => Some(EncodeBytes::TronBase58),
@@ -72,6 +81,9 @@ mod legacy {
             if candidate.contains("tron") {
                 return Some("tron");
             }
+            if candidate.contains("hypercore") {
+                return Some("hypercore");
+            }
             if candidate.contains("ethereum") || candidate.contains("evm") || candidate == "mainnet"
             {
                 return Some("evm");
@@ -91,6 +103,7 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
+            "hypercore" => BlockFamily::Hypercore,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
     }
@@ -112,6 +125,8 @@ mod legacy {
             Ok("tron".to_string())
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
+        } else if type_url.contains("hypercore") {
+            Ok("hypercore".to_string())
         } else {
             Err(anyhow!(
                 "unable to auto-detect block type from type_url: {type_url}"
@@ -203,6 +218,10 @@ mod legacy {
                 include_fork_step,
                 encode_bytes,
             ))),
+            "hypercore" => Ok(Box::new(HypercoreBlockMapper::new(
+                include_fork_step,
+                encode_bytes,
+            ))),
             other => Err(anyhow!(
                 "unsupported block type: {other}. Supported: {}",
                 BLOCK_TYPES.join(", ")
@@ -220,6 +239,7 @@ const TYPE_URLS: &[&str] = &[
     "type.googleapis.com/sf.cosmos.type.v2.Block",
     "type.googleapis.com/sf.tron.type.v1.Block",
     "type.googleapis.com/sf.beacon.type.v1.Block",
+    "type.googleapis.com/pinax.hypercore.v1.Block",
     "type.googleapis.com/sf.unknown.type.v1.Block",
     "type.googleapis.com/sf.firehose.v2.Response",
     "",
@@ -228,8 +248,23 @@ const TYPE_URLS: &[&str] = &[
 /// Every inference keyword, alone and in every ordered pair, so rule
 /// precedence is exercised as well as each rule.
 const KEYWORDS: &[&str] = &[
-    "beacon", "solana", "bitcoin", "near", "antelope", "eos", "cosmos", "tron", "ethereum", "evm",
-    "mainnet", "tron-evm", "btc", "cl", "eth",
+    "beacon",
+    "solana",
+    "bitcoin",
+    "near",
+    "antelope",
+    "eos",
+    "cosmos",
+    "tron",
+    "ethereum",
+    "evm",
+    "mainnet",
+    "tron-evm",
+    "btc",
+    "cl",
+    "eth",
+    "hypercore",
+    "hyper-evm",
 ];
 
 /// Names that exercise strict matching, case folding and substring traps.
@@ -259,6 +294,11 @@ const EXTRA_NAMES: &[&str] = &[
     "geoscience",
     "cosmoshub-4",
     "gnosis-cl",
+    "hypercore",
+    "hypercore-testnet",
+    "HyperCore",
+    "hyper-evm",
+    "hyperliquid",
 ];
 
 fn name_corpus() -> Vec<String> {
@@ -576,15 +616,25 @@ fn inventory_lines_with(
 }
 
 fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -> String {
-    schema_digest_where(|_| true, project)
+    schema_digest_where(|_| true, |_| true, project)
+}
+
+/// Families that predate the historical pins below: those digests were
+/// produced before HyperCore existed, so they cannot include it.
+fn predates_hypercore(kind: ChainKind) -> bool {
+    kind != ChainKind::Hypercore
 }
 
 fn schema_digest_where(
+    include_kind: impl Fn(ChainKind) -> bool,
     include: impl Fn(&MapperOptions) -> bool,
     project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
 ) -> String {
     let mut hasher = Sha256::new();
-    for kind in ChainKind::ALL {
+    for kind in ChainKind::ALL
+        .into_iter()
+        .filter(|kind| include_kind(*kind))
+    {
         for options in option_matrix()
             .into_iter()
             .filter(|options| include(options))
@@ -653,11 +703,13 @@ fn every_mapper_schema_matches_the_pinned_digest() {
 /// The final-only half of the matrix (`--final-blocks-only=true`, no
 /// `fork_step`). The pinned value was produced by the same loop on origin/main
 /// `081dea5`, before `stream_ordinal`: adding it left every final-only schema,
-/// and so every final-only protected table digest, byte-identical.
+/// and so every final-only protected table digest, byte-identical. HyperCore,
+/// added later, is left out; `HYPERCORE_SCHEMA_DIGEST` pins it.
 #[test]
 fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
     assert_eq!(
         schema_digest_where(
+            predates_hypercore,
             |options| !options.include_fork_step,
             |_, _, schema| Some(schema.clone())
         ),
@@ -669,12 +721,30 @@ fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
 /// schema of every family and option is exactly the pre-#550 schema, except the
 /// restructured NEAR `state_changes`, which both sides leave out. The pinned value was produced by
 /// the same loop, with the same table left out, on origin/main `8462692` (after
-/// #526, before #550).
+/// #526, before #550). HyperCore, added later, is left out.
 #[test]
 fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
-        schema_digest(without_appended_columns),
+        schema_digest_where(predates_hypercore, |_| true, without_appended_columns),
         PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED
+    );
+}
+
+/// SHA-256 over the five HyperCore schemas with the default `hex` encoding,
+/// final and non-final, for every other option. These schemas are bound into
+/// every HyperCore root's protected identity, and upstream additions must be
+/// placed without changing them (`docs/chains/hypercore.md`, "Schema epochs").
+#[test]
+fn hypercore_schemas_match_the_pinned_epoch_digest() {
+    assert_eq!(
+        schema_digest_where(
+            |kind| kind == ChainKind::Hypercore,
+            |options| options.encode_bytes == EncodeBytes::Hex,
+            |_, _, schema| Some(schema.clone())
+        ),
+        HYPERCORE_SCHEMA_DIGEST,
+        "the HyperCore schema changed: this requires a new output root (schema epoch); \
+         re-pin only together with a documented epoch"
     );
 }
 
@@ -746,13 +816,17 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
 }
 
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "98b767b5b0469e6f49df5c5ce61b55aee7089a2760a0c1db315bbd0e32ff7406";
+    "027ed07afb88e0c3faf5a70ea7dfe803491ff6366b55f757078dc7267df281f8";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
+    "651f9f74de20ffd955c267835d64715ac11301f479ddef2d54fe6480ae1ae61f";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
     "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
 
 const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
     "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";
+
+/// HyperCore schema epoch 1 (`docs/chains/hypercore.md`).
+const HYPERCORE_SCHEMA_DIGEST: &str =
+    "bfc34061470c195d5e6c932e8d6beda9dfece81dd271fc4fbe038317e0ce314d";

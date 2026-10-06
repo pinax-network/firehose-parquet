@@ -91,7 +91,9 @@ mod legacy {
                 );
             }
         }
-        if let Some(encoding) = encoding {
+        if block_type == Some("hypercore") {
+            meta.add("firehose-parquet.block_id_encoding", "decimal");
+        } else if let Some(encoding) = encoding {
             if let Some(block_id_encoding) = output_block_id_encoding_label(encoding) {
                 meta.add("firehose-parquet.block_id_encoding", block_id_encoding);
             }
@@ -172,6 +174,7 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
+            "hypercore" => BlockFamily::Hypercore,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
     }
@@ -193,6 +196,8 @@ mod legacy {
             Ok("tron".to_string())
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
+        } else if type_url.contains("hypercore") {
+            Ok("hypercore".to_string())
         } else {
             Err(anyhow!(
                 "unable to auto-detect block type from type_url: {type_url}"
@@ -234,6 +239,11 @@ mod legacy {
             "tron" => Some(OutputEncodingPolicy {
                 bytes_encoding: EncodeBytes::TronBase58,
                 block_id_encoding: "hex_no_prefix",
+                allow_endpoint_block_id_hint: false,
+            }),
+            "hypercore" => Some(OutputEncodingPolicy {
+                bytes_encoding: EncodeBytes::Hex,
+                block_id_encoding: "decimal",
                 allow_endpoint_block_id_hint: false,
             }),
             _ => None,
@@ -367,6 +377,9 @@ mod legacy {
             }
             if candidate.contains("tron") {
                 return Some("tron");
+            }
+            if candidate.contains("hypercore") {
+                return Some("hypercore");
             }
             if candidate.contains("ethereum") || candidate.contains("evm") || candidate == "mainnet"
             {
@@ -603,8 +616,16 @@ mod legacy_inline {
     }
 }
 
-const LABELS: [&str; 8] = [
-    "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+const LABELS: [&str; 9] = [
+    "evm",
+    "bitcoin",
+    "solana",
+    "near",
+    "antelope",
+    "cosmos",
+    "tron",
+    "beacon",
+    "hypercore",
 ];
 
 fn requested_types() -> Vec<(&'static str, Option<ChainKind>)> {
@@ -668,6 +689,9 @@ fn endpoint_corpus() -> Vec<Option<EndpointInfo>> {
         ("cosmoshub-4", &[]),
         ("ethereum", &["evm"]),
         ("linear", &[]),
+        ("hypercore", &[]),
+        ("", &["hypercore", "hyper-evm"]),
+        ("hyper-evm", &[]),
     ];
     for (index, (name, aliases)) in special.iter().enumerate() {
         for extended in [false, true] {

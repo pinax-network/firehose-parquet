@@ -41,7 +41,16 @@ use ingestion::run_ingestion;
 
 /// Supported block types.
 const BLOCK_TYPES: &[&str] = &[
-    "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+    "auto",
+    "evm",
+    "bitcoin",
+    "solana",
+    "near",
+    "antelope",
+    "cosmos",
+    "tron",
+    "beacon",
+    "hypercore",
 ];
 const WITHOUT_EXTENDED_WARNING: &str =
     "--without-extended had no effect because extended output is not supported for this chain";
@@ -363,6 +372,10 @@ impl StreamExit {
     }
 }
 
+/// `firehose-parquet.block_id_encoding` of a family whose block ids are
+/// decimal text (`ChainProfile::block_id_text`).
+const DECIMAL_BLOCK_ID_ENCODING: &str = "decimal";
+
 fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str> {
     match encoding {
         EncodeBytes::Binary => None,
@@ -486,7 +499,14 @@ fn add_common_file_metadata(
             );
         }
     }
-    if let Some(encoding) = encoding {
+    if block_type.is_some_and(|kind| kind.profile().block_id_text) {
+        // The ids are the decimal block number as text, whatever the bytes
+        // encoding (`ChainProfile::block_id_text`).
+        meta.add(
+            "firehose-parquet.block_id_encoding",
+            DECIMAL_BLOCK_ID_ENCODING,
+        );
+    } else if let Some(encoding) = encoding {
         if let Some(block_id_encoding) = output_block_id_encoding_label(encoding) {
             meta.add("firehose-parquet.block_id_encoding", block_id_encoding);
         }
@@ -3114,6 +3134,9 @@ mod tests {
         assert!(ChainKind::Beacon.profile().block_number_gaps);
         assert!(!ChainKind::Evm.profile().block_number_gaps);
         assert!(!ChainKind::Bitcoin.profile().block_number_gaps);
+        // HyperCore's missing blocks are a hole in the source data, not a
+        // chain property.
+        assert!(!ChainKind::Hypercore.profile().block_number_gaps);
         let error = ensure_bounded_stream_reached_stop(200, Some(197)).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("block 197"), "{message}");
@@ -3181,6 +3204,14 @@ mod tests {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.beacon.type.v1.Block").unwrap(),
             ChainKind::Beacon
+        );
+    }
+
+    #[test]
+    fn test_detect_block_type_hypercore() {
+        assert_eq!(
+            detect_block_type("type.googleapis.com/pinax.hypercore.v1.Block").unwrap(),
+            ChainKind::Hypercore
         );
     }
 
@@ -3267,6 +3298,34 @@ mod tests {
             output_block_id_encoding_label(&ChainKind::Beacon.default_bytes_encoding(false)),
             Some("hex_0x")
         );
+        // HyperCore ids are decimal text under every encoding.
+        assert_eq!(
+            ChainKind::Hypercore.default_bytes_encoding(false),
+            EncodeBytes::Hex
+        );
+        for encoding in [
+            EncodeBytes::Binary,
+            EncodeBytes::Hex,
+            EncodeBytes::HexNoPrefix,
+            EncodeBytes::Base58,
+            EncodeBytes::TronBase58,
+        ] {
+            let meta = build_file_metadata(
+                ChainKind::Hypercore,
+                &encoding,
+                "https://hypercore.firehose.pinax.network:443",
+                Compression::Zstd,
+                &None,
+            );
+            assert!(
+                meta.entries
+                    .iter()
+                    .any(|(key, value)| key == "firehose-parquet.block_id_encoding"
+                        && value == DECIMAL_BLOCK_ID_ENCODING),
+                "{encoding:?}: {:?}",
+                meta.entries
+            );
+        }
     }
 
     #[test]
@@ -3321,7 +3380,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon"
+            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, hypercore"
         );
     }
 
@@ -3336,7 +3395,8 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"cosmos"));
         assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
-        assert_eq!(BLOCK_TYPES.len(), 9); // auto + 8 chains
+        assert!(BLOCK_TYPES.contains(&"hypercore"));
+        assert_eq!(BLOCK_TYPES.len(), 10); // auto + 9 chains
 
         // `--block-type` help and errors list every profile, in profile order.
         assert_eq!(BLOCK_TYPES[0], "auto");
@@ -3423,6 +3483,7 @@ mod tests {
             (ChainKind::Cosmos, false, 3, EncodeBytes::Hex),
             (ChainKind::Tron, false, 2, EncodeBytes::TronBase58),
             (ChainKind::Beacon, false, 3, EncodeBytes::Hex),
+            (ChainKind::Hypercore, false, 3, EncodeBytes::Hex),
             (ChainKind::Evm, true, 2, EncodeBytes::TronBase58),
         ];
 

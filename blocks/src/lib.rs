@@ -4,6 +4,7 @@ pub mod bitcoin;
 pub mod chain;
 pub mod cosmos;
 pub mod evm;
+pub mod hypercore;
 pub mod near;
 #[doc(hidden)]
 pub mod schema_docs;
