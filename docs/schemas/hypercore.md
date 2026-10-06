@@ -5,7 +5,7 @@
 Generated from the `hypercore` mapper; do not edit by hand. Regenerate with `cargo run -p blocks --example dump_schemas` (see [README](README.md) for the conventions).
 
 - Block type: `--block-type hypercore`.
-- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
+- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain since `--block-type hypercore` was added.
 - Columns typed `string` (hex) or `array<string>` (hex) hold binary values written as text in that encoding.
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 - Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.

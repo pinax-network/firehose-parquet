@@ -1563,6 +1563,23 @@ fn encoding_label(encoding: &EncodeBytes) -> &'static str {
 }
 
 /// How each encoding writes a byte value (`firehose_parquet::encode`).
+/// When the chain's byte encoding was fixed. v1.0.0 fixed it for the chains
+/// that existed then; a chain added later has had one encoding since it was
+/// added. Exhaustive, so a new chain has to choose its wording.
+fn encoding_fixed_since(kind: ChainKind) -> &'static str {
+    match kind {
+        ChainKind::Evm
+        | ChainKind::Bitcoin
+        | ChainKind::Solana
+        | ChainKind::Near
+        | ChainKind::Antelope
+        | ChainKind::Cosmos
+        | ChainKind::Tron
+        | ChainKind::Beacon => "in v1.0.0",
+        ChainKind::Hypercore => "since `--block-type hypercore` was added",
+    }
+}
+
 fn encoding_description(encoding: &EncodeBytes) -> &'static str {
     match encoding {
         EncodeBytes::Binary => "raw bytes",
@@ -1675,7 +1692,7 @@ fn render_index(references: &[ChainReference]) -> String {
          then the chain's type mapping. The files are rendered from the production mappers \
          (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with each chain's default \
          options and byte encoding, mapped onto Delta types as every flush is \
-         (`ChainProfile::delta_types`), so they match what a v1.0.0 build writes.\n\n",
+         (`ChainProfile::delta_types`), so they match what the current build writes.\n\n",
     );
     out.push_str(
         "| Chain | `--block-type` | Tables | Byte encoding | Reference |\n\
@@ -1702,8 +1719,8 @@ fn render_index(references: &[ChainReference]) -> String {
          `delta_scan('<root>/<table>')` or Polars `scan_delta`, never by globbing its \
          files.\n\
          - Types are Delta Lake types (#643), the types of the data files: `long`, \
-         `integer`, `short`, `decimal(20,0)`, `double`, `boolean`, `string`, `binary`, \
-         `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has no unsigned, \
+         `integer`, `short`, `decimal(20,0)`, `decimal(38,10)`, `double`, `boolean`, \
+         `string`, `binary`, `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has no unsigned, \
          dictionary or millisecond types, so every flush maps the mapper's Arrow types \
          once, with checked casts, before anything is written \
          (`firehose_parquet::delta::types`): `UInt64` becomes a checked `long` (a value \
@@ -1711,8 +1728,9 @@ fn render_index(references: &[ChainReference]) -> String {
          chain's currency amounts and values a sender or signer chooses without a range \
          check (`ChainProfile::decimal_columns`); `UInt32` and `UInt16` become `long`, \
          `UInt8` becomes `short`, dictionaries become `string`, and millisecond \
-         timestamps become `timestamp` (microseconds, UTC) with the same instant. Each \
-         chain file ends with its mapping.\n\
+         timestamps become `timestamp` (microseconds, UTC) with the same instant; \
+         `Decimal128` columns (HyperCore's exact amounts, `decimal(38,10)`) are already \
+         Delta types and are written unchanged. Each chain file ends with its mapping.\n\
          - Every table starts with the canonical block identity columns `block_num`, \
          `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` and `date`, shared \
          by all chains (`firehose_parquet::traits`). `block_num`, `parent_num` and \
@@ -1739,8 +1757,9 @@ fn render_index(references: &[ChainReference]) -> String {
          in the middle of a table, and `fork_step` and `stream_ordinal` change the \
          positions of the columns after them.\n\
          - Byte encoding: binary values (hashes, addresses, keys) are written as text in the \
-         chain's encoding, fixed per chain in v1.0.0 (`ChainProfile` in \
-         `blocks/src/chain.rs`). Their type is suffixed with the encoding, for example \
+         chain's encoding, fixed per chain (`ChainProfile` in `blocks/src/chain.rs`): in \
+         v1.0.0 for the families that existed then, and since its addition for a family \
+         added later. Their type is suffixed with the encoding, for example \
          `string` (hex); other `string` columns hold chain-native text and do not depend \
          on the encoding. `binary` columns hold raw bytes whatever the encoding.\n\
          - Enum columns are `string` columns holding stable protobuf labels (the Parquet \
@@ -1784,8 +1803,9 @@ fn render_chain(reference: &ChainReference) -> String {
     let _ = writeln!(out, "- Block type: `--block-type {}`.", kind.label());
     let _ = write!(
         out,
-        "- Byte encoding: `{encoding}` ({}), fixed for this chain in v1.0.0.",
-        encoding_description(&reference.encoding)
+        "- Byte encoding: `{encoding}` ({}), fixed for this chain {}.",
+        encoding_description(&reference.encoding),
+        encoding_fixed_since(kind)
     );
     if let Some(tron_style) = &reference.tron_style_encoding {
         let _ = write!(
@@ -2088,6 +2108,49 @@ mod tests {
              and commit the result:\n  {}",
             problems.join("\n  ")
         );
+    }
+
+    /// The Conventions type list names every leaf Delta type the references
+    /// use, so a type that a new column brings cannot drift out of it.
+    #[test]
+    fn conventions_list_every_delta_type() {
+        fn leaves(data_type: &DataType, out: &mut BTreeSet<String>) {
+            match data_type {
+                DataType::List(item) => leaves(item.data_type(), out),
+                DataType::Struct(fields) => {
+                    for field in fields {
+                        leaves(field.data_type(), out);
+                    }
+                }
+                other => {
+                    out.insert(delta_type_name(other));
+                }
+            }
+        }
+        let references: Vec<_> = ChainKind::ALL
+            .into_iter()
+            .map(|kind| chain_reference(kind).unwrap())
+            .collect();
+        let index = render_index(&references);
+        let list = index
+            .split("- Types are Delta Lake types")
+            .nth(1)
+            .and_then(|rest| rest.split(". Delta has no").next())
+            .expect("the Conventions type list");
+        let mut types = BTreeSet::new();
+        for reference in &references {
+            for table in &reference.tables {
+                for column in &table.columns {
+                    leaves(&column.data_type, &mut types);
+                }
+            }
+        }
+        for name in types {
+            assert!(
+                list.contains(&format!("`{name}`")),
+                "`{name}` is missing from the Conventions type list: {list}"
+            );
+        }
     }
 
     /// The rendered tables are exactly each mapper's `table_names()`, for the
