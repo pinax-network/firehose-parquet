@@ -81,6 +81,15 @@ pub mod sf {
     }
 }
 
+// Pinax HyperCore (HyperLiquid L1) types
+pub mod pinax {
+    pub mod hypercore {
+        pub mod v1 {
+            tonic::include_proto!("pinax.hypercore.v1");
+        }
+    }
+}
+
 // Cosmos SDK types
 pub mod cosmos_sdk {
     pub mod tx {
@@ -97,6 +106,7 @@ pub mod protocol {
 
 // Convenience aliases
 pub use cosmos_sdk::tx::v1beta1 as cosmos_tx;
+pub use pinax::hypercore::v1 as hypercore;
 pub use sf::antelope::r#type::v1 as antelope;
 pub use sf::beacon::r#type::v1 as beacon;
 pub use sf::bitcoin::r#type::v1 as btc;

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Pulls the latest proto definitions from the Buf Build Registry (https://buf.build)
 # and writes them as flat, single-file protos named after each block type.
+# HyperCore keeps its upstream package path (pinax/hypercore/v1/*.proto) and its
+# imports unchanged, so a refresh is a plain copy.
 #
 # Prerequisites:
 #   - buf CLI (https://buf.build/docs/installation)
@@ -66,6 +68,12 @@ echo "  ✓ tron.proto (+ core/)"
 buf export buf.build/pinax/firehose-beacon -o "$TMP_DIR/beacon"
 cp "$TMP_DIR/beacon/sf/beacon/type/v1/type.proto" "$PROTO_DIR/beacon.proto"
 echo "  ✓ beacon.proto"
+
+# ── HyperCore ─────────────────────────────────────────────
+buf export buf.build/pinax/hypercore -o "$TMP_DIR/hypercore"
+mkdir -p "$PROTO_DIR/pinax/hypercore/v1"
+cp "$TMP_DIR/hypercore/pinax/hypercore/v1/"*.proto "$PROTO_DIR/pinax/hypercore/v1/"
+echo "  ✓ pinax/hypercore/v1/*.proto"
 
 echo ""
 echo "Done. All proto files updated in $PROTO_DIR"

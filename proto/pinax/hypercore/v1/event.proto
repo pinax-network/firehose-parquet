@@ -1,0 +1,266 @@
+syntax = "proto3";
+package pinax.hypercore.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/pinax-network/firehose-hypercore/pb/pinax/hypercore/v1;hypercorepb";
+
+message Event {
+  google.protobuf.Timestamp time = 1;
+  bytes hash = 2;
+
+  repeated EventBody events = 3;
+}
+
+message EventBody {
+  oneof event {
+    LedgerUpdate ledger_update = 1;
+    Funding funding = 2;
+    ValidatorRewards validator_rewards = 3;
+    CWithdrawal c_withdrawal = 4;
+    CDeposit c_deposit = 5;
+    Delegation delegation = 6;
+    GossipPriorityAuctionRestart gossip_priority_auction_restart = 7;
+    CreateSubAccount create_sub_account = 8;
+  }
+}
+
+message Delegation {
+  bytes user = 1;
+  bytes validator = 2;
+  string amount = 3;
+  bool is_undelegate = 4;
+}
+
+message CDeposit {
+  bytes user = 1;
+  string amount = 2;
+}
+
+message CWithdrawal {
+  bytes user = 1;
+  string amount = 2;
+  bool is_finalized = 3;
+}
+
+message Funding {
+  repeated FundingDelta deltas = 1;
+}
+
+message FundingDelta {
+  bytes user = 1;
+  string coin = 2;
+  string funding_amount = 3;
+  string szi = 4;
+  string funding_rate = 5;
+}
+
+message ValidatorRewards {
+  repeated ValidatorReward validator_to_reward = 1;
+}
+
+message ValidatorReward {
+  bytes validator = 1;
+  string reward = 2;
+}
+
+message LedgerUpdate {
+  repeated bytes users = 1;
+  LedgerUpdateDelta delta = 2;
+}
+
+message LedgerUpdateDelta {
+  oneof delta {
+    SpotTransfer spot_transfer = 1;
+    CStakingTransfer c_staking_transfer = 2;
+    AccountClassTransfer account_class_transfer = 3;
+    InternalTransfer internal_transfer = 4;
+    SubAccountTransfer sub_account_transfer = 5;
+    Send send = 6;
+    Deposit deposit = 7;
+    Withdraw withdraw = 8;
+    VaultDeposit vault_deposit = 9;
+    RewardsClaim rewards_claim = 10;
+    VaultWithdraw vault_withdraw = 11;
+    VaultLeaderCommission vault_leader_commission = 12;
+    DeployGasAuction deploy_gas_auction = 13;
+    AccountActivationGas account_activation_gas = 14;
+    ActivateDexAbstraction activate_dex_abstraction = 15;
+    Liquidation liquidation = 16;
+    SpotGenesis spot_genesis = 17;
+    VaultDistribution vault_distribution = 18;
+    BorrowLend borrow_lend = 19;
+    VaultCreate vault_create = 20;
+    GossipPriorityGasAuction gossip_priority_gas_auction = 21;
+    Hip3LiquidatorDeposit hip3_liquidator_deposit = 22;
+  }
+}
+
+message VaultCreate {
+  bytes vault = 1;
+  string usdc = 2;
+  string fee = 3;
+}
+
+message BorrowLend {
+  string token = 1;
+  string amount = 2;
+  string interest_amount = 3;
+  string operation = 4;
+}
+
+message VaultDistribution {
+  bytes vault = 1;
+  string usdc = 2;
+}
+
+message SpotGenesis {
+  string token = 1;
+  string amount = 2;
+}
+
+enum LeverageType {
+  LEVERAGE_TYPE_UNSPECIFIED = 0;
+  LEVERAGE_TYPE_CROSS = 1;
+  LEVERAGE_TYPE_ISOLATED = 2;
+}
+
+message Liquidation {
+  string liquidated_ntl_pos = 1;
+  string account_value = 2;
+  LeverageType leverage_type = 3;
+  repeated LiquidatedPosition liquidated_positions = 4;
+}
+
+message LiquidatedPosition {
+  string coin = 1;
+  string szi = 2;
+}
+
+message ActivateDexAbstraction {
+  string dex = 1;
+  string token = 2;
+  string amount = 3;
+}
+
+message DeployGasAuction {
+  string token = 1;
+  string amount = 2;
+}
+
+message VaultLeaderCommission {
+  bytes user = 1;
+  string usdc = 2;
+}
+
+message VaultWithdraw {
+  bytes vault = 1;
+  bytes user = 2;
+  string requested_usd = 3;
+  string commission = 4;
+  string closing_cost = 5;
+  string basis = 6;
+  string net_withdrawn_usd = 7;
+}
+
+message RewardsClaim {
+  string amount = 1;
+  string token = 2;
+}
+
+message VaultDeposit {
+  bytes vault = 1;
+  string usdc = 2;
+}
+
+message Withdraw {
+  string usdc = 1;
+  uint64 nonce = 2;
+  string fee = 3;
+}
+
+message Deposit {
+  string usdc = 1;
+}
+
+message Send {
+  bytes user = 1;
+  bytes destination = 2;
+  string source_dex = 3;
+  string destination_dex = 4;
+  string token = 5;
+  string amount = 6;
+  string usdc_value = 7;
+  string fee = 8;
+  string native_token_fee = 9;
+  uint64 nonce = 10;
+  string fee_token = 11;
+}
+
+message SubAccountTransfer {
+  string usdc = 1;
+  bytes user = 2;
+  bytes destination = 3;
+}
+
+message InternalTransfer {
+  string usdc = 1;
+  bytes user = 2;
+  bytes destination = 3;
+  string fee = 4;
+}
+
+message AccountClassTransfer {
+  string usdc = 1;
+  bool to_perp = 2;
+}
+
+message CStakingTransfer {
+  string token = 1;
+  string amount = 2;
+  bool is_deposit = 3;
+}
+
+message SpotTransfer {
+  string token = 1;
+  string amount = 2;
+  string usdc_value = 3;
+  bytes user = 4;
+  bytes destination = 5;
+  string fee = 6;
+  string native_token_fee = 7;
+  uint64 nonce = 8;
+  string fee_token = 9;
+}
+
+message AccountActivationGas {
+  string amount = 1;
+  string token = 2;
+}
+
+message GossipPriorityAuctionRestart {
+  uint64 slot_id = 1;
+  optional GossipPriorityAuctionPreviousWinner previous_winner = 2;
+  optional string end_gas = 3;
+}
+
+message GossipPriorityAuctionPreviousWinner {
+  string ip = 1;
+}
+
+message GossipPriorityGasAuction {
+  string token = 1;
+  string amount = 2;
+}
+
+message Hip3LiquidatorDeposit {
+  string dex = 1;
+  string token = 2;
+  string amount = 3;
+}
+
+message CreateSubAccount {
+  bytes user = 1;
+  bytes sub_account = 2;
+  string name = 3;
+}

@@ -11,3 +11,4 @@ deps:
   - buf.build/streamingfast/firehose-tron
   - buf.build/pinax/firehose-antelope
   - buf.build/pinax/firehose-beacon
+  - buf.build/pinax/hypercore
