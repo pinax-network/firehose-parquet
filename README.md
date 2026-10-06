@@ -24,6 +24,7 @@ vacuums and checkpoints them beside the writer.
 | `cosmos` | no built-in name; `--endpoint https://mainnet.injective.streamingfast.io:443` | [Cosmos schema](docs/schemas/cosmos.md) | [Cosmos notes](docs/chains/cosmos.md) |
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
 | `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
+| `hypercore` | no built-in name; `--endpoint https://hypercore.firehose.pinax.network:443 --api-key-envvar PINAX_API_KEY`, from block 846903317 | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): `decimal(38,10)` amounts, decimal block ids, the endpoint's block hole, views, monitors and cookbook |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -153,7 +154,7 @@ the maintenance CronJobs.
 | | [Partition vocabulary](docs/partition-vocabulary.md) | The `date=YYYY-MM-DD` key and the CLI terms for it |
 | Chain-specific notes | [Chain notes](docs/chains/README.md) | Index of the chain pages |
 | | [Failed transaction filtering](docs/chains/failed-transactions.md) | Flags, failure conditions and outcome columns per chain |
-| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md) | Joins, ordering and example queries per chain |
+| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
 | | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |

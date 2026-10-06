@@ -140,7 +140,7 @@ WHERE date = DATE '2026-09-25';
 ## Engine compatibility
 
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
-non-final) and Solana output with a mock Firehose, writes a checkpoint of
+non-final), Solana and HyperCore output with a mock Firehose, writes a checkpoint of
 every table, and reads every table through its Delta log
 (`blocks/tests/engine_compat.rs`) with the DuckDB 1.5.5 CLI and its `delta`
 extension `45c4087` (both checksum-verified), and with delta-rs itself
@@ -157,6 +157,7 @@ maintenance job compacted and vacuumed them beside a running `build`.
 | `long` | `BIGINT` | `Int64` | The mapper's `UInt64` (checked: a value above `i64::MAX` refuses the flush), `UInt32` and `UInt16` |
 | `short` | `SMALLINT` | `Int16` | The mapper's `UInt8` |
 | `decimal(20,0)` | `DECIMAL(20,0)` | `Decimal(precision=20, scale=0)` | Currency amounts and unchecked 64-bit values, exact up to `u64::MAX` |
+| `decimal(38,10)` | `DECIMAL(38,10)` | `Decimal(precision=38, scale=10)` | HyperCore amounts, prices and sizes, exact (delta-rs reads `Decimal128(38, 10)`; the Polars type is delta-rs's, not checked in CI). A product of two is `DECIMAL(38,20)` in DuckDB; cast before a third ([HyperCore decimals](chains/hypercore.md#decimals)) |
 | `timestamp` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='us', time_zone='UTC')` | Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)` holding whole milliseconds |
 | `date` (partition column) | `DATE` | `Date` | Filters on `date` read only that day's files |
 | `string` enum labels | `VARCHAR` | `String` | Pages still dictionary-encoded |

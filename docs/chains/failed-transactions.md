@@ -1,6 +1,6 @@
 # Failed transaction filtering
 
-EVM includes failed/reverted transactions by default. Solana, Tron, Antelope, Cosmos and NEAR exclude them unless you pass `--include-failed-transactions`. Bitcoin and Beacon have no failed transactions. `--exclude-failed-transactions` drops them on every chain and takes precedence. The flags select whole transactions: every row that belongs to a dropped transaction is dropped with it. NEAR receipts are not transactions and are always written ([details](near.md#failed-receipts)).
+EVM includes failed/reverted transactions by default. Solana, Tron, Antelope, Cosmos and NEAR exclude them unless you pass `--include-failed-transactions`. Bitcoin, Beacon and HyperCore have no failed transactions. `--exclude-failed-transactions` drops them on every chain and takes precedence. The flags select whole transactions: every row that belongs to a dropped transaction is dropped with it. NEAR receipts are not transactions and are always written ([details](near.md#failed-receipts)).
 
 | Flag | EVM | Solana, Tron, Antelope, Cosmos, NEAR |
 |---|---|---|
@@ -20,6 +20,7 @@ Per-chain failure condition, and the columns that label the rows of an included 
 | **Cosmos** | `code != 0` in `TxResult` | `transactions.code` ([details](cosmos.md)) |
 | **Bitcoin** | *(not applicable — Bitcoin has no failed txs)* | — |
 | **Beacon** | *(not applicable — consensus blocks have no transaction outcomes)* | — |
+| **HyperCore** | *(not applicable — the blocks carry fills and ledger events, not transactions with outcomes)* | — |
 
 A failed transaction still pays fees on every chain. The outcome columns describe the parent transaction or receipt; they do not assert that an individual instruction, contract or action ran.
 
