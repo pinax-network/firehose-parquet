@@ -47,6 +47,16 @@ empty when the release is cut.
 
 ## Fixes
 
+- **No credential-scope `WARN` for a secure Pinax host outside the network
+  registry.** An explicitly selected Pinax credential sent to such a host (over
+  HTTPS on port 443), for example `--api-key-envvar PINAX_API_KEY` to
+  `hypercore.firehose.pinax.network`, logged that it was sent to a non-Pinax
+  host and advised unsetting the selector, which leaves the stream
+  `Unauthenticated`. Any `*.pinax.network` host over HTTPS on port 443 now
+  counts as Pinax for that warning. Automatic selection is unchanged: such a
+  host still gets no credential unless one is selected explicitly
+  ([Authentication](../authentication.md)).
+
 ## Performance
 
 ## Internal

@@ -6,9 +6,13 @@ lists. Five tables: `blocks`, `fills`, `events`, `funding_deltas` and
 `validator_rewards`. This is **schema epoch 1** (see
 [`extra_json` and schema epochs](#extra_json-and-schema-epochs)).
 
-The registry has no HyperCore network, so `--network` has no alias for it and
-the Pinax credential must be named explicitly. The endpoint's `chainName`
-(`hypercore`) resolves the block type, so `--block-type hypercore` is optional:
+The registry has no HyperCore network, so `--network` has no alias for it.
+fireparq treats `hypercore.firehose.pinax.network` as a custom endpoint and
+sends it no credential automatically: name the Pinax key with
+`--api-key-envvar` (without it Firehose rejects the stream as
+`Unauthenticated`; see [Authentication](../authentication.md)). The endpoint's
+`chainName` (`hypercore`) resolves the block type, so `--block-type hypercore`
+is optional:
 
 ```bash
 fireparq build --block-type hypercore \

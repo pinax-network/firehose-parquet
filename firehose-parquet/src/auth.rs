@@ -25,12 +25,21 @@ enum ExplicitScopeWarning {
 /// Explicit selectors bypass provider scoping (#562), so an explicitly selected
 /// credential sent to a non-Pinax host is logged. A provider-scoped
 /// StreamingFast name sent to a StreamingFast host is its normal destination.
-fn explicit_scope_warning(provider: &str, name: &str) -> Option<ExplicitScopeWarning> {
+///
+/// `pinax_host` is a secure (`https`, port 443, no userinfo) `*.pinax.network`
+/// destination, built-in or not. A Pinax host outside the network registry
+/// (for example `hypercore.firehose.pinax.network`) gets no ambient credential,
+/// so it needs the selector, but the credential does not leave Pinax.
+fn explicit_scope_warning(
+    provider: &str,
+    pinax_host: bool,
+    name: &str,
+) -> Option<ExplicitScopeWarning> {
     let streamingfast_name = STREAMINGFAST_API_KEY_ENV_VARS
         .iter()
         .chain(STREAMINGFAST_API_TOKEN_ENV_VARS)
         .any(|candidate| *candidate == name);
-    if provider == "pinax" || (provider == "streamingfast" && streamingfast_name) {
+    if provider == "pinax" || pinax_host || (provider == "streamingfast" && streamingfast_name) {
         return None;
     }
     let pinax_name = PINAX_API_KEY_ENV_VARS
@@ -84,7 +93,10 @@ pub(crate) fn resolve_with(
                 .authority()
                 .is_some_and(|a| a.as_str().eq_ignore_ascii_case(&host)))
         && !uri.authority().is_some_and(|a| a.as_str().contains('@'));
-    let provider = if secure && known_host && host.ends_with(".pinax.network") {
+    // Ambient credentials stay registry-scoped: only a built-in Pinax host is
+    // provider "pinax". `pinax_host` only quiets the explicit-selector warning.
+    let pinax_host = secure && host.ends_with(".pinax.network");
+    let provider = if pinax_host && known_host {
         "pinax"
     } else if secure && known_host && host.ends_with(".streamingfast.io") {
         "streamingfast"
@@ -131,7 +143,7 @@ pub(crate) fn resolve_with(
         let Some((name, _)) = selected else {
             continue;
         };
-        match explicit_scope_warning(provider, name) {
+        match explicit_scope_warning(provider, pinax_host, name) {
             Some(ExplicitScopeWarning::PinaxCredentialToOtherHost) => warn!(
                 host = %host,
                 provider,
@@ -164,6 +176,8 @@ mod tests {
 
     const PINAX: &str = "https://eth.firehose.pinax.network:443";
     const STREAMINGFAST: &str = "https://mainnet.tron.streamingfast.io:443";
+    /// A Pinax host that is not in the network registry.
+    const UNLISTED_PINAX: &str = "https://hypercore.firehose.pinax.network:443";
 
     fn read(name: &str) -> Option<String> {
         match name {
@@ -220,6 +234,7 @@ mod tests {
             "https://eth.firehose.pinax.network:65536",
             "https://eth.firehose.pinax.network.evil.example",
             "https://unknown.firehose.pinax.network",
+            UNLISTED_PINAX,
             "https://mainnet.tron.streamingfast.io.evil.example",
             "https://eth.firehose.pinax.network@evil.example",
             "https://evil.example@eth.firehose.pinax.network",
@@ -306,35 +321,41 @@ mod tests {
             "PINAX_API_TOKEN",
         ] {
             assert_eq!(
-                explicit_scope_warning("streamingfast", name),
+                explicit_scope_warning("streamingfast", false, name),
                 Some(PinaxCredentialToOtherHost),
                 "{name}"
             );
             assert_eq!(
-                explicit_scope_warning("custom", name),
+                explicit_scope_warning("custom", false, name),
                 Some(PinaxCredentialToOtherHost),
                 "{name}"
             );
-            assert_eq!(explicit_scope_warning("pinax", name), None, "{name}");
+            assert_eq!(explicit_scope_warning("pinax", false, name), None, "{name}");
+            // A secure Pinax host outside the registry is still Pinax.
+            assert_eq!(explicit_scope_warning("custom", true, name), None, "{name}");
         }
         assert_eq!(
-            explicit_scope_warning("custom", "INTERNAL_FIREHOSE_API_KEY"),
+            explicit_scope_warning("custom", false, "INTERNAL_FIREHOSE_API_KEY"),
             Some(CredentialToNonPinaxHost)
         );
         assert_eq!(
-            explicit_scope_warning("streamingfast", "INTERNAL_FIREHOSE_API_KEY"),
+            explicit_scope_warning("streamingfast", false, "INTERNAL_FIREHOSE_API_KEY"),
             Some(CredentialToNonPinaxHost)
         );
         assert_eq!(
-            explicit_scope_warning("pinax", "INTERNAL_FIREHOSE_API_KEY"),
+            explicit_scope_warning("pinax", false, "INTERNAL_FIREHOSE_API_KEY"),
             None
         );
         assert_eq!(
-            explicit_scope_warning("streamingfast", "STREAMINGFAST_API_TOKEN"),
+            explicit_scope_warning("custom", true, "INTERNAL_FIREHOSE_API_KEY"),
             None
         );
         assert_eq!(
-            explicit_scope_warning("custom", "STREAMINGFAST_API_TOKEN"),
+            explicit_scope_warning("streamingfast", false, "STREAMINGFAST_API_TOKEN"),
+            None
+        );
+        assert_eq!(
+            explicit_scope_warning("custom", false, "STREAMINGFAST_API_TOKEN"),
             Some(CredentialToNonPinaxHost)
         );
     }
@@ -411,6 +432,24 @@ mod tests {
         ] {
             let (_, log) = capture(endpoint, key, None);
             assert!(!log.contains("WARN"), "{endpoint}: {log}");
+        }
+
+        // A secure Pinax host outside the registry needs the selector (no
+        // ambient credential) and is not warned about: the key stays at Pinax.
+        let (credentials, log) = capture(UNLISTED_PINAX, Some("PINAX_API_KEY"), None);
+        assert_eq!(credentials.api_key.as_deref(), Some("pinax-key"));
+        assert!(!log.contains("WARN"), "{log}");
+        assert!(log.contains("provider=\"custom\""), "{log}");
+        // The same host over plaintext or another port is not secure: still warned.
+        for endpoint in [
+            "http://hypercore.firehose.pinax.network",
+            "https://hypercore.firehose.pinax.network:8443",
+        ] {
+            let (_, log) = capture(endpoint, Some("PINAX_API_KEY"), None);
+            assert!(
+                log.contains("explicitly selected Pinax credential is sent to a non-Pinax host"),
+                "{endpoint}: {log}"
+            );
         }
     }
 
