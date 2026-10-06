@@ -9,3 +9,7 @@ pub mod mapper;
 pub mod proto;
 pub mod schema;
 
+#[cfg(test)]
+pub(crate) mod fixtures;
+#[cfg(test)]
+mod value_tests;

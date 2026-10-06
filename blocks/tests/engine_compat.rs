@@ -4,8 +4,9 @@
 //! through delta-rs), through each table's Delta log.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
-//! and non-final) and Solana (list, binary, decimal and enum columns)
-//! datasets. delta-rs first writes a checkpoint of every table, so each
+//! and non-final), Solana (list, binary, decimal and enum columns) and
+//! HyperCore (`decimal(38,10)` amounts, a list of decimal structs, decimal
+//! text block ids) datasets. delta-rs first writes a checkpoint of every table, so each
 //! `_delta_log/` also holds Parquet, next to the Parquet cursor mirror in
 //! `_fireparq/`. Then both engines must read, for **every** table of every
 //! dataset (tables that never get rows included):
@@ -26,12 +27,17 @@
 //! chain's decimal columns (an EVM block nonce of `u64::MAX`, exactly), and
 //! `string` for enums, lists and binary columns.
 //!
+//! `hypercore_documented_sql_runs_over_the_fixture_blocks` builds the 36 real
+//! HyperCore fixture blocks with their true identities and runs the view
+//! pack, monitors and cookbook of `docs/chains/hypercore.md` over them in
+//! DuckDB.
+//!
 //! `anonymous_reads_of_a_public_deployment_bucket` is an opt-in check against
 //! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
 //! and `FIREPARQ_RGW_BUCKET` are set; see its docs. Engines: see
 //! `common/mod.rs`.
 use firehose_parquet::delta::store::DeltaStore;
-use firehose_protos::{eth, firehose, solana};
+use firehose_protos::{eth, firehose, hypercore, solana};
 use object_store_delta::ObjectStoreExt as _;
 use prost::Message;
 use serde_json::{json, Value};
@@ -70,11 +76,14 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
     }
 }
 
-/// Serves its fixed responses once, to a request for `[100, 104)`.
+/// Serves its fixed responses once, to a request for `first..=last`
+/// (`[100, 104)` for the datasets).
 #[derive(Clone)]
 struct Stream {
     responses: Arc<Vec<firehose::Response>>,
     final_only: bool,
+    first: u64,
+    last: u64,
 }
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
@@ -90,7 +99,7 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
                 request.stop_block_num,
                 request.final_blocks_only
             ),
-            (100, 103, self.final_only)
+            (self.first as i64, self.last, self.final_only)
         );
         assert!(request.cursor.is_empty());
         let responses: Vec<_> = self.responses.iter().cloned().map(Ok).collect();
@@ -260,6 +269,56 @@ fn solana_block(slot: u64, id: u8) -> Vec<u8> {
     .encode_to_vec()
 }
 
+fn hypercore_fixture(number: u64) -> hypercore::Block {
+    let payload: &[u8] = match number {
+        987247825 => include_bytes!("fixtures/hypercore/987247825.pb"),
+        1127672017 => include_bytes!("fixtures/hypercore/1127672017.pb"),
+        1165601237 => include_bytes!("fixtures/hypercore/1165601237.pb"),
+        other => panic!("no fixture {other} here"),
+    };
+    hypercore::Block::decode(payload).unwrap()
+}
+
+/// The funding, dust-conversion and validator-rewards block of
+/// 2026-01-01T00:00:00Z.
+fn hypercore_funding_block() -> hypercore::Block {
+    let payload =
+        zstd::decode_all(include_bytes!("fixtures/hypercore/846903317.pb.zst").as_slice()).unwrap();
+    hypercore::Block::decode(payload.as_slice()).unwrap()
+}
+
+/// Real HyperCore blocks with their headers rewritten to the fixture
+/// identity (the mapper refuses a header that differs from it): gossip
+/// restarts and validator rewards (100), busy fills (101), the funding block
+/// cut to 3 deltas per event and 8 fills (102), a liquidation cascade (103).
+fn hypercore_block(number: u64, _id: u8) -> Vec<u8> {
+    let mut block = match number {
+        100 => hypercore_fixture(987247825),
+        101 => hypercore_fixture(1165601237),
+        102 => {
+            let mut block = hypercore_funding_block();
+            block.fills.truncate(8);
+            for event in &mut block.events {
+                if let Some(hypercore::event_body::Event::Funding(funding)) =
+                    &mut event.events[0].event
+                {
+                    funding.deltas.truncate(3);
+                }
+            }
+            block
+        }
+        _ => hypercore_fixture(1127672017),
+    };
+    block.block_header = Some(hypercore::BlockHeader {
+        block_number: number,
+        block_time: Some(prost_types::Timestamp {
+            seconds: seconds(number),
+            nanos: NANOS,
+        }),
+    });
+    block.encode_to_vec()
+}
+
 /// One dataset written by `build`.
 struct Dataset {
     name: &'static str,
@@ -293,6 +352,8 @@ const CANONICAL: [(&str, &str, &str); 3] = [
     ),
     ("date", "DATE", "Date32"),
 ];
+
+const HYPERCORE_TYPE_URL: &str = "type.googleapis.com/pinax.hypercore.v1.Block";
 
 /// Arrow's spelling of a Delta `decimal(20,0)`, as delta-rs reads it.
 const DELTA_DECIMAL: &str = "Decimal128(20, 0)";
@@ -332,6 +393,7 @@ fn datasets() -> Vec<Dataset> {
             },
         ]
     };
+    let hypercore_decimal = "Decimal128(38, 10)";
     vec![
         Dataset {
             name: "evm-final",
@@ -401,6 +463,77 @@ fn datasets() -> Vec<Dataset> {
                 },
             ],
         },
+        Dataset {
+            name: "hypercore-final",
+            block_type: "hypercore",
+            final_only: true,
+            millis: 250,
+            events: (100..104).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect(),
+            tables: vec![
+                Table {
+                    name: "blocks",
+                    columns: vec![
+                        ("block_id", "VARCHAR", "Utf8"),
+                        ("block_time_ns", "BIGINT", "Int64"),
+                        ("fill_count", "BIGINT", "Int64"),
+                        ("extra_json", "VARCHAR", "Utf8"),
+                    ],
+                    minimums: vec![("fill_count", "0")],
+                },
+                Table {
+                    name: "fills",
+                    columns: vec![
+                        ("price", "DECIMAL(38,10)", hypercore_decimal),
+                        ("closed_pnl", "DECIMAL(38,10)", hypercore_decimal),
+                        ("side", "VARCHAR", "Utf8"),
+                        (
+                            "fill_time",
+                            "TIMESTAMP WITH TIME ZONE",
+                            "Timestamp(µs, \"UTC\")",
+                        ),
+                        ("user", "VARCHAR", "Utf8"),
+                        ("transaction_id", "BIGINT", "Int64"),
+                    ],
+                    // Exact decimals: the smallest price of the fixtures and
+                    // a negative PnL.
+                    minimums: vec![
+                        ("price", "0.0560010000"),
+                        ("closed_pnl", "-8806.1625780000"),
+                        ("order_id", "283365090383"),
+                    ],
+                },
+                Table {
+                    name: "events",
+                    columns: vec![
+                        ("event_type", "VARCHAR", "Utf8"),
+                        ("users", "VARCHAR[]", "List(Utf8, field: 'element')"),
+                        ("amount", "DECIMAL(38,10)", hypercore_decimal),
+                        (
+                            "liquidated_positions",
+                            "STRUCT(coin VARCHAR, szi DECIMAL(38,10))[]",
+                            "List(non-null Struct(\"coin\": non-null Utf8, \"szi\": non-null \
+                             Decimal128(38, 10)), field: 'element')",
+                        ),
+                        ("item_count", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("account_value", "-1.7248590000"), ("slot_id", "0")],
+                },
+                Table {
+                    name: "funding_deltas",
+                    columns: vec![
+                        ("szi", "DECIMAL(38,10)", hypercore_decimal),
+                        ("funding_rate", "DECIMAL(38,10)", hypercore_decimal),
+                        ("delta_index", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("szi", "-37.1900000000"), ("delta_index", "0")],
+                },
+                Table {
+                    name: "validator_rewards",
+                    columns: vec![("reward", "DECIMAL(38,10)", hypercore_decimal)],
+                    minimums: vec![("reward", "0.0000000000")],
+                },
+            ],
+        },
     ]
 }
 
@@ -408,6 +541,7 @@ impl Dataset {
     fn responses(&self) -> Vec<firehose::Response> {
         let (type_url, block): (&str, fn(u64, u8) -> Vec<u8>) = match self.block_type {
             "evm" => ("type.googleapis.com/sf.ethereum.type.v2.Block", evm_block),
+            "hypercore" => (HYPERCORE_TYPE_URL, hypercore_block),
             _ => ("type.googleapis.com/sf.solana.type.v1.Block", solana_block),
         };
         self.events
@@ -424,15 +558,24 @@ impl Dataset {
 
 /// `build` of `dataset` from a mock Firehose into `root`, one part per block.
 async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
+    let stream = Stream {
+        responses: Arc::new(dataset.responses()),
+        final_only: dataset.final_only,
+        first: 100,
+        last: 103,
+    };
+    build_from(stream, dataset.name, dataset.block_type, cwd, root).await;
+}
+
+/// `build` of `stream`'s blocks, `first..=last`, into `root`, one part per
+/// block.
+async fn build_from(stream: Stream, name: &str, block_type: &str, cwd: &Path, root: &Path) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let incoming = futures::stream::unfold(listener, |listener| async {
         Some((listener.accept().await.map(|(socket, _)| socket), listener))
     });
-    let stream = Stream {
-        responses: Arc::new(dataset.responses()),
-        final_only: dataset.final_only,
-    };
+    let (first, stop, final_only) = (stream.first, stream.last + 1, stream.final_only);
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(Info)
@@ -442,16 +585,19 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
             .unwrap();
     });
     let output = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(180),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
             .kill_on_drop(true)
             .env_clear()
             .current_dir(cwd)
             .args(["build", "--endpoint", &endpoint])
-            .args(["--block-type", dataset.block_type])
-            .args(["--start-block", "100", "--stop-block", "104"])
+            .args(["--block-type", block_type])
+            .arg("--start-block")
+            .arg(first.to_string())
+            .arg("--stop-block")
+            .arg(stop.to_string())
             .args(["--flush-blocks", "1", "--stream-idle-timeout-secs", "0"])
-            .arg(format!("--final-blocks-only={}", dataset.final_only))
+            .arg(format!("--final-blocks-only={final_only}"))
             .arg("--output")
             .arg(root)
             .output(),
@@ -462,8 +608,7 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
     server.abort();
     assert!(
         output.status.success(),
-        "{}: {}{}",
-        dataset.name,
+        "{name}: {}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -834,6 +979,202 @@ async fn duckdb_and_delta_rs_read_every_delta_table() {
             duckdb.version, duckdb.delta_version
         );
     }
+}
+
+/// The 36 HyperCore fixture blocks with their true identities, as the
+/// endpoint sends them: the header's number and time, decimal ids, and the
+/// parent and LIB one block below.
+fn hypercore_fixture_responses() -> Vec<firehose::Response> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hypercore");
+    let mut blocks: Vec<(u64, Vec<u8>)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if let Some(number) = name.strip_suffix(".pb") {
+                Some((number.parse().unwrap(), std::fs::read(&path).unwrap()))
+            } else {
+                let number = name.strip_suffix(".pb.zst")?;
+                let file = std::fs::File::open(&path).unwrap();
+                Some((number.parse().unwrap(), zstd::decode_all(file).unwrap()))
+            }
+        })
+        .collect();
+    blocks.sort_by_key(|(number, _)| *number);
+    assert_eq!(blocks.len(), 36);
+    blocks
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (number, payload))| {
+            let header = hypercore::Block::decode(payload.as_slice())
+                .unwrap()
+                .block_header
+                .unwrap();
+            assert_eq!(header.block_number, number);
+            firehose::Response {
+                block: Some(prost_types::Any {
+                    type_url: HYPERCORE_TYPE_URL.into(),
+                    value: payload,
+                }),
+                step: 3,
+                cursor: format!("event-{ordinal}"),
+                metadata: Some(firehose::BlockMetadata {
+                    num: number,
+                    id: number.to_string(),
+                    parent_num: number - 1,
+                    parent_id: (number - 1).to_string(),
+                    lib_num: number - 1,
+                    time: header.block_time,
+                    ..Default::default()
+                }),
+            }
+        })
+        .collect()
+}
+
+/// The ```sql blocks of a Markdown document, in order.
+fn sql_blocks(markdown: &str) -> Vec<&str> {
+    markdown
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().unwrap())
+        .collect()
+}
+
+/// The statements of a SQL block with their labels: `-- C1 …` comments
+/// (cookbook) or the `'M1'` literal a monitor selects.
+fn labelled_statements(block: &str) -> Vec<(String, String)> {
+    block
+        .split(";\n")
+        .filter_map(|text| {
+            let comment = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("-- "))
+                .and_then(|comment| comment.split(' ').next())
+                .map(str::to_string);
+            let statement: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect();
+            let statement = statement.join("\n").trim().to_string();
+            if statement.is_empty() {
+                return None;
+            }
+            let label = statement
+                .strip_prefix("SELECT '")
+                .and_then(|rest| rest.split('\'').next())
+                .filter(|label| label.starts_with('M'))
+                .map(str::to_string)
+                .or(comment)
+                .expect("a labelled statement");
+            Some((label, statement))
+        })
+        .collect()
+}
+
+/// `docs/chains/hypercore.md`: its table views, view pack, monitors and
+/// cookbook run in DuckDB over a real `build` of the 36 HyperCore fixture
+/// blocks (their true identities, 2025-12-31 to 2026-10-06). Every monitor
+/// returns no rows, every query runs, the per-type views cover every event
+/// that is not funding or validator rewards, and the decimal arithmetic types
+/// are the documented ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let Some(duckdb) = DuckDb::open(&cwd) else {
+        return;
+    };
+    let responses = hypercore_fixture_responses();
+    let first = responses[0].metadata.as_ref().unwrap().num;
+    let last = responses.last().unwrap().metadata.as_ref().unwrap().num;
+    let root = cwd.join("hypercore-fixtures");
+    let stream = Stream {
+        responses: Arc::new(responses),
+        final_only: true,
+        first,
+        last,
+    };
+    build_from(stream, "hypercore-fixtures", "hypercore", &cwd, &root).await;
+
+    let doc = include_str!("../../docs/chains/hypercore.md");
+    let blocks = sql_blocks(doc);
+    assert_eq!(
+        blocks.len(),
+        4,
+        "table views, view pack, monitors, cookbook"
+    );
+    let mut sql = blocks[0].replace("<root>", root.to_str().unwrap());
+    sql.push_str(blocks[1]);
+    let monitors = labelled_statements(blocks[2]);
+    let cookbook = labelled_statements(blocks[3]);
+    assert_eq!(monitors.len(), 17, "{monitors:?}");
+    assert_eq!(cookbook.len(), 12, "{cookbook:?}");
+    for (label, statement) in monitors.iter().chain(&cookbook) {
+        sql.push_str(&format!(
+            "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
+        ));
+    }
+    // Every per-type view, and the rows they cover.
+    let views: Vec<&str> = blocks[1]
+        .lines()
+        .filter_map(|line| line.strip_prefix("CREATE OR REPLACE VIEW "))
+        .filter_map(|line| line.split(' ').next())
+        .filter(|view| !view.starts_with("hypercore_"))
+        .collect();
+    assert_eq!(views.len(), 22 + 5, "{views:?}");
+    for view in &views {
+        sql.push_str(&format!(
+            "\nSELECT 'view' AS q, '{view}' AS label, count(*) AS n FROM {view};"
+        ));
+    }
+    sql.push_str(
+        "\nSELECT 'events' AS q, count(*) FILTER (WHERE event_type NOT IN ('funding', \
+         'validator_rewards')) AS n FROM events;\
+         \nSELECT 'types' AS q, any_value(typeof(price * size)) AS product, \
+         typeof(sum(price)) AS total, typeof(avg(price)) AS mean FROM fills;",
+    );
+    let rows = duckdb.query(&sql);
+    let counts = |tag: &str| -> BTreeMap<String, u64> {
+        rows[tag]
+            .iter()
+            .map(|row| {
+                (
+                    row["label"].as_str().unwrap().to_string(),
+                    number(&row["n"]),
+                )
+            })
+            .collect()
+    };
+    let results = counts("result");
+    assert_eq!(results.len(), monitors.len() + cookbook.len());
+    for (label, _) in &monitors {
+        assert_eq!(results[label], 0, "monitor {label} found violations");
+    }
+    // A few cookbook answers on the fixtures: every liquidated side, the
+    // backstop pairs, the funding block's snapshot and its funding events.
+    assert_eq!(results["C3"], 19);
+    assert_eq!(results["C5"], 12);
+    assert_eq!(results["C7"], 202_449);
+    assert_eq!(results["C8"], 6);
+    let views = counts("view");
+    for (view, n) in &views {
+        assert!(*n > 0, "{view} is empty on the fixtures");
+    }
+    assert_eq!(
+        views.values().sum::<u64>(),
+        number(&rows["events"][0]["n"]),
+        "the per-type views cover every event row"
+    );
+    let types = &rows["types"][0];
+    assert_eq!(
+        (&types["product"], &types["total"], &types["mean"]),
+        (
+            &json!("DECIMAL(38,20)"),
+            &json!("DECIMAL(38,10)"),
+            &json!("DOUBLE")
+        )
+    );
 }
 
 /// Opt-in, off in CI: anonymous reads of a deployment's public-read bucket

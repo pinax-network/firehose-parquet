@@ -424,12 +424,13 @@ pub fn int64<'a>(batch: &'a RecordBatch, column: &str) -> &'a Int64Array {
 /// text.
 pub fn minimum(batches: &[(String, RecordBatch)], column: &str) -> Option<String> {
     let mut minimum: Option<i128> = None;
+    let mut scale = 0;
     for (_, batch) in batches {
         let array = batch.column_by_name(column).unwrap();
         let found = if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
             arrow::compute::min(values).map(i128::from)
         } else if let Some(values) = array.as_any().downcast_ref::<Decimal128Array>() {
-            assert_eq!(values.scale(), 0, "{column}");
+            scale = values.scale();
             arrow::compute::min(values)
         } else {
             panic!("{column}: {:?}", array.data_type())
@@ -439,7 +440,24 @@ pub fn minimum(batches: &[(String, RecordBatch)], column: &str) -> Option<String
             (a, b) => a.or(b),
         };
     }
-    minimum.map(|value| value.to_string())
+    minimum.map(|value| decimal_text(value, scale))
+}
+
+/// A scaled decimal as DuckDB casts it to `VARCHAR`: every fractional digit
+/// of the scale (`-1.7248590000` at scale 10).
+fn decimal_text(value: i128, scale: i8) -> String {
+    if scale <= 0 {
+        return value.to_string();
+    }
+    let unit = 10_u128.pow(scale as u32);
+    let sign = if value < 0 { "-" } else { "" };
+    let magnitude = value.unsigned_abs();
+    format!(
+        "{sign}{}.{:0width$}",
+        magnitude / unit,
+        magnitude % unit,
+        width = scale as usize
+    )
 }
 
 /// The largest `timestamp` over `batches`, in microseconds.
