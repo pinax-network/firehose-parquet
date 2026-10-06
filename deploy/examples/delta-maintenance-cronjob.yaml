@@ -38,6 +38,9 @@ metadata:
 data:
   LAKE_BUCKET: ethereum-mainnet
   # Every table of the network's block type (docs/schemas/evm.md for EVM).
+  # A HyperCore network has five:
+  # blocks,fills,events,funding_deltas,validator_rewards
+  # (docs/schemas/hypercore.md).
   LAKE_TABLES: >-
     blocks,transactions,logs,withdrawals,access_lists,set_code_authorizations,
     calls,balance_changes,code_changes,storage_changes,nonce_changes,gas_changes,
