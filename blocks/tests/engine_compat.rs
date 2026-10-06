@@ -1152,7 +1152,8 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
         assert_eq!(results[label], 0, "monitor {label} found violations");
     }
     // A few cookbook answers on the fixtures: every liquidated side, the
-    // backstop pairs, the funding block's snapshot and its funding events.
+    // backstop takeover pairs, the funding block's snapshot and its funding
+    // events.
     assert_eq!(results["C3"], 19);
     assert_eq!(results["C5"], 12);
     assert_eq!(results["C7"], 202_449);

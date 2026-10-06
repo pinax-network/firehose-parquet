@@ -134,7 +134,7 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
              under `binary`). HyperCore has no block hash.",
             "Amounts are `decimal(38,10)`, the exact values of HyperLiquid's decimal strings. \
              In DuckDB a product of two is `DECIMAL(38,20)`; cast to `DOUBLE` or \
-             `DECIMAL(38,10)` before a third multiplication.",
+             `DECIMAL(38,10)` (which rounds to 10 places) before a third multiplication.",
             "All-zero hashes and the zero address are stored as delivered: they mark system \
              and time-triggered items. Exclude zero hashes before joining on `hash`.",
             "`extra_json` is NULL in every row written by this schema version; it is reserved \
@@ -740,9 +740,10 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "fills",
         "liquidation_method",
-        "`market` (liquidation order sent to the book) or `backstop` (takeover by the \
-         liquidator, paired with a ledger `liquidation` event of the same hash), verbatim. \
-         Not NULL exactly when the fill is a liquidation.",
+        "`market` (liquidation order sent to the book) or `backstop` (taken over by the backstop \
+         liquidator, or settled against `AUTO_DELEVERAGING` counterparties; only takeovers, where \
+         both legs are `LIQUIDATED_*`, have a ledger `liquidation` event of the same hash), \
+         verbatim. Not NULL exactly when the fill is a liquidation.",
     ),
     (
         ChainKind::Hypercore,
@@ -755,16 +756,16 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "fills",
         "builder",
-        "Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto \
-         string, so not re-encoded). NULL when none; before block 957002478 NULL means not \
-         captured.",
+        "Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string, \
+         so not re-encoded). NULL when none; before block 957002478 NULL can also mean not \
+         captured (capture there is partial).",
     ),
     (
         ChainKind::Hypercore,
         "fills",
         "builder_fee",
-        "Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so \
-         a builder can appear with a NULL fee. Before block 957002478 NULL means not \
+        "Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a \
+         builder can appear with a NULL fee. Before block 957002478 NULL can also mean not \
          captured.",
     ),
     (
@@ -1001,8 +1002,9 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "events",
         "liquidated_ntl_pos",
-        "For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop \
-         liquidations; their hash equals the hash of the `LIQUIDATED_*` fills.",
+        "For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop takeovers; \
+         their hash equals the hash of the takeover's two `LIQUIDATED_*` fills. ADL-settled \
+         backstop liquidations have no ledger event.",
     ),
     (
         ChainKind::Hypercore,
@@ -1041,8 +1043,9 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "events",
         "end_gas",
-        "For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to \
-         the amount of the next `gossip_priority_gas_auction`. NULL when there was no winner.",
+        "For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to the \
+         amount of the preceding `gossip_priority_gas_auction` ledger delta (paid a few seconds \
+         before the restart, in the same 3-minute auction). NULL when there was no winner.",
     ),
     (
         ChainKind::Hypercore,
@@ -1720,9 +1723,9 @@ fn render_index(references: &[ChainReference]) -> String {
          files.\n\
          - Types are Delta Lake types (#643), the types of the data files: `long`, \
          `integer`, `short`, `decimal(20,0)`, `decimal(38,10)`, `double`, `boolean`, \
-         `string`, `binary`, `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has no unsigned, \
-         dictionary or millisecond types, so every flush maps the mapper's Arrow types \
-         once, with checked casts, before anything is written \
+         `string`, `binary`, `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has \
+         no unsigned, dictionary or millisecond types, so every flush maps the mapper's \
+         Arrow types once, with checked casts, before anything is written \
          (`firehose_parquet::delta::types`): `UInt64` becomes a checked `long` (a value \
          above 9,223,372,036,854,775,807 refuses the flush), or `decimal(20,0)` for the \
          chain's currency amounts and values a sender or signer chooses without a range \

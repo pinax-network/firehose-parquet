@@ -712,6 +712,39 @@ fn t3_pinned_values() {
             label_counts(&fills, "liquidation_method"),
             BTreeMap::from([("backstop".to_string(), 30), ("market".to_string(), 8)])
         );
+
+        // Which liquidated leg is crossed depends on the method
+        // (docs/chains/hypercore.md, Liquidations): a `market` one is, a
+        // `backstop` one never is.
+        let mut liquidated_legs = BTreeMap::new();
+        for row in 0..fills.len() {
+            if !fills.is_null("liquidated_user", row)
+                && fills.bytes("user", row) == fills.bytes("liquidated_user", row)
+            {
+                let method = fills.text("liquidation_method", row).unwrap();
+                let crossed = fills.bool("crossed", row).unwrap();
+                *liquidated_legs.entry((method, crossed)).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(
+            liquidated_legs,
+            BTreeMap::from([(("backstop", false), 15), (("market", true), 4)])
+        );
+
+        // A backstop liquidation settled by ADL: `LIQUIDATED_*` legs against
+        // `AUTO_DELEVERAGING` counterparties, and no ledger event.
+        let mut adl = BTreeMap::new();
+        for row in rows_of(&fills, 1_010_581_248) {
+            if fills.text("liquidation_method", row) == Some("backstop") {
+                *adl.entry(fills.text("direction", row).unwrap())
+                    .or_insert(0) += 1;
+            }
+        }
+        assert_eq!(
+            adl,
+            BTreeMap::from([("AUTO_DELEVERAGING", 3), ("LIQUIDATED_ISOLATED_SHORT", 3)])
+        );
+        assert!(rows_of(&events, 1_010_581_248).is_empty());
     }
 }
 

@@ -145,19 +145,21 @@ pub fn fills_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("liquidated_user", bd.clone(), true),
         // Mark price at liquidation. NULL when the fill is not a liquidation.
         Field::new("liquidation_mark_px", decimal_type(), true),
-        // `market` (liquidation order sent to the book) or `backstop` (takeover by the liquidator,
-        // paired with a ledger `liquidation` event of the same hash), verbatim. Not NULL exactly
-        // when the fill is a liquidation.
+        // `market` (liquidation order sent to the book) or `backstop` (taken over by the backstop
+        // liquidator, or settled against `AUTO_DELEVERAGING` counterparties; only takeovers, where
+        // both legs are `LIQUIDATED_*`, have a ledger `liquidation` event of the same hash),
+        // verbatim. Not NULL exactly when the fill is a liquidation.
         Field::new("liquidation_method", DataType::Utf8, true),
         // HIP-3 or HIP-4 deployer's share of `fee`, in `fee_token`; can be negative. NULL when
         // absent; before block 957002477 (2026-04-13) NULL means not captured.
         Field::new("deployer_fee", decimal_type(), true),
-        // Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto
-        // string, so not re-encoded). NULL when none; before block 957002478 NULL means not
-        // captured.
+        // Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string,
+        // so not re-encoded). NULL when none; before block 957002478 NULL can also mean not
+        // captured (capture there is partial).
         Field::new("builder", DataType::Utf8, true),
         // Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a
-        // builder can appear with a NULL fee. Before block 957002478 NULL means not captured.
+        // builder can appear with a NULL fee. Before block 957002478 NULL can also mean not
+        // captured.
         Field::new("builder_fee", decimal_type(), true),
         // IOC priority fee paid in HYPE, on the taker leg only. NULL when none; the feature
         // launched around 2026-04-20.
@@ -270,8 +272,9 @@ pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         // For `borrow_lend`: the operation, verbatim (`supply`, `withdraw`, `borrow`, `repay`
         // observed).
         Field::new("operation", DataType::Utf8, true),
-        // For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop
-        // liquidations; their hash equals the hash of the `LIQUIDATED_*` fills.
+        // For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop takeovers;
+        // their hash equals the hash of the takeover's two `LIQUIDATED_*` fills. ADL-settled
+        // backstop liquidations have no ledger event.
         Field::new("liquidated_ntl_pos", decimal_type(), true),
         // For `liquidation`: account value, can be negative.
         Field::new("account_value", decimal_type(), true),
@@ -287,7 +290,8 @@ pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         // never captured.
         Field::new("previous_winner_ip", DataType::Utf8, true),
         // For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to the
-        // amount of the next `gossip_priority_gas_auction`. NULL when there was no winner.
+        // amount of the preceding `gossip_priority_gas_auction` ledger delta (paid a few seconds
+        // before the restart, in the same 3-minute auction). NULL when there was no winner.
         Field::new("end_gas", decimal_type(), true),
         // For `create_sub_account`: the user-chosen name, verbatim.
         Field::new("sub_account_name", DataType::Utf8, true),

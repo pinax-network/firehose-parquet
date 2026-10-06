@@ -10,7 +10,7 @@ Generated from the `hypercore` mapper; do not edit by hand. Regenerate with `car
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 - Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.
 - `block_id` and `parent_id` hold the decimal block number as text (ASCII bytes under `binary`). HyperCore has no block hash.
-- Amounts are `decimal(38,10)`, the exact values of HyperLiquid's decimal strings. In DuckDB a product of two is `DECIMAL(38,20)`; cast to `DOUBLE` or `DECIMAL(38,10)` before a third multiplication.
+- Amounts are `decimal(38,10)`, the exact values of HyperLiquid's decimal strings. In DuckDB a product of two is `DECIMAL(38,20)`; cast to `DOUBLE` or `DECIMAL(38,10)` (which rounds to 10 places) before a third multiplication.
 - All-zero hashes and the zero address are stored as delivered: they mark system and time-triggered items. Exclude zero hashes before joining on `hash`.
 - `extra_json` is NULL in every row written by this schema version; it is reserved for fields upstream adds later.
 - Pairing, liquidation, funding, staking and evolution notes: [HyperCore notes](../chains/hypercore.md).
@@ -78,10 +78,10 @@ One row per fill: each participant's side of a match, in execution order. A norm
 | `client_order_id` | `string` (hex) | yes | Client order id (cloid, 16 bytes). NULL when the order had none. Not a taker marker. |
 | `liquidated_user` | `string` (hex) | yes | Liquidated account, on both legs of a liquidation fill; the liquidated side is the row where `user = liquidated_user`. NULL when the fill is not a liquidation (or, never observed, the account was not reported). |
 | `liquidation_mark_px` | `decimal(38,10)` | yes | Mark price at liquidation. NULL when the fill is not a liquidation. |
-| `liquidation_method` | `string` | yes | `market` (liquidation order sent to the book) or `backstop` (takeover by the liquidator, paired with a ledger `liquidation` event of the same hash), verbatim. Not NULL exactly when the fill is a liquidation. |
+| `liquidation_method` | `string` | yes | `market` (liquidation order sent to the book) or `backstop` (taken over by the backstop liquidator, or settled against `AUTO_DELEVERAGING` counterparties; only takeovers, where both legs are `LIQUIDATED_*`, have a ledger `liquidation` event of the same hash), verbatim. Not NULL exactly when the fill is a liquidation. |
 | `deployer_fee` | `decimal(38,10)` | yes | HIP-3 or HIP-4 deployer's share of `fee`, in `fee_token`; can be negative. NULL when absent; before block 957002477 (2026-04-13) NULL means not captured. |
-| `builder` | `string` | yes | Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string, so not re-encoded). NULL when none; before block 957002478 NULL means not captured. |
-| `builder_fee` | `decimal(38,10)` | yes | Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a builder can appear with a NULL fee. Before block 957002478 NULL means not captured. |
+| `builder` | `string` | yes | Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string, so not re-encoded). NULL when none; before block 957002478 NULL can also mean not captured (capture there is partial). |
+| `builder_fee` | `decimal(38,10)` | yes | Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a builder can appear with a NULL fee. Before block 957002478 NULL can also mean not captured. |
 | `priority_gas` | `decimal(38,10)` | yes | IOC priority fee paid in HYPE, on the taker leg only. NULL when none; the feature launched around 2026-04-20. |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
@@ -133,13 +133,13 @@ One row per `Event`. Its single `EventBody`, and for ledger updates its `LedgerU
 | `net_withdrawn_usd` | `decimal(38,10)` | yes | For `vault_withdraw`: net amount withdrawn, USDC. |
 | `interest_amount` | `decimal(38,10)` | yes | For `borrow_lend`: interest realized with this operation, in `token`. |
 | `operation` | `string` | yes | For `borrow_lend`: the operation, verbatim (`supply`, `withdraw`, `borrow`, `repay` observed). |
-| `liquidated_ntl_pos` | `decimal(38,10)` | yes | For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop liquidations; their hash equals the hash of the `LIQUIDATED_*` fills. |
+| `liquidated_ntl_pos` | `decimal(38,10)` | yes | For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop takeovers; their hash equals the hash of the takeover's two `LIQUIDATED_*` fills. ADL-settled backstop liquidations have no ledger event. |
 | `account_value` | `decimal(38,10)` | yes | For `liquidation`: account value, can be negative. |
 | `leverage_type` | `string` | yes | For `liquidation`: `CROSS` or `ISOLATED`. |
 | `liquidated_positions` | `array<non-null struct<coin: non-null string, szi: non-null decimal(38,10)>>` | yes | For `liquidation`: positions liquidated as `coin` and `szi`, in proto order. One element and positive sizes in every observation. |
 | `slot_id` | `long` | yes | For `gossip_priority_auction_restart`: auction slot; 0 is a real slot. |
 | `previous_winner_ip` | `string` | yes | For `gossip_priority_auction_restart`: IPv4 address of the previous slot winner; NULL when there was none (always together with `end_gas`). Before block 957002477 it was never captured. |
-| `end_gas` | `decimal(38,10)` | yes | For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to the amount of the next `gossip_priority_gas_auction`. NULL when there was no winner. |
+| `end_gas` | `decimal(38,10)` | yes | For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to the amount of the preceding `gossip_priority_gas_auction` ledger delta (paid a few seconds before the restart, in the same 3-minute auction). NULL when there was no winner. |
 | `sub_account_name` | `string` | yes | For `create_sub_account`: the user-chosen name, verbatim. |
 | `item_count` | `long` | yes | For `funding`: number of `funding_deltas` rows, 0 when the event had no payments. For `validator_rewards`: number of `validator_rewards` rows. NULL for other types. |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |

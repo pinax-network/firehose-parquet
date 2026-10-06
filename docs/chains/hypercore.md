@@ -31,7 +31,10 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
 - HyperCore has no block hash. `block_id` and `parent_id` are the Firehose block
   ids, the decimal block number as text (`"1174085339"`), written verbatim under
   every encoding (their ASCII bytes under `binary`). Files record
-  `firehose-parquet.block_id_encoding = decimal`.
+  `firehose-parquet.block_id_encoding = decimal`. The optional cursor mirror
+  (`_fireparq/cursor.parquet`) hex-decodes its `last_block_id`, so for
+  HyperCore it holds different bytes for even- and odd-length ids: use its
+  `last_block_num`.
 - `parent_num` and `lib_num` are both `block_num - 1`: a block is final one
   block later, so the default `--final-blocks-only=true` is the mode to use.
 - About 14 blocks per second: block intervals are 67 ms at the median and
@@ -39,20 +42,42 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
   increase.
 - **The hole.** Blocks 846903300–846903312 do not exist on the endpoint, but
   846903313 still names 846903312 as its parent.
-  - fireparq cannot stream across it: the stream ends with `unexpected stream
-    termination` at 846903299, and its cursor cannot be resumed.
+  - fireparq cannot stream across it. A stream delivers blocks up to
+    846903299. After that, every attempt logs `WARN stream error, will
+    reconnect` with `rpc error: code = Internal desc = unexpected stream
+    termination`, because resuming from the cursor of 846903299 returns no
+    block. `Internal` is retried with back-off of up to 60 s, so the build
+    keeps retrying until `--reconnect-stall-timeout-secs` passes (default
+    900 s, about 15 minutes; see [connection errors](../cli.md#connection-errors)).
+    It then exits 1 with `reconnect stalled: no stream message for … after N
+    failed attempts; last error: … unexpected stream termination`. Blocks
+    buffered since the last flush are discarded; earlier committed flushes are
+    kept and stay readable.
+  - A root whose start is before 846903300 can never pass 846903299: running
+    it again resumes from its cursor and fails the same way, and a different
+    `--start-block` is refused with `explicit start differs from the stream's
+    original start; use a new output root …`. Build into a new output root.
   - Start a root at **846903317**, the first block of 2026-01-01 (hourly
     funding, the daily dust conversion and validator rewards), unless upstream
     has re-extracted the hole. 846903313 also works but leaves a partial
-    2025-12-31 partition.
-  - `fireparq validate` reports the hole as a gap: use `--allow-gaps` for any
-    root that contains it.
+    2025-12-31 partition (4 blocks). A `--start-block` inside the hole
+    silently starts at 846903313, without a warning.
+  - No root can hold blocks on both sides of the hole, so `fireparq validate`
+    never reports it and `--allow-gaps` is not needed for it.
   - Upstream runs its readers with `--reader-node-skip-missing-blocks`, so
     other holes are possible. No full contiguity scan of the endpoint exists.
+    A build that reaches one fails as above, and every restart resumes from
+    the same cursor and stops there again. Ask upstream to re-extract the
+    missing blocks; the same root then resumes from its cursor. Otherwise
+    build a new output root whose `--start-block` is after the hole,
+    preferably the first block of the next UTC day so that no partition is
+    partial.
 - **Not captured before the 2026-04-13 reader cutover.** NULL there means "not
   captured", not zero:
   - `fills.deployer_fee` before block 957002477;
-  - `fills.builder` and `fills.builder_fee` before block 957002478;
+  - `fills.builder` and `fills.builder_fee` before block 957002478 (capture
+    there is partial, not absent: blocks just before the cutover have none,
+    but December 2025 blocks have them, so NULL can mean either);
   - `events.previous_winner_ip` and `events.end_gas` before block 957002477.
 
   `fills.priority_gas` is NULL before about 2026-04-20 because the feature did
@@ -83,17 +108,24 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
 - Every amount, price and size is `decimal(38,10)`, the exact value of
   HyperLiquid's decimal string. HyperLiquid's values are `f64` values rounded to
   10 places, so they can look like `6426274.5300000003`.
-- The parser accepts only exact values: `-?[0-9]+(.[0-9]+)?`, at most 10
+- The parser accepts only exact values: `^-?[0-9]+(\.[0-9]+)?$`, at most 10
   significant fractional digits and 28 integer digits. It never rounds, and it
-  refuses exponents, signs, whitespace and `NaN` (R8). Exact but non-canonical
-  text (`"1.50"`, `"5"`) is stored as its value.
+  refuses exponents, a `+` sign, a leading or trailing `.`, whitespace and
+  `NaN` (R8). Exact but non-canonical text (`"1.50"`, `"5"`) is stored as its
+  value.
 - **DuckDB** (1.5.5 and 1.5.6):
-  - `price * size` is `DECIMAL(38,20)`;
+  - `price * size` is `DECIMAL(38,20)`, exact; a product of two and its `sum`
+    need no cast;
   - `sum(decimal)` is `DECIMAL(38,10)`;
   - `avg(decimal)` is `DOUBLE`;
-  - a product of three decimals overflows (`szi * funding_rate * szi` raises
-    "Overflow in multiplication of DECIMAL(38)"). Cast an intermediate to
-    `DOUBLE` or `DECIMAL(38,10)` first (cookbook C10).
+  - a product of three decimals is `DECIMAL(38,30)`, which holds only 8
+    integer digits. It type-checks, then raises "Overflow in multiplication of
+    DECIMAL(38)" at runtime once a row's result reaches 1e8:
+    `szi * funding_rate * szi` runs on rows with `abs(szi) < 100` but fails on
+    real funding blocks, so a small sample can hide the error. Cast an
+    intermediate first: to `DOUBLE` (approximate), or to `DECIMAL(38,10)`,
+    which rounds each value to 10 places, so the result is not exact either
+    (cookbook C10).
 - **Spark:** with the default `spark.sql.decimalOperations.allowPrecisionLoss=true`,
   Spark's documented result-type rule lowers the scale of a `decimal(38,10)`
   product to 6 digits. Cast first when more precision is needed. This was not
@@ -114,13 +146,16 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
     funding, validator-reward and gossip-restart event, staking-withdrawal
     finalization and its transfer, and rare sends (3 in about 220k events).
   - **Joining on `hash` without excluding the zero value fans out:** one dust
-    block alone has 1,451 zero-hash fills. Use `hypercore_fills_v.tx_hash`, or
-    `hash <> hc_zero_hash()`.
+    block alone has 1,523 zero-hash fills (1,451 conversion fills, plus 36
+    pairs in which `0xeeee…eeee` sells the collected dust). Use
+    `hypercore_fills_v.tx_hash`, or `hash <> hc_zero_hash()`.
   - The zero address in `fills.user` is the counterparty of a delisted-perp
     `SETTLEMENT`.
   - `0x3200…02xx` addresses are the outcome-settlement counterparties;
     `0x2000…{token}` and `0x2222…2222` are HyperEVM system senders; `0x4000…{dex}`
-    is a HIP-3 backstop liquidator; `0xfefe…fefe` is the assistance fund.
+    is a HIP-3 backstop liquidator; `0xfefe…fefe` is the assistance fund;
+    `0xeeee…eeee` sells the daily spot dust it collects (crossed `ASK` legs
+    with non-zero trade ids in the 00:00 UTC block).
 - **Hash layout:** a non-zero HyperCore hash has `hash[10] = 0x04` and
   `hash[11..15]` = the block number, big-endian. Deposit and withdraw events
   carry Arbitrum One transaction hashes instead (monitor M4).
@@ -150,8 +185,10 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
   - Non-trade (housekeeping or reshaping): `SPOT_DUST_CONVERSION`, `SETTLEMENT`,
     `NET_CHILD_VAULTS`, `SPLIT_OUTCOME`, `MERGE_OUTCOME`, `MERGE_QUESTION`,
     `NEGATE_OUTCOME` (`hypercore_fills_v.is_non_trade`).
-  - Forced trades: `AUTO_DELEVERAGING`, `LIQUIDATED_*`, `*_BORROW_LIQUIDATION`.
-    OHLC series usually exclude them too.
+  - Forced trades (off the order book): `AUTO_DELEVERAGING`, `LIQUIDATED_*`,
+    `*_BORROW_LIQUIDATION` (`hypercore_fills_v.is_forced`). OHLC series usually
+    exclude them too (cookbook C2). `market` liquidations use the ordinary
+    directions and stay in.
   - `SETTLEMENT` covers both HIP-4 resolution (counterparty `0x3200…`) and a
     delisted-perp close-out (counterparty the zero address, one shared
     `order_id`, fee 0).
@@ -160,13 +197,30 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
 - **Liquidations.**
   - The liquidation columns are set on **both** legs; a fill is a liquidation
     exactly when `liquidation_method IS NOT NULL`.
-  - The liquidated side is the row where `user = liquidated_user`; that leg is
-    crossed.
+  - The liquidated side is the row where `user = liquidated_user`. Which leg
+    is crossed depends on the method:
+    - `market`: the liquidated leg is crossed; it is the liquidation order.
+    - `backstop`: the liquidated leg is not crossed. The crossed leg belongs to
+      the liquidator (on `LIQUIDATED_*` pairs) or, under ADL, to the
+      counterparty (`AUTO_DELEVERAGING`). This held in 15 of 15 fixture fills.
+
+    Do not read `crossed` on the liquidated leg as "the liquidated user was
+    the taker".
   - `market` liquidations use the ordinary open and close directions and emit
     no ledger event.
-  - `backstop` fills (`LIQUIDATED_*`, and observed with ADL) share their hash
-    with a ledger `liquidation` event. Only the `LIQUIDATED_*` pairing is
-    verified (12 of 12 in the fixtures).
+  - `backstop` fills come in two shapes, and only one has a ledger event:
+    - Takeover by the backstop liquidator: both legs are `LIQUIDATED_*`. The
+      takeover shares its hash with exactly one ledger `liquidation` event: 12
+      of 12 in the fixtures (block 1127672017), and all 16 ledger liquidations
+      in the live sample.
+    - Settlement by ADL: the liquidated leg is `LIQUIDATED_*` and the
+      counterparty leg is `AUTO_DELEVERAGING`. These emit no ledger event. In
+      blocks 1010581248 and 1010581292 the ADL fills share their hash with the
+      same liquidation's `market` fills.
+
+    To count backstop liquidations, count fills with
+    `liquidation_method = 'backstop' AND user = liquidated_user`, not ledger
+    events.
 - **Fees.**
   - `fee` is in `fee_token`; negative is a maker rebate (27% of fills).
   - `fee` includes `builder_fee` (documented) and `deployer_fee` (ratio
@@ -246,7 +300,8 @@ The numbers are the `LedgerUpdateDelta` case numbers.
 - **Hashes shared within a block:** `c_deposit` and `c_staking_transfer`
   (adjacent; the transfer comes first in the fixtures),
   `vault_withdraw` and `vault_leader_commission`, `account_activation_gas` and
-  `spot_transfer`, and batched withdraws.
+  `spot_transfer`, batched withdraws, and `vault_distribution` (one vault-side
+  event plus one per recipient; 1 to 204 recipients observed).
 - **`users`**, HyperLiquid's ledger index, by type (monitor M6 checks the 1–2
   entries):
 
@@ -257,7 +312,7 @@ The numbers are the `LedgerUpdateDelta` case numbers.
   | `vault_withdraw` | `[user, vault]` |
   | `vault_deposit`, `vault_create` | 2 entries including the vault |
   | `vault_leader_commission` | `[user]` |
-  | `vault_distribution` | **1** entry: the vault on one event and the recipient on the other. One event per affected ledger, with the same hash, vault and `usdc`. |
+  | `vault_distribution` | **1** entry. One event per affected ledger, all sharing the hash and `vault`. One event is the vault's own (`users = [vault]`) and its `usdc` is the distributed total. Each recipient gets one event (`users = [recipient]`) carrying its share, and the shares add up to the total. `sum(usdc)` over every event is therefore exactly twice the distribution: use `users[1] = vault` for totals and `users[1] <> vault` for per-recipient credits (cookbook C12). |
   | `hip3_liquidator_deposit` | `[depositor, 0x4000…{dex index}]` |
   | every other type | exactly the one account (no other address on the row) |
 
@@ -284,8 +339,9 @@ The numbers are the `LedgerUpdateDelta` case numbers.
   times 1000 and differs from the event time by −12.6 h to +28.2 h. Not a clock.
 - **`borrow_lend`:** `operation` is `supply`, `withdraw`, `borrow` or `repay`;
   tokens observed: USDC, HYPE, UBTC, USDH, USDT0.
-- **Ledger `liquidation`:** backstop only; one position with a positive `szi`
-  in every observation.
+- **Ledger `liquidation`:** backstop takeovers only (ADL-settled backstop
+  liquidations have none); one position with a positive `szi` in every
+  observation.
 - **Ordering.** Funding events come first in their block. Do not assume other
   system events come first: about 8% of validator-reward blocks had user ledger
   events before `validator_rewards`.
@@ -321,8 +377,14 @@ The numbers are the `LedgerUpdateDelta` case numbers.
   documented.
 - **Gossip auction:** restarts every 3 minutes, usually slots 0 and 1 (up to 4
   historically). `previous_winner_ip` and `end_gas` are present together (about
-  88%, monitor M10). `end_gas` equals the amount of the next
-  `gossip_priority_gas_auction` ledger delta.
+  88%, monitor M10). `end_gas` equals the amount of the
+  `gossip_priority_gas_auction` ledger delta that paid for the slot. That
+  payment comes *before* the restart: 6–18 s earlier, in the same 3-minute
+  auction, observed in May, September and October 2026. To pair a restart with
+  its payment, match on `amount = end_gas` within the preceding 3 minutes, not
+  with the next payment. A restart near the first block of a root can have its
+  payment before that block. That the payer is the winner is inferred: its
+  address cannot be linked to `previous_winner_ip`.
 
 ## Refusals
 
@@ -347,11 +409,12 @@ needs a new fireparq release, never a skipped block.
 | R10 | Empty bytes other than `fills.client_order_id` and `fills.liquidated_user` (NULL), including a `users` element. |
 | R11 | A missing fill or event time, nanoseconds outside `[0, 1e9)`, a fill time that is not a whole millisecond, or a time out of range. |
 
-Not validated, only documented and monitored: the payload times against the
-block time, the funding layout, the hash layout, byte widths, the `users`
-composition, the `builder` format, fill pairing, the gossip presence pair,
-`fee_token` against `fee`, signs, contiguous block numbers and the metadata id
-strings.
+Not validated, only documented and monitored by M1–M13: the payload times
+against the block time, the funding layout, the hash layout, byte widths, the
+`users` count, the `builder` format, fill pairing, the gossip presence pair
+and `fee_token` against `fee`. Not validated and only documented: the `users`
+composition, signs and the metadata id strings; `fireparq validate` checks
+contiguous block numbers.
 
 ## Lossless
 
@@ -478,6 +541,9 @@ SELECT f.*,
        coalesce(f.liquidation_method IS NOT NULL AND f.user = f.liquidated_user, false) AS is_liquidated_side,
        f.direction IN ('SPOT_DUST_CONVERSION', 'SETTLEMENT', 'NET_CHILD_VAULTS', 'SPLIT_OUTCOME',
                        'MERGE_OUTCOME', 'MERGE_QUESTION', 'NEGATE_OUTCOME') AS is_non_trade,
+       f.direction IN ('AUTO_DELEVERAGING', 'LIQUIDATED_CROSS_LONG', 'LIQUIDATED_CROSS_SHORT',
+                       'LIQUIDATED_ISOLATED_LONG', 'LIQUIDATED_ISOLATED_SHORT',
+                       'BACKSTOP_BORROW_LIQUIDATION', 'PARTIAL_BORROW_LIQUIDATION') AS is_forced,
        hc_market_type(f.coin)                                        AS market_type,
        hc_perp_dex(f.coin)                                           AS dex,
        CASE WHEN hc_market_type(f.coin) = 'outcome' THEN CAST(substr(f.coin, 2) AS BIGINT) // 10 END AS outcome_id,
@@ -639,8 +705,12 @@ SELECT 'M11' m, block_num, fill_index FROM fills WHERE liquidation_method IS NOT
 -- M12 send/spot fee_token NULL exactly when fee = 0
 SELECT 'M12' m, block_num, event_index FROM events
 WHERE ledger_type IN ('send', 'spot_transfer') AND (fee_token IS NULL) <> (fee = 0);
--- M13 extra_json is still NULL everywhere (no release has used it yet)
-SELECT 'M13' m, block_num, event_index FROM events WHERE extra_json IS NOT NULL;
+-- M13 extra_json is still NULL in every table (no release has used it yet)
+SELECT 'M13' m, 'blocks' t, block_num, NULL::BIGINT i FROM blocks WHERE extra_json IS NOT NULL
+UNION ALL SELECT 'M13', 'fills', block_num, fill_index FROM fills WHERE extra_json IS NOT NULL
+UNION ALL SELECT 'M13', 'events', block_num, event_index FROM events WHERE extra_json IS NOT NULL
+UNION ALL SELECT 'M13', 'funding_deltas', block_num, delta_index FROM funding_deltas WHERE extra_json IS NOT NULL
+UNION ALL SELECT 'M13', 'validator_rewards', block_num, reward_index FROM validator_rewards WHERE extra_json IS NOT NULL;
 ```
 
 ### Cookbook
@@ -649,11 +719,11 @@ SELECT 'M13' m, block_num, event_index FROM events WHERE extra_json IS NOT NULL;
 -- C1 taker notional per day, market type and perp dex (trades only)
 SELECT date, market_type, dex, sum(notional) AS taker_notional, count(*) AS trades
 FROM hypercore_fills_v WHERE is_taker AND NOT is_non_trade GROUP BY ALL ORDER BY ALL;
--- C2 one-minute OHLCV for BTC from taker legs
+-- C2 one-minute OHLCV for BTC from taker legs (trades only, forced trades excluded)
 SELECT time_bucket(INTERVAL 1 MINUTE, timestamp) AS minute,
        arg_min(price, (block_num, fill_index)) AS open, max(price) AS high, min(price) AS low,
        arg_max(price, (block_num, fill_index)) AS close, sum(size) AS volume
-FROM hypercore_fills_v WHERE coin = 'BTC' AND is_taker AND NOT is_non_trade GROUP BY ALL ORDER BY 1;
+FROM hypercore_fills_v WHERE coin = 'BTC' AND is_taker AND NOT is_non_trade AND NOT is_forced GROUP BY ALL ORDER BY 1;
 -- C3 liquidated side of every liquidation fill
 SELECT block_num, fill_index, user, coin, direction, liquidation_method, liquidation_mark_px, price, size
 FROM fills WHERE user = liquidated_user;
@@ -662,11 +732,15 @@ SELECT b.block_num, b.trade_id, b.user AS buyer, a.user AS seller, b.price, b.si
 FROM hypercore_fills_v b JOIN hypercore_fills_v a
   ON a.block_num = b.block_num AND a.trade_id = b.trade_id AND a.fill_index = b.fill_index + 1
 WHERE b.side = 'BUY' AND a.side = 'ASK';
--- C5 backstop liquidation fills joined to their ledger liquidation event (zero hashes excluded)
+-- C5 backstop takeovers joined to their ledger liquidation event (zero hashes excluded).
+--    ADL-settled backstop liquidations have no ledger event. One hash can cover several
+--    accounts' fills, so match the event's account too. Rows are per fill: liquidated_ntl_pos
+--    repeats on each leg, so do not sum it over this result.
 SELECT f.block_num, f.fill_index, e.event_index, e.liquidated_ntl_pos
-FROM hypercore_fills_v f JOIN events e ON e.block_num = f.block_num AND e.hash = f.tx_hash
-WHERE e.ledger_type = 'liquidation' AND f.user = f.liquidated_user;
--- C6 an account's non-trade history
+FROM hypercore_fills_v f JOIN events e
+  ON e.block_num = f.block_num AND e.hash = f.tx_hash AND e.users[1] = f.liquidated_user
+WHERE e.ledger_type = 'liquidation' AND f.user = f.liquidated_user AND f.liquidation_method = 'backstop';
+-- C6 an account's non-funding ledger history (its funding payments are in funding_deltas)
 SELECT e.* FROM hypercore_account_events_v a JOIN events e USING (block_num, event_index)
 WHERE a.account = '0x…' ORDER BY block_num, event_index;
 -- C7 latest hourly position snapshot
@@ -675,17 +749,22 @@ WHERE block_num = (SELECT max(block_num) FROM events WHERE event_type = 'funding
 -- C8 funding per dex per hour, keeping empty funding events
 SELECT e.block_num, e.dex_index, e.item_count, coalesce(sum(d.funding_amount), 0) AS net_funding
 FROM hypercore_funding_events_v e LEFT JOIN funding_deltas d USING (block_num, event_index) GROUP BY ALL ORDER BY 1, 2;
--- C9 builder revenue (captured from block 957002478)
-SELECT builder, sum(builder_fee) AS revenue, count(*) AS fills
-FROM fills WHERE block_num >= 957002478 AND builder IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;
--- C10 three-way products: cast first
-SELECT sum(szi::DOUBLE * funding_rate::DOUBLE) AS rate_weighted_size,
-       sum(CAST(szi * funding_rate AS DECIMAL(38, 10)) * 2) AS exact_alternative FROM funding_deltas;
+-- C9 builder revenue per fee token (builder_fee is in fee_token; fully captured from block 957002478)
+SELECT builder, fee_token, sum(builder_fee) AS revenue, count(*) AS fills
+FROM fills WHERE block_num >= 957002478 AND builder IS NOT NULL GROUP BY ALL ORDER BY revenue DESC NULLS LAST;
+-- C10 three-decimal products: szi * funding_rate * szi overflows in DuckDB, so cast an intermediate first.
+-- DOUBLE is approximate. CAST to DECIMAL(38,10) rounds each row to 10 places, so that column is not exact either.
+-- A product of two needs no cast: sum(szi * funding_rate) is exact, DECIMAL(38,20).
+SELECT sum(szi::DOUBLE * funding_rate::DOUBLE * szi::DOUBLE) AS approx,
+       sum(CAST(CAST(szi * funding_rate AS DECIMAL(38, 10)) * szi AS DECIMAL(38, 10))) AS rounded_to_10dp,
+       sum(szi * funding_rate) AS exact_pair
+FROM funding_deltas;
 -- C11 staking flows counted once (c_deposit duplicates c_staking_transfer)
 SELECT ledger_type, is_deposit, sum(amount) AS hype FROM events WHERE ledger_type = 'c_staking_transfer' GROUP BY ALL;
--- C12 vault flows; depositor of vault_deposit/vault_create from users
+-- C12 vault flows; depositor of vault_deposit/vault_create from users; vault_distribution recipients only (the vault-side row repeats their total)
 SELECT ledger_type, vault, coalesce(user, list_filter(users, lambda u: u <> vault)[1]) AS account, usdc, net_withdrawn_usd
-FROM events WHERE ledger_type IN ('vault_deposit', 'vault_withdraw', 'vault_create', 'vault_leader_commission');
+FROM events WHERE ledger_type IN ('vault_deposit', 'vault_withdraw', 'vault_create', 'vault_leader_commission')
+   OR (ledger_type = 'vault_distribution' AND users[1] <> vault);
 ```
 
 ## Volume and flushes
@@ -702,9 +781,14 @@ measured with zstd and 65,536-row groups on 118k mid-2026 blocks):
 | `validator_rewards` | about 50k | 1–3 | under 0.2 MB | about 13M rows, under 0.1 GB |
 | **Total** | about 22M | | **about 0.8–1.0 GB** | **about 180 GB** |
 
-With the default `--flush-bytes` (32 MiB) and `--flush-memory-bytes`
-(256 MiB), `fills` drives the byte trigger. One funding block adds about 435k
-rows (about 78 MB of Arrow) at once: it cannot trip the memory threshold alone,
-but its parts are lumpy. The date boundary forces a flush just before the 00:00
+With the defaults, `--flush-memory-bytes` (256 MiB, summed over all tables) is
+the trigger that fires. HyperCore Parquet comes out at about 0.125 of the
+mapper estimate, which is 32 MiB / 256 MiB. At that ratio `--flush-bytes`
+(32 MiB) would need one table of about 256 MiB on its own, so it fires only on
+the first flush, before a ratio has been learned. `fills` files are therefore
+about 20–25 MB, below the 32 MiB target. One funding block adds about 435k
+rows (about 78 MB of Arrow) in one step: it cannot trip the memory threshold
+alone, but it can push a flush up to about 80 MB past 256 MiB, and the funding
+parts are lumpy. The date boundary forces a flush just before the 00:00
 funding and dust block. The largest funding payload (26.6 MB) is about five
 times below the 128 MiB gRPC message limit and grows about 1.5 MB a month.
