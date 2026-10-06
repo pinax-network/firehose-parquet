@@ -58,7 +58,22 @@ fn shown(value: &impl Debug) -> String {
     }
 }
 
-/// The checks of one block. Paths are built only when a check fails.
+/// Stages every item of a list into a vector sized up front. Collecting through
+/// `Result` cannot preallocate, and a funding list has about 435k items.
+fn stage_all<'a, T, U>(
+    items: &'a [T],
+    mut stage: impl FnMut(usize, &'a T) -> Result<U>,
+) -> Result<Vec<U>> {
+    let mut staged = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        staged.push(stage(index, item)?);
+    }
+    Ok(staged)
+}
+
+/// The checks of one block. Per-row paths (fills, funding deltas, rewards,
+/// positions, fields) are built only when a check fails; an event's body path
+/// is formatted once per event.
 #[derive(Clone, Copy)]
 struct Check {
     block_num: u64,
@@ -358,16 +373,8 @@ fn stage<'a>(check: Check, block: &'a pb::Block, block_time_ns: i64) -> Result<S
     } = block;
     let fill_count = check.count(fills.len(), || "fills".to_string())?;
     let event_count = check.count(events.len(), || "events".to_string())?;
-    let fills = fills
-        .iter()
-        .enumerate()
-        .map(|(index, fill)| stage_fill(check, index, fill))
-        .collect::<Result<Vec<_>>>()?;
-    let events = events
-        .iter()
-        .enumerate()
-        .map(|(index, event)| stage_event(check, index, event))
-        .collect::<Result<Vec<_>>>()?;
+    let fills = stage_all(fills, |index, fill| stage_fill(check, index, fill))?;
+    let events = stage_all(events, |index, event| stage_event(check, index, event))?;
     Ok(StagedBlock {
         block_time_ns,
         fill_count,
@@ -517,27 +524,23 @@ fn stage_event(check: Check, index: usize, event: &pb::Event) -> Result<StagedEv
         event_body::Event::Funding(pb::Funding { deltas }) => {
             let p = at("funding");
             let item_count = check.count(deltas.len(), || p("deltas"))?;
-            let deltas = deltas
-                .iter()
-                .enumerate()
-                .map(|(position, delta)| {
-                    let path = |field: &str| p(&format!("deltas[{position}].{field}"));
-                    let pb::FundingDelta {
-                        user,
-                        coin,
-                        funding_amount,
-                        szi,
-                        funding_rate,
-                    } = delta;
-                    Ok(StagedFundingDelta {
-                        user: check.bytes(user, || path("user"))?,
-                        coin: check.text(coin, || path("coin"))?,
-                        funding_amount: check.dec(funding_amount, || path("funding_amount"))?,
-                        szi: check.dec(szi, || path("szi"))?,
-                        funding_rate: check.dec(funding_rate, || path("funding_rate"))?,
-                    })
+            let deltas = stage_all(deltas, |position, delta| {
+                let path = |field: &str| p(&format!("deltas[{position}].{field}"));
+                let pb::FundingDelta {
+                    user,
+                    coin,
+                    funding_amount,
+                    szi,
+                    funding_rate,
+                } = delta;
+                Ok(StagedFundingDelta {
+                    user: check.bytes(user, || path("user"))?,
+                    coin: check.text(coin, || path("coin"))?,
+                    funding_amount: check.dec(funding_amount, || path("funding_amount"))?,
+                    szi: check.dec(szi, || path("szi"))?,
+                    funding_rate: check.dec(funding_rate, || path("funding_rate"))?,
                 })
-                .collect::<Result<Vec<_>>>()?;
+            })?;
             StagedEvent {
                 event_type: "funding",
                 item_count: Some(item_count),
@@ -550,18 +553,14 @@ fn stage_event(check: Check, index: usize, event: &pb::Event) -> Result<StagedEv
         }) => {
             let p = at("validator_rewards");
             let item_count = check.count(validator_to_reward.len(), || p("validator_to_reward"))?;
-            let rewards = validator_to_reward
-                .iter()
-                .enumerate()
-                .map(|(position, reward)| {
-                    let path = |field: &str| p(&format!("validator_to_reward[{position}].{field}"));
-                    let pb::ValidatorReward { validator, reward } = reward;
-                    Ok(StagedValidatorReward {
-                        validator: check.bytes(validator, || path("validator"))?,
-                        reward: check.dec(reward, || path("reward"))?,
-                    })
+            let rewards = stage_all(validator_to_reward, |position, reward| {
+                let path = |field: &str| p(&format!("validator_to_reward[{position}].{field}"));
+                let pb::ValidatorReward { validator, reward } = reward;
+                Ok(StagedValidatorReward {
+                    validator: check.bytes(validator, || path("validator"))?,
+                    reward: check.dec(reward, || path("reward"))?,
                 })
-                .collect::<Result<Vec<_>>>()?;
+            })?;
             StagedEvent {
                 event_type: "validator_rewards",
                 item_count: Some(item_count),
@@ -874,19 +873,14 @@ fn stage_ledger_delta<'a>(
             liquidated_positions,
         }) => {
             let p = at("liquidation");
-            let positions = liquidated_positions
-                .iter()
-                .enumerate()
-                .map(|(position, liquidated)| {
-                    let path =
-                        |field: &str| p(&format!("liquidated_positions[{position}].{field}"));
-                    let pb::LiquidatedPosition { coin, szi } = liquidated;
-                    Ok((
-                        check.text(coin, || path("coin"))?,
-                        check.dec(szi, || path("szi"))?,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let positions = stage_all(liquidated_positions, |position, liquidated| {
+                let path = |field: &str| p(&format!("liquidated_positions[{position}].{field}"));
+                let pb::LiquidatedPosition { coin, szi } = liquidated;
+                Ok((
+                    check.text(coin, || path("coin"))?,
+                    check.dec(szi, || path("szi"))?,
+                ))
+            })?;
             StagedEvent {
                 ledger_type: Some("liquidation"),
                 liquidated_ntl_pos: Some(

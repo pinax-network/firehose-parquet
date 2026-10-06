@@ -5,7 +5,8 @@
 //! decimal block number as text (`PreparedIdentity::with_text_ids`). Each
 //! comment beside a field is its description in `docs/schemas/hypercore.md`,
 //! copied into `COLUMN_DESCRIPTIONS` (`blocks/src/schema_docs.rs`): update both
-//! together (`value_tests::schema_comments_match_the_schema_docs` checks it).
+//! together (`schema_docs::tests::hypercore_schema_comments_are_the_column_descriptions`
+//! checks it).
 //!
 //! The columns, their order, types and nullability are bound into the
 //! protected stream identity: any change needs a new output root (a new schema
@@ -357,6 +358,8 @@ pub fn validator_rewards_schema(include_fork_step: bool, encoding: &EncodeBytes)
     push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
+
+/// The five HyperCore tables, in mapping order.
 pub const TABLE_NAMES: [&str; 5] = [
     "blocks",
     "fills",

@@ -15,10 +15,10 @@
 
 use std::fmt;
 
-/// Fractional digits of the stored value.
-pub const SCALE: u32 = 10;
-/// Integer digits that fit beside [`SCALE`] in 38 digits.
-pub const MAX_INTEGER_DIGITS: usize = 38 - SCALE as usize;
+/// Fractional digits of the stored value: the columns' scale.
+pub const SCALE: u32 = super::schema::DECIMAL_SCALE as u32;
+/// Integer digits that fit beside [`SCALE`] in the columns' precision (38).
+pub const MAX_INTEGER_DIGITS: usize = super::schema::DECIMAL_PRECISION as usize - SCALE as usize;
 
 /// Why a string is not an exact `decimal(38,10)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
