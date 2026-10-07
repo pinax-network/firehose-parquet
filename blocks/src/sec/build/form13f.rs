@@ -7,8 +7,8 @@
 use firehose_parquet::encode::EncodeBytes;
 
 use super::{sec_columns, AppendCtx, SecTable, Table};
-#[allow(unused_imports)]
 use super::{Addr, Bool, Date, Dict, Fc, ListI32, ListStr, Str, I32, I64, U32};
+use crate::sec::parse;
 use crate::sec::prepare::form13f::PreparedForm13f;
 use crate::sec::prepare::FilingCtx;
 use crate::sec::proto::sec;
@@ -129,8 +129,110 @@ impl Form13fTables {
         body: &sec::Form13fReport,
         prepared: &PreparedForm13f<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        let report = &prepared.report;
+        let cover = body.cover_page.as_ref();
+        let summary = body.summary_page.as_ref();
+        let manager = cover.and_then(|c| c.filing_manager.as_ref());
+        let cover_text = |field: fn(&sec::CoverPage) -> &str| cover.map_or("", field);
+
+        let row = self.form13f_reports.row(ctx);
+        row.fc.append(fc);
+        row.has_cover_page.val(cover.is_some());
+        row.manager_cik.nz(manager.map_or("", |m| &m.cik));
+        row.manager_name.nz(manager.map_or("", |m| &m.name));
+        row.manager.append(manager.and_then(|m| m.address.as_ref()));
+        row.report_type.nz(cover_text(|c| &c.report_type));
+        row.form13f_file_number
+            .nz(cover_text(|c| &c.form13f_file_number));
+        row.crd_number.nz(cover_text(|c| &c.crd_number));
+        row.sec_file_number.nz(cover_text(|c| &c.sec_file_number));
+        row.period_of_report.opt(report.period_of_report);
+        row.cover_is_amendment.opt(cover.map(|c| c.is_amendment));
+        row.amendment_type.nz(cover_text(|c| &c.amendment_type));
+        row.amendment_number.opt(report.amendment_number);
+        row.provide_info_for_instruction5
+            .opt(report.provide_info_for_instruction5);
+        row.additional_information
+            .nz(cover_text(|c| &c.additional_information));
+        row.has_summary_page.val(summary.is_some());
+        row.other_included_managers_count
+            .opt(summary.map(|s| s.other_included_managers_count));
+        row.table_entry_total
+            .opt(summary.map(|s| s.table_entry_total));
+        row.table_value_total.opt(report.table_value_total);
+        row.is_confidential_omitted
+            .opt(summary.and_then(|s| s.is_confidential_omitted));
+        row.value_multiplier_rule.val(report.value_multiplier_rule);
+        row.holdings_count.val(report.holdings_count);
+        row.holdings_value_sum.opt(report.holdings_value_sum);
+        row.holdings_complete.opt(report.holdings_complete);
+        row.cover_other_manager_count
+            .val(report.cover_other_manager_count);
+        row.summary_other_manager_count
+            .val(report.summary_other_manager_count);
+        row.has_parse_issues.val(report.has_parse_issues);
+
+        // The parent columns every child row copies (issues logged on the parent).
+        let manager_cik = manager.map_or("", |m| m.cik.as_str());
+        let manager_name = manager.map_or("", |m| m.name.as_str());
+        let report_type = cover_text(|c| &c.report_type);
+        let amendment_type = cover_text(|c| &c.amendment_type);
+
+        for other in &prepared.other_managers {
+            let m = other.manager;
+            let row = self.form13f_other_managers.row(ctx);
+            row.fc.append(fc);
+            row.manager_cik.nz(manager_cik);
+            row.period_of_report.opt(report.period_of_report);
+            row.other_manager_index.val(other.other_manager_index);
+            row.list_kind.val(other.list_kind);
+            row.sequence_number.opt(other.sequence_number);
+            row.other_manager_cik.nz(&m.cik);
+            row.other_manager_name.nz(&m.name);
+            row.form13f_file_number.nz(&m.form13f_file_number);
+            row.crd_number.nz(&m.crd_number);
+            row.sec_file_number.nz(&m.sec_file_number);
+            row.has_parse_issues.val(other.has_parse_issues);
+        }
+
+        for (holding, p) in body.holdings.iter().zip(&prepared.holdings) {
+            let amount = holding.shares_or_principal.as_ref();
+            let row = self.form13f_holdings.row(ctx);
+            row.fc.append(fc);
+            row.manager_cik.nz(manager_cik);
+            row.manager_name.nz(manager_name);
+            row.period_of_report.opt(report.period_of_report);
+            row.report_type.nz(report_type);
+            row.amendment_type.nz(amendment_type);
+            row.value_multiplier_rule.val(report.value_multiplier_rule);
+            row.holding_index.val(p.holding_index);
+            row.issuer_name.nz(&holding.name_of_issuer);
+            row.title_of_class.nz(&holding.title_of_class);
+            row.cusip.nz(&holding.cusip);
+            row.cusip_norm
+                .opt(parse::cusip_norm(&holding.cusip).as_deref());
+            row.figi.nz(&holding.figi);
+            row.value.opt(p.value);
+            row.shares_or_principal_amount
+                .opt(p.shares_or_principal_amount);
+            row.shares_or_principal_type
+                .nz(amount.map_or("", |a| a.r#type.as_str()));
+            row.put_call.nz(&holding.put_call);
+            row.put_call_norm
+                .opt(parse::put_call_norm(&holding.put_call));
+            row.investment_discretion.nz(&holding.investment_discretion);
+            row.other_manager_ids
+                .items(holding.other_manager_ids.iter().map(String::as_str));
+            row.other_manager_sequence_numbers.items(
+                parse::seq_numbers(&holding.other_manager_ids)
+                    .into_iter()
+                    .map(Some),
+            );
+            row.voting_authority_sole.opt(p.voting_authority_sole);
+            row.voting_authority_shared.opt(p.voting_authority_shared);
+            row.voting_authority_none.opt(p.voting_authority_none);
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 3] {
