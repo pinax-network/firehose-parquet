@@ -7,9 +7,8 @@
 use firehose_parquet::encode::EncodeBytes;
 
 use super::{sec_columns, AppendCtx, SecTable, Table};
-#[allow(unused_imports)]
 use super::{Addr, Bool, Date, Dec, Fc, ListStr, Str, I32, U32};
-use crate::sec::prepare::ownership::PreparedOwnership;
+use crate::sec::prepare::ownership::{self as prep, OwnerContext, PreparedOwnership};
 use crate::sec::prepare::FilingCtx;
 use crate::sec::proto::sec;
 use crate::sec::schema;
@@ -160,6 +159,47 @@ sec_columns! {
     }
 }
 
+/// One document's issuer fields (`''` when `issuer` is absent), which the
+/// child rows copy from their `ownership_documents` row (§3.10–§3.13), and the
+/// owner context of its transaction and holding rows.
+struct Parent<'p> {
+    issuer_cik: &'p str,
+    issuer_name: &'p str,
+    issuer_trading_symbol: &'p str,
+    issuer_foreign_trading_symbol: &'p str,
+    reporting_owner_count: u32,
+    reporting_owners: &'p [sec::ReportingOwner],
+    owners: &'p OwnerContext<'p>,
+}
+
+impl<'p> Parent<'p> {
+    fn of(body: &'p sec::OwnershipDocument, prepared: &'p PreparedOwnership<'_>) -> Self {
+        let issuer = body.issuer.as_ref();
+        Self {
+            issuer_cik: issuer.map_or("", |issuer| issuer.cik.as_str()),
+            issuer_name: issuer.map_or("", |issuer| issuer.name.as_str()),
+            issuer_trading_symbol: issuer.map_or("", |issuer| issuer.trading_symbol.as_str()),
+            issuer_foreign_trading_symbol: issuer
+                .map_or("", |issuer| issuer.foreign_trading_symbol.as_str()),
+            reporting_owner_count: prepared.document.reporting_owner_count,
+            reporting_owners: &body.reporting_owners,
+            owners: &prepared.owners,
+        }
+    }
+
+    /// `owner_ciks`: every owner's CIK in document order (`""` → NULL item).
+    fn owner_ciks(&self) -> impl Iterator<Item = &'p str> {
+        self.reporting_owners.iter().map(|owner| owner.cik.as_str())
+    }
+
+    /// `owner_names`: every owner's name, same order.
+    fn owner_names(&self) -> impl Iterator<Item = &'p str> {
+        self.reporting_owners
+            .iter()
+            .map(|owner| owner.name.as_str())
+    }
+}
+
 /// Every table of this module.
 pub(crate) struct OwnershipTables {
     pub(crate) ownership_documents: Table<OwnershipDocumentsCols>,
@@ -205,8 +245,222 @@ impl OwnershipTables {
         body: &sec::OwnershipDocument,
         prepared: &PreparedOwnership<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        let parent = Parent::of(body, prepared);
+        self.append_document(ctx, fc, body, prepared, &parent);
+        self.append_owners(ctx, fc, body, &parent);
+        self.append_transactions(ctx, fc, body, prepared, &parent);
+        self.append_holdings(ctx, fc, body, prepared, &parent);
+        self.append_footnotes(ctx, fc, body, &parent);
+    }
+
+    fn append_document(
+        &mut self,
+        ctx: &AppendCtx<'_>,
+        fc: &FilingCtx<'_>,
+        body: &sec::OwnershipDocument,
+        prepared: &PreparedOwnership<'_>,
+        parent: &Parent<'_>,
+    ) {
+        let d = &prepared.document;
+        let row = self.ownership_documents.row(ctx);
+        row.fc.append(fc);
+        row.issuer_cik.nz(parent.issuer_cik);
+        row.issuer_name.nz(parent.issuer_name);
+        row.issuer_trading_symbol.nz(parent.issuer_trading_symbol);
+        row.issuer_foreign_trading_symbol
+            .nz(parent.issuer_foreign_trading_symbol);
+        row.schema_version.nz(&body.schema_version);
+        row.document_type.nz(&body.document_type);
+        row.period_of_report.opt(d.period_of_report);
+        row.not_subject_to_section16
+            .val(body.not_subject_to_section16);
+        row.aff_10b5_one.opt(body.aff_10b5_one);
+        row.no_securities_owned.opt(body.no_securities_owned);
+        row.form3_holdings_reported
+            .opt(body.form3_holdings_reported);
+        row.form4_transactions_reported
+            .opt(body.form4_transactions_reported);
+        row.date_of_original_submission
+            .opt(d.date_of_original_submission);
+        row.remarks.nz(&body.remarks);
+        row.reporting_owner_count.val(d.reporting_owner_count);
+        row.non_derivative_transaction_count
+            .val(d.non_derivative_transaction_count);
+        row.derivative_transaction_count
+            .val(d.derivative_transaction_count);
+        row.non_derivative_holding_count
+            .val(d.non_derivative_holding_count);
+        row.derivative_holding_count.val(d.derivative_holding_count);
+        row.footnote_count.val(d.footnote_count);
+        row.owner_signature_count.val(d.owner_signature_count);
+        row.has_parse_issues.val(d.has_parse_issues);
+    }
+
+    fn append_owners(
+        &mut self,
+        ctx: &AppendCtx<'_>,
+        fc: &FilingCtx<'_>,
+        body: &sec::OwnershipDocument,
+        parent: &Parent<'_>,
+    ) {
+        // The slice drives the zip, so the position counter never steps past
+        // the checked count.
+        for (owner, owner_index) in body.reporting_owners.iter().zip(0u32..) {
+            let row = self.ownership_reporting_owners.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(parent.issuer_cik);
+            row.issuer_trading_symbol.nz(parent.issuer_trading_symbol);
+            row.owner_index.val(owner_index);
+            row.owner_cik.nz(&owner.cik);
+            row.owner_name.nz(&owner.name);
+            row.owner.append(owner.address.as_ref());
+            // §4.1: bools of the optional `Relationship` are NULL exactly when
+            // it is absent.
+            let relationship = owner.relationship.as_ref();
+            row.is_director.opt(relationship.map(|r| r.is_director));
+            row.is_officer.opt(relationship.map(|r| r.is_officer));
+            row.is_ten_percent_owner
+                .opt(relationship.map(|r| r.is_ten_percent_owner));
+            row.is_other.opt(relationship.map(|r| r.is_other));
+            row.officer_title
+                .nz(relationship.map_or("", |r| r.officer_title.as_str()));
+            row.other_text
+                .nz(relationship.map_or("", |r| r.other_text.as_str()));
+        }
+    }
+
+    fn append_transactions(
+        &mut self,
+        ctx: &AppendCtx<'_>,
+        fc: &FilingCtx<'_>,
+        body: &sec::OwnershipDocument,
+        prepared: &PreparedOwnership<'_>,
+        parent: &Parent<'_>,
+    ) {
+        for ((_, tx), t) in prep::transactions(body).zip(&prepared.transactions) {
+            let row = self.ownership_transactions.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(parent.issuer_cik);
+            row.issuer_name.nz(parent.issuer_name);
+            row.issuer_trading_symbol.nz(parent.issuer_trading_symbol);
+            row.reporting_owner_count.val(parent.reporting_owner_count);
+            row.owner_ciks.items_nz(parent.owner_ciks());
+            row.owner_names.items_nz(parent.owner_names());
+            row.any_owner_is_director
+                .val(parent.owners.any_owner_is_director);
+            row.any_owner_is_officer
+                .val(parent.owners.any_owner_is_officer);
+            row.any_owner_is_ten_percent_owner
+                .val(parent.owners.any_owner_is_ten_percent_owner);
+            row.any_owner_is_other.val(parent.owners.any_owner_is_other);
+            row.officer_titles
+                .items(parent.owners.officer_titles.iter().copied());
+            row.aff_10b5_one.opt(body.aff_10b5_one);
+            row.transaction_index.val(t.transaction_index);
+            row.is_derivative.val(t.is_derivative);
+            row.security_title.nz(&tx.security_title);
+            row.transaction_date.opt(t.transaction_date);
+            row.deemed_execution_date.opt(t.deemed_execution_date);
+            row.transaction_form_type.nz(&tx.transaction_form_type);
+            row.transaction_code.nz(&tx.transaction_code);
+            row.equity_swap_involved.val(tx.equity_swap_involved);
+            row.transaction_timeliness.nz(&tx.transaction_timeliness);
+            row.shares.opt(t.shares);
+            row.price_per_share.opt(t.price_per_share);
+            row.total_value.opt(t.total_value);
+            row.acquired_disposed_code.nz(&tx.acquired_disposed_code);
+            row.shares_owned_following.opt(t.shares_owned_following);
+            row.value_owned_following.opt(t.value_owned_following);
+            row.direct_or_indirect.nz(&tx.direct_or_indirect);
+            row.nature_of_ownership.nz(&tx.nature_of_ownership);
+            row.conversion_or_exercise_price
+                .opt(t.conversion_or_exercise_price);
+            row.exercise_date.opt(t.exercise_date);
+            row.expiration_date.opt(t.expiration_date);
+            row.underlying_security_title.nz(tx
+                .underlying_security
+                .as_ref()
+                .map_or("", |security| security.title.as_str()));
+            row.underlying_security_shares
+                .opt(t.underlying_security_shares);
+            row.underlying_security_value
+                .opt(t.underlying_security_value);
+            row.footnote_ids
+                .items(tx.footnote_ids.iter().map(String::as_str));
+            row.signed_shares.opt(t.signed_shares);
+            row.value_usd.opt(t.value_usd);
+            row.is_open_market.val(t.is_open_market);
+            row.filing_lag_days.opt(t.filing_lag_days);
+            row.has_parse_issues.val(t.has_parse_issues);
+        }
+    }
+
+    fn append_holdings(
+        &mut self,
+        ctx: &AppendCtx<'_>,
+        fc: &FilingCtx<'_>,
+        body: &sec::OwnershipDocument,
+        prepared: &PreparedOwnership<'_>,
+        parent: &Parent<'_>,
+    ) {
+        for ((_, holding), h) in prep::holdings(body).zip(&prepared.holdings) {
+            let row = self.ownership_holdings.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(parent.issuer_cik);
+            row.issuer_name.nz(parent.issuer_name);
+            row.issuer_trading_symbol.nz(parent.issuer_trading_symbol);
+            row.reporting_owner_count.val(parent.reporting_owner_count);
+            row.owner_ciks.items_nz(parent.owner_ciks());
+            row.owner_names.items_nz(parent.owner_names());
+            row.any_owner_is_director
+                .val(parent.owners.any_owner_is_director);
+            row.any_owner_is_officer
+                .val(parent.owners.any_owner_is_officer);
+            row.any_owner_is_ten_percent_owner
+                .val(parent.owners.any_owner_is_ten_percent_owner);
+            row.any_owner_is_other.val(parent.owners.any_owner_is_other);
+            row.officer_titles
+                .items(parent.owners.officer_titles.iter().copied());
+            row.holding_index.val(h.holding_index);
+            row.is_derivative.val(h.is_derivative);
+            row.security_title.nz(&holding.security_title);
+            row.shares_owned.opt(h.shares_owned);
+            row.value_owned.opt(h.value_owned);
+            row.direct_or_indirect.nz(&holding.direct_or_indirect);
+            row.nature_of_ownership.nz(&holding.nature_of_ownership);
+            row.conversion_or_exercise_price
+                .opt(h.conversion_or_exercise_price);
+            row.exercise_date.opt(h.exercise_date);
+            row.expiration_date.opt(h.expiration_date);
+            row.underlying_security_title.nz(holding
+                .underlying_security
+                .as_ref()
+                .map_or("", |security| security.title.as_str()));
+            row.underlying_security_shares
+                .opt(h.underlying_security_shares);
+            row.underlying_security_value
+                .opt(h.underlying_security_value);
+            row.footnote_ids
+                .items(holding.footnote_ids.iter().map(String::as_str));
+            row.has_parse_issues.val(h.has_parse_issues);
+        }
+    }
+
+    fn append_footnotes(
+        &mut self,
+        ctx: &AppendCtx<'_>,
+        fc: &FilingCtx<'_>,
+        body: &sec::OwnershipDocument,
+        parent: &Parent<'_>,
+    ) {
+        for (footnote, footnote_index) in body.footnotes.iter().zip(0u32..) {
+            let row = self.ownership_footnotes.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(parent.issuer_cik);
+            row.footnote_index.val(footnote_index);
+            row.footnote_id.nz(&footnote.id);
+            row.footnote_text.nz(&footnote.text);
+        }
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 5] {
