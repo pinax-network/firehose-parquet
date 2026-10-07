@@ -4,16 +4,16 @@
 //!
 //! ```sh
 //! cargo build --release -p blocks --bin fireparq --example replay_sec
-//! target/release/examples/replay_sec --fire 2026-08-14.fire --output /tmp/replay/2026-08-14 \
-//!     -- --grpc-max-message-bytes 268435456
+//! target/release/examples/replay_sec --fire 2026-08-14.fire --output /tmp/replay/2026-08-14
 //! ```
 //!
 //! The example serves the file's `FIRE BLOCK` lines (`num id parent_num
 //! parent_id lib_num timestamp_nanos base64(pinax.sec.v1.Block)`) as FINAL
 //! responses from a loopback mock Firehose, one window at a time with
 //! back-pressure, and runs the `fireparq` binary against it at its default
-//! settings (anything after `--` is appended to `fireparq build`; deadline days
-//! need the larger gRPC message limit of `docs/chains/sec.md`). It samples
+//! settings, which for `--block-type sec` include the 512 MiB gRPC message
+//! limit that deadline days need (anything after `--` is appended to
+//! `fireparq build`). It samples
 //! the RSS of `fireparq` (and of its child processes, so a `/usr/bin/time -l`
 //! wrapper still counts) with `ps`, then prints one JSON summary: wall time,
 //! peak RSS, and the Delta commits, files and rows of every table read from

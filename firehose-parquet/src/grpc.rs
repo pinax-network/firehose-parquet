@@ -293,11 +293,27 @@ impl FirehoseClient {
         &self,
         initial_cursor: Option<String>,
         shutdown: &CancellationToken,
-        mut handler: F,
+        handler: F,
     ) -> Result<()>
     where
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
+        self.stream_blocks_with_quiet(initial_cursor, shutdown, None, &mut BlockFn(handler))
+            .await
+    }
+
+    /// [`Self::stream_blocks`], which also calls [`StreamHandler::quiet`] once
+    /// the stream has delivered no message for `quiet_after`: once per quiet
+    /// period, which the next message ends. Reconnects do not end it, and the
+    /// wait for the pending message continues after the call, so a quiet
+    /// period never cancels a read. `None` never calls it.
+    pub async fn stream_blocks_with_quiet<H: StreamHandler>(
+        &self,
+        initial_cursor: Option<String>,
+        shutdown: &CancellationToken,
+        quiet_after: Option<Duration>,
+        handler: &mut H,
+    ) -> Result<()> {
         let _activity = self.metrics.as_ref().map(PipelineMetrics::begin_stream);
         let mut cursor = initial_cursor;
         // A timeout of 0 means disabled.
@@ -317,6 +333,11 @@ impl FirehoseClient {
         let mut last_block_num: Option<u64> = None;
         // Set once a bounded stream ended before its last requested block.
         let mut resumed_after_early_end = false;
+        // The quiet period starts with the call and restarts once each message
+        // is handled, so the handler's own work (a commit) is not quiet time.
+        let quiet_after = quiet_after.filter(|after| !after.is_zero());
+        let mut last_message = tokio::time::Instant::now();
+        let mut quiet_reported = false;
 
         loop {
             if shutdown.is_cancelled() {
@@ -379,19 +400,33 @@ impl FirehoseClient {
             let mut stream = stream;
 
             let session_end = loop {
-                let next_message = if let Some(timeout) = stream_idle_timeout {
-                    match unless_shutdown(shutdown, tokio::time::timeout(timeout, stream.message()))
-                        .await?
-                    {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            warn!(idle_for = ?timeout, "stream idle timeout reached, will reconnect");
-                            break SessionEnd::Idle;
+                let waiting_since = tokio::time::Instant::now();
+                let next_message = {
+                    let message = stream.message();
+                    tokio::pin!(message);
+                    loop {
+                        let idle_at = stream_idle_timeout.map(|timeout| waiting_since + timeout);
+                        let quiet_at = quiet_after
+                            .filter(|_| !quiet_reported)
+                            .map(|after| last_message + after);
+                        tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return Err(ShutdownRequested.into()),
+                            msg = &mut message => break Some(msg),
+                            _ = sleep_until_some(quiet_at) => {
+                                quiet_reported = true;
+                                debug!(quiet_for = ?quiet_after, "stream quiet");
+                                handler.quiet()?;
+                            }
+                            _ = sleep_until_some(idle_at) => break None,
                         }
                     }
-                } else {
-                    unless_shutdown(shutdown, stream.message()).await?
                 };
+                let Some(next_message) = next_message else {
+                    warn!(idle_for = ?stream_idle_timeout, "stream idle timeout reached, will reconnect");
+                    break SessionEnd::Idle;
+                };
+                quiet_reported = false;
 
                 match next_message {
                     Ok(Some(resp)) => {
@@ -442,7 +477,7 @@ impl FirehoseClient {
                                     "dropping block at or above the exclusive stop block"
                                 );
                             } else {
-                                handler(
+                                handler.block(
                                     any.value,
                                     any.type_url,
                                     new_cursor.clone(),
@@ -453,6 +488,7 @@ impl FirehoseClient {
                         }
 
                         cursor = Some(new_cursor.clone());
+                        last_message = tokio::time::Instant::now();
                     }
                     Ok(None) => {
                         let stop_block = self.config.stop_block;
@@ -553,6 +589,52 @@ impl FirehoseClient {
                 .inc();
         }
         Err(error)
+    }
+}
+
+/// Receives what [`FirehoseClient::stream_blocks_with_quiet`] streams.
+pub trait StreamHandler {
+    /// One block: its payload, `Any.type_url`, cursor, identity and step.
+    fn block(
+        &mut self,
+        payload: Vec<u8>,
+        type_url: String,
+        cursor: String,
+        identity: BlockIdentity,
+        step: i32,
+    ) -> Result<()>;
+
+    /// The stream has delivered no message for the quiet period. An error
+    /// ends the stream like a block handler error.
+    fn quiet(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A block closure as a [`StreamHandler`] that ignores quiet periods.
+struct BlockFn<F>(F);
+
+impl<F> StreamHandler for BlockFn<F>
+where
+    F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
+{
+    fn block(
+        &mut self,
+        payload: Vec<u8>,
+        type_url: String,
+        cursor: String,
+        identity: BlockIdentity,
+        step: i32,
+    ) -> Result<()> {
+        (self.0)(payload, type_url, cursor, identity, step)
+    }
+}
+
+/// Sleep until `at`, or forever without a deadline.
+async fn sleep_until_some(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -987,6 +1069,153 @@ mod tests {
         assert_eq!(metrics.grpc_reconnects_total.get(), 0);
     }
 
+    /// Serves its responses, each after its delay from the previous one.
+    #[derive(Clone)]
+    struct PausedService(Vec<(Duration, firehose::Response)>);
+
+    impl tonic::server::NamedService for PausedService {
+        const NAME: &'static str = "sf.firehose.v2.Stream";
+    }
+
+    impl tonic::server::ServerStreamingService<firehose::Request> for PausedService {
+        type Response = firehose::Response;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, Result<firehose::Response, tonic::Status>>;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<firehose::Request>) -> Self::Future {
+            let responses = self.0.clone();
+            Box::pin(async move {
+                let stream = futures::stream::unfold(responses.into_iter(), |mut rest| async {
+                    let (delay, response) = rest.next()?;
+                    tokio::time::sleep(delay).await;
+                    Some((Ok(response), rest))
+                });
+                Ok(tonic::Response::new(
+                    Box::pin(stream) as Self::ResponseStream
+                ))
+            })
+        }
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for PausedService {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let service = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.server_streaming(service, request).await)
+            })
+        }
+    }
+
+    /// Records blocks and quiet periods in order; `fail_quiet` makes the
+    /// first quiet call fail.
+    struct Recorder {
+        events: Vec<String>,
+        fail_quiet: bool,
+    }
+
+    impl StreamHandler for Recorder {
+        fn block(
+            &mut self,
+            _: Vec<u8>,
+            _: String,
+            _: String,
+            identity: BlockIdentity,
+            _: i32,
+        ) -> Result<()> {
+            self.events.push(identity.block_num.to_string());
+            Ok(())
+        }
+
+        fn quiet(&mut self) -> Result<()> {
+            self.events.push("quiet".into());
+            if self.fail_quiet {
+                anyhow::bail!("injected quiet flush failure");
+            }
+            Ok(())
+        }
+    }
+
+    /// `--flush-idle-secs` (review finding: a burst feed held its rows until
+    /// the next burst): one quiet call per quiet period, none while blocks
+    /// keep coming, no message lost around it, and an error ends the stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quiet_periods_call_the_handler_once_and_lose_no_message() {
+        let pause = Duration::from_millis(900);
+        let schedule = vec![
+            (Duration::ZERO, test_response(100)),
+            (Duration::from_millis(10), test_response(101)),
+            (pause, test_response(102)),
+            (Duration::from_millis(10), test_response(103)),
+            (pause, test_response(104)),
+        ];
+        for fail_quiet in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(socket, _)| socket), listener))
+            });
+            let service = PausedService(schedule.clone());
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .unwrap();
+            });
+            let mut config = test_config(&endpoint);
+            config.start_block = Some(100);
+            config.stop_block = Some(105);
+            // The idle timeout is longer than the pauses: no reconnect.
+            config.stream_idle_timeout_secs = Some(30);
+            let client = FirehoseClient::new(config).unwrap();
+            let mut recorder = Recorder {
+                events: Vec::new(),
+                fail_quiet,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(20),
+                client.stream_blocks_with_quiet(
+                    None,
+                    &CancellationToken::new(),
+                    Some(Duration::from_millis(300)),
+                    &mut recorder,
+                ),
+            )
+            .await
+            .expect("bounded stream must end");
+            server.abort();
+            let _ = server.await;
+            if fail_quiet {
+                let error = result.unwrap_err();
+                assert!(format!("{error:#}").contains("injected quiet flush failure"));
+                assert_eq!(recorder.events, ["100", "101", "quiet"]);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    recorder.events,
+                    ["100", "101", "quiet", "102", "103", "quiet", "104"]
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_stream_identity_never_reaches_handler_or_checkpoint() {
         for invalid in [
@@ -1081,6 +1310,7 @@ mod tests {
             flush_bytes: 0,
             flush_memory_bytes: crate::config::DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
+            flush_idle_secs: None,
             flush_concurrency: crate::config::FlushConcurrency::default(),
             compression: Compression::Zstd,
             final_blocks_only: true,

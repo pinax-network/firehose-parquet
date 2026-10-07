@@ -12,9 +12,10 @@
 //!   is Unicode upper-casing, like Python's `str.upper()`. Sentinel matching is
 //!   ASCII-case-insensitive, which is equivalent for the six sentinels.
 //!
-//! Digits are ASCII digits only. The reference's regular expressions use
-//! Python's Unicode `\d`; no non-ASCII digit occurs in any numeric or date field
-//! of the samples.
+//! Digits are ASCII `[0-9]` only, in every grammar (spec §4.3, decision C15):
+//! non-ASCII digits such as `١٢` or `１２` are `unparseable`, and a
+//! `seq_numbers` token made of them is dropped. The reference spells its
+//! grammars with `[0-9]`, not Python's Unicode `\d`, for the same reading.
 //!
 //! `""` never reaches a parser: callers map it to NULL first, with no issue
 //! ([`crate::sec::issues::RowIssues`] does this).
@@ -538,12 +539,12 @@ pub fn month_end_back(days: i32, months_back: u32) -> Option<i32> {
     let months = i64::from(year) * 12 + i64::from(month) - 1 - i64::from(months_back);
     let year = i32::try_from(months.div_euclid(12)).ok()?;
     let month = (months.rem_euclid(12) + 1) as u8;
-    let next_month_start = if month == 12 {
-        date32(year.checked_add(1)?, 1, 1)?
-    } else {
-        date32(year, month + 1, 1)?
-    };
-    Some(next_month_start - 1)
+    // December ends on the 31st. Going through the next January 1st would
+    // need 10000-01-01 for December 9999, which `time` cannot represent.
+    if month == 12 {
+        return date32(year, 12, 31);
+    }
+    Some(date32(year, month + 1, 1)? - 1)
 }
 
 /// The canonical text of a mantissa at `scale` (`-12.500000`), as DuckDB prints

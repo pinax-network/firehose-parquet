@@ -409,12 +409,27 @@ mod tests {
             "address",
             "owner",
         ];
+        // Virtual columns DuckDB's `read_parquet`/`delta_scan` add on request
+        // (`filename = true`, …). A data column of that name shadows them, so
+        // it is allowed only with the reader workaround in its description:
+        // `filing_documents.filename` is the spec's name for the document.
+        const READER_COLUMNS: [&str; 3] = ["filename", "file_row_number", "file_index"];
         for spec in TABLES {
             assert!(!spec.doc.is_empty(), "{}", spec.name);
             let mut seen = BTreeSet::new();
             for col in spec.columns() {
                 assert!(seen.insert(col.name), "{}.{} twice", spec.name, col.name);
                 assert!(!RESERVED.contains(&col.name), "{}.{}", spec.name, col.name);
+                if READER_COLUMNS.contains(&col.name) {
+                    assert!(
+                        (spec.name, col.name) == ("filing_documents", "filename")
+                            && col.doc.contains("Shadows DuckDB's `filename` scan column")
+                            && col.doc.contains("filename = 'data_file'"),
+                        "{}.{} shadows a DuckDB scan column",
+                        spec.name,
+                        col.name
+                    );
+                }
                 assert!(!col.doc.is_empty(), "{}.{}", spec.name, col.name);
                 assert!(
                     col.name

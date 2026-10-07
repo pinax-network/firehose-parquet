@@ -250,6 +250,14 @@ fn month_ends() {
     assert_eq!(back("2026-02-10", 2).as_deref(), Some("2025-12-31"));
     assert_eq!(back("2024-03-31", 1).as_deref(), Some("2024-02-29"));
     assert_eq!(back("2026-01-31", 13).as_deref(), Some("2024-12-31"));
+    // The last representable month: December 9999 ends on 9999-12-31 (§4.2
+    // keeps the placeholder dates), as in the reference.
+    assert_eq!(back("9999-12-15", 0).as_deref(), Some("9999-12-31"));
+    assert_eq!(back("9999-12-31", 0).as_deref(), Some("9999-12-31"));
+    assert_eq!(back("9999-12-15", 1).as_deref(), Some("9999-11-30"));
+    assert_eq!(back("9999-12-15", 2).as_deref(), Some("9999-10-31"));
+    assert_eq!(back("1000-01-15", 0).as_deref(), Some("1000-01-31"));
+    assert_eq!(back("1000-03-15", 2).as_deref(), Some("1000-01-31"));
 }
 
 #[test]
@@ -307,6 +315,19 @@ fn non_ascii_digits_are_not_digits() {
     assert_eq!(parse_int::<i32>("\u{661}").issue, Some(Unparseable));
     assert_eq!(parse_date("\u{661}/1/2026").issue, Some(Unparseable));
     assert!(seq_numbers(&["\u{661}"]).is_empty());
+    // The cases of the review that compared the reference's former Unicode
+    // `\d`: each is `unparseable` (decision C15), mixed digits included.
+    assert_eq!(parse_decimal("1\u{662}.5", 6).issue, Some(Unparseable));
+    assert_eq!(parse_int::<i64>("\u{661}\u{662}").issue, Some(Unparseable));
+    assert_eq!(
+        parse_date("\u{662}\u{660}\u{662}\u{666}-08-14").issue,
+        Some(Unparseable)
+    );
+    assert_eq!(
+        parse_date("08/14/\u{662}\u{660}\u{662}\u{666}").issue,
+        Some(Unparseable)
+    );
+    assert_eq!(seq_numbers(&["3, \u{661}\u{662}", "1.0"]), [3, 1]);
 }
 
 #[test]

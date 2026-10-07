@@ -989,6 +989,70 @@ async fn duckdb_and_delta_rs_read_every_delta_table() {
     }
 }
 
+/// The "Engine compatibility" section of docs/reading-tables.md states what
+/// this test checks: it names every family of [`datasets`], and its type table
+/// has a DuckDB row for every type pinned above and for each list's element
+/// type (`DECIMAL(38,s)` stands for the five SEC scales, `STRUCT(…)` for any
+/// struct, the `T[]` row for every list).
+#[test]
+fn reading_tables_documents_every_checked_family_and_type() {
+    let docs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/reading-tables.md"),
+    )
+    .unwrap();
+    let section = docs
+        .split("\n## Engine compatibility\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("docs/reading-tables.md has an Engine compatibility section");
+    let ci_sentence = section
+        .split("CI builds real ")
+        .nth(1)
+        .and_then(|rest| rest.split(" output").next())
+        .expect("the section says which output CI builds")
+        .replace('\n', " ");
+    for dataset in datasets() {
+        let family = match dataset.block_type {
+            "evm" => "EVM",
+            "solana" => "Solana",
+            "sec" => "SEC",
+            other => panic!("name the {other} family here"),
+        };
+        assert!(ci_sentence.contains(family), "{family}: {ci_sentence}");
+    }
+    // The DuckDB column of the type table.
+    let duckdb_cells: Vec<&str> = section
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| line.split(" | ").nth(1))
+        .collect();
+    let documented = |spelling: &str| {
+        duckdb_cells
+            .iter()
+            .any(|cell| cell.contains(&format!("`{spelling}")))
+    };
+    let pinned = datasets().into_iter().flat_map(|dataset| {
+        dataset
+            .tables
+            .into_iter()
+            .flat_map(|table| table.columns.into_iter().map(|(_, duckdb, _)| duckdb))
+    });
+    for duckdb in CANONICAL.iter().map(|(_, duckdb, _)| *duckdb).chain(pinned) {
+        let element = duckdb.trim_end_matches("[]");
+        let element = if element.starts_with("DECIMAL(38,") {
+            "DECIMAL(38,s)"
+        } else if element.starts_with("STRUCT(") {
+            "STRUCT("
+        } else {
+            element
+        };
+        assert!(documented(element), "{duckdb}: no row for {element}");
+        if duckdb.ends_with("[]") {
+            assert!(documented("T[]"), "{duckdb}: no array row");
+        }
+    }
+}
+
 /// Opt-in, off in CI: anonymous reads of a deployment's public-read bucket
 /// (the S3 API of Ceph RGW or another S3-compatible service), which the
 /// spike could only check against moto. Operators run it against a live

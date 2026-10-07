@@ -344,6 +344,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
             inflight_bytes: args.flush_inflight_bytes,
         },
         flush_interval_secs: args.flush_interval_secs.filter(|secs| *secs > 0),
+        flush_idle_secs: args.flush_idle_secs.filter(|secs| *secs > 0),
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,
@@ -360,7 +361,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         },
         metrics_port: args.metrics_port,
         // 0 disables either timeout.
-        stream_idle_timeout_secs: args.stream_idle_timeout_secs.filter(|secs| *secs > 0),
+        stream_idle_timeout_secs: Some(
+            args.stream_idle_timeout_secs
+                .unwrap_or(crate::config::DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
+        )
+        .filter(|secs| *secs > 0),
         reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs.filter(|secs| *secs > 0),
     })
 }

@@ -167,12 +167,23 @@ pub async fn build_fixture_dataset(cwd: &Path, root: &Path) {
     .expect("fireparq timed out")
     .unwrap();
     server.abort();
-    assert!(
-        output.status.success(),
+    let logs = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(output.status.success(), "{logs}");
+    // The SEC build defaults fill what the command leaves unset; the explicit
+    // `--stream-idle-timeout-secs 0` wins over its default.
+    for expected in [
+        "grpc_max_message_bytes 536870912",
+        "flush_idle         60s",
+        "stream_idle_timeout disabled",
+        "applied the block family's build defaults to settings left unset",
+        "grpc_max_message_bytes=536870912 flush_idle_secs=60 metrics_stale_after_secs=129600",
+    ] {
+        assert!(logs.contains(expected), "{expected}\n{logs}");
+    }
 }
 
 /// The ```` ```sql ```` blocks of the `## {title}` section of
@@ -257,6 +268,135 @@ impl Docs<'_> {
         let expected: Vec<Value> = expected.iter().map(scalars_as_text).collect();
         assert_eq!(sorted(self.rows(select)), sorted(expected), "{select}");
     }
+}
+
+/// One statement of the shipped views, found by its leading comment.
+fn shipped_view(comment: &str) -> String {
+    let views = &section_sql("Shipped views")[1];
+    let start = views
+        .find(comment)
+        .unwrap_or_else(|| panic!("no shipped view `{comment}`"));
+    let statement = &views[start..];
+    let end = statement.find(";\n").map_or(statement.len(), |end| end + 1);
+    statement[..end].to_string()
+}
+
+/// `sec_13f_units` on synthetic filings shaped like the real ones the review
+/// found (#8): a summary total in another unit than the rows, and the 4-row
+/// DAILY JOURNAL report whose rows are in dollars on the thousands date rule.
+#[test]
+fn sec_13f_units_reads_the_summary_unit_and_breaks_ties_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let Some(duckdb) = common::DuckDb::open(&cwd) else {
+        return;
+    };
+    // (accession, rule, qualifying rows, value per share, summary / rows).
+    // Each row is 1,000,000 shares, so its value is 10^6 × the value per share.
+    let filings: [(&str, i32, u32, f64, Option<f64>); 8] = [
+        // DAILY JOURNAL 0001437749-14-014916: 4 rows of $48/share on the
+        // thousands rule, summary in thousands (1/1000 of the rows).
+        ("a-daily-journal", 1000, 4, 48.0, Some(0.001)),
+        // The same 4 rows with a summary that agrees: the guard holds.
+        ("b-four-rows-agree", 1000, 4, 48.0, Some(1.0)),
+        // TRS of Texas 0000796848-26-000010: rows in dollars, summary in
+        // thousands.
+        ("c-summary-thousands", 1, 6, 76.0, Some(0.001)),
+        // HRT 0001475597-26-000199: rows in thousands after 2023, summary in
+        // dollars.
+        ("d-rows-thousands", 1, 6, 0.033, Some(1000.0)),
+        // 2014 rows in thousands, summary in millions (Cullen and others).
+        ("e-summary-millions", 1000, 6, 0.05, Some(0.001)),
+        // Agreeing units, and a 10x disagreement no unit explains.
+        ("f-agree", 1, 6, 76.0, Some(1.0)),
+        ("g-unexplained", 1, 6, 76.0, Some(10.0)),
+        // No information table: no evidence against the date rule.
+        ("h-no-rows", 1000, 0, 0.0, None),
+    ];
+    let mut sql = String::from(
+        "CREATE TABLE form13f_holdings (block_num BIGINT, filing_index BIGINT, \
+         shares_or_principal_type VARCHAR, put_call_norm VARCHAR, \
+         shares_or_principal_amount BIGINT, value BIGINT);\n\
+         CREATE TABLE form13f_reports (block_num BIGINT, filing_index BIGINT, \
+         accession_number VARCHAR, value_multiplier_rule INTEGER, table_value_total BIGINT, \
+         holdings_value_sum BIGINT);\n",
+    );
+    for (index, (accession, rule, rows, per_share, total_to_rows)) in filings.iter().enumerate() {
+        let value = (per_share * 1_000_000.0).round() as i64;
+        for _ in 0..*rows {
+            sql.push_str(&format!(
+                "INSERT INTO form13f_holdings VALUES (1, {index}, 'SH', NULL, 1000000, {value});\n"
+            ));
+        }
+        let sum = value * i64::from(*rows);
+        let (total, sum) = match total_to_rows {
+            Some(ratio) => (((sum as f64) * ratio).round().to_string(), sum.to_string()),
+            None => ("1000".to_string(), "NULL".to_string()),
+        };
+        sql.push_str(&format!(
+            "INSERT INTO form13f_reports VALUES (1, {index}, '{accession}', {rule}, {total}, {sum});\n"
+        ));
+    }
+    sql.push_str(&shipped_view("-- 2. 13F value units per filing."));
+    sql.push_str(
+        "\nSELECT 'u' AS q, accession_number, value_multiplier, value_unit_source, \
+         table_value_multiplier, table_value_total_usd FROM sec_13f_units ORDER BY accession_number;",
+    );
+    let rows: Vec<Value> = duckdb.query(&sql)["u"]
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            row.as_object_mut().unwrap().remove("q");
+            scalars_as_text(&row)
+        })
+        .collect();
+    let expected: Vec<Value> = [
+        // Rows in dollars ($192 M), and the summary of 192,000 thousands.
+        (
+            "a-daily-journal",
+            1,
+            "median_and_total_override",
+            1000,
+            "192000000",
+        ),
+        (
+            "b-four-rows-agree",
+            1000,
+            "filing_date_rule",
+            1000,
+            "192000000000",
+        ),
+        (
+            "c-summary-thousands",
+            1,
+            "filing_date_rule",
+            1000,
+            "456000000",
+        ),
+        ("d-rows-thousands", 1000, "median_override", 1, "198000000"),
+        (
+            "e-summary-millions",
+            1000,
+            "filing_date_rule",
+            1_000_000,
+            "300000000",
+        ),
+        ("f-agree", 1, "filing_date_rule", 1, "456000000"),
+        ("g-unexplained", 1, "filing_date_rule", 1, "4560000000"),
+        ("h-no-rows", 1000, "filing_date_rule", 1000, "1000000"),
+    ]
+    .iter()
+    .map(
+        |(accession, multiplier, source, table_multiplier, total_usd)| {
+            scalars_as_text(&json!({
+                "accession_number": accession, "value_multiplier": multiplier,
+                "value_unit_source": source, "table_value_multiplier": table_multiplier,
+                "table_value_total_usd": total_usd,
+            }))
+        },
+    )
+    .collect();
+    assert_eq!(rows, expected);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -228,7 +228,7 @@ Every document of the submission, including non-XML exhibits (bodies are not car
 | `document_index` | `long` | no | Derived: position in `documents`. |
 | `sequence` | `string` | yes | `Filing.documents[].sequence`. SGML `<SEQUENCE>`, text. |
 | `document_type` | `string` | yes | `Filing.documents[].type`. `4`, `INFORMATION TABLE`, `EX-99.1`, `GRAPHIC`… (proto `type`). |
-| `filename` | `string` | yes | `Filing.documents[].filename`. |
+| `filename` | `string` | yes | `Filing.documents[].filename`. Shadows DuckDB's `filename` scan column: `SELECT filename` returns this document name, and `filename = true` fails, so name the data file column another way (`delta_scan(…, filename = 'data_file')`). |
 | `description` | `string` | yes | `Filing.documents[].description`. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

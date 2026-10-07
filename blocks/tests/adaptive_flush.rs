@@ -210,6 +210,7 @@ fn build(
     schedule: &Schedule,
     dir: &Path,
     port: u16,
+    extra: &[&str],
 ) -> tokio::process::Command {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
     child
@@ -238,8 +239,9 @@ fn build(
             "--metrics-port",
             &port.to_string(),
             &format!("--final-blocks-only={}", schedule.final_only),
-            "--output",
         ])
+        .args(extra)
+        .arg("--output")
         .arg(dir.join("output"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -424,7 +426,7 @@ async fn a_fast_replay_suspends_the_interval_and_flushes_at_the_end() {
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
     let (output, seen) = run(
-        build(&server, &schedule, dir.path(), port),
+        build(&server, &schedule, dir.path(), port, &[]),
         port,
         &["firehose_parquet_catching_up 1\n"],
     )
@@ -461,7 +463,7 @@ async fn a_real_time_stream_flushes_on_the_interval() {
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
     let (output, seen) = run(
-        build(&server, &schedule, dir.path(), port),
+        build(&server, &schedule, dir.path(), port, &[]),
         port,
         &[
             "firehose_parquet_catching_up 0\n",
@@ -511,7 +513,7 @@ async fn switches_both_ways(final_only: bool) {
     let server = MockFirehose::start(&schedule).await;
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
-    let (output, _) = run(build(&server, &schedule, dir.path(), port), port, &[]).await;
+    let (output, _) = run(build(&server, &schedule, dir.path(), port, &[]), port, &[]).await;
     let logs = plain_logs(&output);
     let events = events(&logs);
     assert_eq!(
@@ -550,4 +552,48 @@ async fn a_final_only_stream_switches_both_ways() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_non_final_stream_switches_both_ways() {
     switches_both_ways(false).await;
+}
+
+/// `--flush-idle-secs` (review finding: a SEC feed day arrives as one burst
+/// of 144 windows, then nothing for about a day, and nothing flushed it): a
+/// fast burst, then silence. The burst is committed while the stream is
+/// quiet, before any later block arrives, although it was a catch-up replay
+/// that suspends the interval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_stream_commits_the_burst_it_holds() {
+    // 60 Ethereum-like blocks every 10 ms (1200x), 3 s of silence, 5 more.
+    let schedule = Schedule::new(true)
+        .blocks(60, Duration::from_millis(10), 12_000)
+        .stall(Duration::from_secs(3))
+        .blocks(5, Duration::from_millis(10), 12_000);
+    let server = MockFirehose::start(&schedule).await;
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let (output, seen) = run(
+        build(
+            &server,
+            &schedule,
+            dir.path(),
+            port,
+            &["--flush-idle-secs", "1"],
+        ),
+        port,
+        &["trigger=\"idle\""],
+    )
+    .await;
+    let logs = plain_logs(&output);
+    assert!(seen, "no idle flush while the stream ran\n{logs}");
+    let idle_line = logs
+        .lines()
+        .find(|line| {
+            line.contains("mapper flush emitted record batches")
+                && field(line, "trigger") == Some("idle")
+        })
+        .unwrap_or_else(|| panic!("{logs}"));
+    assert_eq!(field(idle_line, "blocks"), Some("60"), "{idle_line}");
+    let events = events(&logs);
+    assert_eq!(flushes(&events, "idle").len(), 1, "{events:?}");
+    let (rows, numbers) = blocks_parts(&dir.path().join("output"));
+    assert_eq!(numbers, (FIRST..schedule.stop()).collect::<Vec<_>>());
+    assert!(rows.contains(&60), "{rows:?}");
 }

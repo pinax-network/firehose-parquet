@@ -160,6 +160,9 @@ enum MapperFlushTrigger {
     Blocks,
     Rows,
     Interval,
+    /// `--flush-idle-secs`: the stream went quiet, at any pace. Checked
+    /// between messages, not after a block.
+    Idle,
 }
 
 impl MapperFlushTrigger {
@@ -170,6 +173,7 @@ impl MapperFlushTrigger {
             Self::Blocks => "blocks",
             Self::Rows => "rows",
             Self::Interval => "interval",
+            Self::Idle => "idle",
         }
     }
 }

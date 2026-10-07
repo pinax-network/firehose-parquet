@@ -495,7 +495,9 @@ pub(crate) const FILING_DOCUMENTS: TableSpec = TableSpec {
             "filename",
             Ty::Utf8,
             true,
-            "`Filing.documents[].filename`.",
+            "`Filing.documents[].filename`. Shadows DuckDB's `filename` scan column: \
+             `SELECT filename` returns this document name, and `filename = true` fails, so \
+             name the data file column another way (`delta_scan(…, filename = 'data_file')`).",
         ),
         Col::new(
             "description",

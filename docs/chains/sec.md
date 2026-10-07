@@ -8,10 +8,26 @@ credentials, so pass `--api-key-envvar` when the gateway needs one ([authenticat
 
 **Size the stream and the writer for deadline days.** A 13F or N-PX deadline day puts whole filings of hundreds of
 thousands of votes or holdings into one window. The largest sample window, 2977878 (2026-08-14), is a 143.9 MB
-protobuf: above the 128 MiB default of `--grpc-max-message-bytes`, so fireparq stops on it with `OutOfRange`.
-Pass `--grpc-max-message-bytes 268435456` to every SEC build. A window of that size alone takes about 1.5 GB while it is
-decoded, mapped and flushed. The replay of the four sample days at the default flush settings peaked at 2.0 GB RSS,
-so give the writer at least 3 GiB of memory.
+protobuf, above the generic 128 MiB `--grpc-max-message-bytes`, which would stop the stream with `OutOfRange` on it at
+every restart. A SEC build therefore defaults to 512 MiB; a deployment that sets `GRPC_MAX_MESSAGE_BYTES` must keep it
+at least that high. A window of that size alone takes about 1.5 GB while it is decoded, mapped and flushed. The replay
+of the four sample days at the default flush settings peaked at 2.0 GB RSS, so give the writer at least 3 GiB of
+memory.
+
+**A live writer receives one burst a day.** firesec emits a feed day's 144 windows together once EDGAR publishes
+the daily dump (weekends and holidays as empty windows), then nothing until the next one, about a day later. The
+generic settings expect a block every few seconds, so a SEC build changes four defaults when neither flag nor
+environment variable sets them ([CLI](../cli.md#family-defaults)):
+
+| Setting | SEC default | Why |
+|---|---|---|
+| `--flush-idle-secs` | 60 | The size and interval triggers only run when a block arrives, and a burst replays history, which suspends the interval. Without this flush the end of each burst stays uncommitted, invisible to readers and lost on a restart, until the next feed day arrives. |
+| `--metrics-stale-after-secs` | 129600 (36 h) | `/ready` would otherwise fail 120 s after each burst, for most of the day. It now fails when a feed day is missing. |
+| `--stream-idle-timeout-secs` | 93600 (26 h) | The generic 120 s would reconnect about 700 times a day, each a `WARN` and a `grpc_reconnect` error count. HTTP/2 keepalive still detects a dead connection. |
+| `--grpc-max-message-bytes` | 536870912 (512 MiB) | See above. |
+
+Alert on a writer down for more than a day as on any chain. Window 143 of a feed day reaches a final-only stream
+only with the next day's window 0, because firesec marks each window final when its successor exists.
 
 ## Block model
 
@@ -66,6 +82,10 @@ dissemination keeps its first copy in the dataset. Build from block 1761552 to a
   sub-message (`Relationship`, `CoverPage`, `GeneralInfo`, `OfferingData`, `FormCOffering`, `SecurityLending`) it is
   NULL exactly when the sub-message is absent, and an `optional bool` (`aff_10b5_one`, the Form D `*_is_estimate`
   flags, …) is NULL when unset. `Y`/`N` text becomes a nullable `boolean`.
+- `filing_documents.filename` is the document's file name, and it shadows the `filename` column DuckDB's
+  `delta_scan` and `read_parquet` add: `SELECT filename` returns the document name, and `filename = true` fails
+  with a Binder Error. Give the data file column another name, `delta_scan('…/filing_documents', filename =
+  'data_file')`.
 - `*_count` columns are counts the mapper computed (list lengths, rows written). Counts the filer declared keep their
   form's name: `form13f_reports.table_entry_total`, `npx_reports.declared_series_count`, … `has_*` columns say
   whether an optional part is present.
@@ -113,7 +133,7 @@ item's position. Block-level values (`blocks.feed_date`) have a NULL `filing_ind
 
 | `issue` | Typed value | When |
 |---|---|---|
-| `unparseable` | NULL | the text does not match the column grammar |
+| `unparseable` | NULL | the text does not match the column grammar; digits are ASCII `0`–`9` only, so `١٢` or `１２` is unparseable |
 | `sentinel` | NULL | `N/A`, `NA`, `NONE`, `NULL`, `-` or `XXXX` (any case) |
 | `out_of_range` | NULL | too many integer digits, outside the integer type, an invalid calendar date or a year outside 1000–9999 |
 | `rounded` | rounded | non-zero digits beyond the column scale |
@@ -121,19 +141,28 @@ item's position. Block-level values (`blocks.feed_date`) have a NULL `filing_ind
 | `overflow` | NULL | a derived sum or product overflowed; `raw_value` holds the operands, joined with ` * ` or ` + ` |
 
 Form D's `Indefinite` amounts are not issues: the amount is NULL and `total_offering_amount_is_indefinite` (or
-`total_remaining_is_indefinite`) is true. On the four 0.13.0 sample days, 4,597 of 31.7 M typed values have an issue,
-almost all of them N-PORT `N/A` sentinels and float-printing artifacts rounded below 5e-11 USD or 5e-13 percent; the
-last example query puts the source text back next to a typed value.
+`total_remaining_is_indefinite`) is true. On the four 0.13.0 sample days, 4,597 of 31.7 M typed values have an issue:
+3,125 N-PORT `N/A` sentinels, 1,466 roundings and 6 `tz_dropped` dates. The roundings change no value by more than
+5e-11 USD or 5e-13 percent or rate units, but they are not all noise. The 328 in N10 amounts and
+`debt_annualized_rate` are float-printing artifacts (`7.8939200000000005`); the 1,138 in `pct_value` (979),
+`exchange_rate` (137) and the returns (22) cut genuine 13–17-significant-digit values (`21.367520234938123` →
+`21.367520234938`). Read `raw_value` when those digits matter; the last example query puts it next to the typed
+value.
 
 ### 13F value units
 
 `form13f_holdings.value` and `form13f_reports.table_value_total` are **raw**, as filed: thousands of dollars for
 filings before 2023-01-03, dollars after, and some filers get it wrong either way. `value_multiplier_rule` (1000 or 1)
 is the legal date rule only (a NULL `filing_date` falls back to `date`). The [`sec_13f_units`](#shipped-views) view
-decides each filing's multiplier, overriding the rule only when the median value per share of at least five plain
-share rows contradicts it, and [`sec_13f_holdings_usd`](#shipped-views) gives `value_usd`. `holdings_value_sum` next to
-`table_value_total` shows the filings whose own total disagrees with their rows; `holdings_complete` shows the
-information tables shorter than `table_entry_total`.
+decides each filing's multiplier. It overrides the rule when the median value per share of at least five plain share
+rows contradicts it, or of one to four rows when the summary total is also about 1000× off the rows in the same
+direction (`value_unit_source` `median_and_total_override`: DAILY JOURNAL's 2014 report, in dollars on the thousands
+rule). [`sec_13f_holdings_usd`](#shipped-views) gives `value_usd`. Filers often state `table_value_total` in another
+unit than their rows (rows in dollars and the summary in thousands, or 2014 rows in thousands and the summary in
+millions: 17 of the 1,998 sample reports with rows), so `table_value_total_usd` uses its own
+`table_value_multiplier`, read from the summary-to-rows ratio when it is about 1000 or 1/1000. `holdings_value_sum`
+next to `table_value_total` still shows the filings whose own total disagrees with their rows by another factor;
+`holdings_complete` shows the information tables shorter than `table_entry_total`.
 
 ### Other derived columns
 
@@ -233,8 +262,10 @@ FROM f
 WHERE NOT is_deletion_notice
 QUALIFY row_number() OVER (PARTITION BY accession_number ORDER BY block_num, filing_index) = 1;
 
--- 2. 13F value units per filing. The filing-date rule (value_multiplier_rule, materialized) is overridden by the
---    median value per share of the filing's plain share rows, only with >= 5 qualifying rows.
+-- 2. 13F value units per filing. The filing-date rule (value_multiplier_rule, materialized) is overridden when the
+--    median value per share of the filing's plain share rows contradicts it: on the median alone with >= 5
+--    qualifying rows, with 1-4 only when the summary total is also about 1000x off the rows in the same direction.
+--    The summary total gets its own multiplier, because filers often state it in another unit than their rows.
 CREATE OR REPLACE VIEW sec_13f_units AS
 WITH q AS (
     SELECT block_num, filing_index,
@@ -244,21 +275,41 @@ WITH q AS (
     WHERE shares_or_principal_type = 'SH' AND put_call_norm IS NULL
       AND shares_or_principal_amount > 0 AND value > 0
     GROUP BY ALL
+),
+s AS (
+    SELECT r.block_num, r.filing_index, r.accession_number, r.value_multiplier_rule,
+           coalesce(q.qualifying_rows, 0) AS qualifying_rows, q.median_value_per_share,
+           r.table_value_total, r.holdings_value_sum,
+           CASE WHEN r.value_multiplier_rule = 1000 AND q.median_value_per_share >= 2 THEN 1
+                WHEN r.value_multiplier_rule = 1 AND q.median_value_per_share < 0.5 THEN 1000 END AS median_multiplier,
+           CASE WHEN r.table_value_total > 0 AND r.holdings_value_sum > 0
+                THEN r.table_value_total::DOUBLE / r.holdings_value_sum END AS total_to_rows
+    FROM form13f_reports r
+    LEFT JOIN q USING (block_num, filing_index)
+),
+u AS (
+    SELECT *,
+           CASE WHEN qualifying_rows >= 5 AND median_multiplier IS NOT NULL THEN 'median_override'
+                WHEN qualifying_rows > 0
+                     AND ((median_multiplier = 1 AND total_to_rows BETWEEN 0.0005 AND 0.002)
+                       OR (median_multiplier = 1000 AND total_to_rows BETWEEN 500 AND 2000)) THEN 'median_and_total_override'
+                WHEN qualifying_rows >= 5 AND median_value_per_share >= 0.5 AND median_value_per_share < 2 THEN 'ambiguous'
+                ELSE 'filing_date_rule' END AS value_unit_source
+    FROM s
+),
+m AS (
+    SELECT *,
+           CASE WHEN value_unit_source IN ('median_override', 'median_and_total_override') THEN median_multiplier
+                ELSE value_multiplier_rule END AS value_multiplier
+    FROM u
 )
-SELECT r.block_num, r.filing_index, r.accession_number, r.value_multiplier_rule,
-       coalesce(q.qualifying_rows, 0) AS qualifying_rows, q.median_value_per_share,
-       CASE WHEN coalesce(q.qualifying_rows, 0) >= 5 AND r.value_multiplier_rule = 1000 AND q.median_value_per_share >= 2 THEN 1
-            WHEN coalesce(q.qualifying_rows, 0) >= 5 AND r.value_multiplier_rule = 1 AND q.median_value_per_share < 0.5 THEN 1000
-            ELSE r.value_multiplier_rule END AS value_multiplier,
-       CASE WHEN coalesce(q.qualifying_rows, 0) < 5 THEN 'filing_date_rule'
-            WHEN (r.value_multiplier_rule = 1000 AND q.median_value_per_share >= 2)
-              OR (r.value_multiplier_rule = 1 AND q.median_value_per_share < 0.5) THEN 'median_override'
-            WHEN q.median_value_per_share >= 0.5 AND q.median_value_per_share < 2 THEN 'ambiguous'
-            ELSE 'filing_date_rule' END AS value_unit_source,
-       r.table_value_total, r.holdings_value_sum,
-       r.table_value_total * value_multiplier AS table_value_total_usd
-FROM form13f_reports r
-LEFT JOIN q USING (block_num, filing_index);
+SELECT block_num, filing_index, accession_number, value_multiplier_rule, qualifying_rows, median_value_per_share,
+       value_multiplier, value_unit_source, table_value_total, holdings_value_sum,
+       CASE WHEN total_to_rows BETWEEN 0.0005 AND 0.002 THEN value_multiplier * 1000
+            WHEN total_to_rows BETWEEN 500 AND 2000 AND value_multiplier = 1000 THEN 1
+            ELSE value_multiplier END AS table_value_multiplier,
+       table_value_total * table_value_multiplier AS table_value_total_usd
+FROM m;
 
 -- 3. 13F holdings in US dollars.
 CREATE OR REPLACE VIEW sec_13f_holdings_usd AS
@@ -329,7 +380,7 @@ QUALIFY row_number() OVER (PARTITION BY r.filer_cik, coalesce(r.series_id, r.ser
 | View | What it decides |
 |---|---|
 | `sec_filings_first` | One row per accession: its first dissemination, never a deletion notice, with `dissemination_count`, `is_redisseminated`, `is_deleted` and `is_corrected`. |
-| `sec_13f_units` | Each 13F report's `value_multiplier`: the date rule, unless ≥ 5 plain share rows with a positive value give a median value per share that contradicts it (`median_override`); `ambiguous` when that median is between 0.5 and 2. A one-holding report keeps the date rule. |
+| `sec_13f_units` | Each 13F report's `value_multiplier`: the date rule, unless ≥ 5 plain share rows with a positive value give a median value per share that contradicts it (`median_override`), or 1–4 such rows do and the summary total is about 1000× off the rows in the same direction (`median_and_total_override`); `ambiguous` when that median is between 0.5 and 2. Otherwise a report with fewer than 5 such rows keeps the date rule. `table_value_multiplier` converts `table_value_total`: `value_multiplier`, times 1000 when the summary is about 1/1000 of the rows, or 1 when the rows are in thousands and the summary about 1000× them. |
 | `sec_13f_holdings_usd` | 13F holdings with `value_usd`. |
 | `sec_13f_effective_reports` | The reports that count for each manager and quarter: the latest original or `RESTATEMENT`, chosen before any CUSIP filter so a restatement that drops a position wins, plus the `NEW HOLDINGS` amendments accepted after it. Notices excluded; first disseminations only. |
 | `sec_how_voted_norm(h)`, `sec_npx_vote_records_norm` | N-PX `how_voted` in one of `FOR`, `AGAINST`, `WITHHOLD`, `ABSTAIN`, `DID_NOT_VOTE`, `FREQUENCY_1Y`/`2Y`/`3Y`, `SPLIT`, `NONE`, `OTHER` (NULL when empty); every spelling of the sample days gets a label. |
