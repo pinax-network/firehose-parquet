@@ -6,6 +6,13 @@ the EDGAR daily feed into one Firehose block per 10-minute window. Build a datas
 `--block-type sec --endpoint <firesec Firehose endpoint>`; the stage endpoint is private and gets no automatic
 credentials, so pass `--api-key-envvar` when the gateway needs one ([authentication](../authentication.md)).
 
+**Size the stream and the writer for deadline days.** A 13F or N-PX deadline day puts whole filings of hundreds of
+thousands of votes or holdings into one window. The largest sample window, 2977878 (2026-08-14), is a 143.9 MB
+protobuf: above the 128 MiB default of `--grpc-max-message-bytes`, so fireparq stops on it with `OutOfRange`.
+Pass `--grpc-max-message-bytes 268435456` to every SEC build. A window of that size alone takes about 1.5 GB while it is
+decoded, mapped and flushed. The replay of the four sample days at the default flush settings peaked at 2.0 GB RSS,
+so give the writer at least 3 GiB of memory.
+
 ## Block model
 
 - **One block per 10-minute window.** `block_num = unix_seconds / 600` of the window start, so a feed day has 144
