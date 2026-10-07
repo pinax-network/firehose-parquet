@@ -168,8 +168,167 @@ impl FormDTables {
         body: &sec::FormDNotice,
         prepared: &PreparedFormD<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        let issuer = body.primary_issuer.as_ref();
+        let issuer_cik = issuer.map_or("", |i| i.cik.as_str());
+        let offering = body.offering.as_ref();
+        let of = |field: fn(&sec::OfferingData) -> &str| offering.map_or("", field);
+        let p = &prepared.notice;
+
+        let row = self.form_d_notices.row(ctx);
+        row.fc.append(fc);
+        row.schema_version.nz(&body.schema_version);
+        row.submission_type.nz(&body.submission_type);
+        row.previous_accession_number
+            .nz(&body.previous_accession_number);
+        row.issuer_cik.nz(issuer_cik);
+        row.issuer_name
+            .nz(issuer.map_or("", |i| i.entity_name.as_str()));
+        row.issuer.append(issuer.and_then(|i| i.address.as_ref()));
+        row.issuer_phone.nz(issuer.map_or("", |i| i.phone.as_str()));
+        row.jurisdiction_of_inc
+            .nz(issuer.map_or("", |i| i.jurisdiction_of_inc.as_str()));
+        row.entity_type
+            .nz(issuer.map_or("", |i| i.entity_type.as_str()));
+        row.entity_type_other_desc
+            .nz(issuer.map_or("", |i| i.entity_type_other_desc.as_str()));
+        row.year_of_inc.opt(p.year_of_inc);
+        row.year_of_inc_status
+            .nz(issuer.map_or("", |i| i.year_of_inc_status.as_str()));
+        row.issuer_previous_names.items(
+            issuer
+                .into_iter()
+                .flat_map(|i| i.previous_names.iter().map(String::as_str)),
+        );
+        row.issuer_edgar_previous_names.items(
+            issuer
+                .into_iter()
+                .flat_map(|i| i.edgar_previous_names.iter().map(String::as_str)),
+        );
+        row.industry_group.nz(of(|o| o.industry_group.as_str()));
+        row.investment_fund_type
+            .nz(of(|o| o.investment_fund_type.as_str()));
+        row.is_40_act.opt(offering.and_then(|o| o.is_40_act));
+        row.revenue_range.nz(of(|o| o.revenue_range.as_str()));
+        row.aggregate_net_asset_value_range
+            .nz(of(|o| o.aggregate_net_asset_value_range.as_str()));
+        row.offering_is_amendment
+            .opt(offering.map(|o| o.is_amendment));
+        row.date_of_first_sale.opt(p.date_of_first_sale);
+        row.date_of_first_sale_yet_to_occur
+            .opt(offering.and_then(|o| o.date_of_first_sale_yet_to_occur));
+        row.more_than_one_year
+            .opt(offering.map(|o| o.more_than_one_year));
+        row.is_equity_type.opt(offering.map(|o| o.is_equity_type));
+        row.securities_types.items(
+            offering
+                .into_iter()
+                .flat_map(|o| o.securities_types.iter().map(String::as_str)),
+        );
+        row.description_of_other_type
+            .nz(of(|o| o.description_of_other_type.as_str()));
+        row.is_business_combination
+            .opt(offering.and_then(|o| o.is_business_combination));
+        row.business_combination_clarification
+            .nz(of(|o| o.business_combination_clarification.as_str()));
+        row.federal_exemptions.items(
+            offering
+                .into_iter()
+                .flat_map(|o| o.federal_exemptions.iter().map(String::as_str)),
+        );
+        row.minimum_investment.opt(p.minimum_investment);
+        row.total_offering_amount.opt(p.total_offering_amount);
+        row.total_offering_amount_is_indefinite
+            .val(p.total_offering_amount_is_indefinite);
+        row.total_amount_sold.opt(p.total_amount_sold);
+        row.total_remaining.opt(p.total_remaining);
+        row.total_remaining_is_indefinite
+            .val(p.total_remaining_is_indefinite);
+        row.offering_sales_amounts_clarification
+            .nz(of(|o| o.offering_sales_amounts_clarification.as_str()));
+        row.has_non_accredited_investors
+            .opt(offering.map(|o| o.has_non_accredited_investors));
+        row.number_non_accredited_investors
+            .opt(p.number_non_accredited_investors);
+        row.total_number_already_invested
+            .opt(p.total_number_already_invested);
+        row.sales_commissions.opt(p.sales_commissions);
+        row.sales_commissions_is_estimate
+            .opt(offering.and_then(|o| o.sales_commissions_is_estimate));
+        row.finders_fees.opt(p.finders_fees);
+        row.finders_fees_is_estimate
+            .opt(offering.and_then(|o| o.finders_fees_is_estimate));
+        row.sales_commissions_clarification
+            .nz(of(|o| o.sales_commissions_clarification.as_str()));
+        row.gross_proceeds_used.opt(p.gross_proceeds_used);
+        row.gross_proceeds_used_is_estimate
+            .opt(offering.and_then(|o| o.gross_proceeds_used_is_estimate));
+        row.use_of_proceeds_clarification
+            .nz(of(|o| o.use_of_proceeds_clarification.as_str()));
+        row.authorized_representative
+            .opt(body.authorized_representative);
+        row.co_issuer_count.val(p.co_issuer_count);
+        row.related_person_count.val(p.related_person_count);
+        row.sales_recipient_count.val(p.sales_recipient_count);
+        row.has_parse_issues.val(p.has_parse_issues);
+
+        for (co_issuer, p) in body.issuers.iter().zip(&prepared.co_issuers) {
+            let row = self.form_d_co_issuers.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.co_issuer_index.val(p.co_issuer_index);
+            row.co_issuer_cik.nz(&co_issuer.cik);
+            row.co_issuer_name.nz(&co_issuer.entity_name);
+            row.co_issuer.append(co_issuer.address.as_ref());
+            row.co_issuer_phone.nz(&co_issuer.phone);
+            row.jurisdiction_of_inc.nz(&co_issuer.jurisdiction_of_inc);
+            row.entity_type.nz(&co_issuer.entity_type);
+            row.entity_type_other_desc
+                .nz(&co_issuer.entity_type_other_desc);
+            row.year_of_inc.opt(p.year_of_inc);
+            row.year_of_inc_status.nz(&co_issuer.year_of_inc_status);
+            row.previous_names
+                .items(co_issuer.previous_names.iter().map(String::as_str));
+            row.edgar_previous_names
+                .items(co_issuer.edgar_previous_names.iter().map(String::as_str));
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
+
+        // Positions `0..related_person_count`, checked in preflight.
+        for (person_index, person) in
+            (0..prepared.notice.related_person_count).zip(&body.related_persons)
+        {
+            let row = self.form_d_related_persons.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.person_index.val(person_index);
+            row.first_name.nz(&person.first_name);
+            row.middle_name.nz(&person.middle_name);
+            row.last_name.nz(&person.last_name);
+            row.person.append(person.address.as_ref());
+            row.relationships
+                .items(person.relationships.iter().map(String::as_str));
+            row.relationship_clarification
+                .nz(&person.relationship_clarification);
+        }
+
+        // Positions `0..sales_recipient_count`, checked in preflight.
+        for (recipient_index, recipient) in
+            (0..prepared.notice.sales_recipient_count).zip(&body.sales_compensation_recipients)
+        {
+            let row = self.form_d_sales_recipients.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.recipient_index.val(recipient_index);
+            row.recipient_name.nz(&recipient.name);
+            row.recipient_crd_number.nz(&recipient.crd_number);
+            row.associated_bd_name.nz(&recipient.associated_bd_name);
+            row.associated_bd_crd_number
+                .nz(&recipient.associated_bd_crd_number);
+            row.recipient.append(recipient.address.as_ref());
+            row.states_of_solicitation
+                .items(recipient.states_of_solicitation.iter().map(String::as_str));
+            row.foreign_solicitation.opt(recipient.foreign_solicitation);
+        }
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 4] {
