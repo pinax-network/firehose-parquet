@@ -417,9 +417,10 @@ pub(crate) mod fire {
 /// oracle::assert_matches(&["2026-03-16"], &["ownership_documents"], &[]);
 /// ```
 ///
-/// The oracle predates the critic fixes C2–C9 of `decisions.md`: three renamed
-/// columns are compared under their old names ([`oracle::RENAMED`]), the added
-/// `form_c_co_issuers.filer_cik` has no oracle value, and C2 (13F sequence
+/// The oracle may predate the critic fixes C2–C9 of `decisions.md`: three
+/// renamed columns are then compared under their old names
+/// ([`oracle::RENAMED`]), the added `form_c_co_issuers.filer_cik` has no
+/// oracle value (the prototype has both since the golden fixture), and C2 (13F sequence
 /// tokens `1.0`), C3 (`month_end` guard) and C4 (aggregate rules) may differ
 /// where the oracle was generated before them; pass such columns in `known`.
 pub(crate) mod oracle {
@@ -600,11 +601,16 @@ pub(crate) mod oracle {
                 serde_json::from_str(&line.unwrap()).expect("oracle JSON");
             for (index, field) in schema.fields().iter().enumerate() {
                 let name = field.name().as_str();
-                let oracle_name = RENAMED
+                // A regenerated oracle has the spec names; an older one the
+                // names of `RENAMED`.
+                let old_name = RENAMED
                     .iter()
                     .find(|(t, column, _)| *t == table && *column == name)
-                    .map_or(name, |(_, _, old)| *old);
-                let Some(expected) = expected.get(oracle_name) else {
+                    .map(|(_, _, old)| *old);
+                let Some(expected) = expected
+                    .get(name)
+                    .or_else(|| old_name.and_then(|old| expected.get(old)))
+                else {
                     if !report.absent.iter().any(|c| c == name) {
                         report.absent.push(name.to_string());
                     }

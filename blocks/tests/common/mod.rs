@@ -1,7 +1,8 @@
 //! Helpers shared by the tests that read fireparq's Delta tables with the
 //! target engines (#643): `engine_compat.rs`, `delta_tables.rs`,
-//! `delta_maintenance.rs`, `delta_recovery.rs`, `delta_readers.rs` and
-//! `non_final_stream.rs` (the live view of docs/non-final-streams.md).
+//! `delta_maintenance.rs`, `delta_recovery.rs`, `delta_readers.rs`,
+//! `non_final_stream.rs` (the live view of docs/non-final-streams.md) and
+//! `sec_docs_sql.rs` (the shipped views of docs/chains/sec.md).
 //!
 //! Readers and tools:
 //!
@@ -24,7 +25,9 @@
 //! Every process runs with a cleared environment.
 #![allow(dead_code)]
 
-use arrow::array::{Array, Decimal128Array, Int64Array, RecordBatch, TimestampMicrosecondArray};
+use arrow::array::{
+    Array, Date32Array, Decimal128Array, Int64Array, RecordBatch, TimestampMicrosecondArray,
+};
 use deltalake_core::checkpoints::create_checkpoint;
 use deltalake_core::operations::vacuum::VacuumMode;
 use deltalake_core::{DeltaTable, FilterOp, FilterValue};
@@ -420,17 +423,22 @@ pub fn int64<'a>(batch: &'a RecordBatch, column: &str) -> &'a Int64Array {
         .unwrap_or_else(|| panic!("{column} is not Int64"))
 }
 
-/// The minimum of an `Int64` or `decimal(20,0)` column over `batches`, as
-/// text.
+/// The minimum of an `Int64`, `decimal(p,s)` or `date` column over
+/// `batches`, as text: digits (with `s` decimals), or `YYYY-MM-DD`.
 pub fn minimum(batches: &[(String, RecordBatch)], column: &str) -> Option<String> {
     let mut minimum: Option<i128> = None;
+    let mut scale = None;
+    let mut is_date = false;
     for (_, batch) in batches {
         let array = batch.column_by_name(column).unwrap();
         let found = if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
             arrow::compute::min(values).map(i128::from)
         } else if let Some(values) = array.as_any().downcast_ref::<Decimal128Array>() {
-            assert_eq!(values.scale(), 0, "{column}");
+            scale = Some(values.scale());
             arrow::compute::min(values)
+        } else if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
+            is_date = true;
+            arrow::compute::min(values).map(i128::from)
         } else {
             panic!("{column}: {:?}", array.data_type())
         };
@@ -439,7 +447,28 @@ pub fn minimum(batches: &[(String, RecordBatch)], column: &str) -> Option<String
             (a, b) => a.or(b),
         };
     }
-    minimum.map(|value| value.to_string())
+    minimum.map(|value| {
+        if is_date {
+            let days = i32::try_from(value).unwrap();
+            return Date32Array::from(vec![days])
+                .value_as_date(0)
+                .unwrap()
+                .to_string();
+        }
+        match scale {
+            Some(scale) if scale > 0 => {
+                let unit = 10i128.pow(u32::try_from(scale).unwrap());
+                let sign = if value < 0 { "-" } else { "" };
+                format!(
+                    "{sign}{}.{:0width$}",
+                    (value / unit).abs(),
+                    (value % unit).abs(),
+                    width = scale as usize
+                )
+            }
+            _ => value.to_string(),
+        }
+    })
 }
 
 /// The largest `timestamp` over `batches`, in microseconds.

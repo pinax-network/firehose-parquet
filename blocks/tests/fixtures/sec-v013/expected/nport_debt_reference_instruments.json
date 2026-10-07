@@ -1,0 +1,7 @@
+{
+  "table": "nport_debt_reference_instruments",
+  "columns": ["block_num", "block_id", "parent_num", "parent_id", "lib_num", "timestamp", "date", "filing_index", "accession_number", "form_type", "filing_date", "acceptance_datetime", "series_id", "as_of_date", "holding_index", "reference_index", "reference_name", "reference_title", "currency", "cusip", "cusip_norm", "isin", "ticker", "other_identifiers"],
+  "rows": [
+    {"block_num":2979883,"block_id":"2979883","parent_num":2979882,"parent_id":"2979882","lib_num":2979882,"timestamp":"2026-08-28 15:10:00","date":"2026-08-28","filing_index":0,"accession_number":"0000910472-26-013496","form_type":"NPORT-P","filing_date":"2026-08-28","acceptance_datetime":"2026-08-28 15:17:58","series_id":"S000045921","as_of_date":"2026-06-30","holding_index":0,"reference_index":0,"reference_name":"PennyMac Mortgage Investment Trust","reference_title":"PennyMac Mortgage Investment Trust COM","currency":"USD","cusip":"70931T103","cusip_norm":"70931T103","isin":null,"ticker":null,"other_identifiers":[]}
+  ]
+}
