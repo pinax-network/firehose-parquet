@@ -95,8 +95,18 @@ pub mod protocol {
     include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 
+// SEC EDGAR (pinax/firehose-sec)
+pub mod pinax {
+    pub mod sec {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/pinax.sec.v1.rs"));
+        }
+    }
+}
+
 // Convenience aliases
 pub use cosmos_sdk::tx::v1beta1 as cosmos_tx;
+pub use pinax::sec::v1 as sec;
 pub use sf::antelope::r#type::v1 as antelope;
 pub use sf::beacon::r#type::v1 as beacon;
 pub use sf::bitcoin::r#type::v1 as btc;

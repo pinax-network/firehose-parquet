@@ -109,6 +109,7 @@ fn chain_title(kind: ChainKind) -> &'static str {
         ChainKind::Cosmos => "Cosmos",
         ChainKind::Tron => "Tron",
         ChainKind::Beacon => "Beacon",
+        ChainKind::Sec => "SEC EDGAR",
     }
 }
 
@@ -127,6 +128,20 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
         ChainKind::Bitcoin => &[
             "`outputs.value_sats` is a checked `long`, not a `decimal(20,0)`: consensus caps \
              it at 2.1·10^15 satoshis (`MAX_MONEY`).",
+        ],
+        ChainKind::Sec => &[
+            "`block_id` and `parent_id` are decimal 10-minute window numbers (`\"2984687\"`, \
+             `block_num = unix_seconds / 600`), written verbatim, not hashes. A feed day has 144 \
+             windows, empty ones included: every window has a `blocks` row.",
+            "Amounts are typed decimals in five `decimal(38,s)` scale families (M2 = 2, Q6 = 6, \
+             N10 = 10, R12 = 12, S16 = 16), dates are `date`, and XSD integers are `integer` or \
+             `long`. Every source value that a typed column does not reproduce exactly \
+             (unparseable, sentinel, out of range, rounded, dropped time zone, overflow) has one \
+             `parse_issues` row with the verbatim text, and its row has `has_parse_issues`.",
+            "Rows are keyed `(block_num, filing_index[, child positions])`. `accession_number` is \
+             not unique, because EDGAR re-disseminates filings: use the `sec_filings_first` view.",
+            "13F `value` is raw (thousands before 2023-01-03, dollars after, with filer \
+             exceptions): use the `sec_13f_holdings_usd` view.",
         ],
         ChainKind::Solana
         | ChainKind::Near
@@ -551,18 +566,35 @@ fn canonical_description(column: &str) -> Option<&'static str> {
 
 fn column_description(kind: ChainKind, table: &str, column: &str) -> Option<&'static str> {
     canonical_description(column).or_else(|| {
-        COLUMN_DESCRIPTIONS
-            .iter()
+        column_descriptions()
             .find(|(k, t, c, _)| *k == kind && *t == table && *c == column)
-            .map(|(_, _, _, description)| *description)
+            .map(|(_, _, _, description)| description)
     })
 }
 
 fn table_description(kind: ChainKind, table: &str) -> Option<&'static str> {
-    TABLE_DESCRIPTIONS
-        .iter()
+    table_descriptions()
         .find(|(k, t, _)| *k == kind && *t == table)
-        .map(|(_, _, description)| *description)
+        .map(|(_, _, description)| description)
+}
+
+/// [`TABLE_DESCRIPTIONS`] and the SEC table descriptions, which live beside
+/// their columns in `blocks/src/sec/schema/`.
+fn table_descriptions() -> impl Iterator<Item = (ChainKind, &'static str, &'static str)> {
+    TABLE_DESCRIPTIONS.iter().copied().chain(
+        crate::sec::schema::table_descriptions()
+            .map(|(table, description)| (ChainKind::Sec, table, description)),
+    )
+}
+
+/// [`COLUMN_DESCRIPTIONS`] and the SEC column descriptions (every SEC column
+/// is described in `blocks/src/sec/schema/`).
+fn column_descriptions(
+) -> impl Iterator<Item = (ChainKind, &'static str, &'static str, &'static str)> {
+    COLUMN_DESCRIPTIONS.iter().copied().chain(
+        crate::sec::schema::column_descriptions()
+            .map(|(table, column, description)| (ChainKind::Sec, table, column, description)),
+    )
 }
 
 /// Every description must name a column (or table) that exists, so a renamed or
@@ -575,15 +607,15 @@ fn check_descriptions(references: &[ChainReference]) -> Result<()> {
             .flat_map(|reference| &reference.tables)
             .find(|t| t.name == table)
     };
-    for (kind, table, _) in TABLE_DESCRIPTIONS {
+    for (kind, table, _) in table_descriptions() {
         ensure!(
-            has_table(*kind, table).is_some(),
+            has_table(kind, table).is_some(),
             "schema_docs: table description for {kind}.{table} names no table"
         );
     }
-    for (kind, table, column, _) in COLUMN_DESCRIPTIONS {
+    for (kind, table, column, _) in column_descriptions() {
         ensure!(
-            has_table(*kind, table).is_some_and(|t| t.columns.iter().any(|c| c.name == *column)),
+            has_table(kind, table).is_some_and(|t| t.columns.iter().any(|c| c.name == column)),
             "schema_docs: column description for {kind}.{table}.{column} names no column"
         );
     }
@@ -1377,7 +1409,7 @@ fn render_mapping(reference: &ChainReference, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{antelope, beacon, bitcoin, cosmos, evm, near, solana, tron};
+    use crate::{antelope, beacon, bitcoin, cosmos, evm, near, sec, solana, tron};
 
     /// The first line where `committed` and `rendered` differ, for the failure message.
     fn first_difference(committed: &str, rendered: &str) -> String {
@@ -1522,6 +1554,7 @@ mod tests {
             (ChainKind::Cosmos, &cosmos::schema::TABLE_NAMES[..]),
             (ChainKind::Near, &near::schema::TABLE_NAMES[..]),
             (ChainKind::Tron, &tron::schema::TABLE_NAMES[..]),
+            (ChainKind::Sec, &sec::schema::TABLE_NAMES[..]),
         ] {
             assert_eq!(names(kind, all), expect(constants), "{kind}");
             assert_eq!(names(kind, base), expect(constants), "{kind}");

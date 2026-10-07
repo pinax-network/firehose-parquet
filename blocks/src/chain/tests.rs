@@ -13,8 +13,9 @@ mod legacy {
     use anyhow::{anyhow, Result};
     use firehose_parquet::grpc::EndpointInfo;
 
+    // Post-#526 families are appended explicitly: sec.
     pub const BLOCK_TYPES: &[&str] = &[
-        "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+        "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon", "sec",
     ];
 
     pub fn output_encoding_policy_bytes(
@@ -23,7 +24,8 @@ mod legacy {
     ) -> Option<EncodeBytes> {
         match block_type {
             "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
-            "evm" | "bitcoin" | "cosmos" | "beacon" => Some(EncodeBytes::Hex),
+            // post-#526 family: sec
+            "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" => Some(EncodeBytes::Hex),
             "antelope" => Some(EncodeBytes::HexNoPrefix),
             "solana" | "near" => Some(EncodeBytes::Base58),
             "tron" => Some(EncodeBytes::TronBase58),
@@ -50,6 +52,10 @@ mod legacy {
         for candidate in candidates {
             if candidate.eq_ignore_ascii_case("tron-evm") {
                 return Some("evm");
+            }
+            // post-#526 family: sec (exact name only)
+            if candidate == "sec" {
+                return Some("sec");
             }
             if candidate.contains("beacon") {
                 return Some("beacon");
@@ -91,6 +97,8 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
+            // post-#526 family: sec
+            "sec" => BlockFamily::Sec,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
     }
@@ -112,6 +120,9 @@ mod legacy {
             Ok("tron".to_string())
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
+        } else if type_url.contains("pinax.sec.") {
+            // post-#526 family: sec
+            Ok("sec".to_string())
         } else {
             Err(anyhow!(
                 "unable to auto-detect block type from type_url: {type_url}"
@@ -203,6 +214,11 @@ mod legacy {
                 include_fork_step,
                 encode_bytes,
             ))),
+            // post-#526 family: sec
+            "sec" => Ok(Box::new(SecBlockMapper::new(
+                include_fork_step,
+                encode_bytes,
+            ))),
             other => Err(anyhow!(
                 "unsupported block type: {other}. Supported: {}",
                 BLOCK_TYPES.join(", ")
@@ -220,6 +236,7 @@ const TYPE_URLS: &[&str] = &[
     "type.googleapis.com/sf.cosmos.type.v2.Block",
     "type.googleapis.com/sf.tron.type.v1.Block",
     "type.googleapis.com/sf.beacon.type.v1.Block",
+    "type.googleapis.com/pinax.sec.v1.Block",
     "type.googleapis.com/sf.unknown.type.v1.Block",
     "type.googleapis.com/sf.firehose.v2.Response",
     "",
@@ -229,7 +246,7 @@ const TYPE_URLS: &[&str] = &[
 /// precedence is exercised as well as each rule.
 const KEYWORDS: &[&str] = &[
     "beacon", "solana", "bitcoin", "near", "antelope", "eos", "cosmos", "tron", "ethereum", "evm",
-    "mainnet", "tron-evm", "btc", "cl", "eth",
+    "mainnet", "tron-evm", "btc", "cl", "eth", "sec",
 ];
 
 /// Names that exercise strict matching, case folding and substring traps.
@@ -259,6 +276,10 @@ const EXTRA_NAMES: &[&str] = &[
     "geoscience",
     "cosmoshub-4",
     "gnosis-cl",
+    "SEC",
+    "sec-edgar",
+    "secret-4",
+    "pinax.sec.",
 ];
 
 fn name_corpus() -> Vec<String> {
@@ -576,15 +597,25 @@ fn inventory_lines_with(
 }
 
 fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -> String {
-    schema_digest_where(|_| true, project)
+    schema_digest_where(|_| true, |_| true, project)
+}
+
+/// The eight families that existed when the historical digests were pinned.
+/// Families added later (sec) are left out, so those pins stay byte-identical.
+fn pre_sec_family(kind: ChainKind) -> bool {
+    kind != ChainKind::Sec
 }
 
 fn schema_digest_where(
+    include_family: impl Fn(ChainKind) -> bool,
     include: impl Fn(&MapperOptions) -> bool,
     project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
 ) -> String {
     let mut hasher = Sha256::new();
-    for kind in ChainKind::ALL {
+    for kind in ChainKind::ALL
+        .into_iter()
+        .filter(|kind| include_family(*kind))
+    {
         for options in option_matrix()
             .into_iter()
             .filter(|options| include(options))
@@ -640,7 +671,7 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 }
 
 /// SHA-256 over every family's table inventory and complete Arrow schemas for
-/// all 160 option/encoding combinations. Update the pinned value only for an
+/// all 160 option/encoding combinations of each of the nine families. Update the pinned value only for an
 /// intentional schema change, and record that change.
 #[test]
 fn every_mapper_schema_matches_the_pinned_digest() {
@@ -653,11 +684,13 @@ fn every_mapper_schema_matches_the_pinned_digest() {
 /// The final-only half of the matrix (`--final-blocks-only=true`, no
 /// `fork_step`). The pinned value was produced by the same loop on origin/main
 /// `081dea5`, before `stream_ordinal`: adding it left every final-only schema,
-/// and so every final-only protected table digest, byte-identical.
+/// and so every final-only protected table digest, byte-identical. It covers
+/// the eight families of that commit; later families (sec) are left out.
 #[test]
 fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
     assert_eq!(
         schema_digest_where(
+            pre_sec_family,
             |options| !options.include_fork_step,
             |_, _, schema| Some(schema.clone())
         ),
@@ -669,11 +702,12 @@ fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
 /// schema of every family and option is exactly the pre-#550 schema, except the
 /// restructured NEAR `state_changes`, which both sides leave out. The pinned value was produced by
 /// the same loop, with the same table left out, on origin/main `8462692` (after
-/// #526, before #550).
+/// #526, before #550). It covers the eight families of that commit; later
+/// families (sec) are left out.
 #[test]
 fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
-        schema_digest(without_appended_columns),
+        schema_digest_where(pre_sec_family, |_| true, without_appended_columns),
         PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED
     );
 }
@@ -729,7 +763,7 @@ fn decimal_columns_name_unsigned_columns_of_their_family() {
 }
 
 /// SHA-256 over every family's Delta data file schemas (#643) for all 160
-/// option/encoding combinations: the mapper schemas above, mapped by each
+/// option/encoding combinations of each family: the mapper schemas above, mapped by each
 /// profile's `delta_types()`. Update the pinned value only for an intentional
 /// change of a Delta column type, and record that change.
 #[test]
@@ -746,10 +780,10 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
 }
 
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "98b767b5b0469e6f49df5c5ce61b55aee7089a2760a0c1db315bbd0e32ff7406";
+    "628f1ccf604ae05cf8388e1cf53277c2977cea8316e3dbf85a1019842ae354b7";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
+    "73e83bcbe9547fb43ccd9394c539602b042f929d70829396e007571eb7698a71";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
     "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";

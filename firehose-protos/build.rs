@@ -34,6 +34,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 proto_root.join("tron_contract.proto"),
                 // Beacon
                 proto_root.join("beacon.proto"),
+                // SEC (EDGAR): package pinax.sec.v1, imports by path under proto/
+                proto_root.join("pinax/sec/v1/block.proto"),
+                proto_root.join("pinax/sec/v1/ownership.proto"),
+                proto_root.join("pinax/sec/v1/form13f.proto"),
+                proto_root.join("pinax/sec/v1/beneficial.proto"),
+                proto_root.join("pinax/sec/v1/form144.proto"),
+                proto_root.join("pinax/sec/v1/nport.proto"),
+                proto_root.join("pinax/sec/v1/formd.proto"),
+                proto_root.join("pinax/sec/v1/npx.proto"),
+                proto_root.join("pinax/sec/v1/ncen.proto"),
+                proto_root.join("pinax/sec/v1/formc.proto"),
             ],
             &[proto_root],
         )?;

@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form C — Regulation Crowdfunding offering statement (and family: C-U, C-AR,
+// C-TR, C-W). Structured XML. Models issuer, intermediary (funding portal),
+// and offering terms.
+message FormCNotice {
+  string filer_cik                  = 1;
+  FormCIssuer issuer                = 2;
+  string intermediary_company_name  = 3; // companyName (portal)
+  string intermediary_cik           = 4; // commissionCik
+  string intermediary_file_number   = 5; // commissionFileNumber
+  FormCOffering offering             = 6;
+
+  // --- Added in 0.13.0 ---
+  FormCFinancials financials        = 7;  // annualReportDisclosureRequirements (C, C-AR, ...)
+  string intermediary_crd_number    = 8;  // issuerInformation/crdNumber
+  optional bool is_amendment        = 9;  // issuerInformation/isAmendment
+  string nature_of_amendment        = 10; // issuerInformation/natureOfAmendment
+  string progress_update            = 11; // issuerInformation/progressUpdate (C-U)
+  optional bool is_co_issuer        = 12; // issuerInformation/isCoIssuer
+  repeated FormCIssuer co_issuers   = 13; // issuerInformation/coIssuers/coIssuerInfo
+  repeated string offering_jurisdictions = 14; // annualReportDisclosureRequirements/issueJurisdictionSecuritiesOffering
+  FormCSignature issuer_signature   = 15; // signatureInfo/issuerSignature (issuer, issuerSignature, issuerTitle)
+  repeated FormCSignature person_signatures = 16; // signatureInfo/signaturePersons/signaturePerson
+  string period                     = 17; // headerData/filerInfo/period (C-AR fiscal period end), raw MM-DD-YYYY
+}
+
+// One Form C signature. The issuer signature fills issuer/signature/title; a
+// signaturePerson fills signature (personSignature), title (personTitle) and date
+// (signatureDate, raw MM-DD-YYYY).
+message FormCSignature {
+  string issuer    = 1;
+  string signature = 2;
+  string title     = 3;
+  string date      = 4;
+}
+
+// annualReportDisclosureRequirements: most recent and prior fiscal year, raw.
+message FormCFinancials {
+  string current_employees          = 1;
+  string total_assets_most_recent_fy    = 2;
+  string total_assets_prior_fy          = 3;
+  string cash_equivalents_most_recent_fy = 4;
+  string cash_equivalents_prior_fy       = 5;
+  string accounts_receivable_most_recent_fy = 6; // actReceived...
+  string accounts_receivable_prior_fy       = 7;
+  string short_term_debt_most_recent_fy = 8;
+  string short_term_debt_prior_fy       = 9;
+  string long_term_debt_most_recent_fy  = 10;
+  string long_term_debt_prior_fy        = 11;
+  string revenue_most_recent_fy         = 12;
+  string revenue_prior_fy               = 13;
+  string cost_goods_sold_most_recent_fy = 14;
+  string cost_goods_sold_prior_fy       = 15;
+  string tax_paid_most_recent_fy        = 16;
+  string tax_paid_prior_fy              = 17;
+  string net_income_most_recent_fy      = 18;
+  string net_income_prior_fy            = 19;
+}
+
+message FormCIssuer {
+  string  name                = 1; // nameOfIssuer
+  string  legal_status_form   = 2;
+  string  jurisdiction        = 3; // jurisdictionOrganization
+  string  date_incorporation  = 4;
+  Address address             = 5;
+  string  website             = 6; // issuerWebsite
+  string  legal_status_other_desc = 7; // legalStatusOtherDesc (0.13.0+)
+}
+
+message FormCOffering {
+  string security_type             = 1; // securityOfferedType
+  string num_securities_offered    = 2; // noOfSecurityOffered
+  string price                     = 3;
+  string offering_amount           = 4;
+  string maximum_offering_amount   = 5;
+  bool   over_subscription_accepted = 6;
+  string deadline_date             = 7;
+  string compensation_amount       = 8; // free text, not a number
+
+  // --- Added in 0.13.0 ---
+  string security_offered_other_desc       = 9;  // securityOfferedOtherDesc (e.g. "SAFE")
+  string over_subscription_allocation_type = 10; // overSubscriptionAllocationType
+  string desc_over_subscription            = 11; // descOverSubscription
+  string price_determination_method        = 12; // priceDeterminationMethod
+  string financial_interest                = 13; // financialInterest
+}

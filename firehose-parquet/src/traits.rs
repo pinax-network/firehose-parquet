@@ -255,6 +255,31 @@ impl PreparedIdentity {
         })
     }
 
+    /// Prepare `identity` with block and parent ids that are already text (for
+    /// example SEC's decimal window numbers): written verbatim under a text
+    /// encoding, and as their UTF-8 bytes under `Binary`. Unlike
+    /// [`PreparedIdentity::new`], the ids are never hex-decoded.
+    pub fn with_text_ids(
+        identity: &BlockIdentity,
+        block_id: &str,
+        parent_id: &str,
+        encoding: &EncodeBytes,
+    ) -> Result<Self> {
+        let text = |id: &str| match encoding {
+            EncodeBytes::Binary => EncodedBytes::Binary(id.as_bytes().to_vec()),
+            other => EncodedBytes::String(id.to_owned(), other.clone()),
+        };
+        Ok(Self {
+            block_num: identity.block_num,
+            parent_num: identity.parent_num,
+            lib_num: identity.lib_num,
+            timestamp_millis: Some(identity.timestamp_millis()?),
+            date: Some(date32_from_timestamp_seconds(identity.timestamp)?),
+            block_id: text(block_id),
+            parent_id: text(parent_id),
+        })
+    }
+
     /// Replace the block time with an optional time in whole unix seconds. `None`
     /// (e.g. a Solana block without `block_time`) writes null `timestamp` and
     /// `date` values.
@@ -314,6 +339,17 @@ impl CanonicalBuilder {
         parent_id: &[u8],
     ) -> Result<PreparedIdentity> {
         PreparedIdentity::with_ids(identity, block_id, parent_id, &self.block_id.encoding())
+    }
+
+    /// Prepare `identity` with block and parent ids that are already text, in
+    /// this builder's encoding (see [`PreparedIdentity::with_text_ids`]).
+    pub fn prepare_with_text_ids(
+        &self,
+        identity: &BlockIdentity,
+        block_id: &str,
+        parent_id: &str,
+    ) -> Result<PreparedIdentity> {
+        PreparedIdentity::with_text_ids(identity, block_id, parent_id, &self.block_id.encoding())
     }
 
     /// Append one row.
@@ -1109,6 +1145,62 @@ mod tests {
                 "{encoding:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_prepare_with_text_ids_writes_text_ids_verbatim() {
+        use arrow::array::{Array, StringArray};
+        let identity = BlockIdentity {
+            block_num: 2_984_687,
+            block_id: "2984687".to_string(),
+            parent_num: 2_984_686,
+            parent_id: "2984686".to_string(),
+            lib_num: 2_984_686,
+            timestamp: 1_790_812_200,
+            timestamp_nanos: 0,
+            fork_step: None,
+        };
+        for encoding in all_encodings() {
+            let mut builder = CanonicalBuilder::with_encoding(&encoding);
+            let prepared = builder
+                .prepare_with_text_ids(&identity, &identity.block_id, &identity.parent_id)
+                .unwrap();
+            builder.append(&prepared);
+            let columns = builder.finish();
+            match encoding {
+                EncodeBytes::Binary => {
+                    let ids = columns[1].as_any().downcast_ref::<BinaryArray>().unwrap();
+                    let parents = columns[3].as_any().downcast_ref::<BinaryArray>().unwrap();
+                    assert_eq!(ids.value(0), b"2984687");
+                    assert_eq!(parents.value(0), b"2984686");
+                }
+                _ => {
+                    let ids = columns[1].as_any().downcast_ref::<StringArray>().unwrap();
+                    let parents = columns[3].as_any().downcast_ref::<StringArray>().unwrap();
+                    assert_eq!(ids.value(0), "2984687", "{encoding:?}");
+                    assert_eq!(parents.value(0), "2984686", "{encoding:?}");
+                }
+            }
+            let dates = columns[6].as_any().downcast_ref::<Date32Array>().unwrap();
+            assert_eq!(dates.value(0), 20_726);
+            assert_eq!(columns[0].len(), 1);
+        }
+
+        // Invalid identity times fail exactly like the other prepare paths.
+        let bad_seconds = BlockIdentity {
+            timestamp: i64::MAX,
+            ..identity.clone()
+        };
+        assert!(CanonicalBuilder::new()
+            .prepare_with_text_ids(&bad_seconds, "1", "0")
+            .is_err());
+        let bad_nanos = BlockIdentity {
+            timestamp_nanos: 1_000_000_000,
+            ..identity
+        };
+        assert!(CanonicalBuilder::new()
+            .prepare_with_text_ids(&bad_nanos, "1", "0")
+            .is_err());
     }
 
     #[test]

@@ -28,6 +28,7 @@ use crate::bitcoin::mapper::BitcoinBlockMapper;
 use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
 use crate::near::mapper::NearBlockMapper;
+use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
 use crate::tron::mapper::TronBlockMapper;
 
@@ -42,6 +43,7 @@ pub enum ChainKind {
     Cosmos,
     Tron,
     Beacon,
+    Sec,
 }
 
 /// How a family treats extended output and `--without-extended`.
@@ -344,6 +346,28 @@ const BEACON: ChainProfile = ChainProfile {
     decimal_columns: BEACON_DECIMALS,
 };
 
+const SEC: ChainProfile = ChainProfile {
+    label: "sec",
+    // The Any type URL is `type.googleapis.com/pinax.sec.v1.Block`; a bare
+    // `sec` marker would be a needless substring trap.
+    type_url_marker: "pinax.sec.",
+    family: BlockFamily::Sec,
+    // No SEC field is hash or address bytes: the encoding only makes
+    // `block_id`/`parent_id` text, written verbatim (decimal window numbers).
+    bytes_encoding: EncodeBytes::Hex,
+    tron_style_bytes_encoding: None,
+    nullable_timestamps: false,
+    // firesec emits every 10-minute window, empty ones included.
+    block_number_gaps: false,
+    extended: ExtendedOutput::NotMapped,
+    vote_transactions: false,
+    failed_transactions_by_default: false,
+    strict_chain_names: &[],
+    strict_chain_name_prefixes: &[],
+    // No UInt64 domain column and no native Decimal128(20,0).
+    decimal_columns: &[],
+};
+
 /// One ordered chain-name inference rule, matched against a lowercase name.
 #[derive(Clone, Copy, Debug)]
 pub enum NameRule {
@@ -365,6 +389,8 @@ impl NameRule {
 /// resolves to EVM before the `tron` rule is tried.
 pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
     (NameRule::Exact("tron-evm"), ChainKind::Evm),
+    // `Contains("sec")` would also catch names such as `secret-*`.
+    (NameRule::Exact("sec"), ChainKind::Sec),
     (NameRule::Contains("beacon"), ChainKind::Beacon),
     (NameRule::Contains("solana"), ChainKind::Solana),
     (NameRule::Contains("bitcoin"), ChainKind::Bitcoin),
@@ -395,7 +421,7 @@ pub struct MapperOptions {
 
 impl ChainKind {
     /// Every family, in `type_url` detection and `--block-type` help order.
-    pub const ALL: [ChainKind; 8] = [
+    pub const ALL: [ChainKind; 9] = [
         ChainKind::Evm,
         ChainKind::Bitcoin,
         ChainKind::Solana,
@@ -404,6 +430,7 @@ impl ChainKind {
         ChainKind::Cosmos,
         ChainKind::Tron,
         ChainKind::Beacon,
+        ChainKind::Sec,
     ];
 
     pub fn profile(self) -> &'static ChainProfile {
@@ -416,6 +443,7 @@ impl ChainKind {
             ChainKind::Cosmos => &COSMOS,
             ChainKind::Tron => &TRON,
             ChainKind::Beacon => &BEACON,
+            ChainKind::Sec => &SEC,
         }
     }
 
@@ -520,6 +548,7 @@ impl ChainKind {
                 include_failed_transactions,
             )),
             ChainKind::Beacon => Box::new(BeaconBlockMapper::new(include_fork_step, encode_bytes)),
+            ChainKind::Sec => Box::new(SecBlockMapper::new(include_fork_step, encode_bytes)),
         }
     }
 }

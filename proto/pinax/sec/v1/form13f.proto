@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form 13F-HR / 13F-NT. Faithful to primary_doc.xml (cover + summary) and
+// infotable.xml. The holding `value` is the RAW XML string (NOT x1000) —
+// pre-2023 filings report thousands, post-2023 whole dollars; left downstream.
+message Form13fReport {
+  CoverPage   cover_page       = 1;
+  SummaryPage summary_page     = 2;  // absent on 13F-NT
+  // Rows of the document whose SGML <TYPE> is "INFORMATION TABLE" (0.13.0+; before,
+  // the table was found by file name and ~40% of 13F-HR came out empty).
+  repeated InfoTableEntry holdings = 3;
+  Form13fSignature signature   = 4;  // formData/signatureBlock (0.13.0+)
+}
+
+message Form13fSignature {
+  string name           = 1;
+  string title          = 2;
+  string phone          = 3;
+  string signature      = 4;
+  string city           = 5;
+  string state          = 6;  // stateOrCountry (EDGAR code)
+  string signature_date = 7;  // raw (MM-DD-YYYY as filed)
+}
+
+message CoverPage {
+  string        report_type         = 1;  // "13F HOLDINGS REPORT" | "13F NOTICE" | ...
+  // coverPage/form13FFileNumber: the filing manager's own 028- number. 0.12.x
+  // overwrote it with the last coverPage/otherManagersInfo number (13F-NT /
+  // combination reports); 0.13.0+ keeps the manager's own.
+  string        form13f_file_number = 2;
+  string        period_of_report    = 3;  // YYYY-MM-DD (normalized from MM-DD-YYYY)
+  FilingManager filing_manager      = 4;
+  bool          is_amendment        = 5;
+  string        amendment_type      = 6;
+  string        amendment_number    = 7;
+  string        provide_info_for_instruction5 = 8;
+  // --- 0.13.0+ ---
+  string        crd_number             = 9;  // coverPage/crdNumber
+  string        sec_file_number        = 10; // coverPage/secFileNumber
+  string        additional_information = 11; // coverPage/additionalInformation (free text)
+  // coverPage/otherManagersInfo/otherManager: other managers reporting holdings
+  // for this manager (13F NOTICE / COMBINATION REPORT). No sequence numbers.
+  repeated OtherManager other_managers = 12;
+}
+
+message FilingManager {
+  string  cik     = 1;  // 10-pad
+  string  name    = 2;
+  Address address = 3;  // reuses ownership.Address (same package)
+}
+
+message SummaryPage {
+  uint32 other_included_managers_count = 1;
+  uint32 table_entry_total             = 2;
+  string table_value_total             = 3;  // raw
+  repeated OtherManager other_managers = 4;  // otherManagers2Info/otherManager2
+  optional bool is_confidential_omitted = 5; // isConfidentialOmitted (0.13.0+)
+}
+
+message OtherManager {
+  string cik                 = 1;
+  string name                = 2;
+  string form13f_file_number = 3;
+  // --- 0.13.0+ ---
+  // summaryPage otherManager2/sequenceNumber: the key InfoTableEntry.other_manager_ids
+  // refers to. Empty for coverPage other managers.
+  string sequence_number     = 4;
+  string crd_number          = 5;
+  string sec_file_number     = 6;
+}
+
+message InfoTableEntry {
+  string         name_of_issuer        = 1;
+  string         title_of_class        = 2;
+  string         cusip                 = 3;  // 9-char
+  string         figi                  = 4;
+  string         value                 = 5;  // RAW (not x1000)
+  ShrsOrPrnAmt   shares_or_principal   = 6;
+  string         put_call              = 7;  // raw as filed: "Put" | "Call" (case varies) | ""
+  string         investment_discretion = 8;  // SOLE | DFND | OTR
+  repeated string other_manager_ids    = 9;
+  VotingAuthority voting_authority     = 10;
+}
+
+message ShrsOrPrnAmt {
+  string amount = 1;  // sshPrnamt
+  string type   = 2;  // SH | PRN
+}
+
+message VotingAuthority {
+  string sole   = 1;
+  string shared = 2;
+  string none   = 3;
+}

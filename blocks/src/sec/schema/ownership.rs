@@ -1,0 +1,723 @@
+//! Table specs generated from the final specification §3 (`final-spec.md`).
+//! Edit only to fix a divergence from the specification; regenerate
+//! `docs/schemas/sec.md` and re-pin the chain schema digests afterwards.
+
+#[allow(unused_imports)]
+use super::{Col, Family, Member, TableSpec, Ty};
+
+/// §3.9 `ownership_documents`.
+pub(crate) const OWNERSHIP_DOCUMENTS: TableSpec = TableSpec {
+    name: super::OWNERSHIP_DOCUMENTS,
+    doc: "Form 3/4/5 header: issuer, 10b5-1 flag and counts.",
+    filing_context: true,
+    cols: &[
+        Col::new(
+            "issuer_cik",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.issuer.cik`. 10-pad; = filings.cik.",
+        ),
+        Col::new(
+            "issuer_name",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.issuer.name`.",
+        ),
+        Col::new(
+            "issuer_trading_symbol",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.issuer.trading_symbol`. Free text as filed (`NONE`, lower case, several tickers).",
+        ),
+        Col::new(
+            "issuer_foreign_trading_symbol",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.issuer.foreign_trading_symbol`.",
+        ),
+        Col::new(
+            "schema_version",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.schema_version`. `X0508`, `X0609`…",
+        ),
+        Col::new(
+            "document_type",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.document_type`. `3`/`4`/`5` (+`/A`).",
+        ),
+        Col::new(
+            "period_of_report",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.period_of_report`: date (§4.2).",
+        ),
+        Col::new(
+            "not_subject_to_section16",
+            Ty::Boolean,
+            false,
+            "`Filing.body.ownership.not_subject_to_section16`: proto bool (false = false or absent).",
+        ),
+        Col::new(
+            "aff_10b5_one",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.aff_10b5_one`: optional bool: NULL when unset. Rule 10b5-1(c) plan box (schema X0508+); NULL = element absent.",
+        ),
+        Col::new(
+            "no_securities_owned",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.no_securities_owned`: optional bool: NULL when unset. Form 3.",
+        ),
+        Col::new(
+            "form3_holdings_reported",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.form3_holdings_reported`: optional bool: NULL when unset. Form 5.",
+        ),
+        Col::new(
+            "form4_transactions_reported",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.form4_transactions_reported`: optional bool: NULL when unset. Form 5.",
+        ),
+        Col::new(
+            "date_of_original_submission",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.date_of_original_submission`: date (§4.2). 3/A, 4/A, 5/A.",
+        ),
+        Col::new(
+            "remarks",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.remarks`.",
+        ),
+        Col::new(
+            "reporting_owner_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[]`: length of the list. >1 = joint filing.",
+        ),
+        Col::new(
+            "non_derivative_transaction_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.non_derivative_transactions[]`: length of the list.",
+        ),
+        Col::new(
+            "derivative_transaction_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.derivative_transactions[]`: length of the list.",
+        ),
+        Col::new(
+            "non_derivative_holding_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.non_derivative_holdings[]`: length of the list.",
+        ),
+        Col::new(
+            "derivative_holding_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.derivative_holdings[]`: length of the list.",
+        ),
+        Col::new(
+            "footnote_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.footnotes[]`: length of the list.",
+        ),
+        Col::new(
+            "owner_signature_count",
+            Ty::UInt32,
+            false,
+            "Derived from `Filing.body.ownership.owner_signatures[]`: length of the list.",
+        ),
+        Col::new(
+            "has_parse_issues",
+            Ty::Boolean,
+            false,
+            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+        ),
+    ],
+};
+
+/// §3.10 `ownership_reporting_owners`.
+pub(crate) const OWNERSHIP_REPORTING_OWNERS: TableSpec = TableSpec {
+    name: super::OWNERSHIP_REPORTING_OWNERS,
+    doc: "Insiders of each Form 3/4/5, with their roles.",
+    filing_context: true,
+    cols: &[
+        Col::new(
+            "issuer_cik",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_cik`.",
+        ),
+        Col::new(
+            "issuer_trading_symbol",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_trading_symbol`.",
+        ),
+        Col::new(
+            "owner_index",
+            Ty::UInt32,
+            false,
+            "Derived: position in `reporting_owners`.",
+        ),
+        Col::new(
+            "owner_cik",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].cik`. 10-pad.",
+        ),
+        Col::new(
+            "owner_name",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].name`. \"LAST FIRST MIDDLE\" as filed.",
+        ),
+        Col::new(
+            "owner_street1",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.street1`.",
+        ),
+        Col::new(
+            "owner_street2",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.street2`.",
+        ),
+        Col::new(
+            "owner_city",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.city`.",
+        ),
+        Col::new(
+            "owner_state",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.state`. EDGAR state/country code.",
+        ),
+        Col::new(
+            "owner_zip_code",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.zip_code`. Text (keeps leading zeros).",
+        ),
+        Col::new(
+            "owner_state_description",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.state_description`. Filled only by Forms 3/4/5 and D.",
+        ),
+        Col::new(
+            "owner_country",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.country`.",
+        ),
+        Col::new(
+            "owner_non_us_state_territory",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].address.non_us_state_territory`.",
+        ),
+        Col::new(
+            "is_director",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.is_director`: proto bool; NULL when `relationship` is absent.",
+        ),
+        Col::new(
+            "is_officer",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.is_officer`: proto bool; NULL when `relationship` is absent.",
+        ),
+        Col::new(
+            "is_ten_percent_owner",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.is_ten_percent_owner`: proto bool; NULL when `relationship` is absent.",
+        ),
+        Col::new(
+            "is_other",
+            Ty::Boolean,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.is_other`: proto bool; NULL when `relationship` is absent.",
+        ),
+        Col::new(
+            "officer_title",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.officer_title`.",
+        ),
+        Col::new(
+            "other_text",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.reporting_owners[].relationship.other_text`.",
+        ),
+    ],
+};
+
+/// §3.11 `ownership_transactions`.
+pub(crate) const OWNERSHIP_TRANSACTIONS: TableSpec = TableSpec {
+    name: super::OWNERSHIP_TRANSACTIONS,
+    doc: "Insider transactions (Table I non-derivative + Table II derivative) with typed amounts and the standard derived columns.",
+    filing_context: true,
+    cols: &[
+        Col::new(
+            "issuer_cik",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_cik`.",
+        ),
+        Col::new(
+            "issuer_name",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_name`.",
+        ),
+        Col::new(
+            "issuer_trading_symbol",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_trading_symbol`.",
+        ),
+        Col::new(
+            "reporting_owner_count",
+            Ty::UInt32,
+            false,
+            "Copy of `ownership_documents.reporting_owner_count`.",
+        ),
+        Col::new(
+            "owner_ciks",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].cik`: every reporting owner's CIK in document order ('' → NULL item). Joint filings list every owner; never take `[1]` as \"the\" insider.",
+        ),
+        Col::new(
+            "owner_names",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].name`: every owner's name, same order.",
+        ),
+        Col::new(
+            "any_owner_is_director",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_director`: OR over owners (false when none set).",
+        ),
+        Col::new(
+            "any_owner_is_officer",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_officer`: OR over owners.",
+        ),
+        Col::new(
+            "any_owner_is_ten_percent_owner",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_ten_percent_owner`: OR over owners.",
+        ),
+        Col::new(
+            "any_owner_is_other",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_other`: OR over owners.",
+        ),
+        Col::new(
+            "officer_titles",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.officer_title`: non-empty `officer_title` of every owner with `is_officer`, owner order. Titles of the officers only (never another owner's).",
+        ),
+        Col::new(
+            "aff_10b5_one",
+            Ty::Boolean,
+            true,
+            "Copy of `ownership_documents.aff_10b5_one`. The filing-level 10b5-1 plan box.",
+        ),
+        Col::new(
+            "transaction_index",
+            Ty::UInt32,
+            false,
+            "Derived: 0-based over non-derivative rows (document order) then derivative rows (document order).",
+        ),
+        Col::new(
+            "is_derivative",
+            Ty::Boolean,
+            false,
+            "Derived: true for rows from `derivative_transactions`. Table II (options, RSUs, warrants…).",
+        ),
+        Col::new(
+            "security_title",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].security_title`.",
+        ),
+        Col::new(
+            "transaction_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_date`: date (§4.2).",
+        ),
+        Col::new(
+            "deemed_execution_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].deemed_execution_date`: date (§4.2).",
+        ),
+        Col::new(
+            "transaction_form_type",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_form_type`. `4`/`5`.",
+        ),
+        Col::new(
+            "transaction_code",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_code`. P, S, A, M, F, G, … (legend in docs/chains/sec.md).",
+        ),
+        Col::new(
+            "equity_swap_involved",
+            Ty::Boolean,
+            false,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].equity_swap_involved`: proto bool (false = false or absent).",
+        ),
+        Col::new(
+            "transaction_timeliness",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_timeliness`. `E` early, `L` late, NULL on time.",
+        ),
+        Col::new(
+            "shares",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].shares`: decimal s=6 (§4.3, Q6). Derivative rows count derivative units.",
+        ),
+        Col::new(
+            "price_per_share",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].price_per_share`: decimal s=6 (§4.3, Q6). NULL when footnote-only (~5%); never 0.",
+        ),
+        Col::new(
+            "total_value",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].total_value`: decimal s=6 (§4.3, Q6). `transactionTotalValue` (reported instead of shares on some rows).",
+        ),
+        Col::new(
+            "acquired_disposed_code",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].acquired_disposed_code`. `A` / `D`.",
+        ),
+        Col::new(
+            "shares_owned_following",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].shares_owned_following`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "value_owned_following",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].value_owned_following`: decimal s=6 (§4.3, Q6). Fractional-interest securities.",
+        ),
+        Col::new(
+            "direct_or_indirect",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].direct_or_indirect`. `D` / `I`.",
+        ),
+        Col::new(
+            "nature_of_ownership",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].nature_of_ownership`.",
+        ),
+        Col::new(
+            "conversion_or_exercise_price",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].conversion_or_exercise_price`: decimal s=6 (§4.3, Q6). Derivative rows.",
+        ),
+        Col::new(
+            "exercise_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].exercise_date`: date (§4.2).",
+        ),
+        Col::new(
+            "expiration_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].expiration_date`: date (§4.2).",
+        ),
+        Col::new(
+            "underlying_security_title",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.title`.",
+        ),
+        Col::new(
+            "underlying_security_shares",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.shares`: decimal s=6 (§4.3, Q6). Exposure in underlying shares.",
+        ),
+        Col::new(
+            "underlying_security_value",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.value`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "footnote_ids",
+            Ty::ListUtf8,
+            false,
+            "`Filing.body.ownership.{non_derivative,derivative}_transactions[].footnote_ids[]`: verbatim items in document order; [] when empty. Join `ownership_footnotes` on (block_num, filing_index, footnote_id).",
+        ),
+        Col::new(
+            "signed_shares",
+            Ty::Decimal(Family::Q6),
+            true,
+            "Derived from `shares, acquired_disposed_code`: `shares` × (+1 for A, −1 for D); NULL otherwise. Net buying without CASE.",
+        ),
+        Col::new(
+            "value_usd",
+            Ty::Decimal(Family::Q6),
+            true,
+            "Derived from `shares, price_per_share`: `shares × price_per_share` exact in i128, rounded half away from zero to s=6; NULL if either is NULL. Trade value; NULL (never 0) for footnote-only prices.",
+        ),
+        Col::new(
+            "is_open_market",
+            Ty::Boolean,
+            false,
+            "Derived: `NOT is_derivative AND transaction_code IN (P, S)`. The standard insider buy/sell filter; per the SEC code legend `S` is \"open market **or private** sale\".",
+        ),
+        Col::new(
+            "filing_lag_days",
+            Ty::Int32,
+            true,
+            "Derived: `filing_date − transaction_date` in days. Form 4 is due within 2 business days.",
+        ),
+        Col::new(
+            "has_parse_issues",
+            Ty::Boolean,
+            false,
+            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+        ),
+    ],
+};
+
+/// §3.12 `ownership_holdings`.
+pub(crate) const OWNERSHIP_HOLDINGS: TableSpec = TableSpec {
+    name: super::OWNERSHIP_HOLDINGS,
+    doc: "Insider holdings reported without a transaction (Form 3 baselines, Form 4/5 indirect holdings).",
+    filing_context: true,
+    cols: &[
+        Col::new(
+            "issuer_cik",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_cik`.",
+        ),
+        Col::new(
+            "issuer_name",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_name`.",
+        ),
+        Col::new(
+            "issuer_trading_symbol",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_trading_symbol`.",
+        ),
+        Col::new(
+            "reporting_owner_count",
+            Ty::UInt32,
+            false,
+            "Copy of `ownership_documents.reporting_owner_count`.",
+        ),
+        Col::new(
+            "owner_ciks",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].cik`: every reporting owner's CIK in document order ('' → NULL item). Joint filings list every owner; never take `[1]` as \"the\" insider.",
+        ),
+        Col::new(
+            "owner_names",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].name`: every owner's name, same order.",
+        ),
+        Col::new(
+            "any_owner_is_director",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_director`: OR over owners (false when none set).",
+        ),
+        Col::new(
+            "any_owner_is_officer",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_officer`: OR over owners.",
+        ),
+        Col::new(
+            "any_owner_is_ten_percent_owner",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_ten_percent_owner`: OR over owners.",
+        ),
+        Col::new(
+            "any_owner_is_other",
+            Ty::Boolean,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.is_other`: OR over owners.",
+        ),
+        Col::new(
+            "officer_titles",
+            Ty::ListUtf8,
+            false,
+            "Derived from `Filing.body.ownership.reporting_owners[].relationship.officer_title`: non-empty `officer_title` of every owner with `is_officer`, owner order. Titles of the officers only (never another owner's).",
+        ),
+        Col::new(
+            "holding_index",
+            Ty::UInt32,
+            false,
+            "Derived: 0-based over non-derivative rows then derivative rows, document order.",
+        ),
+        Col::new(
+            "is_derivative",
+            Ty::Boolean,
+            false,
+            "Derived: true for rows from `derivative_holdings`.",
+        ),
+        Col::new(
+            "security_title",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].security_title`.",
+        ),
+        Col::new(
+            "shares_owned",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].shares_owned`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "value_owned",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].value_owned`: decimal s=6 (§4.3, Q6). `valueOwnedFollowingTransaction` (0.13.0+).",
+        ),
+        Col::new(
+            "direct_or_indirect",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].direct_or_indirect`.",
+        ),
+        Col::new(
+            "nature_of_ownership",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].nature_of_ownership`.",
+        ),
+        Col::new(
+            "conversion_or_exercise_price",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].conversion_or_exercise_price`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "exercise_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].exercise_date`: date (§4.2).",
+        ),
+        Col::new(
+            "expiration_date",
+            Ty::Date32,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].expiration_date`: date (§4.2).",
+        ),
+        Col::new(
+            "underlying_security_title",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.title`.",
+        ),
+        Col::new(
+            "underlying_security_shares",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.shares`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "underlying_security_value",
+            Ty::Decimal(Family::Q6),
+            true,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.value`: decimal s=6 (§4.3, Q6).",
+        ),
+        Col::new(
+            "footnote_ids",
+            Ty::ListUtf8,
+            false,
+            "`Filing.body.ownership.{non_derivative,derivative}_holdings[].footnote_ids[]`: verbatim items in document order; [] when empty.",
+        ),
+        Col::new(
+            "has_parse_issues",
+            Ty::Boolean,
+            false,
+            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+        ),
+    ],
+};
+
+/// §3.13 `ownership_footnotes`.
+pub(crate) const OWNERSHIP_FOOTNOTES: TableSpec = TableSpec {
+    name: super::OWNERSHIP_FOOTNOTES,
+    doc: "Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).",
+    filing_context: true,
+    cols: &[
+        Col::new(
+            "issuer_cik",
+            Ty::Utf8,
+            true,
+            "Copy of `ownership_documents.issuer_cik`.",
+        ),
+        Col::new(
+            "footnote_index",
+            Ty::UInt32,
+            false,
+            "Derived: position in `footnotes`.",
+        ),
+        Col::new(
+            "footnote_id",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.footnotes[].id`. `F1`… ; join key with `footnote_ids` items is (block_num, filing_index, footnote_id).",
+        ),
+        Col::new(
+            "footnote_text",
+            Ty::Utf8,
+            true,
+            "`Filing.body.ownership.footnotes[].text`.",
+        ),
+    ],
+};
