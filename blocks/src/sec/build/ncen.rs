@@ -58,8 +58,29 @@ impl NcenTables {
         body: &sec::NcenReport,
         prepared: &PreparedNcen<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        // An absent registrant reads as an empty one: every registrant column
+        // is NULL (it has no boolean member).
+        let absent_registrant = sec::NcenRegistrant::default();
+        let registrant = body.registrant.as_ref().unwrap_or(&absent_registrant);
+        let row = self.ncen_reports.row(ctx);
+        row.fc.append(fc);
+        row.filer_cik.nz(&body.filer_cik);
+        row.investment_company_type
+            .nz(&body.investment_company_type);
+        row.report_ending_period.opt(prepared.report_ending_period);
+        row.is_report_period_lt12.val(body.is_report_period_lt12);
+        row.previous_accession_number
+            .nz(&body.previous_accession_number);
+        row.registrant_name.nz(&registrant.full_name);
+        row.registrant_file_number.nz(&registrant.file_number);
+        row.registrant_cik.nz(&registrant.cik);
+        row.registrant_lei.nz(&registrant.lei);
+        row.registrant.append(registrant.address.as_ref());
+        row.registrant_phone.nz(&registrant.phone);
+        row.series_ids
+            .items(body.series_ids.iter().map(String::as_str));
+        row.series_count.val(prepared.series_count);
+        row.has_parse_issues.val(prepared.has_parse_issues);
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 1] {

@@ -6,13 +6,19 @@
 
 use anyhow::Result;
 
+use super::{idx, FilingCtx};
 use crate::sec::issues::IssueSink;
-use crate::sec::prepare::FilingCtx;
 use crate::sec::proto::sec;
+use crate::sec::schema::NCEN_REPORTS;
 
-/// The parsed and derived values of `ncen_reports` for one filing.
+/// The parsed and derived values of `ncen_reports` for one filing. Verbatim
+/// strings are read from the proto during the append.
 #[derive(Debug, Default)]
 pub(crate) struct PreparedNcen<'a> {
+    pub report_ending_period: Option<i32>,
+    /// `len(series_ids)`.
+    pub series_count: u32,
+    pub has_parse_issues: bool,
     _borrows: std::marker::PhantomData<&'a ()>,
 }
 
@@ -21,7 +27,14 @@ pub(crate) fn prepare<'a>(
     body: &'a sec::NcenReport,
     issues: &mut IssueSink<'a>,
 ) -> Result<PreparedNcen<'a>> {
-    // Stub: nothing prepared yet.
-    let _ = (fc, body, issues);
-    Ok(PreparedNcen::default())
+    let _ = fc;
+    let series_count = idx(body.series_ids.len())?;
+    let mut row = issues.row(NCEN_REPORTS, &[]);
+    let report_ending_period = row.date("report_ending_period", &body.report_ending_period);
+    Ok(PreparedNcen {
+        report_ending_period,
+        series_count,
+        has_parse_issues: row.finish(),
+        _borrows: std::marker::PhantomData,
+    })
 }
