@@ -40,9 +40,10 @@ use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
 use crate::evm::proto::eth;
 use crate::near::mapper::NearBlockMapper;
+use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
 use crate::tron::mapper::TronBlockMapper;
-use crate::{antelope, beacon, bitcoin, cosmos, evm, near, solana, tron};
+use crate::{antelope, beacon, bitcoin, cosmos, evm, near, sec, solana, tron};
 
 const BLOCK_NUM: u64 = 100;
 const TIMESTAMP: i64 = 1_700_000_000;
@@ -268,6 +269,18 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             ],
         ),
         Case::new(
+            ChainKind::Sec,
+            "sec",
+            SecBlockMapper::new(fork_step, enc()),
+            vec![
+                // Every body kind and repeated child, a non-empty raw_xml and
+                // a parse issue: all 43 tables get rows.
+                sec::mapper::tests::make_every_body_block(BLOCK_NUM, TIMESTAMP).encode_to_vec(),
+                // An empty 10-minute window: only its `blocks` row.
+                sec::mapper::tests::make_test_block(BLOCK_NUM + 1, TIMESTAMP + 1).encode_to_vec(),
+            ],
+        ),
+        Case::new(
             ChainKind::Tron,
             "tron",
             TronBlockMapper::new(fork_step, enc(), true),
@@ -392,6 +405,7 @@ fn expected_table_count() -> usize {
         + bitcoin::schema::TABLE_NAMES.len()
         + cosmos::schema::TABLE_NAMES.len()
         + near::schema::TABLE_NAMES.len()
+        + sec::schema::TABLE_NAMES.len()
         + tron::schema::TABLE_NAMES.len()
         + evm::schema::BASE_TABLE_NAMES.len()
         + evm::schema::EXTENDED_TABLE_NAMES.len()
@@ -989,5 +1003,15 @@ fn owned_decoding_shares_nested_payload_storage_and_retains_its_lifetime() {
     shared(
         cosmos::mapper::tests::make_test_block(BLOCK_NUM as i64),
         |b| &b.txs[0],
+    );
+    shared(
+        sec::mapper::tests::make_every_body_block(BLOCK_NUM, TIMESTAMP),
+        |b| {
+            &b.filings
+                .iter()
+                .find(|filing| !filing.raw_xml.is_empty())
+                .expect("the SEC fixture has a raw_xml filing")
+                .raw_xml
+        },
     );
 }

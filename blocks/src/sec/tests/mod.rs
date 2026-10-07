@@ -109,8 +109,9 @@ pub(crate) fn filing(form_type: &str, body: Body) -> sec::Filing {
 }
 
 /// An empty 10-minute window (no filings), for the contract fixture.
-pub(crate) fn make_test_block(n: u64) -> sec::Block {
-    block_at(n, window_seconds(n), Vec::new())
+/// `timestamp` is the header time, which must equal the identity's.
+pub(crate) fn make_test_block(n: u64, timestamp: i64) -> sec::Block {
+    block_at(n, timestamp, Vec::new())
 }
 
 /// One block whose filings give every SEC table at least one row once every

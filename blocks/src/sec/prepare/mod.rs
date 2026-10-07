@@ -95,7 +95,8 @@ pub(crate) enum PreparedBody<'a> {
         beneficial::PreparedBeneficial<'a>,
     ),
     Form144(&'a sec::Form144Notice, form144::PreparedForm144<'a>),
-    Nport(&'a sec::NportReport, nport::PreparedNport<'a>),
+    /// Boxed: its per-table row lists make it the largest prepared body.
+    Nport(&'a sec::NportReport, Box<nport::PreparedNport<'a>>),
     FormD(&'a sec::FormDNotice, formd::PreparedFormD<'a>),
     Npx(&'a sec::NpxReport, npx::PreparedNpx<'a>),
     Ncen(&'a sec::NcenReport, ncen::PreparedNcen<'a>),
@@ -200,7 +201,7 @@ fn prepare_filing<'a>(
         ),
         Some(Body::Nport(body)) => PreparedBody::Nport(
             body,
-            nport::prepare(&fc, body, &mut issues).with_context(context)?,
+            Box::new(nport::prepare(&fc, body, &mut issues).with_context(context)?),
         ),
         Some(Body::FormD(body)) => PreparedBody::FormD(
             body,

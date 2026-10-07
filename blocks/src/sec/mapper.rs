@@ -215,7 +215,8 @@ pub(crate) mod tests {
 
     #[test]
     fn empty_window_writes_only_its_blocks_row() {
-        let block = make_test_block(crate::sec::tests::BLOCK_NUM);
+        let n = crate::sec::tests::BLOCK_NUM;
+        let block = make_test_block(n, crate::sec::tests::window_seconds(n));
         let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
         let mapped = mapper
             .map_block(
@@ -240,8 +241,11 @@ pub(crate) mod tests {
     fn text_ids_are_written_verbatim_under_hex_and_binary() {
         let n = crate::sec::tests::BLOCK_NUM;
         for encoding in [EncodeBytes::Hex, EncodeBytes::Binary] {
-            let batches =
-                crate::sec::tests::map_with(&[make_test_block(n)], false, encoding.clone());
+            let batches = crate::sec::tests::map_with(
+                &[make_test_block(n, crate::sec::tests::window_seconds(n))],
+                false,
+                encoding.clone(),
+            );
             let block_id = batches.cell("blocks", "block_id", 0);
             let parent_id = batches.cell("blocks", "parent_id", 0);
             match encoding {
@@ -362,15 +366,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// Enable once every group has landed: the contract fixture must give every
-    /// table at least one row (`schema_contract_tests.rs` requires it).
+    /// The contract fixture gives every table at least one row
+    /// (`schema_contract_tests.rs` requires it).
     #[test]
-    #[ignore = "integration: passes once every group's tables are mapped"]
     fn every_body_block_fills_every_table() {
         let n = crate::sec::tests::BLOCK_NUM;
         let batches = crate::sec::tests::map(&[
             make_every_body_block(n, crate::sec::tests::window_seconds(n)),
-            make_test_block(n + 1),
+            make_test_block(n + 1, crate::sec::tests::window_seconds(n + 1)),
         ]);
         let empty: Vec<&str> = schema::TABLE_NAMES
             .into_iter()

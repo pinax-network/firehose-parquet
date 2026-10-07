@@ -4,11 +4,12 @@
 use super::*;
 
 /// The hub's filings in the contract fixture: a raw body, an EDGAR deletion
-/// notice and a filing with a sentinel `period_of_report` (a `parse_issues`
-/// row).
+/// notice and a filing with an unparseable `filing_date` and a sentinel
+/// `period_of_report` (two `parse_issues` rows).
 pub(crate) fn contract_filings() -> Vec<sec::Filing> {
     vec![
         sec::Filing {
+            filing_date: "2026-08-2x".to_string(),
             period_of_report: "N/A".to_string(),
             ..filing(
                 "N-PX",
@@ -81,6 +82,29 @@ fn blocks_row_carries_feed_date_count_and_issue_flag() {
     assert_eq!(block_issue.index, [None, None, None]);
     assert_eq!(block_issue.raw, "2026/08/28");
     assert_eq!(block_issue.issue, "unparseable");
+
+    let filing_issues: Vec<(&str, &str, &str)> = issues
+        .iter()
+        .filter(|issue| issue.table == "filings")
+        .map(|issue| {
+            (
+                issue.column.as_str(),
+                issue.raw.as_str(),
+                issue.issue.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        filing_issues,
+        [
+            ("filing_date", "2026-08-2x", "unparseable"),
+            ("period_of_report", "N/A", "sentinel"),
+        ]
+    );
+    assert_eq!(
+        batches.column("filings", "has_parse_issues"),
+        ["true", "false"]
+    );
 }
 
 #[test]
@@ -310,10 +334,19 @@ fn hub_matches_the_prototype() {
     oracle::assert_matches(&fire::DAYS, &["blocks", "filings"], &[]);
 }
 
-/// Integration: every `parse_issues` row equals the prototype's, in order
-/// (needs every group's tables).
+/// Every `parse_issues` row equals the prototype's, in order, on every sample
+/// day present locally.
 #[test]
-#[ignore = "integration: needs every group's tables and the local samples"]
+#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
 fn parse_issues_match_the_prototype() {
     oracle::assert_matches(&fire::DAYS, &["parse_issues"], &[]);
+}
+
+/// All 43 tables equal the prototype's, row for row and column for column, on
+/// every sample day present locally (one mapping pass per day).
+/// `cargo test --release -p blocks --lib sec::tests::hub::all_tables -- --ignored --nocapture`
+#[test]
+#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
+fn all_tables_match_the_prototype() {
+    oracle::assert_matches(&fire::DAYS, &crate::sec::schema::TABLE_NAMES, &[]);
 }
