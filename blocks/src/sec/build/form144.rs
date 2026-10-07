@@ -143,8 +143,107 @@ impl Form144Tables {
         body: &sec::Form144Notice,
         prepared: &PreparedForm144<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        let issuer = body.issuer.as_ref();
+        let issuer_cik = issuer.map_or("", |i| i.issuer_cik.as_str());
+        let filer_cik = body.filer_cik.as_str();
+        let signature = body.signature.as_ref();
+        let p = &prepared.notice;
+
+        let row = self.form144_notices.row(ctx);
+        row.fc.append(fc);
+        row.filer_cik.nz(filer_cik);
+        row.issuer_cik.nz(issuer_cik);
+        row.issuer_name
+            .nz(issuer.map_or("", |i| i.issuer_name.as_str()));
+        row.issuer_sec_file_number
+            .nz(issuer.map_or("", |i| i.sec_file_number.as_str()));
+        row.issuer
+            .append(issuer.and_then(|i| i.issuer_address.as_ref()));
+        row.issuer_contact_phone
+            .nz(issuer.map_or("", |i| i.issuer_contact_phone.as_str()));
+        row.person_for_whose_account
+            .nz(issuer.map_or("", |i| i.person_for_whose_account.as_str()));
+        row.relationships_to_issuer.items(
+            issuer
+                .into_iter()
+                .flat_map(|i| i.relationships_to_issuer.iter().map(String::as_str)),
+        );
+        row.nothing_sold_past_3_months
+            .val(body.nothing_sold_past_3_months);
+        row.remarks.nz(&body.remarks);
+        row.previous_accession_number
+            .nz(&body.previous_accession_number);
+        row.notice_date.opt(p.notice_date);
+        row.signature_text
+            .nz(signature.map_or("", |s| s.signature.as_str()));
+        row.plan_adoption_dates
+            .items(p.plan_adoption_dates.iter().copied());
+        row.securities_information_count
+            .val(p.securities_information_count);
+        row.total_units_sold.opt(p.total_units_sold);
+        row.total_aggregate_market_value
+            .opt(p.total_aggregate_market_value);
+        row.securities_to_be_sold_count
+            .val(p.securities_to_be_sold_count);
+        row.sales_past_3_months_count
+            .val(p.sales_past_3_months_count);
+        row.has_parse_issues.val(p.has_parse_issues);
+
+        for (entry, p) in prepared.entries.iter().zip(&prepared.information) {
+            let broker = entry.broker.as_ref();
+            let row = self.form144_securities_information.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.filer_cik.nz(filer_cik);
+            row.entry_index.val(p.entry_index);
+            row.securities_class_title.nz(&entry.securities_class_title);
+            row.broker_name.nz(broker.map_or("", |b| b.name.as_str()));
+            row.broker.append(broker.and_then(|b| b.address.as_ref()));
+            row.units_sold.opt(p.units_sold);
+            row.aggregate_market_value.opt(p.aggregate_market_value);
+            row.units_outstanding.opt(p.units_outstanding);
+            row.approx_sale_date.opt(p.approx_sale_date);
+            row.securities_exchange_name
+                .nz(&entry.securities_exchange_name);
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
+
+        for (lot, p) in body.securities_to_be_sold.iter().zip(&prepared.lots) {
+            let row = self.form144_securities_to_be_sold.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.filer_cik.nz(filer_cik);
+            row.lot_index.val(p.lot_index);
+            row.securities_class_title.nz(&lot.securities_class_title);
+            row.acquired_date.opt(p.acquired_date);
+            row.nature_of_acquisition.nz(&lot.nature_of_acquisition);
+            row.acquired_from.nz(&lot.acquired_from);
+            row.is_gift.val(lot.is_gift);
+            row.donor_acquired_date.opt(p.donor_acquired_date);
+            row.amount_acquired.opt(p.amount_acquired);
+            row.payment_date.opt(p.payment_date);
+            row.nature_of_payment.nz(&lot.nature_of_payment);
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
+
+        for (sale, p) in body
+            .securities_sold_past_3_months
+            .iter()
+            .zip(&prepared.sales)
+        {
+            let row = self.form144_sales_past_3_months.row(ctx);
+            row.fc.append(fc);
+            row.issuer_cik.nz(issuer_cik);
+            row.filer_cik.nz(filer_cik);
+            row.sale_index.val(p.sale_index);
+            row.seller_name.nz(&sale.seller_name);
+            row.seller.append(sale.seller_address.as_ref());
+            row.securities_class_title.nz(&sale.securities_class_title);
+            row.sale_date.opt(p.sale_date);
+            row.amount_sold.opt(p.amount_sold);
+            row.gross_proceeds.opt(p.gross_proceeds);
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 4] {

@@ -118,8 +118,104 @@ impl FormCTables {
         body: &sec::FormCNotice,
         prepared: &PreparedFormC<'_>,
     ) {
-        // Stub: no rows yet.
-        let _ = (ctx, fc, body, prepared);
+        let issuer = body.issuer.as_ref();
+        let offering = body.offering.as_ref();
+        let of = |field: fn(&sec::FormCOffering) -> &str| offering.map_or("", field);
+        let p = &prepared.notice;
+
+        let row = self.form_c_notices.row(ctx);
+        row.fc.append(fc);
+        row.filer_cik.nz(&body.filer_cik);
+        row.issuer_name.nz(issuer.map_or("", |i| i.name.as_str()));
+        row.issuer_legal_status_form
+            .nz(issuer.map_or("", |i| i.legal_status_form.as_str()));
+        row.issuer_legal_status_other_desc
+            .nz(issuer.map_or("", |i| i.legal_status_other_desc.as_str()));
+        row.issuer_jurisdiction
+            .nz(issuer.map_or("", |i| i.jurisdiction.as_str()));
+        row.issuer_date_incorporation
+            .opt(p.issuer_date_incorporation);
+        row.issuer.append(issuer.and_then(|i| i.address.as_ref()));
+        row.issuer_website
+            .nz(issuer.map_or("", |i| i.website.as_str()));
+        row.intermediary_company_name
+            .nz(&body.intermediary_company_name);
+        row.intermediary_cik.nz(&body.intermediary_cik);
+        row.intermediary_file_number
+            .nz(&body.intermediary_file_number);
+        row.intermediary_crd_number
+            .nz(&body.intermediary_crd_number);
+        row.issuer_info_is_amendment.opt(body.is_amendment);
+        row.nature_of_amendment.nz(&body.nature_of_amendment);
+        row.progress_update.nz(&body.progress_update);
+        row.is_co_issuer.opt(body.is_co_issuer);
+        row.period.opt(p.period);
+        row.security_type.nz(of(|o| o.security_type.as_str()));
+        row.security_offered_other_desc
+            .nz(of(|o| o.security_offered_other_desc.as_str()));
+        row.num_securities_offered.opt(p.num_securities_offered);
+        row.price.opt(p.price);
+        row.price_determination_method
+            .nz(of(|o| o.price_determination_method.as_str()));
+        row.offering_amount.opt(p.offering_amount);
+        row.maximum_offering_amount.opt(p.maximum_offering_amount);
+        row.over_subscription_accepted
+            .opt(offering.map(|o| o.over_subscription_accepted));
+        row.over_subscription_allocation_type
+            .nz(of(|o| o.over_subscription_allocation_type.as_str()));
+        row.desc_over_subscription
+            .nz(of(|o| o.desc_over_subscription.as_str()));
+        row.deadline_date.opt(p.deadline_date);
+        row.compensation_amount
+            .nz(of(|o| o.compensation_amount.as_str()));
+        row.financial_interest
+            .nz(of(|o| o.financial_interest.as_str()));
+        row.offering_jurisdictions
+            .items(body.offering_jurisdictions.iter().map(String::as_str));
+        row.has_financials.val(body.financials.is_some());
+        row.current_employees.opt(p.current_employees);
+        // The 18 statement columns, in `prepare::formc::FINANCIAL_COLUMNS` order.
+        let statements = [
+            &mut row.total_assets_most_recent_fy,
+            &mut row.total_assets_prior_fy,
+            &mut row.cash_equivalents_most_recent_fy,
+            &mut row.cash_equivalents_prior_fy,
+            &mut row.accounts_receivable_most_recent_fy,
+            &mut row.accounts_receivable_prior_fy,
+            &mut row.short_term_debt_most_recent_fy,
+            &mut row.short_term_debt_prior_fy,
+            &mut row.long_term_debt_most_recent_fy,
+            &mut row.long_term_debt_prior_fy,
+            &mut row.revenue_most_recent_fy,
+            &mut row.revenue_prior_fy,
+            &mut row.cost_goods_sold_most_recent_fy,
+            &mut row.cost_goods_sold_prior_fy,
+            &mut row.tax_paid_most_recent_fy,
+            &mut row.tax_paid_prior_fy,
+            &mut row.net_income_most_recent_fy,
+            &mut row.net_income_prior_fy,
+        ];
+        for (column, value) in statements.into_iter().zip(p.financials) {
+            column.opt(value);
+        }
+        row.co_issuer_count.val(p.co_issuer_count);
+        row.has_parse_issues.val(p.has_parse_issues);
+
+        for (co_issuer, p) in body.co_issuers.iter().zip(&prepared.co_issuers) {
+            let row = self.form_c_co_issuers.row(ctx);
+            row.fc.append(fc);
+            row.filer_cik.nz(&body.filer_cik);
+            row.co_issuer_index.val(p.co_issuer_index);
+            row.co_issuer_name.nz(&co_issuer.name);
+            row.legal_status_form.nz(&co_issuer.legal_status_form);
+            row.legal_status_other_desc
+                .nz(&co_issuer.legal_status_other_desc);
+            row.jurisdiction.nz(&co_issuer.jurisdiction);
+            row.date_incorporation.opt(p.date_incorporation);
+            row.co_issuer.append(co_issuer.address.as_ref());
+            row.website.nz(&co_issuer.website);
+            row.has_parse_issues.val(p.has_parse_issues);
+        }
     }
 
     pub(crate) fn tables(&self) -> [&dyn SecTable; 2] {
