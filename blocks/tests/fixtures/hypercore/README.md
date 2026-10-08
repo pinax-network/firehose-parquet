@@ -25,9 +25,14 @@ decode their payload as an unknown field, which the mapper's length guard (R2)
 refuses.
 
 The tests (`blocks/src/hypercore/value_tests.rs`) map every block with its true
-identity and check row counts, labels, pinned values, the populated-column matrix
-of `docs/chains/hypercore.md`, a byte-exact rebuild of each payload from the five
-output tables, and a pinned hash of the whole output (the release invariant).
+identity and check row counts, labels, pinned values, the routing and the
+populated-column matrix of each event table in `docs/chains/hypercore.md`, a
+byte-exact rebuild of each payload from the raw tables (the union of the five
+event tables included), golden derived rows, an independent naive re-derivation
+of every derived value, and a pinned hash of the whole output (the release
+invariant). Between them the fixtures give every one of the twelve tables rows:
+16 outcome fills, 19 liquidated legs (4 `market`, 12 backstop takeovers, 3 ADL)
+and 225 `funding_rates` rows.
 `blocks/src/schema_contract_tests.rs` maps synthetic derivatives of them: block
 headers rewritten to the harness identity, and the funding block cut to 8 fills
 and 3 deltas per funding event.

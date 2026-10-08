@@ -1089,7 +1089,9 @@ fn rows_by_block(view: &View<'_>) -> BTreeMap<u64, Vec<usize>> {
     rows
 }
 
-/// Rebuild every block from the five tables with the inverse rules.
+/// Rebuild every block with the inverse rules from the raw tables: `blocks`,
+/// the raw columns of `fills`, the union of the event tables, `funding_deltas`
+/// and `validator_rewards`.
 fn rebuild(tables: &Tables, encoding: &EncodeBytes) -> Vec<(u64, pb::Block)> {
     let blocks = View::new(tables, "blocks", encoding);
     let fills = Rebuild {
@@ -1234,7 +1236,7 @@ fn rebuild(tables: &Tables, encoding: &EncodeBytes) -> Vec<(u64, pb::Block)> {
 }
 
 /// The proof that the mapping loses nothing: every fixture payload is rebuilt
-/// byte for byte from the five tables, under `hex` and `binary`. It also
+/// byte for byte from the raw tables, under `hex` and `binary`. It also
 /// confirms that prost re-encodes every payload to its own length (R2).
 #[test]
 fn t4_every_payload_is_rebuilt_byte_for_byte_from_the_tables() {
@@ -1322,7 +1324,7 @@ fn labels(key: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Every label and its event table, pinned (rule D8): a label's table never
+/// Every label and its event table, pinned ("Routing only grows"): a label's table never
 /// changes for the life of a root, and this list may only grow, when a release
 /// vendors a new label.
 const ROUTES: [(&str, &str); 29] = [
@@ -3062,7 +3064,7 @@ fn empty_values_follow_the_null_and_keep_lists() {
 }
 
 // ---------------------------------------------------------------------------
-// Derivations never refuse (D3)
+// Derivations never refuse
 // ---------------------------------------------------------------------------
 
 /// A shape a derivation rule does not recognise gives NULL derived values,
@@ -3247,6 +3249,21 @@ fn owned_and_borrowed_payloads_map_alike() {
         assert_eq!(a, b);
     }
     assert_eq!(borrowed.flush().unwrap(), owned.flush().unwrap());
+}
+
+/// No HyperCore table but `blocks` shares a name with a table whose
+/// in-block row order the maintenance job repairs (EVM's), so a compaction
+/// never re-sorts HyperCore rows by another chain's key.
+#[test]
+fn no_table_name_has_an_evm_row_order() {
+    for table in TABLE_NAMES {
+        let key = fireparq_maintenance::row_order::row_order_key(table);
+        if table == "blocks" {
+            assert_eq!(key.map(<[_]>::len), Some(0));
+        } else {
+            assert!(key.is_none(), "{table}");
+        }
+    }
 }
 
 /// The account and validator lookups get Bloom filters
