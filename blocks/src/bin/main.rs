@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
@@ -22,7 +22,9 @@ use firehose_parquet::ingest::{
     IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED, SOLANA_GENESIS_ROUTING_SECONDS,
 };
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
+use firehose_parquet::networks::{
+    network_data_origin, resolve_network_endpoint, EndpointSource, NetworkDataOrigin,
+};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper, StreamEvent};
 use firehose_parquet::writer::ParquetFileMetadata;
 use std::collections::HashMap;
@@ -976,31 +978,74 @@ fn infer_ingestion_live_mode(stop_block: Option<u64>) -> bool {
     stop_block.is_none()
 }
 
+/// The data origin of the streamed network (`NETWORK_DATA_ORIGINS`), by the
+/// EndpointInfo chain name, or by the resolved `--network` alias when
+/// EndpointInfo has no chain name.
+fn resolve_network_data_origin(
+    endpoint_info: &Option<EndpointInfo>,
+    network: Option<&str>,
+) -> Option<&'static NetworkDataOrigin> {
+    endpoint_info
+        .as_ref()
+        .map(|info| info.chain_name.trim())
+        .filter(|chain_name| !chain_name.is_empty())
+        .or(network)
+        .and_then(network_data_origin)
+}
+
+/// The start block of a run. A stored cursor's start wins unless
+/// `--cursor-override`. Otherwise `--start-block`, else the endpoint's first
+/// streamable block. A network with a data origin starts there when the
+/// endpoint advertises earlier blocks, and refuses an explicit earlier start;
+/// resuming from a stored cursor is unaffected.
 fn resolve_ingestion_start_block(
     start_block: Option<u64>,
     cursor_state: Option<&CursorState>,
     endpoint_info: &Option<EndpointInfo>,
     cursor_override: bool,
+    data_origin: Option<&NetworkDataOrigin>,
 ) -> Result<Option<u64>> {
     if !cursor_override {
         if let Some(cursor_start_block) = cursor_state.and_then(|state| state.start_block) {
             return Ok(Some(cursor_start_block));
         }
     }
+    // A stored cursor resumes the stream: the origin only bounds new starts.
+    let data_origin = data_origin.filter(|_| cursor_override || cursor_state.is_none());
 
     if let Some(start_block) = start_block {
+        if let Some(origin) = data_origin.filter(|origin| start_block < origin.first_block) {
+            bail!(
+                "--start-block {start_block} is before the data origin of network `{network}`, block {first}: {reason}. Use --start-block {first} or later, or omit --start-block to start at block {first}",
+                network = origin.chain_name,
+                first = origin.first_block,
+                reason = origin.reason,
+            );
+        }
         return Ok(Some(start_block));
     }
 
-    endpoint_info
+    let first_streamable = endpoint_info
         .as_ref()
-        .map(|info| info.first_streamable_block_num)
-        .map(Some)
-        .ok_or_else(|| {
-            anyhow!(
-                "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
-            )
-        })
+        .map(|info| info.first_streamable_block_num);
+    match (first_streamable, data_origin) {
+        (first_streamable, Some(origin))
+            if first_streamable.is_none_or(|first| first < origin.first_block) =>
+        {
+            info!(
+                network = origin.chain_name,
+                data_origin_block = origin.first_block,
+                first_streamable_block_num = ?first_streamable,
+                reason = origin.reason,
+                "no --start-block: starting at the network's data origin instead of the endpoint's first streamable block"
+            );
+            Ok(Some(origin.first_block))
+        }
+        (Some(first_streamable), _) => Ok(Some(first_streamable)),
+        (None, _) => Err(anyhow!(
+            "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
+        )),
+    }
 }
 
 fn stream_resume_cursor(
@@ -2976,7 +3021,7 @@ mod tests {
         });
 
         let start_block =
-            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, false)
+            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, false, None)
                 .expect("ingestion should prefer an existing cursor");
 
         assert_eq!(start_block, Some(21));
@@ -2984,7 +3029,7 @@ mod tests {
 
     #[test]
     fn test_resolve_ingestion_start_block_uses_explicit_start_without_cursor() {
-        let start_block = resolve_ingestion_start_block(Some(21), None, &None, false)
+        let start_block = resolve_ingestion_start_block(Some(21), None, &None, false, None)
             .expect("ingestion should use an explicit start block when no cursor exists");
 
         assert_eq!(start_block, Some(21));
@@ -3006,7 +3051,7 @@ mod tests {
         });
 
         let start_block =
-            resolve_ingestion_start_block(Some(7), Some(&cursor_state), &endpoint_info, true)
+            resolve_ingestion_start_block(Some(7), Some(&cursor_state), &endpoint_info, true, None)
                 .expect("cursor override should use the requested start block");
 
         assert_eq!(start_block, Some(7));
@@ -3023,7 +3068,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_ingestion_start_block(None, None, &endpoint_info, false)
+        let start_block = resolve_ingestion_start_block(None, None, &endpoint_info, false, None)
             .expect("ingestion should use endpoint first streamable block");
 
         assert_eq!(start_block, Some(42));
@@ -3046,7 +3091,7 @@ mod tests {
         });
 
         let start_block =
-            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, true)
+            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, true, None)
                 .expect("cursor override should fall back to endpoint metadata");
 
         assert_eq!(start_block, Some(42));
@@ -3054,13 +3099,219 @@ mod tests {
 
     #[test]
     fn test_resolve_ingestion_start_block_rejects_missing_first_streamable_metadata() {
-        let err = resolve_ingestion_start_block(None, None, &None, false)
+        let err = resolve_ingestion_start_block(None, None, &None, false, None)
             .expect_err("ingestion should require an explicit start, cursor, or endpoint metadata");
 
         assert_eq!(
             err.to_string(),
             "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
         );
+    }
+
+    fn endpoint_info_at(chain_name: &str, first_streamable_block_num: u64) -> Option<EndpointInfo> {
+        Some(EndpointInfo {
+            chain_name: chain_name.to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        })
+    }
+
+    /// The HyperCore endpoint advertises 846000000; its data origin is 846903317.
+    const HYPERCORE_FIRST_STREAMABLE: u64 = 846_000_000;
+    const HYPERCORE_ORIGIN: u64 = 846_903_317;
+
+    fn hypercore_origin() -> Option<&'static NetworkDataOrigin> {
+        let origin = network_data_origin("hypercore");
+        assert_eq!(
+            origin.map(|origin| origin.first_block),
+            Some(HYPERCORE_ORIGIN)
+        );
+        origin
+    }
+
+    #[test]
+    fn test_resolve_network_data_origin_keys_by_endpoint_chain_name_then_alias() {
+        let hypercore = hypercore_origin();
+        for chain_name in ["hypercore", "HyperCore", " HYPERCORE "] {
+            let info = endpoint_info_at(chain_name, HYPERCORE_FIRST_STREAMABLE);
+            assert_eq!(
+                resolve_network_data_origin(&info, None),
+                hypercore,
+                "{chain_name:?}"
+            );
+        }
+        // The EndpointInfo chain name decides when there is one: an override
+        // of `--network hypercore` to another chain's endpoint has no origin.
+        assert_eq!(
+            resolve_network_data_origin(&endpoint_info_at("mainnet", 0), Some("hypercore")),
+            None
+        );
+        // Without a chain name, the resolved `--network` alias decides.
+        assert_eq!(
+            resolve_network_data_origin(&endpoint_info_at("  ", 0), Some("hypercore")),
+            hypercore
+        );
+        assert_eq!(
+            resolve_network_data_origin(&None, Some("hypercore")),
+            hypercore
+        );
+        // Other networks have none.
+        assert_eq!(
+            resolve_network_data_origin(&endpoint_info_at("", 0), None),
+            None
+        );
+        assert_eq!(
+            resolve_network_data_origin(&endpoint_info_at("mainnet", 0), Some("mainnet")),
+            None
+        );
+        assert_eq!(
+            resolve_network_data_origin(&endpoint_info_at("hyper-evm", 0), Some("hyper-evm")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_defaults_to_the_data_origin() {
+        let origin = hypercore_origin();
+        let info = endpoint_info_at("hypercore", HYPERCORE_FIRST_STREAMABLE);
+        // No stored cursor and no --start-block: the origin, not 846000000.
+        assert_eq!(
+            resolve_ingestion_start_block(None, None, &info, false, origin).unwrap(),
+            Some(HYPERCORE_ORIGIN)
+        );
+        // --cursor-override ignores the stored cursor's start the same way.
+        let cursor_state = CursorState {
+            start_block: Some(HYPERCORE_FIRST_STREAMABLE),
+            ..CursorState::default()
+        };
+        assert_eq!(
+            resolve_ingestion_start_block(None, Some(&cursor_state), &info, true, origin).unwrap(),
+            Some(HYPERCORE_ORIGIN)
+        );
+        // The later of the endpoint's first streamable block and the origin.
+        for first_streamable in [HYPERCORE_ORIGIN, HYPERCORE_ORIGIN + 1, 900_000_000] {
+            let info = endpoint_info_at("hypercore", first_streamable);
+            assert_eq!(
+                resolve_ingestion_start_block(None, None, &info, false, origin).unwrap(),
+                Some(first_streamable)
+            );
+        }
+        // Without EndpointInfo, the origin is still a known start.
+        assert_eq!(
+            resolve_ingestion_start_block(None, None, &None, false, origin).unwrap(),
+            Some(HYPERCORE_ORIGIN)
+        );
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_refuses_an_explicit_start_before_the_data_origin() {
+        let origin = hypercore_origin();
+        let info = endpoint_info_at("hypercore", HYPERCORE_FIRST_STREAMABLE);
+        let cursor_state = CursorState {
+            start_block: Some(HYPERCORE_ORIGIN),
+            ..CursorState::default()
+        };
+        for (start_block, cursor_state, cursor_override) in [
+            (HYPERCORE_FIRST_STREAMABLE, None, false),
+            (846_903_300, None, false),
+            (846_903_313, None, false),
+            (HYPERCORE_ORIGIN - 1, None, false),
+            (0, None, false),
+            (846_903_300, Some(&cursor_state), true),
+        ] {
+            let err = resolve_ingestion_start_block(
+                Some(start_block),
+                cursor_state,
+                &info,
+                cursor_override,
+                origin,
+            )
+            .expect_err("a start before the data origin is refused");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "--start-block {start_block} is before the data origin of network `hypercore`, block 846903317: HyperCore data is known from 2026-01-01 (block 846903317, 2026-01-01T00:00:00.063Z); the endpoint advertises earlier blocks but lacks 846903300-846903312, and a stream cannot cross them. Use --start-block 846903317 or later, or omit --start-block to start at block 846903317"
+                )
+            );
+        }
+        for start_block in [HYPERCORE_ORIGIN, HYPERCORE_ORIGIN + 1, 1_174_085_339] {
+            assert_eq!(
+                resolve_ingestion_start_block(Some(start_block), None, &info, false, origin)
+                    .unwrap(),
+                Some(start_block)
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_resume_ignores_the_data_origin() {
+        let origin = hypercore_origin();
+        let info = endpoint_info_at("hypercore", HYPERCORE_FIRST_STREAMABLE);
+        // A stored stream that started before the origin resumes unchanged,
+        // with or without its original --start-block.
+        let cursor_state = CursorState {
+            start_block: Some(HYPERCORE_FIRST_STREAMABLE),
+            ..CursorState::default()
+        };
+        for start_block in [None, Some(HYPERCORE_FIRST_STREAMABLE)] {
+            assert_eq!(
+                resolve_ingestion_start_block(
+                    start_block,
+                    Some(&cursor_state),
+                    &info,
+                    false,
+                    origin
+                )
+                .unwrap(),
+                Some(HYPERCORE_FIRST_STREAMABLE)
+            );
+        }
+        // A legacy cursor without a start (dry runs) resumes from the cursor;
+        // its start bounds are left as before.
+        let legacy = CursorState::default();
+        assert_eq!(
+            resolve_ingestion_start_block(Some(100), Some(&legacy), &info, false, origin).unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            resolve_ingestion_start_block(None, Some(&legacy), &info, false, origin).unwrap(),
+            Some(HYPERCORE_FIRST_STREAMABLE)
+        );
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_other_networks_are_unaffected() {
+        let info = endpoint_info_at("mainnet", 42);
+        let origin = resolve_network_data_origin(&info, Some("mainnet"));
+        assert_eq!(origin, None);
+        assert_eq!(
+            resolve_ingestion_start_block(None, None, &info, false, origin).unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            resolve_ingestion_start_block(Some(7), None, &info, false, origin).unwrap(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn test_stop_block_is_validated_against_the_data_origin_start() {
+        let origin = hypercore_origin();
+        let info = endpoint_info_at("hypercore", HYPERCORE_FIRST_STREAMABLE);
+        let start = resolve_ingestion_start_block(None, None, &info, false, origin).unwrap();
+        // A stop below the origin is valid for 846000000 but not for the
+        // adjusted start.
+        let err = firehose_parquet::cli::validate_stop_block_after_start(start, Some(846_903_000))
+            .expect_err("the stop must follow the adjusted start");
+        assert_eq!(
+            err.to_string(),
+            "--stop-block (846903000) must be greater than the start block (846903317); --stop-block is exclusive"
+        );
+        firehose_parquet::cli::validate_stop_block_after_start(start, Some(HYPERCORE_ORIGIN + 1))
+            .unwrap();
     }
 
     #[test]

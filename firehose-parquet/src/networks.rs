@@ -26,6 +26,38 @@ pub const KNOWN_NETWORK_NAMES: &[&str] = networks_generated::GENERATED_NETWORK_N
 
 const BUILTIN_NETWORKS: &[BuiltinNetwork] = networks_generated::GENERATED_NETWORKS;
 
+/// The first block of a network's known data, when that is later than what
+/// its Firehose endpoint advertises as first streamable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkDataOrigin {
+    /// The EndpointInfo chain name (also its built-in alias), lowercase.
+    pub chain_name: &'static str,
+    /// The first block of the network's known data.
+    pub first_block: u64,
+    /// Why earlier blocks are not supported, for logs and the refusal.
+    pub reason: &'static str,
+}
+
+/// Per-network data origins. Hand-written, not generated: a new stream (no
+/// stored cursor) of such a network starts at its origin by default and
+/// refuses an earlier `--start-block`; resuming is unaffected.
+pub const NETWORK_DATA_ORIGINS: &[NetworkDataOrigin] = &[NetworkDataOrigin {
+    chain_name: "hypercore",
+    first_block: 846_903_317,
+    reason: "HyperCore data is known from 2026-01-01 (block 846903317, 2026-01-01T00:00:00.063Z); \
+             the endpoint advertises earlier blocks but lacks 846903300-846903312, and a stream \
+             cannot cross them",
+}];
+
+/// The data origin of the network with this EndpointInfo chain name or
+/// built-in alias (case-insensitive, surrounding whitespace ignored).
+pub fn network_data_origin(chain_name: &str) -> Option<&'static NetworkDataOrigin> {
+    let chain_name = chain_name.trim();
+    NETWORK_DATA_ORIGINS
+        .iter()
+        .find(|origin| origin.chain_name.eq_ignore_ascii_case(chain_name))
+}
+
 pub fn normalize_network_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
@@ -222,6 +254,51 @@ mod tests {
         unsafe {
             std::env::remove_var("FIREHOSE_ENDPOINT_MAINNET");
         }
+    }
+
+    #[test]
+    fn test_network_data_origin_lookup() {
+        let origin = network_data_origin("hypercore").expect("hypercore has a data origin");
+        assert_eq!(origin.first_block, 846_903_317);
+        assert!(origin.reason.contains("2026-01-01"), "{}", origin.reason);
+        assert!(
+            origin.reason.contains("846903300-846903312"),
+            "{}",
+            origin.reason
+        );
+        for name in [" HyperCore ", "HYPERCORE", "hypercore\n"] {
+            assert_eq!(network_data_origin(name), Some(origin), "{name:?}");
+        }
+        for name in [
+            "",
+            "mainnet",
+            "hyper-evm",
+            "hypercore-testnet",
+            "hyper core",
+        ] {
+            assert_eq!(network_data_origin(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn test_network_data_origins_are_unique_lowercase_with_a_reason() {
+        let mut names: Vec<&str> = NETWORK_DATA_ORIGINS
+            .iter()
+            .map(|origin| origin.chain_name)
+            .collect();
+        for origin in NETWORK_DATA_ORIGINS {
+            assert_eq!(
+                origin.chain_name,
+                normalize_network_name(origin.chain_name),
+                "chain names are matched lowercase"
+            );
+            assert!(origin.first_block > 0, "{}", origin.chain_name);
+            assert!(!origin.reason.trim().is_empty(), "{}", origin.chain_name);
+        }
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate data origin");
     }
 
     #[test]
