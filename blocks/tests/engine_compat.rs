@@ -1197,6 +1197,16 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
          count(ledger_event_index) AS linked FROM liquidations_v GROUP BY ALL;\
          \nSELECT 'matches' AS q, match_type AS label, count(*) AS n FROM outcome_matches_v \
          GROUP BY ALL;\
+         \nSELECT 'value' AS q, 'trades_v settlements' AS label, count(*) AS n FROM trades_v \
+         WHERE is_settlement;\
+         \nSELECT 'value' AS q, 'trades_v non-trades' AS label, count(*) AS n FROM trades_v \
+         WHERE is_non_trade;\
+         \nSELECT 'value' AS q, 'settled outcomes with open interest' AS label, count(*) AS n \
+         FROM outcome_open_interest_v JOIN outcome_settlements_v USING (outcome_id);\
+         \nSELECT 'columns' AS q, 'events' AS label, \
+         list(column_name || ' ' || column_type) AS columns FROM (DESCRIBE events);\
+         \nSELECT 'columns' AS q, 'other_events' AS label, \
+         list(column_name || ' ' || column_type) AS columns FROM (DESCRIBE other_events);\
          \nSELECT 'types' AS q, any_value(typeof(price * size)) AS product, \
          typeof(sum(price)) AS total, typeof(avg(price)) AS mean FROM fills;",
     );
@@ -1224,10 +1234,31 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     assert_eq!(results["C5"], 12);
     assert_eq!(results["C8"], 202_449);
     assert_eq!(results["C9"], 6);
-    // Every paired taker leg is a trade: as many as buyer-seller pairs.
-    assert_eq!(results["C4"], 254);
+    // trades_v keeps every paired taker leg and flags the non-trades: 159
+    // settlements (157 of a delisted perp against the zero address, 2 of a
+    // HIP-4 outcome) and a NET_CHILD_VAULTS pair. C4 counts only the trades.
     let views = counts("view");
     assert_eq!(views["trades_v"], 254);
+    let values = counts("value");
+    assert_eq!(values["trades_v settlements"], 159);
+    assert_eq!(values["trades_v non-trades"], 160);
+    assert_eq!(results["C4"], 254 - 160);
+    // A settled outcome has no open interest left (the settlement's receiving
+    // leg is a system account's, not a holding), so the fixtures' open
+    // outcomes are all C17 returns.
+    assert_eq!(values["settled outcomes with open interest"], 0);
+    assert_eq!(results["C17"], views["outcome_open_interest_v"]);
+    // `events` returns other_events' columns in the order and with the types
+    // `SELECT *` gives, so that the two compare by position.
+    let columns: BTreeMap<&str, &Value> = rows["columns"]
+        .iter()
+        .map(|row| (row["label"].as_str().unwrap(), &row["columns"]))
+        .collect();
+    assert_eq!(columns["events"], columns["other_events"]);
+    assert_eq!(
+        columns["events"].as_array().unwrap().last(),
+        Some(&json!("date DATE"))
+    );
     assert_eq!(views["liquidation_orders_v"], 16);
     // HIP-4: split, merge, merge-question and negate actions, one settled
     // outcome.

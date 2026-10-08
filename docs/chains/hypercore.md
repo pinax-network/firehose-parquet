@@ -41,7 +41,7 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
 | Perps (core and HIP-3), spot, HIP-4 | `fills` | raw, plus 3 derived columns | one fill leg; `(block_num, fill_index)` | Every trade leg of every market. `market_type` and `dex` select core perps (`perp`, `dex = ''`), HIP-3 perps (`perp`, the dex name), spot (`spot`) and HIP-4 outcomes (`outcome`); `counterparty` gives maker and taker. | 10.3M (13.6M peak) | 0.55–0.74 GB |
 | Perps | `liquidations` | derived | the liquidated leg; `(block_num, fill_index)` | Every liquidation, with its method, mark price, counterparty and the counterparty's direction. | about 6k (3.1k–17.9k) | about 0.5 MB |
 | Perps | `funding_rates` | derived | funding event × coin; `(block_num, event_index, coin)` | The hourly settled funding rate, the open-interest census, holder counts and funding flows. | about 8.0k | about 0.4 MB |
-| Perps | `funding_deltas` | raw | account × coin × hour; `(block_num, event_index, delta_index)` | Funding paid per account, and an hourly snapshot of every open position. | about 10.4M | about 0.24 GB |
+| Perps | `funding_deltas` | raw | account × coin × hour; `(block_num, event_index, delta_index)` | Funding paid per account, and an hourly snapshot of every open position in coins with a non-zero rate that hour. | about 10.4M | about 0.24 GB |
 | HIP-4 outcomes | `outcome_fills` | derived | outcome fill leg; `(block_num, fill_index)` | Every outcome leg with typed `outcome_id` and `side_index`: trades, mints, burns, split, merge, negate and settlements. | about 55k (0 before 2026-05-02) | about 2.5 MB |
 | Transfers and bridge | `transfers` | raw (event split) | event; `(block_num, event_index)` | `send`, `spot_transfer`, `internal_transfer`, `sub_account_transfer`, `account_class_transfer`. HyperEVM↔HyperCore moves are `send` and `spot_transfer` rows with a `0x20…` or `0x2222…` system address. | about 84k | about 7.6 MB |
 | Transfers and bridge | `bridge_transfers` | raw (event split) | event; `(block_num, event_index)` | The Arbitrum USDC bridge: `deposit` and `withdraw`. | about 3.0k | about 0.3 MB |
@@ -54,7 +54,8 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
 - **HIP-3 and spot are columns, not tables.** They share the perp data model:
   HIP-3 is `market_type = 'perp' AND dex <> ''` (35% of fills), spot is
   `market_type = 'spot'`. 0xArchive's families map onto the lake as follows;
-  `trades_v.family` names them:
+  `trades_v.family` names them (for trade counts and volume per family, use
+  cookbook C1's filter, not `trades_v`; see [Where to start](#where-to-start)):
 
   | Family | Filter |
   |---|---|
@@ -77,6 +78,30 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
   protobuf and are not in the lake. A separate reference job can provide them
   as `hl_*` tables, joined at query time
   ([optional reference joins](#optional-reference-joins)).
+
+### Where to start
+
+Tables hold facts; the `_v` views of the [view pack](#view-pack) are
+interpretations and free to change. The `C` numbers are queries of the
+[cookbook](#cookbook), the `J` numbers [optional reference
+joins](#optional-reference-joins).
+
+| Question | Start from | Queries |
+|---|---|---|
+| Trades and taker volume by core, HIP-3, spot or HIP-4 | `hypercore_fills_v` with `is_taker AND NOT is_non_trade`, by `market_type` and `dex`. Not `trades_v`: it keeps settlement pairs and lacks HIP-4 mints and burns. | C1 |
+| Trades with taker and maker (0xArchive's trades shape) | `trades_v` (`family`; filter `NOT is_non_trade`), or `fills.counterparty` | C2, C4 |
+| Liquidations: legs, kind, notional, orders, ADL | `liquidations`, `liquidations_v`, `liquidation_orders_v` | C3, C5, C6 |
+| Funding rates and open interest per coin and hour | `funding_rates`, `funding_rates_v`, `open_interest_v`, `hypercore_funding_events_v` (zero-rate coin-hours have no row, see [Funding](#funding)) | C9, C10, C11 |
+| Funding paid per account, and perp positions | `funding_deltas` (an hourly snapshot; zero-rate coin-hours are missing) | C8, C13 |
+| HIP-4 fills, matches, settlements, open interest and balances | `outcome_fills`, `outcome_matches_v`, `outcome_settlements_v`, `outcome_open_interest_v`, `outcome_positions_v` | C16, C17, C18 |
+| Transfers, and HyperEVM↔HyperCore moves | `transfers`, `transfers_v` | |
+| The Arbitrum USDC bridge | `bridge_transfers`, `bridge_transfers_v` | |
+| Vaults | `vault_events`, `vault_events_v` | C15 |
+| HYPE staking | `staking_events`, `staking_flows_v` | C14 |
+| One account's ledger history | `hypercore_account_events_v` joined to `events` | C7 |
+| Builder revenue | `fills` | C12 |
+| Validator rewards | `validator_rewards` | |
+| Names and labels (pairs, tokens, outcomes, dexes, the funding premium) | the optional `hl_*` tables | J1, J2, J3 |
 
 ## Identity and coverage
 
@@ -273,8 +298,11 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
     - Takeover by the backstop liquidator: both legs are `LIQUIDATED_*`
       (`liquidations.counterparty_direction LIKE 'LIQUIDATED_%'`). The
       takeover shares its hash with exactly one ledger `liquidation` event in
-      `other_events`: 12 of 12 in the fixtures (block 1127672017), and all 16
-      ledger liquidations in the live sample. `liquidations_v` links it.
+      `other_events`: 12 of 12 in the fixtures, all in block 1127672017 (TRUMP).
+      That block is the only evidence ([R-D4](#r-d4-liquidations)): an
+      earlier research sample found 16 ledger liquidations, 12 of them in this
+      block, and the October 2026 sample lakes contain none. `liquidations_v`
+      links it, and monitor M16 lists a ledger liquidation it does not link.
     - Settlement by ADL: the liquidated leg is `LIQUIDATED_*` and the
       counterparty leg is `AUTO_DELEVERAGING`
       (`liquidations.counterparty_direction`). These emit no ledger event. In
@@ -283,14 +311,17 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
 
     To count backstop liquidations, count `liquidations` rows with
     `liquidation_method = 'backstop'`, not ledger events.
+  - In the October 2026 sample lakes every liquidation is `market`: the
+    backstop takeover and ADL shapes described here come from fixtures.
 - **Fees.**
   - `fee` is in `fee_token`; negative is a maker rebate (27% of fills).
   - `fee` includes `builder_fee` (documented) and `deployer_fee` (ratio
     evidence only).
   - `builder` can appear without `builder_fee`: HyperLiquid omits a zero fee.
   - `priority_gas` is HYPE, on the taker leg only.
-  - Outcome fills pay fees too: `fee_token` is `+<n>` (the outcome token) in
-    May 2026 and `USDC` in October.
+  - Outcome fills pay fees too. In May 2026 `BUY` legs (shares received) paid
+    in `+<n>`, the leg's own outcome token, and `ASK` legs in USDC (41% of
+    the legs in a May sample); by October every leg pays USDC.
 - **Coins and market classes** (`market_type` and `dex`,
   [R-D1](#r-d1-market_type-and-dex)):
 
@@ -299,7 +330,7 @@ Rows per day are for October 2026; Parquet sizes are DuckDB zstd estimates.
   | `BTC`, `kPEPE` | `perp` (core) | `''` |
   | `<dex>:<SYM>` (xyz, io, para, mkts, hyna, km, cash, flx, vntl) | `perp` (HIP-3) | the dex name |
   | `@<n>`, or `PURR/USDC` (the only named pair) | `spot` | NULL |
-  | `#<10·outcome_id + side_index>` | `outcome`; its fee token is `+<n>` | NULL |
+  | `#<10·outcome_id + side_index>` | `outcome`; its fee token is `+<n>` on May 2026 `BUY` legs, otherwise USDC | NULL |
 
   Spot pair names and outcome metadata are **not** in the protobuf; they come
   from HyperLiquid's `/info` ([optional reference joins](#optional-reference-joins)).
@@ -322,7 +353,8 @@ its labels: `event_type` (the `EventBody` case) and, for `ledger_update`,
 | `staking_events` | `c_deposit` (282), `c_withdrawal` (347), `delegation` (430); ledger `c_staking_transfer` (479) | 1.5k |
 | `other_events` | `funding` (264 headers), `validator_rewards` (1,440 headers), `gossip_priority_auction_restart` (959), `create_sub_account` (102); ledger `gossip_priority_gas_auction` (960), `borrow_lend` (1,350), `rewards_claim` (278), `account_activation_gas` (63), `liquidation` (rare), `spot_genesis`, `deploy_gas_auction`, `activate_dex_abstraction` (0–5), `hip3_liquidator_deposit` (2 ever) | about 5.4k |
 
-- **One catalogue of columns.** `other_events` has all 43 event columns;
+- **One catalogue of columns.** `other_events` has all 43 event columns (50
+  with the 7 canonical columns);
   every other event table has the shared ones (`event_index`, `event_type`,
   `ledger_type`, `hash`, `event_time_ns`, `users`, `extra_json`) and the
   columns its types set, with the same names, types, nullability and
@@ -330,7 +362,8 @@ its labels: `event_type` (the `EventBody` case) and, for `ledger_update`,
 - **The union is the event list.** `event_index` is the event's position in
   the block over all five tables, and `blocks.event_count` is the block's
   total over them. The `events` view (the first SQL block below) is the union,
-  with `other_events`' columns in their order; `funding_deltas`,
+  with `other_events`' columns in the order `SELECT *` returns them (the
+  partition column `date` last); `funding_deltas`,
   `funding_rates` and `validator_rewards` join their header in
   `other_events` on `(block_num, event_index)`.
 - **Routing only grows** ([R-D6](#r-d6-event-routing)). A label stays in its
@@ -339,9 +372,13 @@ its labels: `event_type` (the `EventBody` case) and, for `ledger_update`,
   to a domain table, since no earlier row of it exists, and otherwise routes
   it to `other_events`. A new field of a routed type goes to a typed column
   only if that table has a column with the same name, protobuf type and
-  meaning, otherwise to `extra_json`. `value_tests.rs` pins every label's
-  table against the matrix below, and monitor M21 flags a label it does not
-  list.
+  meaning, otherwise to `extra_json`; a release whose mapper puts a value in
+  a column its table lacks stops on the first such block, before appending
+  anything, instead of dropping the value. `value_tests.rs` reads every case
+  of the vendored `EventBody` and `LedgerUpdateDelta` oneofs from
+  `event.proto` and pins each label's table against the matrix below, so a
+  release that vendors a case fails its tests until the case is routed and
+  documented; monitor M21 flags a label the routing table does not list.
 
 ### The columns each type sets
 
@@ -477,12 +514,28 @@ The numbers are the `LedgerUpdateDelta` case numbers.
   was closer to Σ|`szi`| than to the one-sided size, with a median ratio of
   0.97. `long_size` (= `short_size` up to `f64` noise, monitor M20) is half of
   it. Positions opened and closed between two funding blocks are invisible.
-- **A missing coin-hour is unknown, not zero.** No delta with
+- **A missing coin-hour: rate probably 0, positions unknown.** No delta with
   `funding_rate = 0` exists in about 3.4M deltas sampled: HyperLiquid appears
-  to omit zero-rate coin-hours. `xyz:GBP` had at least 6 open positions at
-  19:00 on 2026-10-06 yet no deltas at 18:00–21:00. So `open_interest` is
-  exact for the rows that exist; monitor M22 lists perp coins traded in the
-  hour before a funding block without a row at it.
+  to omit zero-rate coin-hours. `xyz:GBP` had at least 6 open positions and
+  fills at 18:00–21:00 UTC on 2026-10-06 yet no deltas at those funding
+  blocks. So:
+  - for `funding_rate`, a missing row most likely means a rate of 0. This is
+    inferred, not confirmed (the optional `hl_funding_history` table can
+    confirm it); an average of hourly rates should count such hours as 0 or
+    exclude them explicitly;
+  - for `open_interest`, the holder counts and the `funding_deltas`
+    positions, a missing row means unknown, not zero: they are exact for the
+    rows that exist. Monitor M22 lists perp coins traded in the hour before a
+    funding block without a row at it.
+- **`net_funding` is not funding volume.** Funding passes from payers to
+  receivers, so `positive_funding + negative_funding` (`funding_rates_v`'s
+  `net_funding`) is only rounding residue, about 1e-6 of the gross flow: for
+  example 0.33 on 412,906 USDC for the default dex over 5 hours. It is kept
+  for parity with the Pinax API's `total_funding`; the funding volume is
+  `positive_funding` (or `-negative_funding`).
+- **Delisted dexes.** The dexes delisted in October 2026 (indexes 2–7) still
+  have a funding event every hour, with `item_count = 0` and no
+  `funding_rates` rows, so they keep their `dex_index`.
 
 ## Validator rewards and gossip
 
@@ -518,9 +571,11 @@ staged and validated, before any row is appended. The rules:
 - are **versioned**: every table's schema carries the metadata
   `fireparq.hypercore.derivation = "1"`.
 
-The macros `hc_market_type`, `hc_dex` and `hc_event_table` of the
-[view pack](#view-pack) state R-D1 and R-D6 in SQL (monitors M19 and M21
-compare the lake with them), and `blocks/src/hypercore/value_tests.rs`
+The macros `hc_market_type` and `hc_dex` of the [view pack](#view-pack) state
+R-D1 in SQL, and `hc_event_table` states R-D6 for the labels the routing table
+lists: it returns NULL for an unlisted label, which the mapper writes to
+`other_events`, so that monitor M21 can flag it (monitors M19 and M21 compare
+the lake with them). `blocks/src/hypercore/value_tests.rs`
 re-derives every derived value from the raw output with a second, naive
 implementation and compares the two on all 36 fixtures.
 
@@ -563,7 +618,8 @@ A pure function of `coin`. Anchored patterns, tried in order:
   user`. A group of three or more legs, or of two legs on one side, has never
   been seen: NULL, and monitor M15.
 - In the samples every perp and spot leg with a non-zero trade id was paired;
-  outcome legs were paired at 43–83% (the direct trades and settlements).
+  outcome legs were paired at about 40–83% (the direct trades and
+  settlements), roughly half or less in May and October 2026 windows.
 
 ### R-D3 `outcome_fills`
 
@@ -589,8 +645,9 @@ A pure function of `coin`. Anchored patterns, tried in order:
   paired leg.
 - That is all: the link to the ledger `liquidation` event, the kind and the
   notional are `liquidations_v`. The link joins two small tables, and its
-  evidence is 12 events in one fixture block, so it is not frozen into the
-  root.
+  only verified evidence is the 12 events of fixture block 1127672017; the
+  October 2026 sample lakes contain no ledger liquidation. So it is not frozen
+  into the root.
 - **Edge cases:** a `market` liquidation's liquidated leg is crossed; a
   backstop takeover's counterparty is `LIQUIDATED_*` and has a ledger event; an
   ADL's counterparty is `AUTO_DELEVERAGING` and has none. An order filled
@@ -614,7 +671,9 @@ A pure function of `coin`. Anchored patterns, tried in order:
   when every delta of the coin carries the same rate (monitor M17). `dex` is
   R-D1 of the coin.
 - An event without deltas has no row; its header, with `item_count = 0`, stays
-  in `other_events`.
+  in `other_events` and still counts in `dex_index`. The dexes delisted in
+  October 2026 (indexes 2–7) are such events every hour, between non-empty
+  ones.
 
 ### R-D6 Event routing
 
@@ -637,7 +696,8 @@ union of the five tables equals the event list value for value.
   it, and readers must not rely on it. `validate` and resume work on compacted
   tables.
 - A defect found in a rule is fixed by publishing a corrected view at once (the
-  views above are free to change) and rebuilding when the defect is material.
+  [views](#views-monitors-and-cookbook) are free to change) and rebuilding when
+  the defect is material.
 
 ## Refusals
 
@@ -691,7 +751,7 @@ and every event has exactly one body.
 The columns, their types and nullability, and the derivation version are bound
 into the root's protected identity: an added or changed column, or a changed
 derivation rule, needs a new output root, a rebuild from the origin (about
-330M blocks; at the 3.6k blocks/s measured once, about a day of streaming, while
+327M blocks; at the 3.6k blocks/s measured once, about a day of streaming, while
 the old root keeps serving). `extra_json` (every table, the last column before
 `fork_step`) is the lane that lets most upstream additions ship without one.
 **This version writes NULL in every row.**
@@ -775,7 +835,9 @@ The SQL below assumes the default `hex` encoding and DuckDB 1.5 or later with
 its `delta` extension. It is not part of the schema: change it freely.
 `blocks/tests/engine_compat.rs` runs all of it over a HyperCore build of the
 fixture blocks. Start with a view per table, and `events`, the union of the
-five event tables with `other_events`' columns in their order:
+five event tables with `other_events`' columns in the order `SELECT *`
+returns them (`date`, the partition column, last), so that `SELECT *` from
+either compares by position:
 
 ```sql
 CREATE VIEW blocks AS SELECT * FROM delta_scan('<root>/blocks');
@@ -790,14 +852,16 @@ CREATE VIEW other_events AS SELECT * FROM delta_scan('<root>/other_events');
 CREATE VIEW funding_deltas AS SELECT * FROM delta_scan('<root>/funding_deltas');
 CREATE VIEW funding_rates AS SELECT * FROM delta_scan('<root>/funding_rates');
 CREATE VIEW validator_rewards AS SELECT * FROM delta_scan('<root>/validator_rewards');
--- UNION ALL BY NAME orders columns by first appearance, so list them in other_events' order.
+-- UNION ALL BY NAME orders columns by first appearance, so list them in other_events' order
+-- (delta_scan returns the partition column date last).
 CREATE VIEW events AS
-SELECT block_num, block_id, parent_num, parent_id, lib_num, timestamp, date, event_index, event_type,
+SELECT block_num, block_id, parent_num, parent_id, lib_num, timestamp, event_index, event_type,
        ledger_type, hash, event_time_ns, users, user, destination, vault, validator, sub_account, token,
        amount, usdc, usdc_value, fee, fee_token, native_token_fee, nonce, source_dex, destination_dex, dex,
        is_deposit, to_perp, is_undelegate, is_finalized, requested_usd, commission, closing_cost, basis,
        net_withdrawn_usd, interest_amount, operation, liquidated_ntl_pos, account_value, leverage_type,
-       liquidated_positions, slot_id, previous_winner_ip, end_gas, sub_account_name, item_count, extra_json
+       liquidated_positions, slot_id, previous_winner_ip, end_gas, sub_account_name, item_count, extra_json,
+       date
 FROM (SELECT * FROM transfers UNION ALL BY NAME SELECT * FROM bridge_transfers
       UNION ALL BY NAME SELECT * FROM vault_events UNION ALL BY NAME SELECT * FROM staking_events
       UNION ALL BY NAME SELECT * FROM other_events);
@@ -810,23 +874,32 @@ liquidation, funding and transfer interpretations; the 0xArchive trades shape;
 and one view per ledger type and per scalar body.
 
 - **HIP-4** (`outcome_*`): `outcome_matches_v` gives one row per match: a
-  trade or settlement from the counterparty pair (the taker's row), and a mint
-  or burn from two adjacent single-leg fills of one outcome's two sides with
-  the same hash and size, prices summing to exactly 1, maker then taker for a
-  mint and taker then maker for a burn (a heuristic: without the price check it
-  pairs 40 wrong legs in a 4-hour sample). `outcome_actions_v` groups split,
-  merge, merge-question and negate legs into actions. `outcome_settlements_v`
-  reads the settle fraction from the side-0 settlement price (85 of 85 against
-  `/info`). `outcome_positions_v` gives exact share balances from
-  `start_position`, which assumes outcome tokens move only through fills
-  (monitor M23) and needs history from before an account's first outcome fill,
-  which a root from the origin has (HIP-4 launched later).
+  trade or settlement from the counterparty pair (the taker's row; these are
+  the `family = 'hip4'` rows of `trades_v`), and a mint or burn from two
+  adjacent single-leg fills of one outcome's two sides with the same hash and
+  size, prices summing to exactly 1, maker then taker for a mint and taker
+  then maker for a burn (a heuristic: without the price check it pairs 40
+  wrong legs in a 4-hour sample). `outcome_actions_v` groups split, merge,
+  merge-question and negate legs into actions. `outcome_settlements_v` reads
+  the settle fraction from the side-0 settlement price (85 of 85 against
+  `/info`). `outcome_positions_v` gives each account's share balance from its
+  latest fill, `start_position ± size`, which assumes outcome tokens move only
+  through fills (monitor M23). It leaves out the `BUY` leg of a settlement:
+  that leg goes to a `0x3200…` system account whose `start_position` is
+  always 0 and whose balance is never carried forward, so those shares are
+  retired, not held, and a settled outcome has no open interest. The balance
+  is exact for every account with an outcome fill in the root. History from
+  before the root matters only for holders whose last outcome fill came
+  before its first block; a root from the origin has none, since HIP-4
+  launched later.
 - **Liquidations:** `liquidations_v` adds `notional`, `liquidation_kind`
   (`market`, `backstop_takeover` or `adl`) and the ledger `liquidation` event
   of the same block, hash and account (a takeover's; `ledger_event_index` and
   its fields). `liquidation_orders_v` groups the legs of one order.
-- **Funding:** `funding_rates_v` adds net funding, net position, the
-  open-interest change from the previous hour (NULL across a missing hour) and
+- **Funding:** `funding_rates_v` adds net funding (the rounding residue of a
+  zero-sum transfer, about 0, kept as the API's `total_funding`; see
+  [Funding](#funding)), net position, the open-interest change from the
+  previous hour (NULL across a missing hour) and
   `funding_price_derived`, the price at which the funding paid matches the rate
   (median error 6e-6 against trades). It is believed to be HyperLiquid's oracle
   price but has not been checked against it.
@@ -837,8 +910,19 @@ and one view per ledger type and per scalar body.
   depositor or recipient and the vault of a leader commission (from the
   same-hash `vault_withdraw`), and `staking_flows_v` counts each HYPE move once.
 - **Trades:** `trades_v` has one row per paired taker leg with `maker :=
-  counterparty` and `family` (`core`, `hip3`, `spot`, `hip4`); HIP-4 mints and
-  burns, which have no counterparty, are in `outcome_matches_v`.
+  counterparty` and `family` (`core`, `hip3`, `spot`, `hip4`), 0xArchive's
+  trades shape. Like 0xArchive's `is_settlement_fill`, it keeps settlement
+  pairs and flags them: `is_settlement` marks a HIP-4 settlement (against
+  `0x3200…`) or a delisted-perp close-out (against the zero address), and
+  `is_non_trade` every direction `hypercore_fills_v` counts as no trade.
+  Filter `NOT is_non_trade` for trades; per-family trade counts and volume
+  come from cookbook C1, since `trades_v` has no HIP-4 mints or burns.
+  - `trades_v` already holds the HIP-4 trade and settlement pairs
+    (`family = 'hip4'`), which `outcome_matches_v` returns too, as
+    `match_type` `trade` and `settlement`, beside the mints and burns, which
+    have no counterparty. Never union the two views as they stand: for HIP-4,
+    use `outcome_matches_v` alone; for every market with the mints and burns,
+    use `trades_v WHERE family <> 'hip4'` plus `outcome_matches_v`.
 
 ```sql
 CREATE OR REPLACE MACRO hc_zero_hash() AS '0x' || repeat('0', 64);
@@ -849,7 +933,8 @@ CREATE OR REPLACE MACRO hc_market_type(coin) AS CASE
     WHEN regexp_full_match(coin, '([a-z][a-z0-9]*:)?[A-Za-z0-9]+') THEN 'perp' END;
 CREATE OR REPLACE MACRO hc_dex(coin) AS CASE WHEN hc_market_type(coin) = 'perp'
     THEN CASE WHEN contains(coin, ':') THEN split_part(coin, ':', 1) ELSE '' END END;
--- R-D6: the event table of an event's labels; NULL for a label the routing table does not list.
+-- R-D6 for the labels the routing table lists. An unlisted label gives NULL here (monitor M21 flags it),
+-- where the mapper writes it to other_events.
 CREATE OR REPLACE MACRO hc_event_table(event_type, ledger_type) AS CASE
     WHEN event_type = 'ledger_update' THEN CASE
         WHEN ledger_type IN ('send', 'spot_transfer', 'internal_transfer', 'sub_account_transfer',
@@ -881,13 +966,20 @@ SELECT f.*,
        f.price * f.size                                              AS notional
 FROM fills f;
 
--- 0xArchive's trades shape: one row per paired taker leg (HIP-4 mints and burns: outcome_matches_v).
+-- 0xArchive's trades shape: one row per paired taker leg. Settlement pairs (HIP-4 against 0x3200…, delisted
+-- perps against the zero address) are kept and flagged, as 0xArchive's is_settlement_fill: filter NOT is_non_trade
+-- for trades. Includes the HIP-4 trade and settlement pairs (family = 'hip4'), which outcome_matches_v also
+-- returns; HIP-4 mints and burns are only in outcome_matches_v. Do not union the two views unless trades_v is
+-- filtered to family <> 'hip4'. Trade counts and volume per family: cookbook C1.
 CREATE OR REPLACE VIEW trades_v AS
 SELECT block_num, timestamp, date, fill_index, coin,
        CASE market_type WHEN 'perp' THEN CASE WHEN dex = '' THEN 'core' ELSE 'hip3' END
             WHEN 'spot' THEN 'spot' WHEN 'outcome' THEN 'hip4' END AS family,
        market_type, dex, transaction_id AS trade_id, nullif(hash, hc_zero_hash()) AS tx_hash,
        price, size, price * size AS notional, side AS taker_side, direction AS taker_direction,
+       direction = 'SETTLEMENT' AS is_settlement,
+       direction IN ('SPOT_DUST_CONVERSION', 'SETTLEMENT', 'NET_CHILD_VAULTS', 'SPLIT_OUTCOME',
+                     'MERGE_OUTCOME', 'MERGE_QUESTION', 'NEGATE_OUTCOME') AS is_non_trade,
        user AS taker, counterparty AS maker, fee AS taker_fee, fee_token AS taker_fee_token,
        liquidation_method
 FROM fills WHERE crossed AND counterparty IS NOT NULL;
@@ -903,6 +995,8 @@ SELECT d.*, r.dex_index, r.dex
 FROM funding_deltas d JOIN funding_rates r USING (block_num, event_index, coin);
 
 -- Net funding, net position, the derived funding price and the open-interest change (NULL across a missing hour).
+-- net_funding (positive + negative) is the rounding residue of a zero-sum transfer, about 0, kept as the API's
+-- total_funding. The funding volume is positive_funding.
 CREATE OR REPLACE VIEW funding_rates_v AS
 SELECT *, positive_funding + negative_funding AS net_funding, long_size - short_size AS net_position,
        CASE WHEN funding_rate <> 0 AND open_interest > 0
@@ -992,12 +1086,14 @@ SELECT outcome_id, min(block_num) AS settled_block, min(timestamp) AS settled_at
        sum(size) FILTER (WHERE side = 'ASK') AS settled_shares
 FROM outcome_fills WHERE direction = 'SETTLEMENT' GROUP BY outcome_id;
 
--- HIP-4 share balance of each account and side coin after its latest fill.
+-- HIP-4 share balance of each account and side coin after its latest fill. The BUY leg of a settlement goes to
+-- a 0x3200… system account whose start_position is always 0 and whose balance is never carried forward: those
+-- shares are retired, not held, so the leg is left out and a settled outcome has no open interest.
 CREATE OR REPLACE VIEW outcome_positions_v AS
 SELECT user, coin, outcome_id, side_index,
        arg_max(start_position + CASE side WHEN 'BUY' THEN size ELSE -size END, (block_num, fill_index)) AS shares,
        max(block_num) AS last_block_num
-FROM outcome_fills GROUP BY ALL;
+FROM outcome_fills WHERE NOT (direction = 'SETTLEMENT' AND side = 'BUY') GROUP BY ALL;
 
 CREATE OR REPLACE VIEW outcome_open_interest_v AS
 SELECT coin, outcome_id, side_index, sum(shares) AS open_interest, count(*) AS holders
@@ -1255,18 +1351,21 @@ SELECT 'M23' m, block_num, event_index FROM events WHERE regexp_full_match(token
 ### Cookbook
 
 ```sql
--- C1 taker notional per day, market type and perp dex (trades only)
+-- C1 taker notional per day, market type and perp dex (trades only). Notional is in the quote or collateral
+-- token: each HIP-3 dex has its own collateral, and a few spot pairs quote USDT0 or USDE, so group spot by coin
+-- (or by quote token through J1) before adding it up.
 SELECT date, market_type, dex, sum(notional) AS taker_notional, count(*) AS trades
 FROM hypercore_fills_v WHERE is_taker AND NOT is_non_trade GROUP BY ALL ORDER BY ALL;
--- C2 the trades of one HIP-3 dex with taker and maker
+-- C2 the trades of one HIP-3 dex with taker and maker (a delisted perp's settlement pairs left out)
 SELECT block_num, timestamp, coin, trade_id, taker_side, price, size, taker, maker
-FROM trades_v WHERE family = 'hip3' AND dex = 'xyz' ORDER BY block_num, fill_index;
+FROM trades_v WHERE family = 'hip3' AND dex = 'xyz' AND NOT is_non_trade ORDER BY block_num, fill_index;
 -- C3 every liquidated leg with its counterparty: the resting order, the backstop liquidator, or under ADL the deleveraged account
 SELECT block_num, fill_index, liquidated_user, coin, direction, liquidation_method, mark_price, price, size, counterparty
 FROM liquidations;
--- C4 buyer and seller of each trade (dust conversions, HIP-4 mints and burns have no counterparty)
+-- C4 buyer and seller of each trade (dust conversions, HIP-4 mints and burns have no counterparty, and
+-- settlement and other non-trade pairs are left out)
 SELECT block_num, transaction_id, user AS buyer, counterparty AS seller, price, size, crossed AS buyer_is_taker
-FROM fills WHERE side = 'BUY' AND counterparty IS NOT NULL;
+FROM hypercore_fills_v WHERE side = 'BUY' AND counterparty IS NOT NULL AND NOT is_non_trade;
 -- C5 backstop takeovers with their ledger liquidation event (one row per liquidated leg)
 SELECT block_num, fill_index, liquidated_user, coin, ledger_event_index, liquidated_ntl_pos, account_value, leverage_type
 FROM liquidations_v WHERE liquidation_kind = 'backstop_takeover';
@@ -1276,17 +1375,20 @@ FROM liquidations_v GROUP BY ALL ORDER BY ALL;
 -- C7 an account's non-funding ledger history (its funding payments are in funding_deltas)
 SELECT e.* FROM hypercore_account_events_v a JOIN events e USING (block_num, event_index)
 WHERE a.account = '0x…' ORDER BY block_num, event_index;
--- C8 latest hourly position snapshot
+-- C8 latest hourly position snapshot (positions in coins whose rate was 0 that hour are absent, see M22)
 SELECT user, coin, szi FROM funding_deltas
 WHERE block_num = (SELECT max(block_num) FROM other_events WHERE event_type = 'funding');
--- C9 funding per dex per hour, keeping empty funding events
-SELECT e.block_num, e.dex_index, e.item_count, coalesce(sum(r.positive_funding + r.negative_funding), 0) AS net_funding
+-- C9 funding paid and received per dex per hour, keeping empty funding events (the two sides net to about 0)
+SELECT e.block_num, e.dex_index, e.item_count,
+       coalesce(sum(r.positive_funding), 0) AS funding_received, coalesce(-sum(r.negative_funding), 0) AS funding_paid
 FROM hypercore_funding_events_v e LEFT JOIN funding_rates r USING (block_num, event_index) GROUP BY ALL ORDER BY 1, 2;
--- C10 open interest per coin at the latest funding block (both sides, as HyperLiquid counts it)
+-- C10 open interest per coin at the latest funding block (both sides, as HyperLiquid counts it; a coin whose
+-- rate was 0 that hour has no row)
 SELECT dex_index, dex, coin, open_interest, long_size, long_positions, short_positions, funding_rate
 FROM funding_rates WHERE block_num = (SELECT max(block_num) FROM funding_rates) ORDER BY open_interest DESC;
--- C11 hourly funding of one coin with the open-interest change (NULL across a missing hour)
-SELECT timestamp, funding_rate, open_interest, open_interest_change, net_funding, funding_price_derived
+-- C11 hourly funding of one coin with the open-interest change (NULL across a missing hour) and the funding volume
+SELECT timestamp, funding_rate, open_interest, open_interest_change, positive_funding AS funding_volume,
+       funding_price_derived
 FROM funding_rates_v WHERE coin = 'BTC' ORDER BY timestamp;
 -- C12 builder revenue per fee token (builder_fee is in fee_token; fully captured from block 957002478)
 SELECT builder, fee_token, sum(builder_fee) AS revenue, count(*) AS fills
@@ -1304,9 +1406,9 @@ SELECT flow, sum(amount) AS hype, count(*) AS moves FROM staking_flows_v GROUP B
 SELECT ledger_type, vault, account, usdc, net_withdrawn_usd FROM vault_events_v WHERE NOT is_vault_total;
 -- C16 HIP-4 matches per outcome and kind: trades, settlements, mints and burns
 SELECT outcome_id, match_type, count(*) AS matches, sum(size) AS shares FROM outcome_matches_v GROUP BY ALL ORDER BY ALL;
--- C17 HIP-4 settled outcomes with the open interest left on each side
-SELECT outcome_id, s.settled_at, s.settle_fraction, o.side_index, o.open_interest, o.holders
-FROM outcome_settlements_v s FULL JOIN outcome_open_interest_v o USING (outcome_id) ORDER BY ALL;
+-- C17 HIP-4 open outcomes (not settled in the root) with their open interest per side
+SELECT o.outcome_id, o.side_index, o.coin, o.open_interest, o.holders
+FROM outcome_open_interest_v o ANTI JOIN outcome_settlements_v s USING (outcome_id) ORDER BY ALL;
 -- C18 an account's HIP-4 share balances
 SELECT coin, outcome_id, side_index, shares, last_block_num FROM outcome_positions_v
 WHERE user = '0x…' AND shares <> 0;
@@ -1322,23 +1424,27 @@ are never written into a fireparq root. A separate reference job (a
 append-only Delta tables (`hl_spot_tokens`, `hl_spot_pairs`, `hl_perp_dexs`,
 `hl_perp_assets`, `hl_outcomes`, `hl_questions`, `hl_funding_history`), each
 with `*_current` and `*_history` views, using the lake's vocabulary: `''` for
-the default dex and `side_index`. When those tables exist, join them at query
-time:
+the default dex and `side_index`. That job owns the tables and creates them
+and their views in its own location, never in a fireparq root. J3 reads the
+`hl_funding_history` table itself (keyed by `coin, funding_time`), not a
+`*_history` view, and joins `hl_perp_dexs_current` on `dex_index`, the
+observed ordinal that monitor M18 checks. When those tables exist, join them
+at query time:
 
 ```sql
--- R1 spot trades with pair names
+-- J1 spot trades with pair names
 SELECT f.block_num, f.fill_index, f.timestamp, p.base_symbol, p.quote_symbol, f.side, f.price, f.size,
        f.user, f.counterparty, f.crossed
 FROM fills f LEFT JOIN hl_spot_pairs_current p ON p.coin = f.coin
 WHERE f.market_type = 'spot';
--- R2 HIP-4 fills with labels (side_names is 1-based in DuckDB)
+-- J2 HIP-4 fills with labels (side_names is 1-based in DuckDB)
 SELECT o.*, m.name AS outcome_name, m.side_names[o.side_index + 1] AS side_label,
        q.name AS question_name, s.settle_fraction
 FROM outcome_fills o
 LEFT JOIN hl_outcomes_current m USING (outcome_id)
 LEFT JOIN hl_questions_current q ON q.question_id = m.question_id
 LEFT JOIN outcome_settlements_v s USING (outcome_id);
--- R3 hourly funding with the premium and the dex name
+-- J3 hourly funding with the premium and the dex name
 SELECT r.*, h.premium, d.full_name AS dex_full_name
 FROM funding_rates r
 LEFT JOIN hl_funding_history h ON h.coin = r.coin AND h.funding_time = r.timestamp
@@ -1365,7 +1471,15 @@ tables and the event split from DuckDB prototypes of 24-hour windows):
 | `validator_rewards` | about 50k | 1–3 | under 0.2 MB | about 13M rows, under 0.1 GB |
 | **Total** | about 22M | | **about 0.85–1.0 GB** | **about 190 GB** |
 
-`counterparty` adds about 5.5% to `fills`; the event split saves no space.
+fireparq's own parts of the small tables come out larger per row than these
+prototype figures. On a 5-hour October 2026 lake (column data, footers
+excluded) they measured `outcome_fills` 59, `liquidations` 96,
+`funding_rates` 53, `transfers` 109, `vault_events` 163, `staking_events` 114
+and `bridge_transfers` 103 bytes per row, up to about 60% more, and each
+uncompacted part adds 6–10 KB of footer; `fills` (57), `funding_deltas` (23)
+and `blocks` (25) match. The small tables stay a few MB a day.
+
+`counterparty` adds about 5–5.5% to `fills`; the event split saves no space.
 With up to about 28 flushes a day and rows in every table, a day gets up to
 about 336 small parts before the maintenance job compacts them.
 

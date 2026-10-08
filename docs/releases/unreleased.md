@@ -48,7 +48,9 @@ empty when the release is cut.
     (rules R1–R11). Such a stop needs a release with refreshed protos;
     `extra_json`, NULL in this version, lets most additions ship without a
     new output root, and a new event label is routed by the release that
-    vendors it.
+    vendors it (its tests fail until the label's table is pinned and
+    documented). A value the mapper stages for an event table without that
+    column stops the block before any append instead of being dropped.
   - `--network hypercore` streams it with the ambient `PINAX_API_KEY` (or
     `SUBSTREAMS_API_KEY`), like any Pinax alias; see the internal Pinax
     networks below.
@@ -60,10 +62,12 @@ empty when the release is cut.
   - `docs/chains/hypercore.md` adds a DuckDB view pack (the `events` union,
     HIP-4 matches, settlements and positions, liquidation kinds with their
     ledger events, funding and open-interest views, normalised transfers,
-    0xArchive-shaped trades, a view per ledger type and body), 28
-    data-quality monitors, a cookbook, and the optional joins against `hl_*`
-    reference tables of a separate metadata job, which `engine_compat` runs
-    over a build of 36 real fixture blocks.
+    0xArchive-shaped trades, a view per ledger type and body), 23
+    data-quality monitors (M1–M23) and a cookbook, all of which
+    `engine_compat` runs over a build of 36 real fixture blocks, and a
+    "where to start" map from questions to tables, views and queries. It also
+    documents optional joins against the `hl_*` tables of a separate metadata
+    job (run in `engine_compat` against empty stand-ins).
   - The maintenance job needs all twelve tables in `LAKE_TABLES`
     (`deploy/examples/delta-maintenance-cronjob.yaml`).
   - `user`, `destination`, `vault`, `validator`, `liquidated_user` and
@@ -71,8 +75,7 @@ empty when the release is cut.
     columns of those names.
   - New roots only: the family is part of the protected stream identity, so
     existing roots are unaffected and an older binary refuses a HyperCore
-    root. `MAPPER_EPOCH` is unchanged. A root written by a pre-release build
-    of #709 (five tables) is refused and must be rebuilt; none was deployed.
+    root. `MAPPER_EPOCH` is unchanged.
 - **Built-in aliases for Pinax networks the registry does not list yet**:
   `PINAX_NETWORKS` in `scripts/generate_networks.rs` is a reviewed list of
   Pinax-served Firehose networks outside The Graph networks registry, appended
