@@ -24,7 +24,7 @@ vacuums and checkpoints them beside the writer.
 | `cosmos` | no built-in name; `--endpoint https://mainnet.injective.streamingfast.io:443` | [Cosmos schema](docs/schemas/cosmos.md) | [Cosmos notes](docs/chains/cosmos.md) |
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
 | `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
-| `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from 2026-01-01, block 846903317: the default start, earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): `decimal(38,10)` amounts, decimal block ids, the data origin and the endpoint's block hole, views, monitors and cookbook |
+| `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from 2026-01-01, block 846903317: the default start, earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): twelve tables by product family (fills with market class and counterparty, liquidations, funding rates and open interest, HIP-4 outcomes, transfers, bridge, vaults, staking), `decimal(38,10)` amounts, decimal block ids, the data origin and the endpoint's block hole, views, monitors and cookbook |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 

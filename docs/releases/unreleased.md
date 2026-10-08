@@ -15,12 +15,28 @@ empty when the release is cut.
 ## New features
 
 - **HyperCore (`--block-type hypercore`)**: the HyperLiquid L1 from Pinax's
-  `pinax.hypercore.v1` Firehose (`hypercore.firehose.pinax.network:443`),
-  schema epoch 1. Five tables: `blocks`, `fills`, `events` (one row per
-  event, its body and ledger delta flattened, with `event_type` and
-  `ledger_type`), `funding_deltas` and `validator_rewards`
+  `pinax.hypercore.v1` Firehose (`hypercore.firehose.pinax.network:443`), in
+  twelve tables organised by product family
   ([schema](../schemas/hypercore.md), [notes](../chains/hypercore.md))
-  (#709).
+  (#709):
+  - the raw record: `blocks`, `fills` (every leg of every market),
+    `funding_deltas`, `validator_rewards`, and the events split by product
+    family into `transfers`, `bridge_transfers`, `vault_events`,
+    `staking_events` and the catch-all `other_events` (one row per event, its
+    body and ledger delta flattened, the columns of one shared catalogue;
+    their union is the block's event list);
+  - derived from the same block by fact-only rules (R-D1–R-D6):
+    `fills.market_type` (`perp`, `spot`, `outcome`), `fills.dex` (`''` for
+    the default perp dex, else the HIP-3 dex) and `fills.counterparty` (the
+    other leg of the match), and the tables `outcome_fills` (HIP-4 legs with
+    `outcome_id` and `side_index`), `liquidations` (the liquidated leg with
+    its counterparty and method) and `funding_rates` (the hourly rate, open
+    interest, position counts and funding flows per coin). A rule never
+    refuses a block: a shape it does not recognise gives NULL.
+  - Every table's schema carries `fireparq.hypercore.derivation = "1"`, part
+    of its declared digest: a change to a derivation rule needs a new root,
+    and a root refuses to resume under other rules. Compacted files do not
+    carry the key; `validate` and resume do not need it.
   - Amounts, prices and sizes are exact `decimal(38,10)` values, parsed
     without rounding; a string that is not exact refuses the block.
   - `block_id` and `parent_id` are the decimal block number as text
@@ -30,8 +46,9 @@ empty when the release is cut.
     with fields the vendored protos do not know, an unknown enum value or an
     empty required value is refused with its block, protobuf path and value
     (rules R1–R11). Such a stop needs a release with refreshed protos;
-    `extra_json`, NULL in this epoch, lets most additions ship without a new
-    output root.
+    `extra_json`, NULL in this version, lets most additions ship without a
+    new output root, and a new event label is routed by the release that
+    vendors it.
   - `--network hypercore` streams it with the ambient `PINAX_API_KEY` (or
     `SUBSTREAMS_API_KEY`), like any Pinax alias; see the internal Pinax
     networks below.
@@ -40,15 +57,22 @@ empty when the release is cut.
     `--start-block` before it is refused. The endpoint advertises
     846000000 but lacks blocks 846903300–846903312, which a stream cannot
     cross; see the data origins below.
-  - `docs/chains/hypercore.md` adds a DuckDB view pack (a view per ledger
-    type and body), 17 data-quality monitors and a cookbook, which
-    `engine_compat` runs over a build of 36 real fixture blocks.
+  - `docs/chains/hypercore.md` adds a DuckDB view pack (the `events` union,
+    HIP-4 matches, settlements and positions, liquidation kinds with their
+    ledger events, funding and open-interest views, normalised transfers,
+    0xArchive-shaped trades, a view per ledger type and body), 28
+    data-quality monitors, a cookbook, and the optional joins against `hl_*`
+    reference tables of a separate metadata job, which `engine_compat` runs
+    over a build of 36 real fixture blocks.
+  - The maintenance job needs all twelve tables in `LAKE_TABLES`
+    (`deploy/examples/delta-maintenance-cronjob.yaml`).
   - `user`, `destination`, `vault`, `validator`, `liquidated_user` and
     `sub_account` columns get Parquet Bloom filters; no other family has
     columns of those names.
   - New roots only: the family is part of the protected stream identity, so
     existing roots are unaffected and an older binary refuses a HyperCore
-    root. `MAPPER_EPOCH` is unchanged.
+    root. `MAPPER_EPOCH` is unchanged. A root written by a pre-release build
+    of #709 (five tables) is refused and must be rebuilt; none was deployed.
 - **Built-in aliases for Pinax networks the registry does not list yet**:
   `PINAX_NETWORKS` in `scripts/generate_networks.rs` is a reviewed list of
   Pinax-served Firehose networks outside The Graph networks registry, appended

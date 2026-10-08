@@ -203,10 +203,12 @@ order): `hash`, `tx_hash`, `transaction_hash`, `signature`, `address`, `from`,
 `contract_address`, `receiver_id`, `signer_id`, `block_hash`, `blockhash`,
 `receipt_id`, and HyperCore's `user`, `destination`, `vault`, `validator`,
 `liquidated_user` and `sub_account` (no other family has columns of those six
-names). HyperCore's `fills` get filters on `user`, `hash` and `liquidated_user`,
-`events` on `hash`, `user`, `destination`, `vault`, `validator` and
-`sub_account`, `funding_deltas` on `user` and `validator_rewards` on
-`validator`; the `events.users` list gets none. Readers that support these filters
+names). HyperCore's `fills` get filters on `user`, `hash` and `liquidated_user`
+(not `counterparty`, which is the other leg's `user`), `outcome_fills` on `user`
+and `hash`, `liquidations` on `liquidated_user` and `hash`, each event table on
+`hash` and those of `user`, `destination`, `vault`, `validator` and
+`sub_account` it has (`other_events` on all six), `funding_deltas` on `user`
+and `validator_rewards` on `validator`; the `users` lists get none. Readers that support these filters
 can skip row groups for equality lookups; positive matches still require row
 filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
 65,536 rows, with at most eight filters per group. This changes physical layout,

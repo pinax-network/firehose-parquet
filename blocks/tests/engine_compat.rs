@@ -29,8 +29,8 @@
 //!
 //! `hypercore_documented_sql_runs_over_the_fixture_blocks` builds the 36 real
 //! HyperCore fixture blocks with their true identities and runs the view
-//! pack, monitors and cookbook of `docs/chains/hypercore.md` over them in
-//! DuckDB.
+//! pack, monitors, cookbook and reference joins of `docs/chains/hypercore.md`
+//! over them in DuckDB.
 //!
 //! `anonymous_reads_of_a_public_deployment_bucket` is an opt-in check against
 //! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
@@ -52,7 +52,7 @@ use common::{number, DuckDb};
 
 const CHAIN: &str = "engine-test";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, 102 and 103
-/// on 2023-11-15.
+/// (and HyperCore's 104) on 2023-11-15.
 const MIDNIGHT: i64 = 1_700_006_400;
 const DAY: &str = "2023-11-15";
 /// Sub-second part of every Firehose block time, so a seconds-only reader
@@ -77,7 +77,7 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
 }
 
 /// Serves its fixed responses once, to a request for `first..=last`
-/// (`[100, 104)` for the datasets).
+/// (`[100, 104)` for the datasets, `[100, 105)` for HyperCore).
 #[derive(Clone)]
 struct Stream {
     responses: Arc<Vec<firehose::Response>>,
@@ -289,12 +289,14 @@ fn hypercore_funding_block() -> hypercore::Block {
 
 /// Real HyperCore blocks with their headers rewritten to the fixture
 /// identity (the mapper refuses a header that differs from it): gossip
-/// restarts and validator rewards (100), busy fills (101), the funding block
-/// cut to 3 deltas per event and 8 fills (102), a liquidation cascade (103).
+/// restarts and validator rewards (100), busy fills with two outcome fills
+/// (101, and again 104 so that `outcome_fills` has rows on [`DAY`]), the
+/// funding block cut to 3 deltas per event and 8 fills (102), a liquidation
+/// cascade (103).
 fn hypercore_block(number: u64, _id: u8) -> Vec<u8> {
     let mut block = match number {
         100 => hypercore_fixture(987247825),
-        101 => hypercore_fixture(1165601237),
+        101 | 104 => hypercore_fixture(1165601237),
         102 => {
             let mut block = hypercore_funding_block();
             block.fills.truncate(8);
@@ -468,7 +470,7 @@ fn datasets() -> Vec<Dataset> {
             block_type: "hypercore",
             final_only: true,
             millis: 250,
-            events: (100..104).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect(),
+            events: (100..105).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect(),
             tables: vec![
                 Table {
                     name: "blocks",
@@ -493,6 +495,8 @@ fn datasets() -> Vec<Dataset> {
                         ),
                         ("user", "VARCHAR", "Utf8"),
                         ("transaction_id", "BIGINT", "Int64"),
+                        ("market_type", "VARCHAR", "Utf8"),
+                        ("counterparty", "VARCHAR", "Utf8"),
                     ],
                     // Exact decimals: the smallest price of the fixtures and
                     // a negative PnL.
@@ -503,7 +507,7 @@ fn datasets() -> Vec<Dataset> {
                     ],
                 },
                 Table {
-                    name: "events",
+                    name: "other_events",
                     columns: vec![
                         ("event_type", "VARCHAR", "Utf8"),
                         ("users", "VARCHAR[]", "List(Utf8, field: 'element')"),
@@ -517,6 +521,25 @@ fn datasets() -> Vec<Dataset> {
                         ("item_count", "BIGINT", "Int64"),
                     ],
                     minimums: vec![("account_value", "-1.7248590000"), ("slot_id", "0")],
+                },
+                Table {
+                    name: "liquidations",
+                    columns: vec![
+                        ("mark_price", "DECIMAL(38,10)", hypercore_decimal),
+                        ("market_type", "VARCHAR", "Utf8"),
+                        ("counterparty", "VARCHAR", "Utf8"),
+                        ("counterparty_fill_index", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("mark_price", "2.6689900000")],
+                },
+                Table {
+                    name: "funding_rates",
+                    columns: vec![
+                        ("dex_index", "BIGINT", "Int64"),
+                        ("open_interest", "DECIMAL(38,10)", hypercore_decimal),
+                        ("positions", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("dex_index", "0")],
                 },
                 Table {
                     name: "funding_deltas",
@@ -562,7 +585,7 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
         responses: Arc::new(dataset.responses()),
         final_only: dataset.final_only,
         first: 100,
-        last: 103,
+        last: dataset.events.iter().map(|event| event.0).max().unwrap(),
     };
     build_from(stream, dataset.name, dataset.block_type, cwd, root).await;
 }
@@ -1072,12 +1095,38 @@ fn labelled_statements(block: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `docs/chains/hypercore.md`: its table views, view pack, monitors and
-/// cookbook run in DuckDB over a real `build` of the 36 HyperCore fixture
-/// blocks (their true identities, 2025-12-31 to 2026-10-06). Every monitor
-/// returns no rows, every query runs, the per-type views cover every event
-/// that is not funding or validator rewards, and the decimal arithmetic types
-/// are the documented ones.
+/// Empty stand-ins for the `hl_*` reference tables of a separate job, with the
+/// columns the documented joins read, so that those joins run.
+const REFERENCE_STUBS: &str = "
+CREATE TABLE hl_spot_pairs_current (coin VARCHAR, base_symbol VARCHAR, quote_symbol VARCHAR);
+CREATE TABLE hl_outcomes_current (outcome_id BIGINT, question_id BIGINT, name VARCHAR, side_names VARCHAR[]);
+CREATE TABLE hl_questions_current (question_id BIGINT, name VARCHAR);
+CREATE TABLE hl_funding_history (coin VARCHAR, funding_time TIMESTAMPTZ, premium DECIMAL(38,10));
+CREATE TABLE hl_perp_dexs_current (dex_index BIGINT, name VARCHAR, full_name VARCHAR);
+";
+
+/// The per-type views of the view pack: one per ledger type and per scalar
+/// body.
+fn per_type_view(view: &str) -> bool {
+    view.starts_with("ledger_")
+        || [
+            "c_deposits",
+            "c_withdrawals",
+            "delegations",
+            "gossip_priority_auction_restarts",
+            "create_sub_accounts",
+        ]
+        .contains(&view)
+}
+
+/// `docs/chains/hypercore.md`: its table views, view pack, monitors, cookbook
+/// and optional reference joins run in DuckDB over a real `build` of the 36
+/// HyperCore fixture blocks (their true identities, 2025-12-31 to
+/// 2026-10-06). Every monitor returns no rows, every query runs (the joins
+/// over empty `hl_*` stand-ins), the per-type views cover every event that is
+/// not funding or validator rewards, the interpretation views give the
+/// fixtures' known answers, and the decimal arithmetic types are the
+/// documented ones.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     let dir = tempfile::tempdir().unwrap();
@@ -1101,28 +1150,34 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     let blocks = sql_blocks(doc);
     assert_eq!(
         blocks.len(),
-        4,
-        "table views, view pack, monitors, cookbook"
+        5,
+        "table views, view pack, monitors, cookbook, reference joins"
     );
     let mut sql = blocks[0].replace("<root>", root.to_str().unwrap());
     sql.push_str(blocks[1]);
+    sql.push_str(REFERENCE_STUBS);
     let monitors = labelled_statements(blocks[2]);
     let cookbook = labelled_statements(blocks[3]);
-    assert_eq!(monitors.len(), 17, "{monitors:?}");
-    assert_eq!(cookbook.len(), 12, "{cookbook:?}");
-    for (label, statement) in monitors.iter().chain(&cookbook) {
+    let joins = labelled_statements(blocks[4]);
+    assert_eq!(monitors.len(), 28, "{monitors:?}");
+    assert_eq!(cookbook.len(), 18, "{cookbook:?}");
+    assert_eq!(joins.len(), 3, "{joins:?}");
+    for (label, statement) in monitors.iter().chain(&cookbook).chain(&joins) {
         sql.push_str(&format!(
             "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
         ));
     }
-    // Every per-type view, and the rows they cover.
+    // Every view, and the rows each gives.
     let views: Vec<&str> = blocks[1]
         .lines()
         .filter_map(|line| line.strip_prefix("CREATE OR REPLACE VIEW "))
         .filter_map(|line| line.split(' ').next())
-        .filter(|view| !view.starts_with("hypercore_"))
         .collect();
-    assert_eq!(views.len(), 22 + 5, "{views:?}");
+    assert_eq!(
+        views.iter().filter(|view| per_type_view(view)).count(),
+        22 + 5,
+        "{views:?}"
+    );
     for view in &views {
         sql.push_str(&format!(
             "\nSELECT 'view' AS q, '{view}' AS label, count(*) AS n FROM {view};"
@@ -1131,6 +1186,10 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     sql.push_str(
         "\nSELECT 'events' AS q, count(*) FILTER (WHERE event_type NOT IN ('funding', \
          'validator_rewards')) AS n FROM events;\
+         \nSELECT 'kinds' AS q, liquidation_kind AS label, count(*) AS n, \
+         count(ledger_event_index) AS linked FROM liquidations_v GROUP BY ALL;\
+         \nSELECT 'matches' AS q, match_type AS label, count(*) AS n FROM outcome_matches_v \
+         GROUP BY ALL;\
          \nSELECT 'types' AS q, any_value(typeof(price * size)) AS product, \
          typeof(sum(price)) AS total, typeof(avg(price)) AS mean FROM fills;",
     );
@@ -1147,25 +1206,62 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
             .collect()
     };
     let results = counts("result");
-    assert_eq!(results.len(), monitors.len() + cookbook.len());
+    assert_eq!(results.len(), monitors.len() + cookbook.len() + joins.len());
     for (label, _) in &monitors {
         assert_eq!(results[label], 0, "monitor {label} found violations");
     }
-    // A few cookbook answers on the fixtures: every liquidated side, the
-    // backstop takeover pairs, the funding block's snapshot and its funding
-    // events.
+    // A few cookbook answers on the fixtures: every liquidated leg, the
+    // backstop takeovers with their ledger events, the funding block's
+    // snapshot and its funding events.
     assert_eq!(results["C3"], 19);
     assert_eq!(results["C5"], 12);
-    assert_eq!(results["C7"], 202_449);
-    assert_eq!(results["C8"], 6);
+    assert_eq!(results["C8"], 202_449);
+    assert_eq!(results["C9"], 6);
+    // Every paired taker leg is a trade: as many as buyer-seller pairs.
+    assert_eq!(results["C4"], 254);
     let views = counts("view");
-    for (view, n) in &views {
+    assert_eq!(views["trades_v"], 254);
+    assert_eq!(views["liquidation_orders_v"], 16);
+    // HIP-4: split, merge, merge-question and negate actions, one settled
+    // outcome.
+    assert_eq!(views["outcome_actions_v"], 4);
+    assert_eq!(views["outcome_settlements_v"], 1);
+    for (view, n) in views.iter().filter(|(view, _)| per_type_view(view)) {
         assert!(*n > 0, "{view} is empty on the fixtures");
     }
     assert_eq!(
-        views.values().sum::<u64>(),
+        views
+            .iter()
+            .filter(|(view, _)| per_type_view(view))
+            .map(|(_, n)| n)
+            .sum::<u64>(),
         number(&rows["events"][0]["n"]),
         "the per-type views cover every event row"
+    );
+    // Liquidation kinds: four market legs, twelve backstop takeovers (each
+    // linked to its ledger event) and three ADL legs.
+    let kinds: BTreeMap<String, (u64, u64)> = rows["kinds"]
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap().to_string(),
+                (number(&row["n"]), number(&row["linked"])),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeMap::from([
+            ("adl".to_string(), (3, 0)),
+            ("backstop_takeover".to_string(), (12, 12)),
+            ("market".to_string(), (4, 0)),
+        ])
+    );
+    // HIP-4 matches: a burn of two complementary sides, and a settlement of
+    // each side coin.
+    assert_eq!(
+        counts("matches"),
+        BTreeMap::from([("burn".to_string(), 1), ("settlement".to_string(), 2)])
     );
     let types = &rows["types"][0];
     assert_eq!(
