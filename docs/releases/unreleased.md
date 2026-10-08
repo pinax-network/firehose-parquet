@@ -19,7 +19,8 @@ empty when the release is cut.
   schema epoch 1. Five tables: `blocks`, `fills`, `events` (one row per
   event, its body and ledger delta flattened, with `event_type` and
   `ledger_type`), `funding_deltas` and `validator_rewards`
-  ([schema](../schemas/hypercore.md), [notes](../chains/hypercore.md)).
+  ([schema](../schemas/hypercore.md), [notes](../chains/hypercore.md))
+  (#709).
   - Amounts, prices and sizes are exact `decimal(38,10)` values, parsed
     without rounding; a string that is not exact refuses the block.
   - `block_id` and `parent_id` are the decimal block number as text
@@ -54,18 +55,22 @@ empty when the release is cut.
   to the registry's aliases, starting with `hypercore` →
   `hypercore.firehose.pinax.network:443`. Their hosts are built-in Pinax hosts
   for credential selection, `FIREHOSE_ENDPOINT_*` overrides them, and the
-  endpoint check covers them. Once the registry lists such a network, the
-  registry entry wins and the generator warns until the entry is dropped. The
-  registry snapshot is unchanged (v0.8.4)
-  ([network registry integration](../network-registry-integration.md#internal-pinax-networks)).
+  endpoint check covers them. Once the registry gives such a network an
+  alias, the registry entry wins and the generator warns until the entry is
+  dropped; it also warns when the registry lists the name without an accepted
+  endpoint, or gives another name the same endpoint host. The registry
+  snapshot is unchanged (v0.8.4)
+  ([network registry integration](../network-registry-integration.md#internal-pinax-networks))
+  (#709).
 - **Per-network data origin**: `NETWORK_DATA_ORIGINS`
   (`firehose-parquet/src/networks.rs`) records where a network's known data
   starts when its endpoint advertises earlier blocks; HyperCore's is block
-  846903317. Matched by the EndpointInfo chain name (or the `--network` alias
-  when Info has none), a new stream without `--start-block` starts there with
-  an info line, and an earlier `--start-block` is refused before streaming,
-  in dry runs too. Resuming from output authority and other networks are
-  unaffected ([start and stop blocks](../cursor-and-resume.md#start-and-stop-blocks)).
+  846903317. Matched by the EndpointInfo chain name, a new stream without
+  `--start-block` starts there with an info line, and an earlier
+  `--start-block` is refused before streaming, in dry runs too. Resuming from
+  output authority and other networks are unaffected
+  ([start and stop blocks](../cursor-and-resume.md#start-and-stop-blocks))
+  (#709).
 
 ## Fixes
 

@@ -13,9 +13,11 @@ fireparq's reviewed list of Pinax-served networks the registry lacks
 It is a built-in Pinax host, so the ambient `PINAX_API_KEY` (or the legacy
 `SUBSTREAMS_API_KEY`) is sent without a selector
 ([Authentication](../authentication.md)), and `FIREHOSE_ENDPOINT_HYPERCORE`
-overrides the endpoint. The endpoint's `chainName` (`hypercore`) resolves the
-block type. HyperCore data is known from 2026-01-01, so a new root starts at
-block 846903317 by default and an earlier `--start-block` is refused
+overrides the endpoint (an override to another host is a custom endpoint that
+gets no ambient key: name its credential with `--api-key-envvar`). The
+endpoint's `chainName` (`hypercore`) resolves the block type. HyperCore data
+is known from 2026-01-01, so a new root starts at block 846903317 by default
+and an earlier `--start-block` is refused
 ([data origin](#identity-and-coverage)):
 
 ```bash
@@ -73,9 +75,10 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
 - **Not captured before the 2026-04-13 reader cutover.** NULL there means "not
   captured", not zero:
   - `fills.deployer_fee` before block 957002477;
-  - `fills.builder` and `fills.builder_fee` before block 957002478 (capture
-    there is partial, not absent: blocks just before the cutover have none,
-    but December 2025 blocks have them, so NULL can mean either);
+  - `fills.builder` and `fills.builder_fee` before block 957002478 (2,000-block
+    samples from 2026-01-01 to 2026-04-13, about 71k fills, had no builder,
+    while blocks before the data origin had some, so a NULL there may hide a
+    builder);
   - `events.previous_winner_ip` and `events.end_gas` before block 957002477.
 
   `fills.priority_gas` is NULL before about 2026-04-20 because the feature did
