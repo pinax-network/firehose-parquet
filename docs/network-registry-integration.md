@@ -35,7 +35,7 @@ Use a one-off generator to turn a locally downloaded registry snapshot into `fir
    cargo run -p firehose-parquet --bin generate-networks -- TheGraphNetworksRegistry.json
    ```
 
-   The generator prints a `warning:` line for every `PINAX_NETWORKS` entry the registry now lists (see [Internal Pinax networks](#internal-pinax-networks)) and for every fallback network the registry no longer lists with its fallback provider.
+   The generator prints a `warning:` line for every `PINAX_NETWORKS` entry that now conflicts with the registry: the registry lists the same name, or gives another name the same endpoint host (see [Internal Pinax networks](#internal-pinax-networks)). It also warns for every fallback network the registry no longer lists with its fallback provider.
 
 3. Check that every generated endpoint answers:
 
@@ -84,7 +84,10 @@ Policy:
 
 - **Pinax-served only.** An entry is a `https://<host>.pinax.network:443` endpoint that Pinax serves. A unit test of the generator checks the form, a normalized alias, a nonempty reason and that the alias is not also a fallback or exclusion.
 - **Reviewed additions.** An entry is added in a reviewed change, after its endpoint answers `scripts/check_network_endpoints.sh` and a stream with a Pinax key returns blocks. The reason says what the network is and why the registry does not list it.
-- **Removed once the registry lists it.** When a registry snapshot lists the same name, the registry entry wins and the generator warns that the internal network is now in the registry, naming the registry's endpoint, and should be dropped from `PINAX_NETWORKS`. Drop the entry in the same change. If the registry's endpoint differs from the internal one, the alias is re-pointed: say so in `docs/releases/unreleased.md`.
+- **Removed once the registry lists it.** The generator compares each entry with the snapshot and warns on a conflict:
+  - **The registry lists the same name with an endpoint the provider policy accepts** (its `pinax.network` endpoint, or the `FALLBACK_PROVIDERS` provider). The registry entry wins, and the warning names the registry's endpoint and says to drop the entry from `PINAX_NETWORKS`. Drop it in the same change. If the registry's endpoint differs from the internal one, the alias is re-pointed: say so in `docs/releases/unreleased.md`.
+  - **The registry lists the same name without such an endpoint** (for example only another provider's). The internal entry is kept, so the alias keeps working, and the warning says to review it: its reason no longer holds. Update the reason, and keep the entry until the registry lists the network's `pinax.network` endpoint.
+  - **A registry network under another name has the same endpoint host.** Both aliases are kept, and the warning says to drop the internal entry or confirm that both aliases are intended. Dropping it removes the internal alias, a breaking change for its users.
 
 Current internal networks:
 
@@ -111,6 +114,6 @@ When the check fails: refresh the registry snapshot and regenerate. If the regis
 
 ## Endpoint metadata
 
-For alias generation, the registry is enough.
+For alias generation, the registry snapshot and `PINAX_NETWORKS` are enough.
 
 Querying each endpoint for `EndpointInfo/Info` is a separate validation step (the staleness check above), not part of generation. Generation stays offline because network calls slow refreshes and can fail for temporary endpoint availability reasons.

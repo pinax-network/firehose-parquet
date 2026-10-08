@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -28,9 +29,17 @@ const EXCLUDED_NETWORKS: &[(&str, &str)] = &[(
 /// Pinax-served Firehose networks that the registry does not list yet, as
 /// `(alias, endpoint, reason)`. Hand-maintained: each entry is a reviewed
 /// addition whose endpoint answers `scripts/check_network_endpoints.sh`.
-/// They are appended to the registry's aliases. Once the registry lists the
-/// same name, the registry entry wins and the generator warns until the entry
-/// is dropped from this list.
+/// They are appended to the registry's aliases. When a registry snapshot
+/// lists the same name:
+///
+/// - with an endpoint the provider policy accepts (its pinax.network endpoint,
+///   or the `FALLBACK_PROVIDERS` provider), the registry entry wins and the
+///   generator warns until the entry is dropped from this list;
+/// - without such an endpoint, the internal entry is kept and the generator
+///   warns that it needs review (its reason no longer holds).
+///
+/// When a registry network under another name resolves to the same endpoint
+/// host, both aliases are kept and the generator warns that they need review.
 const PINAX_NETWORKS: &[(&str, &str, &str)] = &[(
     "hypercore",
     "https://hypercore.firehose.pinax.network:443",
@@ -110,14 +119,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The registry's aliases plus the `internal` ones it does not list, sorted by
-/// name, and a warning for every internal entry the registry now lists (the
-/// registry entry wins).
+/// The registry's aliases plus the `internal` ones, sorted by name, and a
+/// warning for every internal entry that conflicts with the registry: the
+/// registry gives the same name an alias (the registry entry wins), lists the
+/// same name without an endpoint the provider policy accepts (the internal
+/// entry is kept), or gives another name the same endpoint host (both are kept).
 fn build_networks(
     networks: &[RegistryNetwork],
     internal: &[(&str, &str, &str)],
 ) -> Result<(Vec<BuiltNetwork>, Vec<String>)> {
     let mut built = Vec::new();
+    // Every name the registry lists, including networks that get no alias.
+    let mut registry_names = BTreeSet::new();
     for network in networks {
         let Some(chain_name) = canonical_name(network) else {
             if let Some(endpoint) = provider_endpoint(network, DEFAULT_PROVIDER) {
@@ -127,6 +140,7 @@ fn build_networks(
             }
             continue;
         };
+        registry_names.insert(chain_name.clone());
         if let Some((_, reason)) = EXCLUDED_NETWORKS
             .iter()
             .find(|(name, _)| *name == chain_name)
@@ -143,14 +157,31 @@ fn build_networks(
         }
     }
 
+    let registry_count = built.len();
     let mut warnings = Vec::new();
     for (alias, endpoint, reason) in internal {
-        if let Some(listed) = built.iter().find(|b| b.chain_name == *alias) {
+        let registry_built = &built[..registry_count];
+        if let Some(listed) = registry_built.iter().find(|b| b.chain_name == *alias) {
             warnings.push(format!(
                 "internal network `{alias}` is now in the registry ({}); the registry entry wins, drop `{alias}` from PINAX_NETWORKS",
                 listed.default_endpoint
             ));
             continue;
+        }
+        if registry_names.contains(*alias) {
+            warnings.push(format!(
+                "internal network `{alias}` is now in the registry without a Firehose endpoint the provider policy accepts; the internal entry is kept, review `{alias}` in PINAX_NETWORKS (its reason says the registry does not list it)"
+            ));
+        }
+        let host = endpoint_host(endpoint);
+        for other in registry_built
+            .iter()
+            .filter(|b| endpoint_host(&b.default_endpoint) == host)
+        {
+            warnings.push(format!(
+                "internal network `{alias}` and registry network `{}` share endpoint {host}; drop `{alias}` from PINAX_NETWORKS or confirm both aliases are intended",
+                other.chain_name
+            ));
         }
         built.push(BuiltNetwork {
             chain_name: alias.to_string(),
@@ -197,6 +228,18 @@ fn canonical_name(network: &RegistryNetwork) -> Option<String> {
                 .map(normalize_alias)
         })
         .filter(|value| !value.is_empty())
+}
+
+/// The endpoint's host, lowercased, without the scheme or a `:443` port, so
+/// two spellings of one endpoint compare equal.
+fn endpoint_host(endpoint: &str) -> String {
+    let url = with_https(endpoint).to_ascii_lowercase();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(&url)
+        .trim_end_matches('/');
+    rest.strip_suffix(":443").unwrap_or(rest).to_string()
 }
 
 fn with_https(value: &str) -> String {
@@ -405,6 +448,78 @@ mod tests {
             vec![
                 "internal network `hypercore` is now in the registry (https://hyperliquid.firehose.pinax.network:443); the registry entry wins, drop `hypercore` from PINAX_NETWORKS"
             ]
+        );
+    }
+
+    #[test]
+    fn test_build_networks_keeps_an_internal_entry_the_registry_lists_without_an_accepted_endpoint()
+    {
+        let (built, warnings) = build_networks(
+            &[network(
+                "hypercore",
+                &["mainnet.hypercore.streamingfast.io:443"],
+            )],
+            &[HYPERCORE],
+        )
+        .unwrap();
+        assert_eq!(
+            endpoints(&built),
+            vec![("hypercore", "https://hypercore.firehose.pinax.network:443")]
+        );
+        assert_eq!(built[0].internal_reason.as_deref(), Some(HYPERCORE.2));
+        assert_eq!(
+            warnings,
+            vec![
+                "internal network `hypercore` is now in the registry without a Firehose endpoint the provider policy accepts; the internal entry is kept, review `hypercore` in PINAX_NETWORKS (its reason says the registry does not list it)"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_networks_warns_when_a_registry_network_shares_an_internal_endpoint() {
+        let (built, warnings) = build_networks(
+            &[network(
+                "hyperliquid",
+                &["HyperCore.firehose.pinax.network:443"],
+            )],
+            &[HYPERCORE],
+        )
+        .unwrap();
+        assert_eq!(
+            endpoints(&built),
+            vec![
+                ("hypercore", "https://hypercore.firehose.pinax.network:443"),
+                (
+                    "hyperliquid",
+                    "https://HyperCore.firehose.pinax.network:443"
+                ),
+            ]
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "internal network `hypercore` and registry network `hyperliquid` share endpoint hypercore.firehose.pinax.network; drop `hypercore` from PINAX_NETWORKS or confirm both aliases are intended"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_endpoint_host_ignores_scheme_case_and_default_port() {
+        for spelling in [
+            "hypercore.firehose.pinax.network:443",
+            "https://HyperCore.firehose.pinax.network:443",
+            "https://hypercore.firehose.pinax.network",
+            "https://hypercore.firehose.pinax.network:443/",
+        ] {
+            assert_eq!(
+                endpoint_host(spelling),
+                "hypercore.firehose.pinax.network",
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            endpoint_host("https://hypercore.firehose.pinax.network:9000"),
+            "hypercore.firehose.pinax.network:9000"
         );
     }
 
