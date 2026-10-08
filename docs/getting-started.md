@@ -10,7 +10,7 @@ Each GitHub release attaches `fireparq` binaries for Linux and macOS
 (`x86_64` and `aarch64`), with build provenance attestations:
 
 ```bash
-curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.1.2/fireparq-linux-x86_64.tar.gz
+curl -LO https://github.com/pinax-network/firehose-parquet/releases/download/v1.2.0/fireparq-linux-x86_64.tar.gz
 tar xzf fireparq-linux-x86_64.tar.gz
 ./fireparq-linux-x86_64/fireparq --version
 ```
@@ -126,17 +126,17 @@ duckdb -c "INSTALL delta; LOAD delta;
 ## Docker
 
 The image is published to GitHub Container Registry for each release tag; this
-release is tagged `1.1.2`, `1.1`, `1` and `latest`. The image path stays
+release is tagged `1.2.0`, `1.2`, `1` and `latest`. The image path stays
 `ghcr.io/pinax-network/firehose-parquet`, and the container entrypoint runs
 `fireparq`.
 
 ```bash
-docker pull ghcr.io/pinax-network/firehose-parquet:1.1.2
+docker pull ghcr.io/pinax-network/firehose-parquet:1.2.0
 
 docker run --rm \
   -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
-  ghcr.io/pinax-network/firehose-parquet:1.1.2 \
+  ghcr.io/pinax-network/firehose-parquet:1.2.0 \
   build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
