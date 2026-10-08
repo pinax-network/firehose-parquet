@@ -949,6 +949,8 @@ fn test_build_help_does_not_mention_antelope_extended_behavior() {
     assert!(!help.contains("Antelope always includes `db_ops` by default"));
     assert!(!help.contains("Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)"));
     assert!(help.contains("Stream Antelope blocks"));
+    assert!(help.contains("fireparq build --network hypercore"));
+    assert!(!help.contains("--api-key-envvar PINAX_API_KEY"));
     assert!(help.contains("--without-extended"));
     assert!(help.contains("Disable extended detail tables for chains that support them"));
     assert!(help.contains("--without-votes"));

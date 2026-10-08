@@ -27,6 +27,7 @@ use crate::beacon::mapper::BeaconBlockMapper;
 use crate::bitcoin::mapper::BitcoinBlockMapper;
 use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
+use crate::hypercore::mapper::HypercoreBlockMapper;
 use crate::near::mapper::NearBlockMapper;
 use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
@@ -44,6 +45,7 @@ pub enum ChainKind {
     Tron,
     Beacon,
     Sec,
+    Hypercore,
 }
 
 /// How a family treats extended output and `--without-extended`.
@@ -101,6 +103,13 @@ pub struct ChainProfile {
     /// (`firehose_parquet::delta::types`). Bitcoin satoshis stay `long`:
     /// consensus caps them at 2.1·10^15.
     pub decimal_columns: &'static [DecimalColumn],
+    /// The Firehose block id is text, not a hash: HyperCore's is the decimal
+    /// block number, SEC's the decimal window number. The canonical `block_id`
+    /// and `parent_id` hold that text verbatim under every text encoding (its
+    /// ASCII bytes under `binary`, `PreparedIdentity::with_text_ids`), the file
+    /// metadata records `firehose-parquet.block_id_encoding = decimal`, and
+    /// `docs/schemas/` types the two columns `string` (decimal).
+    pub block_id_text: bool,
     /// `build` settings whose generic default does not suit the family.
     pub build_defaults: BuildDefaults,
 }
@@ -277,6 +286,7 @@ const EVM: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: EVM_DECIMALS,
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -294,6 +304,7 @@ const BITCOIN: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: &[],
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -311,6 +322,7 @@ const SOLANA: ChainProfile = ChainProfile {
     strict_chain_names: &["solana"],
     strict_chain_name_prefixes: &["solana-"],
     decimal_columns: SOLANA_DECIMALS,
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -328,6 +340,7 @@ const NEAR: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: &[],
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -345,6 +358,7 @@ const ANTELOPE: ChainProfile = ChainProfile {
     strict_chain_names: &["antelope", "eos"],
     strict_chain_name_prefixes: &["antelope-"],
     decimal_columns: ANTELOPE_DECIMALS,
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -362,6 +376,7 @@ const COSMOS: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: COSMOS_DECIMALS,
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -379,6 +394,7 @@ const TRON: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: &[],
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -396,6 +412,7 @@ const BEACON: ChainProfile = ChainProfile {
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
     decimal_columns: BEACON_DECIMALS,
+    block_id_text: false,
     build_defaults: BuildDefaults::GENERIC,
 };
 
@@ -419,7 +436,35 @@ const SEC: ChainProfile = ChainProfile {
     strict_chain_name_prefixes: &[],
     // No UInt64 domain column and no native Decimal128(20,0).
     decimal_columns: &[],
+    // The mapper writes the decimal window numbers with
+    // `PreparedIdentity::with_text_ids` (`sec::prepare::prepare_block`).
+    block_id_text: true,
     build_defaults: SEC_BUILD_DEFAULTS,
+};
+
+const HYPERCORE: ChainProfile = ChainProfile {
+    label: "hypercore",
+    type_url_marker: "hypercore",
+    family: BlockFamily::Hypercore,
+    bytes_encoding: EncodeBytes::Hex,
+    tron_style_bytes_encoding: None,
+    nullable_timestamps: false,
+    // The endpoint lacks blocks 846903300–846903312, a hole in the source data
+    // rather than a chain property (`docs/chains/hypercore.md`).
+    block_number_gaps: false,
+    extended: ExtendedOutput::NotMapped,
+    vote_transactions: false,
+    failed_transactions_by_default: false,
+    strict_chain_names: &[],
+    strict_chain_name_prefixes: &[],
+    // Every `UInt64` fits a checked `long`: `order_id` (about 40 bits), the
+    // trade id `transaction_id` (a 50-bit hash), `twap_id`, `slot_id`, and
+    // `nonce` (at most 51 bits; HyperLiquid range-checks user-signed nonces
+    // against the block time, and HyperEVM-originated ones are a sequence).
+    // A larger value refuses the block (R5) before any flush.
+    decimal_columns: &[],
+    block_id_text: true,
+    build_defaults: BuildDefaults::GENERIC,
 };
 
 /// One ordered chain-name inference rule, matched against a lowercase name.
@@ -453,6 +498,8 @@ pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
     (NameRule::Contains("eos"), ChainKind::Antelope),
     (NameRule::Contains("cosmos"), ChainKind::Cosmos),
     (NameRule::Contains("tron"), ChainKind::Tron),
+    // Not `hyper`: `hyper-evm` (HyperEVM) stays EVM through the `evm` rule.
+    (NameRule::Contains("hypercore"), ChainKind::Hypercore),
     (NameRule::Contains("ethereum"), ChainKind::Evm),
     (NameRule::Contains("evm"), ChainKind::Evm),
     (NameRule::Exact("mainnet"), ChainKind::Evm),
@@ -475,7 +522,7 @@ pub struct MapperOptions {
 
 impl ChainKind {
     /// Every family, in `type_url` detection and `--block-type` help order.
-    pub const ALL: [ChainKind; 9] = [
+    pub const ALL: [ChainKind; 10] = [
         ChainKind::Evm,
         ChainKind::Bitcoin,
         ChainKind::Solana,
@@ -485,6 +532,7 @@ impl ChainKind {
         ChainKind::Tron,
         ChainKind::Beacon,
         ChainKind::Sec,
+        ChainKind::Hypercore,
     ];
 
     pub fn profile(self) -> &'static ChainProfile {
@@ -498,6 +546,7 @@ impl ChainKind {
             ChainKind::Tron => &TRON,
             ChainKind::Beacon => &BEACON,
             ChainKind::Sec => &SEC,
+            ChainKind::Hypercore => &HYPERCORE,
         }
     }
 
@@ -603,6 +652,9 @@ impl ChainKind {
             )),
             ChainKind::Beacon => Box::new(BeaconBlockMapper::new(include_fork_step, encode_bytes)),
             ChainKind::Sec => Box::new(SecBlockMapper::new(include_fork_step, encode_bytes)),
+            ChainKind::Hypercore => {
+                Box::new(HypercoreBlockMapper::new(include_fork_step, encode_bytes))
+            }
         }
     }
 }

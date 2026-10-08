@@ -374,6 +374,19 @@ flushes the remaining buffers and saves the final cursor.
 
 ## Start and stop blocks
 
+- **Default start and network data origins.** Without a stored cursor and
+  without `--start-block`, a stream starts at the endpoint's first streamable
+  block (EndpointInfo `first_streamable_block_num`). A network whose known data
+  starts later has a data origin (`NETWORK_DATA_ORIGINS` in
+  `firehose-parquet/src/networks.rs`, matched case-insensitively by the
+  EndpointInfo chain name): HyperCore's is block
+  846903317, the first block of 2026-01-01, while its endpoint advertises
+  846000000. Such a stream starts at the later of the two and logs that the
+  data origin was used; an explicit `--start-block` before the origin is
+  refused before streaming, dry runs included. A resumed stream keeps its
+  original start. The stop-block check applies to the adjusted start, so
+  `--stop-block` must be after the origin, and its error names the origin
+  ([HyperCore notes](chains/hypercore.md#identity-and-coverage)).
 - **Start above the last irreversible block.** With `--final-blocks-only`
   (the default), Firehose serves a request whose start block is above the
   current last irreversible block (LIB) from LIB+1. Without a resume cursor,

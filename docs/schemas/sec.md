@@ -5,8 +5,7 @@
 Generated from the `sec` mapper; do not edit by hand. Regenerate with `cargo run -p blocks --example dump_schemas` (see [README](README.md) for the conventions).
 
 - Block type: `--block-type sec`.
-- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
-- Columns typed `string` (hex) hold binary values written as text in that encoding.
+- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain since `--block-type sec` was added.
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 - Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.
 - `block_id` and `parent_id` are decimal 10-minute window numbers (`"2984687"`, `block_num = unix_seconds / 600`), written verbatim, not hashes. A feed day has 144 windows, empty ones included: every window has a `blocks` row.
@@ -69,9 +68,9 @@ One row per 10-minute window. The only table with a row for empty windows; commi
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -88,9 +87,9 @@ One row per filing: the envelope, resolved parties and dissemination flags. Ever
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -137,9 +136,9 @@ Original primary-document XML. Gets rows only when the producer runs with `--inc
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -160,9 +159,9 @@ Every party of the SGML submission header (0.13.0+): filer, filed-by, subject co
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -214,9 +213,9 @@ Every document of the submission, including non-XML exhibits (bodies are not car
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -240,9 +239,9 @@ Fund series named in the header of N-PORT, N-PX and N-CEN filings: the series-id
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -267,9 +266,9 @@ Share classes and their tickers: the ticker → class → series bridge to N-POR
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -294,9 +293,9 @@ Every signature block of every form in one table (Form 144's notice signature st
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -326,9 +325,9 @@ Form 3/4/5 header: issuer, 10b5-1 flag and counts.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -369,9 +368,9 @@ Insiders of each Form 3/4/5, with their roles.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -409,9 +408,9 @@ Insider transactions (Table I non-derivative + Table II derivative) with typed a
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -471,9 +470,9 @@ Insider holdings reported without a transaction (Form 3 baselines, Form 4/5 indi
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -518,9 +517,9 @@ Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -543,9 +542,9 @@ Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -597,9 +596,9 @@ Other managers listed by a 13F, with the real EDGAR sequence number (0.13.0+).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -629,9 +628,9 @@ Other managers listed by a 13F, with the real EDGAR sequence number (0.13.0+).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -674,9 +673,9 @@ Beneficial-ownership (13D/13G) filings with the structured items; legacy SC 13D/
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -770,9 +769,9 @@ Cover-page rows of a 13D/G: one per reporting person, with typed share counts an
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -816,9 +815,9 @@ Form 144 notices of proposed sale.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -864,9 +863,9 @@ The planned sale(s) of a Form 144: one row per class/broker block.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -904,9 +903,9 @@ How the seller acquired the securities to be sold.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -938,9 +937,9 @@ Recent sales disclosed on a Form 144 (repeat across notices: never sum across fi
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -976,9 +975,9 @@ N-PORT fund header: registrant, series, as-of date and fund totals. The signatur
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1029,9 +1028,9 @@ Monthly total returns per share class, with the month-end each return belongs to
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1061,9 +1060,9 @@ Monthly sales, reinvestments, redemptions and gains of a fund.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1093,9 +1092,9 @@ Fund positions with identifiers, value, debt terms and securities lending; deriv
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1165,9 +1164,9 @@ Reference instruments of convertible bonds (what they convert into).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1198,9 +1197,9 @@ Conversion terms of convertible bonds.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1226,9 +1225,9 @@ Derivative terms of N-PORT positions; a nested derivative (the future under an o
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1313,9 +1312,9 @@ Pay and receive legs of swaps.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1349,9 +1348,9 @@ Custom-basket components (one swap can list 30k+).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1386,9 +1385,9 @@ Form D exempt offerings: primary issuer, offering terms and amounts. Signatures 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1466,9 +1465,9 @@ Co-issuers of a Form D.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1508,9 +1507,9 @@ People related to a Form D issuer.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1544,9 +1543,9 @@ Placement agents and brokers paid on a Form D offering.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1581,9 +1580,9 @@ N-PX cover page. Signatures are in `filing_signatures`, other managers in `npx_o
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1647,9 +1646,9 @@ N-PX proposals voted, with identifiers and categories.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1689,9 +1688,9 @@ How each block of shares was voted; filter columns are copied from the vote so m
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1724,9 +1723,9 @@ Other managers of an N-PX (joined from votes by serial number).
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1755,9 +1754,9 @@ N-CEN registrant census header.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1797,9 +1796,9 @@ Regulation Crowdfunding filings: issuer, portal, offering terms and financials. 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1878,9 +1877,9 @@ Co-issuers (e.g. crowdfunding SPVs) of a Form C.
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
@@ -1916,9 +1915,9 @@ Every source value that did not convert exactly (or was rounded), with enough ke
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `block_num` | `long` | no | Block number (Firehose block metadata). |
-| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `block_id` | `string` (decimal) | no | Decimal 10-minute window number as text: SEC has no block hash, and this is the Firehose block id. |
 | `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |

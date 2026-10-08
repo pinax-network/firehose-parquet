@@ -1,0 +1,70 @@
+syntax = "proto3";
+package pinax.hypercore.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/pinax-network/firehose-hypercore/pb/pinax/hypercore/v1;hypercorepb";
+
+enum FillSide {
+  FILL_SIDE_UNSPECIFIED = 0;
+  FILL_SIDE_ASK = 1;
+  FILL_SIDE_BUY = 2;
+}
+
+enum TradingDirection {
+  TRADING_DIRECTION_UNSPECIFIED = 0;
+  TRADING_DIRECTION_BUY = 1;
+  TRADING_DIRECTION_SELL = 2;
+  TRADING_DIRECTION_OPEN_LONG = 3;
+  TRADING_DIRECTION_CLOSE_LONG = 4;
+  TRADING_DIRECTION_OPEN_SHORT = 5;
+  TRADING_DIRECTION_CLOSE_SHORT = 6;
+  TRADING_DIRECTION_LONG_TO_SHORT = 7;
+  TRADING_DIRECTION_SHORT_TO_LONG = 8;
+  TRADING_DIRECTION_SPOT_DUST_CONVERSION = 9;
+  TRADING_DIRECTION_LIQUIDATED_CROSS_LONG = 10;
+  TRADING_DIRECTION_LIQUIDATED_CROSS_SHORT = 11;
+  TRADING_DIRECTION_LIQUIDATED_ISOLATED_LONG = 12;
+  TRADING_DIRECTION_LIQUIDATED_ISOLATED_SHORT = 13;
+  TRADING_DIRECTION_AUTO_DELEVERAGING = 14;
+  TRADING_DIRECTION_SETTLEMENT = 15;
+  TRADING_DIRECTION_NET_CHILD_VAULTS = 16;
+  TRADING_DIRECTION_BACKSTOP_BORROW_LIQUIDATION = 17;
+  TRADING_DIRECTION_PARTIAL_BORROW_LIQUIDATION = 18;
+  TRADING_DIRECTION_SPLIT_OUTCOME = 19;
+  TRADING_DIRECTION_MERGE_OUTCOME = 20;
+  TRADING_DIRECTION_MERGE_QUESTION = 21;
+  TRADING_DIRECTION_NEGATE_OUTCOME = 22;
+}
+
+message Fill {
+  bytes user = 1;
+  string coin = 2;
+  string price = 3;
+  string size = 4;
+  FillSide side = 5;
+  google.protobuf.Timestamp time = 6;
+  string start_position = 7;
+  TradingDirection direction = 8;
+  string closed_pnl = 9;
+  bytes hash = 10;
+  uint64 order_id = 11;
+  bool crossed = 12;
+  string fee = 13;
+  uint64 transaction_id = 14;
+  string fee_token = 15;
+  // Time-Weighted Average Price Identifier
+  optional uint64 twap_id = 16;
+  bytes client_order_id = 17;
+  FillLiquidation liquidation = 18;
+  string deployer_fee = 19;
+  string builder = 20;
+  string builder_fee = 21;
+  string priority_gas = 22;
+}
+
+message FillLiquidation {
+  bytes liquidated_user = 1;
+  string mark_px = 2;
+  string method = 3;
+}

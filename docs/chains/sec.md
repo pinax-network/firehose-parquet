@@ -39,8 +39,7 @@ only with the next day's window 0, because firesec marks each window final when 
   daily dump: most of a day's windows then land in a few flushes.
 - **Ids are decimal text.** `block_id` is the window number written verbatim (`"2979867"`) and `parent_id` the
   previous one; `parent_num = lib_num = block_num − 1`. They are not hashes. The Parquet footer key
-  `firehose-parquet.block_id_encoding` still says `hex_0x`, the label of the chain's byte encoding: ignore it for
-  `sec`.
+  `firehose-parquet.block_id_encoding` says `decimal`.
 - **Filings inside a window** are ordered by acceptance time, then accession number: `filing_index` is that position.
   firesec places each filing of a feed day in the window of its EDGAR acceptance time. Filings accepted before the
   feed day's first window, usually the previous evening's, are **clamped into window 0**, and those accepted after

@@ -39,11 +39,12 @@ use crate::chain::ChainKind;
 use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
 use crate::evm::proto::eth;
+use crate::hypercore::mapper::HypercoreBlockMapper;
 use crate::near::mapper::NearBlockMapper;
 use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
 use crate::tron::mapper::TronBlockMapper;
-use crate::{antelope, beacon, bitcoin, cosmos, evm, near, sec, solana, tron};
+use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana, tron};
 
 const BLOCK_NUM: u64 = 100;
 const TIMESTAMP: i64 = 1_700_000_000;
@@ -193,6 +194,19 @@ fn solana_block_with_vote() -> Vec<u8> {
     block.encode_to_vec()
 }
 
+/// Synthetic HyperCore blocks: the 36 real fixtures with their headers
+/// rewritten to this harness's identities (`BLOCK_NUM + offset`, `TIMESTAMP +
+/// offset` seconds, 250 ms), and the funding block cut to 8 fills and 3 deltas
+/// per funding event. The mapper refuses a header that differs from the
+/// Firehose identity and ignores the metadata's hex ids. Together they give
+/// every table rows and every event body and ledger delta.
+fn hypercore_blocks() -> Vec<Vec<u8>> {
+    static BLOCKS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    BLOCKS
+        .get_or_init(|| hypercore::fixtures::derived_blocks(BLOCK_NUM, TIMESTAMP, 250_000_000))
+        .clone()
+}
+
 // ---------------------------------------------------------------------------
 // Cases
 // ---------------------------------------------------------------------------
@@ -285,6 +299,12 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             "tron",
             TronBlockMapper::new(fork_step, enc(), true),
             vec![tron::mapper::tests::make_test_block(BLOCK_NUM).encode_to_vec()],
+        ),
+        Case::new(
+            ChainKind::Hypercore,
+            "hypercore",
+            HypercoreBlockMapper::new(fork_step, enc()),
+            hypercore_blocks(),
         ),
     ];
     for extended in [false, true] {
@@ -407,6 +427,7 @@ fn expected_table_count() -> usize {
         + near::schema::TABLE_NAMES.len()
         + sec::schema::TABLE_NAMES.len()
         + tron::schema::TABLE_NAMES.len()
+        + hypercore::schema::TABLE_NAMES.len()
         + evm::schema::BASE_TABLE_NAMES.len()
         + evm::schema::EXTENDED_TABLE_NAMES.len()
         + 2 * solana::schema::BASE_TABLE_NAMES.len()
@@ -431,12 +452,24 @@ fn duplicate_field_names(batch: &RecordBatch) -> Vec<String> {
         .collect()
 }
 
-/// Encode `batch` as an ingestion part is encoded, then read it back.
+/// Encode `batch` as an ingestion part is encoded, then read it back, with
+/// the file's Arrow schema. A record batch reader leaves schema metadata out
+/// of its batches (HyperCore's derivation version); the footer's Arrow schema
+/// keeps it, as protected verification reads it.
 fn parquet_round_trip(batch: &RecordBatch) -> RecordBatch {
     let bytes = encode_parquet(batch, Compression::Zstd, &ParquetFileMetadata::new())
         .expect("encode parquet");
+    let footer_schema = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        prost::bytes::Bytes::from(bytes.clone()),
+    )
+    .expect("read the footer")
+    .schema()
+    .clone();
     let batches = decode_parquet(bytes).expect("read parquet");
-    concat_batches(&batches[0].schema(), &batches).expect("concat read batches")
+    concat_batches(&batches[0].schema(), &batches)
+        .expect("concat read batches")
+        .with_schema(footer_schema)
+        .expect("the footer schema describes the rows")
 }
 
 fn display_values(batch: &RecordBatch, column: &str) -> BTreeSet<String> {
@@ -1013,5 +1046,13 @@ fn owned_decoding_shares_nested_payload_storage_and_retains_its_lifetime() {
                 .expect("the SEC fixture has a raw_xml filing")
                 .raw_xml
         },
+    );
+    let (_, busy_block) = hypercore::fixtures::real_blocks()
+        .iter()
+        .find(|(number, _)| *number == 1_165_601_237)
+        .expect("HyperCore fixture 1165601237");
+    shared(
+        hypercore::proto::hypercore::Block::decode(busy_block.as_slice()).unwrap(),
+        |b| &b.fills[0].hash,
     );
 }

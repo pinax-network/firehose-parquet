@@ -86,6 +86,14 @@ cargo build --release --workspace
   --stop-block 1001000 \
   --output './output/{chain}'
 
+# Stream HyperCore (PINAX_API_KEY holds the key). Its data is known from
+# 2026-01-01: without --start-block a new root starts at block 846903317, and
+# an earlier start is refused (docs/chains/hypercore.md)
+./target/release/fireparq build \
+  --network hypercore \
+  --stop-block 846904317 \
+  --output './output/{chain}'
+
 # Backfill from a block and keep following finalized blocks
 ./target/release/fireparq build \
   --network solana-mainnet-beta \

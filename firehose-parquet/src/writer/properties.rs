@@ -52,6 +52,13 @@ fn lookup_column(name: &str) -> bool {
             | "block_hash"
             | "blockhash"
             | "receipt_id"
+            // HyperCore account and validator lookups (`docs/schemas/hypercore.md`).
+            | "user"
+            | "destination"
+            | "vault"
+            | "validator"
+            | "liquidated_user"
+            | "sub_account"
     )
 }
 

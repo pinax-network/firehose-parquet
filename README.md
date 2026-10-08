@@ -25,6 +25,7 @@ vacuums and checkpoints them beside the writer.
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
 | `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
 | `sec` | no built-in name; `--endpoint` of a firesec ≥ 0.13.0 Firehose (SEC EDGAR filings, one block per 10-minute window) | [SEC schema](docs/schemas/sec.md) | [SEC notes](docs/chains/sec.md): shipped views, `parse_issues`, 13F units |
+| `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from 2026-01-01, block 846903317: the default start, earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): twelve tables by product family (fills with market class and counterparty, liquidations, funding rates and open interest, HIP-4 outcomes, transfers, bridge, vaults, staking), `decimal(38,10)` amounts, decimal block ids, the data origin and the endpoint's block hole, views, monitors and cookbook |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -154,12 +155,12 @@ the maintenance CronJobs.
 | | [Partition vocabulary](docs/partition-vocabulary.md) | The `date=YYYY-MM-DD` key and the CLI terms for it |
 | Chain-specific notes | [Chain notes](docs/chains/README.md) | Index of the chain pages |
 | | [Failed transaction filtering](docs/chains/failed-transactions.md) | Flags, failure conditions and outcome columns per chain |
-| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md) | Joins, ordering and example queries per chain |
+| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
 | | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |
 | | [Prometheus metrics](docs/metrics.md) | Metrics, `/health` and `/ready` |
-| | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases, provider policy, endpoint check |
+| | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases (registry and internal Pinax list), provider policy, endpoint check |
 | Design and audit | [Delta Lake design](docs/design/delta-lake.md) | The v1.0.0 Delta Lake output design (#643) |
 | | [Audit records](docs/audit/README.md) | Implementation and validation records of the September 2026 audit (#463) |
 | Development | [Development](docs/development.md) | Build and test, repository structure, CLI architecture |

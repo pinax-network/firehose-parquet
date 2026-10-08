@@ -8,6 +8,8 @@ pub(super) struct ResolvedEndpoint {
     block_type: Option<ChainKind>,
     endpoint_info: Option<EndpointInfo>,
     cursor_location: Option<CursorLocation>,
+    /// The built-in alias `--network` resolved to; `None` with `--endpoint`.
+    network: Option<&'static str>,
 }
 
 impl ResolvedEndpoint {
@@ -24,6 +26,7 @@ impl ResolvedEndpoint {
 
         let mut common = args.common.clone();
         let mut resolved_network_name: Option<String> = None;
+        let mut network_alias: Option<&'static str> = None;
         if common.endpoint.is_none() {
             if let Some(network) = args.network.as_deref() {
                 let resolved = resolve_network_endpoint(network)?;
@@ -43,6 +46,7 @@ impl ResolvedEndpoint {
                     ),
                 }
                 resolved_network_name = Some(resolved.requested.clone());
+                network_alias = Some(resolved.chain_name);
                 common.endpoint = Some(resolved.endpoint);
             }
         } else if let Some(network) = args.network.as_deref() {
@@ -103,6 +107,7 @@ impl ResolvedEndpoint {
             block_type,
             endpoint_info,
             cursor_location,
+            network: network_alias,
         }))
     }
 
@@ -205,6 +210,7 @@ impl IngestionSetup {
             block_type,
             endpoint_info,
             cursor_location,
+            network,
         } = endpoint;
         let extended = !args.without_extended;
         let with_votes = !args.without_votes;
@@ -230,15 +236,21 @@ impl IngestionSetup {
         }
 
         let live = infer_ingestion_live_mode(config.stop_block);
+        // Before the stop-block check, which must hold for the adjusted start.
+        let requested_start_block = config.start_block;
+        let data_origin = resolve_network_data_origin(&endpoint_info, network);
         config.start_block = resolve_ingestion_start_block(
             config.start_block,
             existing_cursor_state.as_ref(),
             &endpoint_info,
             args.cursor_override,
+            data_origin,
         )?;
-        firehose_parquet::cli::validate_stop_block_after_start(
+        validate_stop_block_after_resolved_start(
+            requested_start_block,
             config.start_block,
             config.stop_block,
+            data_origin,
         )?;
         debug!(
             requested_start_block = ?args.common.start_block,
@@ -451,6 +463,7 @@ mod native_upload_tests {
             block_type: Some(ChainKind::Evm),
             endpoint_info: None,
             cursor_location: None,
+            network: None,
         };
         let error = endpoint
             .acquire_ownership()

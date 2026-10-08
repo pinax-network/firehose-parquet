@@ -45,6 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 proto_root.join("pinax/sec/v1/npx.proto"),
                 proto_root.join("pinax/sec/v1/ncen.proto"),
                 proto_root.join("pinax/sec/v1/formc.proto"),
+                // HyperCore (pinax.hypercore.v1, vendored verbatim with its
+                // package path so the upstream imports resolve unchanged)
+                proto_root.join("pinax/hypercore/v1/block.proto"),
+                proto_root.join("pinax/hypercore/v1/event.proto"),
+                proto_root.join("pinax/hypercore/v1/fill.proto"),
             ],
             &[proto_root],
         )?;

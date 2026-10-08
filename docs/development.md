@@ -66,7 +66,7 @@ firehose-parquet/
 │   │   ├── bin/main.rs                     # `fireparq` entrypoint and command dispatch
 │   │   ├── bin/ingestion/                  # `build`: mod.rs, setup.rs (endpoint/resume), runtime.rs
 │   │   ├── chain.rs                        # ChainKind / ChainProfile per chain family
-│   │   └── evm/, solana/, bitcoin/, beacon/, tron/, cosmos/, antelope/, near/, sec/
+│   │   └── evm/, solana/, bitcoin/, beacon/, tron/, cosmos/, antelope/, near/, sec/, hypercore/
 │   │                                       # per chain: proto.rs, schema.rs, mapper.rs
 │   └── tests/                              # integration tests, including `fireparq` runs against a mock Firehose
 └── target/                                 # build output

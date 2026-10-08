@@ -1,8 +1,8 @@
 use anyhow::{ensure, Context, Result};
 use arrow::array::{
-    ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder,
-    Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder, UInt32Builder,
-    UInt64Builder,
+    ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder,
+    Int32Builder, Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
+    UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -53,6 +53,11 @@ pub fn est_f64(b: &Float64Builder) -> usize {
 /// Estimate memory usage of a `BooleanBuilder`.
 pub fn est_bool(b: &BooleanBuilder) -> usize {
     (b.len() + 7) / 8
+}
+
+/// Estimate memory usage of a `Decimal128Builder` (16 bytes per value).
+pub fn est_decimal128(b: &Decimal128Builder) -> usize {
+    b.len() * 16
 }
 
 /// Estimate memory usage of a `StringBuilder` (offsets + values).
@@ -255,10 +260,11 @@ impl PreparedIdentity {
         })
     }
 
-    /// Prepare `identity` with block and parent ids that are already text (for
-    /// example SEC's decimal window numbers): written verbatim under a text
-    /// encoding, and as their UTF-8 bytes under `Binary`. Unlike
-    /// [`PreparedIdentity::new`], the ids are never hex-decoded.
+    /// Prepare `identity` with text block and parent ids, for chains whose
+    /// Firehose block id is not a hash (HyperCore's is the decimal block
+    /// number, SEC's the decimal window number). The text is written verbatim
+    /// under every text encoding, never hex-decoded or re-encoded; under
+    /// [`EncodeBytes::Binary`] the column holds its UTF-8 (ASCII) bytes.
     pub fn with_text_ids(
         identity: &BlockIdentity,
         block_id: &str,
@@ -341,8 +347,8 @@ impl CanonicalBuilder {
         PreparedIdentity::with_ids(identity, block_id, parent_id, &self.block_id.encoding())
     }
 
-    /// Prepare `identity` with block and parent ids that are already text, in
-    /// this builder's encoding (see [`PreparedIdentity::with_text_ids`]).
+    /// Prepare `identity` with text block and parent ids (see
+    /// [`PreparedIdentity::with_text_ids`]), in this builder's encoding.
     pub fn prepare_with_text_ids(
         &self,
         identity: &BlockIdentity,
@@ -1145,6 +1151,86 @@ mod tests {
                 "{encoding:?}"
             );
         }
+    }
+
+    /// Text ids (HyperCore's decimal block numbers) are written verbatim under
+    /// every text encoding, never hex-decoded or re-encoded, and as their ASCII
+    /// bytes under `Binary`; the odd-length `846000000` and the even-length,
+    /// valid-hex `1174085339` behave alike.
+    #[test]
+    fn test_prepare_with_text_ids_writes_the_text_verbatim() {
+        use arrow::array::{Array, StringArray};
+        let identity = BlockIdentity {
+            block_num: 1_174_085_339,
+            parent_num: 1_174_085_338,
+            lib_num: 1_174_085_338,
+            timestamp: 1_791_307_636,
+            timestamp_nanos: 123_456_789,
+            ..BlockIdentity::default()
+        };
+        for (block_id, parent_id) in [("1174085339", "1174085338"), ("846000000", "845999999")] {
+            for encoding in all_encodings() {
+                let mut builder = CanonicalBuilder::with_encoding(&encoding);
+                let prepared = builder
+                    .prepare_with_text_ids(&identity, block_id, parent_id)
+                    .unwrap();
+                builder.append(&prepared);
+                let columns = builder.finish();
+                for (column, expected) in [(&columns[1], block_id), (&columns[3], parent_id)] {
+                    match encoding {
+                        EncodeBytes::Binary => assert_eq!(
+                            column
+                                .as_any()
+                                .downcast_ref::<BinaryArray>()
+                                .unwrap()
+                                .value(0),
+                            expected.as_bytes(),
+                            "{encoding:?}"
+                        ),
+                        _ => assert_eq!(
+                            column
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .unwrap()
+                                .value(0),
+                            expected,
+                            "{encoding:?}"
+                        ),
+                    }
+                    assert_eq!(column.null_count(), 0);
+                }
+                assert_eq!(
+                    columns[5]
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(0),
+                    1_791_307_636_123
+                );
+            }
+        }
+        // Malformed identity times are refused like every other path.
+        assert!(PreparedIdentity::with_text_ids(
+            &BlockIdentity {
+                timestamp_nanos: 1_000_000_000,
+                ..identity.clone()
+            },
+            "1",
+            "0",
+            &EncodeBytes::Hex
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_est_decimal128_counts_sixteen_bytes_per_value() {
+        let mut builder = Decimal128Builder::new()
+            .with_precision_and_scale(38, 10)
+            .unwrap();
+        assert_eq!(est_decimal128(&builder), 0);
+        builder.append_value(1);
+        builder.append_null();
+        assert_eq!(est_decimal128(&builder), 32);
     }
 
     #[test]

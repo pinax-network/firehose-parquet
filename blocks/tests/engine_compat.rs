@@ -4,9 +4,11 @@
 //! through delta-rs), through each table's Delta log.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
-//! and non-final), Solana (list, binary, decimal and enum columns) and SEC
-//! (the real fixture filings: `decimal(38,s)`, data `date`, `array<struct>`,
-//! `array<date>`, `array<integer>` and `binary` columns) datasets. delta-rs first writes a checkpoint of every table, so each
+//! and non-final), Solana (list, binary, decimal and enum columns), HyperCore
+//! (`decimal(38,10)` amounts, a list of decimal structs, decimal text block
+//! ids) and SEC (the real fixture filings: `decimal(38,s)`, data `date`,
+//! `array<struct>`, `array<date>`, `array<integer>` and `binary` columns)
+//! datasets. delta-rs first writes a checkpoint of every table, so each
 //! `_delta_log/` also holds Parquet, next to the Parquet cursor mirror in
 //! `_fireparq/`. Then both engines must read, for **every** table of every
 //! dataset (tables that never get rows included):
@@ -28,12 +30,24 @@
 //! `string` for enums, lists and binary columns, and SEC's native types
 //! passed through (`decimal(38,s)`, `date`, `array<struct<…>>`, `binary`).
 //!
+//! `hypercore_documented_sql_runs_over_the_fixture_blocks` builds the 36 real
+//! HyperCore fixture blocks with their true identities and runs the view
+//! pack, monitors, cookbook and reference joins of `docs/chains/hypercore.md`
+//! over them in DuckDB.
+//!
+//! `hypercore_compaction_drops_the_derivation_key_and_resume_still_works`
+//! builds the same blocks as a contiguous stream, compacts the tables with the
+//! maintenance job, and checks that the compacted files lack the HyperCore
+//! derivation version (schema metadata that guards resume only) while
+//! `validate`, a resume and a second compaction still work and the rows are
+//! exactly the mapper's.
+//!
 //! `anonymous_reads_of_a_public_deployment_bucket` is an opt-in check against
 //! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
 //! and `FIREPARQ_RGW_BUCKET` are set; see its docs. Engines: see
 //! `common/mod.rs`.
 use firehose_parquet::delta::store::DeltaStore;
-use firehose_protos::{eth, firehose, solana};
+use firehose_protos::{eth, firehose, hypercore, solana};
 use object_store_delta::ObjectStoreExt as _;
 use prost::Message;
 use serde_json::{json, Value};
@@ -50,7 +64,7 @@ use common::{number, DuckDb};
 
 const CHAIN: &str = "engine-test";
 /// 2023-11-15T00:00:00Z: blocks 100 and 101 are on 2023-11-14, 102 and 103
-/// on 2023-11-15.
+/// (and HyperCore's 104) on 2023-11-15.
 const MIDNIGHT: i64 = 1_700_006_400;
 const DAY: &str = "2023-11-15";
 /// Sub-second part of every Firehose block time, so a seconds-only reader
@@ -74,11 +88,14 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
     }
 }
 
-/// Serves its fixed responses once, to a request for `[100, 104)`.
+/// Serves its fixed responses once, to a request for `first..=last`
+/// (`[100, 104)` for the datasets, `[100, 105)` for HyperCore).
 #[derive(Clone)]
 struct Stream {
     responses: Arc<Vec<firehose::Response>>,
     final_only: bool,
+    first: u64,
+    last: u64,
 }
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
@@ -94,7 +111,7 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
                 request.stop_block_num,
                 request.final_blocks_only
             ),
-            (100, 103, self.final_only)
+            (self.first as i64, self.last, self.final_only)
         );
         assert!(request.cursor.is_empty());
         let responses: Vec<_> = self.responses.iter().cloned().map(Ok).collect();
@@ -264,6 +281,58 @@ fn solana_block(slot: u64, id: u8) -> Vec<u8> {
     .encode_to_vec()
 }
 
+fn hypercore_fixture(number: u64) -> hypercore::Block {
+    let payload: &[u8] = match number {
+        987247825 => include_bytes!("fixtures/hypercore/987247825.pb"),
+        1127672017 => include_bytes!("fixtures/hypercore/1127672017.pb"),
+        1165601237 => include_bytes!("fixtures/hypercore/1165601237.pb"),
+        other => panic!("no fixture {other} here"),
+    };
+    hypercore::Block::decode(payload).unwrap()
+}
+
+/// The funding, dust-conversion and validator-rewards block of
+/// 2026-01-01T00:00:00Z.
+fn hypercore_funding_block() -> hypercore::Block {
+    let payload =
+        zstd::decode_all(include_bytes!("fixtures/hypercore/846903317.pb.zst").as_slice()).unwrap();
+    hypercore::Block::decode(payload.as_slice()).unwrap()
+}
+
+/// Real HyperCore blocks with their headers rewritten to the fixture
+/// identity (the mapper refuses a header that differs from it): gossip
+/// restarts and validator rewards (100), busy fills with two outcome fills
+/// (101, and again 104 so that `outcome_fills` has rows on [`DAY`]), the
+/// funding block cut to 3 deltas per event and 8 fills (102), a liquidation
+/// cascade (103).
+fn hypercore_block(number: u64, _id: u8) -> Vec<u8> {
+    let mut block = match number {
+        100 => hypercore_fixture(987247825),
+        101 | 104 => hypercore_fixture(1165601237),
+        102 => {
+            let mut block = hypercore_funding_block();
+            block.fills.truncate(8);
+            for event in &mut block.events {
+                if let Some(hypercore::event_body::Event::Funding(funding)) =
+                    &mut event.events[0].event
+                {
+                    funding.deltas.truncate(3);
+                }
+            }
+            block
+        }
+        _ => hypercore_fixture(1127672017),
+    };
+    block.block_header = Some(hypercore::BlockHeader {
+        block_number: number,
+        block_time: Some(prost_types::Timestamp {
+            seconds: seconds(number),
+            nanos: NANOS,
+        }),
+    });
+    block.encode_to_vec()
+}
+
 /// A SEC window. Windows 100 and 102, one on each UTC day, hold every real
 /// fixture filing (`tests/fixtures/sec-v013/`) re-homed into the window
 /// (header number and time are the stream's, as the mapper requires), so
@@ -339,6 +408,8 @@ const CANONICAL: [(&str, &str, &str); 3] = [
     ("date", "DATE", "Date32"),
 ];
 
+const HYPERCORE_TYPE_URL: &str = "type.googleapis.com/pinax.hypercore.v1.Block";
+
 /// Arrow's spelling of a Delta `decimal(20,0)`, as delta-rs reads it.
 const DELTA_DECIMAL: &str = "Decimal128(20, 0)";
 
@@ -377,6 +448,7 @@ fn datasets() -> Vec<Dataset> {
             },
         ]
     };
+    let hypercore_decimal = "Decimal128(38, 10)";
     vec![
         Dataset {
             name: "evm-final",
@@ -443,6 +515,98 @@ fn datasets() -> Vec<Dataset> {
                         ("post_balance", "DECIMAL(20,0)", DELTA_DECIMAL),
                     ],
                     minimums: vec![("post_balance", "999")],
+                },
+            ],
+        },
+        Dataset {
+            name: "hypercore-final",
+            block_type: "hypercore",
+            final_only: true,
+            millis: 250,
+            events: (100..105).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect(),
+            tables: vec![
+                Table {
+                    name: "blocks",
+                    columns: vec![
+                        ("block_id", "VARCHAR", "Utf8"),
+                        ("block_time_ns", "BIGINT", "Int64"),
+                        ("fill_count", "BIGINT", "Int64"),
+                        ("extra_json", "VARCHAR", "Utf8"),
+                    ],
+                    minimums: vec![("fill_count", "0")],
+                },
+                Table {
+                    name: "fills",
+                    columns: vec![
+                        ("price", "DECIMAL(38,10)", hypercore_decimal),
+                        ("closed_pnl", "DECIMAL(38,10)", hypercore_decimal),
+                        ("side", "VARCHAR", "Utf8"),
+                        (
+                            "fill_time",
+                            "TIMESTAMP WITH TIME ZONE",
+                            "Timestamp(µs, \"UTC\")",
+                        ),
+                        ("user", "VARCHAR", "Utf8"),
+                        ("transaction_id", "BIGINT", "Int64"),
+                        ("market_type", "VARCHAR", "Utf8"),
+                        ("counterparty", "VARCHAR", "Utf8"),
+                    ],
+                    // Exact decimals: the smallest price of the fixtures and
+                    // a negative PnL.
+                    minimums: vec![
+                        ("price", "0.0560010000"),
+                        ("closed_pnl", "-8806.1625780000"),
+                        ("order_id", "283365090383"),
+                    ],
+                },
+                Table {
+                    name: "other_events",
+                    columns: vec![
+                        ("event_type", "VARCHAR", "Utf8"),
+                        ("users", "VARCHAR[]", "List(Utf8, field: 'element')"),
+                        ("amount", "DECIMAL(38,10)", hypercore_decimal),
+                        (
+                            "liquidated_positions",
+                            "STRUCT(coin VARCHAR, szi DECIMAL(38,10))[]",
+                            "List(non-null Struct(\"coin\": non-null Utf8, \"szi\": non-null \
+                             Decimal128(38, 10)), field: 'element')",
+                        ),
+                        ("item_count", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("account_value", "-1.7248590000"), ("slot_id", "0")],
+                },
+                Table {
+                    name: "liquidations",
+                    columns: vec![
+                        ("mark_price", "DECIMAL(38,10)", hypercore_decimal),
+                        ("market_type", "VARCHAR", "Utf8"),
+                        ("counterparty", "VARCHAR", "Utf8"),
+                        ("counterparty_fill_index", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("mark_price", "2.6689900000")],
+                },
+                Table {
+                    name: "funding_rates",
+                    columns: vec![
+                        ("dex_index", "BIGINT", "Int64"),
+                        ("open_interest", "DECIMAL(38,10)", hypercore_decimal),
+                        ("positions", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("dex_index", "0")],
+                },
+                Table {
+                    name: "funding_deltas",
+                    columns: vec![
+                        ("szi", "DECIMAL(38,10)", hypercore_decimal),
+                        ("funding_rate", "DECIMAL(38,10)", hypercore_decimal),
+                        ("delta_index", "BIGINT", "Int64"),
+                    ],
+                    minimums: vec![("szi", "-37.1900000000"), ("delta_index", "0")],
+                },
+                Table {
+                    name: "validator_rewards",
+                    columns: vec![("reward", "DECIMAL(38,10)", hypercore_decimal)],
+                    minimums: vec![("reward", "0.0000000000")],
                 },
             ],
         },
@@ -558,6 +722,7 @@ impl Dataset {
     fn responses(&self) -> Vec<firehose::Response> {
         let (type_url, block): (&str, fn(u64, u8) -> Vec<u8>) = match self.block_type {
             "evm" => ("type.googleapis.com/sf.ethereum.type.v2.Block", evm_block),
+            "hypercore" => (HYPERCORE_TYPE_URL, hypercore_block),
             "sec" => ("type.googleapis.com/pinax.sec.v1.Block", sec_block),
             _ => ("type.googleapis.com/sf.solana.type.v1.Block", solana_block),
         };
@@ -575,15 +740,24 @@ impl Dataset {
 
 /// `build` of `dataset` from a mock Firehose into `root`, one part per block.
 async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
+    let stream = Stream {
+        responses: Arc::new(dataset.responses()),
+        final_only: dataset.final_only,
+        first: 100,
+        last: dataset.events.iter().map(|event| event.0).max().unwrap(),
+    };
+    build_from(stream, dataset.name, dataset.block_type, cwd, root).await;
+}
+
+/// `build` of `stream`'s blocks, `first..=last`, into `root`, one part per
+/// block.
+async fn build_from(stream: Stream, name: &str, block_type: &str, cwd: &Path, root: &Path) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let incoming = futures::stream::unfold(listener, |listener| async {
         Some((listener.accept().await.map(|(socket, _)| socket), listener))
     });
-    let stream = Stream {
-        responses: Arc::new(dataset.responses()),
-        final_only: dataset.final_only,
-    };
+    let (first, stop, final_only) = (stream.first, stream.last + 1, stream.final_only);
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(Info)
@@ -593,16 +767,19 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
             .unwrap();
     });
     let output = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(180),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
             .kill_on_drop(true)
             .env_clear()
             .current_dir(cwd)
             .args(["build", "--endpoint", &endpoint])
-            .args(["--block-type", dataset.block_type])
-            .args(["--start-block", "100", "--stop-block", "104"])
+            .args(["--block-type", block_type])
+            .arg("--start-block")
+            .arg(first.to_string())
+            .arg("--stop-block")
+            .arg(stop.to_string())
             .args(["--flush-blocks", "1", "--stream-idle-timeout-secs", "0"])
-            .arg(format!("--final-blocks-only={}", dataset.final_only))
+            .arg(format!("--final-blocks-only={final_only}"))
             .arg("--output")
             .arg(root)
             .output(),
@@ -613,8 +790,7 @@ async fn build(dataset: &Dataset, cwd: &Path, root: &Path) {
     server.abort();
     assert!(
         output.status.success(),
-        "{}: {}{}",
-        dataset.name,
+        "{name}: {}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -989,6 +1165,608 @@ async fn duckdb_and_delta_rs_read_every_delta_table() {
     }
 }
 
+/// The 36 HyperCore fixture blocks with their true identities, as the
+/// endpoint sends them: the header's number and time, decimal ids, and the
+/// parent and LIB one block below.
+fn hypercore_fixture_responses() -> Vec<firehose::Response> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hypercore");
+    let mut blocks: Vec<(u64, Vec<u8>)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if let Some(number) = name.strip_suffix(".pb") {
+                Some((number.parse().unwrap(), std::fs::read(&path).unwrap()))
+            } else {
+                let number = name.strip_suffix(".pb.zst")?;
+                let file = std::fs::File::open(&path).unwrap();
+                Some((number.parse().unwrap(), zstd::decode_all(file).unwrap()))
+            }
+        })
+        .collect();
+    blocks.sort_by_key(|(number, _)| *number);
+    assert_eq!(blocks.len(), 36);
+    blocks
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (number, payload))| {
+            let header = hypercore::Block::decode(payload.as_slice())
+                .unwrap()
+                .block_header
+                .unwrap();
+            assert_eq!(header.block_number, number);
+            firehose::Response {
+                block: Some(prost_types::Any {
+                    type_url: HYPERCORE_TYPE_URL.into(),
+                    value: payload,
+                }),
+                step: 3,
+                cursor: format!("event-{ordinal}"),
+                metadata: Some(firehose::BlockMetadata {
+                    num: number,
+                    id: number.to_string(),
+                    parent_num: number - 1,
+                    parent_id: (number - 1).to_string(),
+                    lib_num: number - 1,
+                    time: header.block_time,
+                    ..Default::default()
+                }),
+            }
+        })
+        .collect()
+}
+
+/// The ```sql blocks of a Markdown document, in order.
+fn sql_blocks(markdown: &str) -> Vec<&str> {
+    markdown
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().unwrap())
+        .collect()
+}
+
+/// The statements of a SQL block with their labels: `-- C1 …` comments
+/// (cookbook) or the `'M1'` literal a monitor selects.
+fn labelled_statements(block: &str) -> Vec<(String, String)> {
+    block
+        .split(";\n")
+        .filter_map(|text| {
+            let comment = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("-- "))
+                .and_then(|comment| comment.split(' ').next())
+                .map(str::to_string);
+            let statement: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect();
+            let statement = statement.join("\n").trim().to_string();
+            if statement.is_empty() {
+                return None;
+            }
+            let label = statement
+                .strip_prefix("SELECT '")
+                .and_then(|rest| rest.split('\'').next())
+                .filter(|label| label.starts_with('M'))
+                .map(str::to_string)
+                .or(comment)
+                .expect("a labelled statement");
+            Some((label, statement))
+        })
+        .collect()
+}
+
+/// Empty stand-ins for the `hl_*` reference tables of a separate job, with the
+/// columns the documented joins read, so that those joins run.
+const REFERENCE_STUBS: &str = "
+CREATE TABLE hl_spot_pairs_current (coin VARCHAR, base_symbol VARCHAR, quote_symbol VARCHAR);
+CREATE TABLE hl_outcomes_current (outcome_id BIGINT, question_id BIGINT, name VARCHAR, side_names VARCHAR[]);
+CREATE TABLE hl_questions_current (question_id BIGINT, name VARCHAR);
+CREATE TABLE hl_funding_history (coin VARCHAR, funding_time TIMESTAMPTZ, premium DECIMAL(38,10));
+CREATE TABLE hl_perp_dexs_current (dex_index BIGINT, name VARCHAR, full_name VARCHAR);
+";
+
+/// The per-type views of the view pack: one per ledger type and per scalar
+/// body.
+fn per_type_view(view: &str) -> bool {
+    view.starts_with("ledger_")
+        || [
+            "c_deposits",
+            "c_withdrawals",
+            "delegations",
+            "gossip_priority_auction_restarts",
+            "create_sub_accounts",
+        ]
+        .contains(&view)
+}
+
+/// `docs/chains/hypercore.md`: its table views, view pack, monitors, cookbook
+/// and optional reference joins run in DuckDB over a real `build` of the 36
+/// HyperCore fixture blocks (their true identities, 2025-12-31 to
+/// 2026-10-06). Every monitor returns no rows, every query runs (the joins
+/// over empty `hl_*` stand-ins), the per-type views cover every event that is
+/// not funding or validator rewards, the interpretation views give the
+/// fixtures' known answers, and the decimal arithmetic types are the
+/// documented ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let Some(duckdb) = DuckDb::open(&cwd) else {
+        return;
+    };
+    let responses = hypercore_fixture_responses();
+    let first = responses[0].metadata.as_ref().unwrap().num;
+    let last = responses.last().unwrap().metadata.as_ref().unwrap().num;
+    let root = cwd.join("hypercore-fixtures");
+    let stream = Stream {
+        responses: Arc::new(responses),
+        final_only: true,
+        first,
+        last,
+    };
+    build_from(stream, "hypercore-fixtures", "hypercore", &cwd, &root).await;
+
+    let doc = include_str!("../../docs/chains/hypercore.md");
+    let blocks = sql_blocks(doc);
+    assert_eq!(
+        blocks.len(),
+        5,
+        "table views, view pack, monitors, cookbook, reference joins"
+    );
+    let mut sql = blocks[0].replace("<root>", root.to_str().unwrap());
+    sql.push_str(blocks[1]);
+    sql.push_str(REFERENCE_STUBS);
+    let monitors = labelled_statements(blocks[2]);
+    let cookbook = labelled_statements(blocks[3]);
+    let joins = labelled_statements(blocks[4]);
+    assert_eq!(monitors.len(), 28, "{monitors:?}");
+    assert_eq!(cookbook.len(), 18, "{cookbook:?}");
+    assert_eq!(joins.len(), 3, "{joins:?}");
+    for (label, statement) in monitors.iter().chain(&cookbook).chain(&joins) {
+        sql.push_str(&format!(
+            "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
+        ));
+    }
+    // Every view, and the rows each gives.
+    let views: Vec<&str> = blocks[1]
+        .lines()
+        .filter_map(|line| line.strip_prefix("CREATE OR REPLACE VIEW "))
+        .filter_map(|line| line.split(' ').next())
+        .collect();
+    assert_eq!(
+        views.iter().filter(|view| per_type_view(view)).count(),
+        22 + 5,
+        "{views:?}"
+    );
+    for view in &views {
+        sql.push_str(&format!(
+            "\nSELECT 'view' AS q, '{view}' AS label, count(*) AS n FROM {view};"
+        ));
+    }
+    sql.push_str(
+        "\nSELECT 'events' AS q, count(*) FILTER (WHERE event_type NOT IN ('funding', \
+         'validator_rewards')) AS n FROM events;\
+         \nSELECT 'kinds' AS q, liquidation_kind AS label, count(*) AS n, \
+         count(ledger_event_index) AS linked FROM liquidations_v GROUP BY ALL;\
+         \nSELECT 'matches' AS q, match_type AS label, count(*) AS n FROM outcome_matches_v \
+         GROUP BY ALL;\
+         \nSELECT 'value' AS q, 'trades_v settlements' AS label, count(*) AS n FROM trades_v \
+         WHERE is_settlement;\
+         \nSELECT 'value' AS q, 'trades_v non-trades' AS label, count(*) AS n FROM trades_v \
+         WHERE is_non_trade;\
+         \nSELECT 'value' AS q, 'settled outcomes with open interest' AS label, count(*) AS n \
+         FROM outcome_open_interest_v JOIN outcome_settlements_v USING (outcome_id);\
+         \nSELECT 'columns' AS q, 'events' AS label, \
+         list(column_name || ' ' || column_type) AS columns FROM (DESCRIBE events);\
+         \nSELECT 'columns' AS q, 'other_events' AS label, \
+         list(column_name || ' ' || column_type) AS columns FROM (DESCRIBE other_events);\
+         \nSELECT 'types' AS q, any_value(typeof(price * size)) AS product, \
+         typeof(sum(price)) AS total, typeof(avg(price)) AS mean FROM fills;",
+    );
+    let rows = duckdb.query(&sql);
+    let counts = |tag: &str| -> BTreeMap<String, u64> {
+        rows[tag]
+            .iter()
+            .map(|row| {
+                (
+                    row["label"].as_str().unwrap().to_string(),
+                    number(&row["n"]),
+                )
+            })
+            .collect()
+    };
+    let results = counts("result");
+    assert_eq!(results.len(), monitors.len() + cookbook.len() + joins.len());
+    for (label, _) in &monitors {
+        assert_eq!(results[label], 0, "monitor {label} found violations");
+    }
+    // A few cookbook answers on the fixtures: every liquidated leg, the
+    // backstop takeovers with their ledger events, the funding block's
+    // snapshot and its funding events.
+    assert_eq!(results["C3"], 19);
+    assert_eq!(results["C5"], 12);
+    assert_eq!(results["C8"], 202_449);
+    assert_eq!(results["C9"], 6);
+    // trades_v keeps every paired taker leg and flags the non-trades: 159
+    // settlements (157 of a delisted perp against the zero address, 2 of a
+    // HIP-4 outcome) and a NET_CHILD_VAULTS pair. C4 counts only the trades.
+    let views = counts("view");
+    assert_eq!(views["trades_v"], 254);
+    let values = counts("value");
+    assert_eq!(values["trades_v settlements"], 159);
+    assert_eq!(values["trades_v non-trades"], 160);
+    assert_eq!(results["C4"], 254 - 160);
+    // A settled outcome has no open interest left (the settlement's receiving
+    // leg is a system account's, not a holding), so the fixtures' open
+    // outcomes are all C17 returns.
+    assert_eq!(values["settled outcomes with open interest"], 0);
+    assert_eq!(results["C17"], views["outcome_open_interest_v"]);
+    // `events` returns other_events' columns in the order and with the types
+    // `SELECT *` gives, so that the two compare by position.
+    let columns: BTreeMap<&str, &Value> = rows["columns"]
+        .iter()
+        .map(|row| (row["label"].as_str().unwrap(), &row["columns"]))
+        .collect();
+    assert_eq!(columns["events"], columns["other_events"]);
+    assert_eq!(
+        columns["events"].as_array().unwrap().last(),
+        Some(&json!("date DATE"))
+    );
+    assert_eq!(views["liquidation_orders_v"], 16);
+    // HIP-4: split, merge, merge-question and negate actions, one settled
+    // outcome.
+    assert_eq!(views["outcome_actions_v"], 4);
+    assert_eq!(views["outcome_settlements_v"], 1);
+    for (view, n) in views.iter().filter(|(view, _)| per_type_view(view)) {
+        assert!(*n > 0, "{view} is empty on the fixtures");
+    }
+    assert_eq!(
+        views
+            .iter()
+            .filter(|(view, _)| per_type_view(view))
+            .map(|(_, n)| n)
+            .sum::<u64>(),
+        number(&rows["events"][0]["n"]),
+        "the per-type views cover every event row"
+    );
+    // Liquidation kinds: four market legs, twelve backstop takeovers (each
+    // linked to its ledger event) and three ADL legs.
+    let kinds: BTreeMap<String, (u64, u64)> = rows["kinds"]
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap().to_string(),
+                (number(&row["n"]), number(&row["linked"])),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeMap::from([
+            ("adl".to_string(), (3, 0)),
+            ("backstop_takeover".to_string(), (12, 12)),
+            ("market".to_string(), (4, 0)),
+        ])
+    );
+    // HIP-4 matches: a burn of two complementary sides, and a settlement of
+    // each side coin.
+    assert_eq!(
+        counts("matches"),
+        BTreeMap::from([("burn".to_string(), 1), ("settlement".to_string(), 2)])
+    );
+    let types = &rows["types"][0];
+    assert_eq!(
+        (&types["product"], &types["total"], &types["mean"]),
+        (
+            &json!("DECIMAL(38,20)"),
+            &json!("DECIMAL(38,10)"),
+            &json!("DOUBLE")
+        )
+    );
+}
+
+/// Serves `responses` from a request's cursor (`event-<ordinal>`), or from
+/// the first when it has none, through the request's (inclusive) stop block.
+#[derive(Clone)]
+struct Resumable {
+    responses: Arc<Vec<firehose::Response>>,
+}
+impl tonic::server::ServerStreamingService<firehose::Request> for Resumable {
+    type Response = firehose::Response;
+    type ResponseStream = std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<Self::Response, tonic::Status>> + Send>,
+    >;
+    type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+    fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
+        let request = request.into_inner();
+        let after: Option<usize> = match request.cursor.as_str() {
+            "" => None,
+            cursor => Some(
+                cursor
+                    .strip_prefix("event-")
+                    .and_then(|ordinal| ordinal.parse().ok())
+                    .unwrap_or_else(|| panic!("unexpected cursor {cursor}")),
+            ),
+        };
+        let responses: Vec<_> = self
+            .responses
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, response)| {
+                after.is_none_or(|after| *ordinal > after)
+                    && response.metadata.as_ref().unwrap().num <= request.stop_block_num
+            })
+            .map(|(_, response)| Ok(response.clone()))
+            .collect();
+        Box::pin(async move {
+            Ok(tonic::Response::new(
+                Box::pin(futures::stream::iter(responses)) as Self::ResponseStream,
+            ))
+        })
+    }
+}
+service!(Resumable, "sf.firehose.v2.Stream", server_streaming);
+
+/// The 36 HyperCore fixtures as contiguous blocks 100..=135, twelve per UTC
+/// day from 2023-11-14, their headers rewritten to that identity; the funding
+/// block is cut to 8 fills and 3 deltas per funding event.
+fn contiguous_hypercore_responses() -> Vec<firehose::Response> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hypercore");
+    let mut payloads: Vec<(u64, Vec<u8>)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if let Some(number) = name.strip_suffix(".pb") {
+                Some((number.parse().unwrap(), std::fs::read(&path).unwrap()))
+            } else {
+                let number = name.strip_suffix(".pb.zst")?;
+                let file = std::fs::File::open(&path).unwrap();
+                Some((number.parse().unwrap(), zstd::decode_all(file).unwrap()))
+            }
+        })
+        .collect();
+    payloads.sort_by_key(|(number, _)| *number);
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (_, payload))| {
+            let number = 100 + ordinal as u64;
+            let mut block = hypercore::Block::decode(payload.as_slice()).unwrap();
+            block.fills.truncate(8);
+            for event in &mut block.events {
+                if let Some(hypercore::event_body::Event::Funding(funding)) =
+                    &mut event.events[0].event
+                {
+                    funding.deltas.truncate(3);
+                }
+            }
+            let time = prost_types::Timestamp {
+                seconds: MIDNIGHT - 86_400 + ordinal as i64 * 7_200,
+                nanos: NANOS,
+            };
+            block.block_header = Some(hypercore::BlockHeader {
+                block_number: number,
+                block_time: Some(time),
+            });
+            firehose::Response {
+                block: Some(prost_types::Any {
+                    type_url: HYPERCORE_TYPE_URL.into(),
+                    value: block.encode_to_vec(),
+                }),
+                step: 3,
+                cursor: format!("event-{ordinal}"),
+                metadata: Some(firehose::BlockMetadata {
+                    num: number,
+                    id: number.to_string(),
+                    parent_num: number - 1,
+                    parent_id: (number - 1).to_string(),
+                    lib_num: number - 1,
+                    time: Some(time),
+                }),
+            }
+        })
+        .collect()
+}
+
+/// `build` from block 100 to `stop` (exclusive), resuming from the root's
+/// cursor when it has one.
+async fn build_resumable(
+    responses: &Arc<Vec<firehose::Response>>,
+    stop: u64,
+    cwd: &Path,
+    root: &Path,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let incoming = futures::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(socket, _)| socket), listener))
+    });
+    let stream = Resumable {
+        responses: responses.clone(),
+    };
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(Info)
+            .add_service(stream)
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    let output = tokio::time::timeout(
+        Duration::from_secs(180),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(cwd)
+            .args([
+                "build",
+                "--endpoint",
+                &endpoint,
+                "--block-type",
+                "hypercore",
+            ])
+            .args(["--start-block", "100", "--stop-block", &stop.to_string()])
+            .args(["--flush-blocks", "1", "--stream-idle-timeout-secs", "0"])
+            .arg("--output")
+            .arg(root)
+            .output(),
+    )
+    .await
+    .expect("fireparq timed out")
+    .unwrap();
+    server.abort();
+    assert!(
+        output.status.success(),
+        "build to {stop}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The Arrow schema metadata of a local Parquet file, as a reader sees it
+/// (the footer's Arrow schema with its key-value metadata).
+fn file_schema_metadata(path: &Path) -> std::collections::HashMap<String, String> {
+    let file = std::fs::File::open(path).unwrap();
+    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .schema()
+        .metadata()
+        .clone()
+        .into()
+}
+
+/// `fireparq validate --cross-partition` of a root's `blocks`.
+async fn validate_blocks(cwd: &Path, root: &Path) {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+        .env_clear()
+        .current_dir(cwd)
+        .arg("validate")
+        .arg(root.join("blocks"))
+        .arg("--cross-partition")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "validate: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `docs/chains/hypercore.md`, "Derivation version": the derivation version
+/// is schema metadata that guards resume only. Every part fireparq writes
+/// carries it; the maintenance job rewrites files from the Delta schema, which
+/// does not. A HyperCore root whose dates were compacted still validates,
+/// resumes, compacts again and reads exactly the rows the mapper maps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hypercore_compaction_drops_the_derivation_key_and_resume_still_works() {
+    const KEY: &str = blocks::hypercore::schema::DERIVATION_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let root = cwd.join("hypercore-compacted");
+    let responses = Arc::new(contiguous_hypercore_responses());
+    let tables: Vec<String> = blocks::hypercore::schema::TABLE_NAMES
+        .iter()
+        .map(|table| table.to_string())
+        .collect();
+    let job = common::maintenance_bin();
+    let compact = || {
+        let env = vec![
+            ("LAKE_ROOT", root.to_str().unwrap().to_string()),
+            ("LAKE_TABLES", tables.join(",")),
+            ("OPTIMIZE_DATES", "all".to_string()),
+            ("VACUUM_RETENTION_HOURS", "0".to_string()),
+        ];
+        let job = job.clone();
+        async move { common::maintenance_job(&job, &env).await }
+    };
+
+    // Two days of blocks, one part per block: every part carries the key.
+    build_resumable(&responses, 124, &cwd, &root).await;
+    for table in &tables {
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
+        for file in &read.files {
+            let metadata = file_schema_metadata(&root.join(table).join(&file.path));
+            assert_eq!(
+                metadata.get(KEY).map(String::as_str),
+                Some("1"),
+                "{table} {}",
+                file.path
+            );
+        }
+    }
+
+    // Compaction rewrites every date of more than one part without the key.
+    let run = compact().await;
+    run.assert_clean();
+    let mut compacted = 0;
+    for table in &tables {
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
+        for file in &read.files {
+            let name = file.path.rsplit('/').next().unwrap();
+            if name.starts_with("part-v1-") {
+                continue;
+            }
+            let metadata = file_schema_metadata(&root.join(table).join(&file.path));
+            assert_eq!(metadata.get(KEY), None, "{table} {name}: {metadata:?}");
+            compacted += 1;
+        }
+    }
+    assert!(
+        compacted >= 12,
+        "every table has a compacted date: {compacted}"
+    );
+    validate_blocks(&cwd, &root).await;
+
+    // The root resumes over the compacted tables, and compacts again.
+    build_resumable(&responses, 136, &cwd, &root).await;
+    validate_blocks(&cwd, &root).await;
+    compact().await.assert_clean();
+    validate_blocks(&cwd, &root).await;
+
+    // Exactly the rows the mapper maps from the same 36 blocks.
+    let mut mapper = blocks::hypercore::mapper::HypercoreBlockMapper::new(
+        false,
+        firehose_parquet::encode::EncodeBytes::Hex,
+    );
+    for response in responses.iter() {
+        let metadata = response.metadata.as_ref().unwrap();
+        let time = metadata.time.as_ref().unwrap();
+        let identity = firehose_parquet::traits::BlockIdentity {
+            block_num: metadata.num,
+            block_id: metadata.id.clone(),
+            parent_num: metadata.parent_num,
+            parent_id: metadata.parent_id.clone(),
+            lib_num: metadata.lib_num,
+            timestamp: time.seconds,
+            timestamp_nanos: time.nanos,
+            fork_step: None,
+        };
+        use firehose_parquet::traits::BlockMapper as _;
+        mapper
+            .map_block(
+                &response.block.as_ref().unwrap().value,
+                &identity,
+                firehose_parquet::traits::StreamEvent::default(),
+            )
+            .unwrap();
+    }
+    use firehose_parquet::traits::BlockMapper as _;
+    let expected: BTreeMap<String, u64> = mapper
+        .flush()
+        .unwrap()
+        .into_iter()
+        .map(|(table, batch)| (table, batch.num_rows() as u64))
+        .collect();
+    assert_eq!(common::delta_counts(&root, &tables).await, expected);
+    if let Some(duckdb) = DuckDb::open(&cwd) {
+        assert_eq!(common::duckdb_counts(&duckdb, &root, &tables), expected);
+    }
+}
+
 /// The "Engine compatibility" section of docs/reading-tables.md states what
 /// this test checks: it names every family of [`datasets`], and its type table
 /// has a DuckDB row for every type pinned above and for each list's element
@@ -1016,6 +1794,7 @@ fn reading_tables_documents_every_checked_family_and_type() {
             "evm" => "EVM",
             "solana" => "Solana",
             "sec" => "SEC",
+            "hypercore" => "HyperCore",
             other => panic!("name the {other} family here"),
         };
         assert!(ci_sentence.contains(family), "{family}: {ci_sentence}");

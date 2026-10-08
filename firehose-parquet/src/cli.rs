@@ -162,7 +162,10 @@ pub struct CommonArgs {
     /// When omitted, an existing output resumes from its authoritative state
     /// under `.fireparq-ingest/` (never from the optional
     /// `_fireparq/cursor.parquet` mirror), and a new output starts from the
-    /// endpoint's first streamable block.
+    /// endpoint's first streamable block, or from the network's data origin
+    /// when that is later (HyperCore: block 846903317, data known from
+    /// 2026-01-01). For a new output, an explicit start before a network's
+    /// data origin is refused.
     #[arg(
         short = 's',
         long,
@@ -455,6 +458,10 @@ Examples:
     --endpoint https://eos.firehose.pinax.network:443 \\
     --start-block 1000000 --stop-block 1001000
 
+  # Stream HyperCore: its data is known from 2026-01-01, so a new root
+  # starts at block 846903317 and an earlier --start-block is refused
+  fireparq build --network hypercore
+
   # Resume: rerun the same command. Progress comes from the output's
   # .fireparq-ingest/ state; _fireparq/cursor.parquet is only an optional mirror
   fireparq build --network mainnet
@@ -493,7 +500,7 @@ pub struct BuildArgs {
 
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
-    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec
+    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec, hypercore
     #[arg(
         long,
         env = "BLOCK_TYPE",

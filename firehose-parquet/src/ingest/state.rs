@@ -137,6 +137,7 @@ pub enum BlockFamily {
     Tron,
     Beacon,
     Sec,
+    Hypercore,
 }
 
 /// The recorded output layout. Every table is partitioned by

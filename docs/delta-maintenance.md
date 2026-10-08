@@ -100,7 +100,7 @@ not apply to it. Requests use object_store's default retries.
 | Variable | Default | Meaning |
 |---|---|---|
 | `LAKE_ROOT` or `LAKE_BUCKET` | (required) | The dataset root, `s3://bucket[/prefix]` or a local path; `LAKE_BUCKET=b` is `s3://b`, a dataset at the bucket root |
-| `LAKE_TABLES` | (required) | Comma-separated tables, for example every table of the network's [schema](schemas/README.md); dates are closed by `blocks`, and a table that does not exist yet is skipped |
+| `LAKE_TABLES` | (required) | Comma-separated tables, for example every table of the network's [schema](schemas/README.md) (HyperCore, twelve: `blocks,fills,outcome_fills,liquidations,transfers,bridge_transfers,vault_events,staking_events,other_events,funding_deltas,funding_rates,validator_rewards`); dates are closed by `blocks`, and a table that does not exist yet is skipped |
 | `S3_ENDPOINT` | AWS | S3 endpoint URL, for example the in-cluster RGW |
 | `AWS_REGION` | `us-east-1` | |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | (required on S3) | The maintenance user; `AWS_SESSION_TOKEN` is optional |

@@ -1,0 +1,19 @@
+syntax = "proto3";
+package pinax.hypercore.v1;
+
+import "google/protobuf/timestamp.proto";
+import "pinax/hypercore/v1/event.proto";
+import "pinax/hypercore/v1/fill.proto";
+
+option go_package = "github.com/pinax-network/firehose-hypercore/pb/pinax/hypercore/v1;hypercorepb";
+
+message Block {
+  BlockHeader block_header = 1;
+  repeated Fill fills = 2;
+  repeated Event events = 3;
+}
+
+message BlockHeader {
+  uint64 block_number = 1;
+  google.protobuf.Timestamp block_time = 2;
+}

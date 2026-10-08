@@ -1,0 +1,5 @@
+# Protobuf and compressed fixtures are bytes. Without this, a payload with no
+# NUL byte is detected as text, and an eol or autocrlf rule could rewrite its
+# 0x0a bytes on checkout.
+*.pb binary
+*.zst binary

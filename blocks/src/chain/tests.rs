@@ -13,9 +13,19 @@ mod legacy {
     use anyhow::{anyhow, Result};
     use firehose_parquet::grpc::EndpointInfo;
 
-    // Post-#526 families are appended explicitly: sec.
+    // Post-#526 families are appended explicitly: sec, hypercore.
     pub const BLOCK_TYPES: &[&str] = &[
-        "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon", "sec",
+        "auto",
+        "evm",
+        "bitcoin",
+        "solana",
+        "near",
+        "antelope",
+        "cosmos",
+        "tron",
+        "beacon",
+        "sec",
+        "hypercore",
     ];
 
     pub fn output_encoding_policy_bytes(
@@ -24,8 +34,8 @@ mod legacy {
     ) -> Option<EncodeBytes> {
         match block_type {
             "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
-            // post-#526 family: sec
-            "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" => Some(EncodeBytes::Hex),
+            // post-#526 families: sec, hypercore
+            "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" | "hypercore" => Some(EncodeBytes::Hex),
             "antelope" => Some(EncodeBytes::HexNoPrefix),
             "solana" | "near" => Some(EncodeBytes::Base58),
             "tron" => Some(EncodeBytes::TronBase58),
@@ -78,6 +88,9 @@ mod legacy {
             if candidate.contains("tron") {
                 return Some("tron");
             }
+            if candidate.contains("hypercore") {
+                return Some("hypercore");
+            }
             if candidate.contains("ethereum") || candidate.contains("evm") || candidate == "mainnet"
             {
                 return Some("evm");
@@ -97,8 +110,9 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
-            // post-#526 family: sec
+            // post-#526 families: sec, hypercore
             "sec" => BlockFamily::Sec,
+            "hypercore" => BlockFamily::Hypercore,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
     }
@@ -123,6 +137,9 @@ mod legacy {
         } else if type_url.contains("pinax.sec.") {
             // post-#526 family: sec
             Ok("sec".to_string())
+        } else if type_url.contains("hypercore") {
+            // post-#526 family: hypercore
+            Ok("hypercore".to_string())
         } else {
             Err(anyhow!(
                 "unable to auto-detect block type from type_url: {type_url}"
@@ -219,6 +236,11 @@ mod legacy {
                 include_fork_step,
                 encode_bytes,
             ))),
+            // post-#526 family: hypercore
+            "hypercore" => Ok(Box::new(HypercoreBlockMapper::new(
+                include_fork_step,
+                encode_bytes,
+            ))),
             other => Err(anyhow!(
                 "unsupported block type: {other}. Supported: {}",
                 BLOCK_TYPES.join(", ")
@@ -237,6 +259,7 @@ const TYPE_URLS: &[&str] = &[
     "type.googleapis.com/sf.tron.type.v1.Block",
     "type.googleapis.com/sf.beacon.type.v1.Block",
     "type.googleapis.com/pinax.sec.v1.Block",
+    "type.googleapis.com/pinax.hypercore.v1.Block",
     "type.googleapis.com/sf.unknown.type.v1.Block",
     "type.googleapis.com/sf.firehose.v2.Response",
     "",
@@ -245,8 +268,24 @@ const TYPE_URLS: &[&str] = &[
 /// Every inference keyword, alone and in every ordered pair, so rule
 /// precedence is exercised as well as each rule.
 const KEYWORDS: &[&str] = &[
-    "beacon", "solana", "bitcoin", "near", "antelope", "eos", "cosmos", "tron", "ethereum", "evm",
-    "mainnet", "tron-evm", "btc", "cl", "eth", "sec",
+    "beacon",
+    "solana",
+    "bitcoin",
+    "near",
+    "antelope",
+    "eos",
+    "cosmos",
+    "tron",
+    "ethereum",
+    "evm",
+    "mainnet",
+    "tron-evm",
+    "btc",
+    "cl",
+    "eth",
+    "sec",
+    "hypercore",
+    "hyper-evm",
 ];
 
 /// Names that exercise strict matching, case folding and substring traps.
@@ -280,6 +319,11 @@ const EXTRA_NAMES: &[&str] = &[
     "sec-edgar",
     "secret-4",
     "pinax.sec.",
+    "hypercore",
+    "hypercore-testnet",
+    "HyperCore",
+    "hyper-evm",
+    "hyperliquid",
 ];
 
 fn name_corpus() -> Vec<String> {
@@ -601,9 +645,10 @@ fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -
 }
 
 /// The eight families that existed when the historical digests were pinned.
-/// Families added later (sec) are left out, so those pins stay byte-identical.
+/// Families added later (sec, hypercore) are left out, so those pins stay
+/// byte-identical.
 fn pre_sec_family(kind: ChainKind) -> bool {
-    kind != ChainKind::Sec
+    !matches!(kind, ChainKind::Sec | ChainKind::Hypercore)
 }
 
 fn schema_digest_where(
@@ -671,8 +716,9 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 }
 
 /// SHA-256 over every family's table inventory and complete Arrow schemas for
-/// all 160 option/encoding combinations of each of the nine families. Update the pinned value only for an
-/// intentional schema change, and record that change.
+/// all 160 option/encoding combinations of each of the ten families. Update
+/// the pinned value only for an intentional schema change, and record that
+/// change.
 #[test]
 fn every_mapper_schema_matches_the_pinned_digest() {
     assert_eq!(
@@ -685,7 +731,8 @@ fn every_mapper_schema_matches_the_pinned_digest() {
 /// `fork_step`). The pinned value was produced by the same loop on origin/main
 /// `081dea5`, before `stream_ordinal`: adding it left every final-only schema,
 /// and so every final-only protected table digest, byte-identical. It covers
-/// the eight families of that commit; later families (sec) are left out.
+/// the eight families of that commit; later families (sec, hypercore) are left
+/// out (`HYPERCORE_SCHEMA_DIGEST` pins HyperCore).
 #[test]
 fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
     assert_eq!(
@@ -703,12 +750,135 @@ fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
 /// restructured NEAR `state_changes`, which both sides leave out. The pinned value was produced by
 /// the same loop, with the same table left out, on origin/main `8462692` (after
 /// #526, before #550). It covers the eight families of that commit; later
-/// families (sec) are left out.
+/// families (sec, hypercore) are left out.
 #[test]
 fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
         schema_digest_where(pre_sec_family, |_| true, without_appended_columns),
         PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED
+    );
+}
+
+/// SHA-256 over the twelve HyperCore schemas, their schema metadata (the
+/// derivation version) included, with the default `hex` encoding, final and
+/// non-final, for every other option. These schemas are bound into every
+/// HyperCore root's protected identity, and upstream additions must be placed
+/// without changing them (`docs/chains/hypercore.md`, "`extra_json` and schema changes").
+#[test]
+fn hypercore_schemas_match_the_pinned_digest() {
+    assert_eq!(
+        schema_digest_where(
+            |kind| kind == ChainKind::Hypercore,
+            |options| options.encode_bytes == EncodeBytes::Hex,
+            |_, _, schema| Some(schema.clone())
+        ),
+        HYPERCORE_SCHEMA_DIGEST,
+        "the HyperCore schema changed: this requires a new output root; re-pin only \
+         together with a documented, rebuild-required change"
+    );
+}
+
+/// `docs/chains/hypercore.md`, "Derivation version": the HyperCore
+/// derivation version is schema metadata, so a change of a derivation rule
+/// alone, with the same columns, changes every table's declared digest, and a
+/// root started under one version refuses to resume under another. The same
+/// version resumes.
+#[tokio::test]
+async fn a_hypercore_derivation_version_change_alone_is_refused_on_resume() {
+    use crate::hypercore::schema::{DERIVATION_KEY, DERIVATION_VERSION};
+    use arrow::record_batch::RecordBatch;
+    use firehose_parquet::config::Config;
+    use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
+    use firehose_parquet::ingest::{
+        declare_data_schemas, declare_inventory, BlockFamily, IngestionSession, MapperSemantics,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let kind = ChainKind::Hypercore;
+    let delta_types = kind.profile().delta_types();
+    let mut mapper = kind.create_mapper(MapperOptions {
+        extended: false,
+        with_votes: false,
+        include_fork_step: false,
+        encode_bytes: EncodeBytes::Hex,
+        synthetic_partition_routing: false,
+        include_failed_transactions: false,
+    });
+    let names: Vec<String> = mapper
+        .table_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let declared: Vec<&str> = names.iter().map(String::as_str).collect();
+    let current = mapper.flush().unwrap();
+    // The same tables and columns under the next derivation version.
+    let next: HashMap<String, RecordBatch> = current
+        .iter()
+        .map(|(name, batch)| {
+            let mut metadata = batch.schema().metadata().clone();
+            assert_eq!(
+                metadata.insert(DERIVATION_KEY.to_string(), "2".to_string()),
+                Some(DERIVATION_VERSION.to_string()),
+                "{name}"
+            );
+            let schema = batch.schema().as_ref().clone().with_metadata(metadata);
+            (name.clone(), RecordBatch::new_empty(Arc::new(schema)))
+        })
+        .collect();
+    let semantics = |batches: &HashMap<String, RecordBatch>| MapperSemantics {
+        chain: "hypercore".into(),
+        family: BlockFamily::Hypercore,
+        bytes_encoding: "hex".into(),
+        extended: false,
+        with_votes: false,
+        include_failed_transactions: false,
+        tables: declare_inventory(batches, &declared, &delta_types).unwrap(),
+        data_schemas: declare_data_schemas(batches, &declared, &delta_types).unwrap(),
+        delta_types,
+    };
+    let (first, second) = (semantics(&current), semantics(&next));
+    assert_eq!(first.tables.len(), 12);
+    for name in &names {
+        assert_ne!(first.tables[name], second.tables[name], "{name}");
+        assert_eq!(
+            first.data_schemas[name].fields(),
+            second.data_schemas[name].fields(),
+            "{name}: only the metadata differs"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        output: dir.path().join("hypercore"),
+        start_block: Some(846_903_317),
+        final_blocks_only: true,
+        ..Default::default()
+    };
+    let owner = DatasetOwnership::acquire(
+        "test",
+        vec![MutationScope::directory(config.output.to_string_lossy())],
+        None,
+    )
+    .await
+    .unwrap();
+    drop(
+        IngestionSession::open(&config, first, &owner, None, None)
+            .await
+            .unwrap(),
+    );
+    let refused = IngestionSession::open(&config, second, &owner, None, None)
+        .await
+        .err()
+        .expect("a root of derivation version 1 refuses version 2");
+    assert!(
+        format!("{refused:#}").contains("existing authoritative stream differs from this request"),
+        "{refused:#}"
+    );
+    drop(
+        IngestionSession::open(&config, semantics(&current), &owner, None, None)
+            .await
+            .unwrap(),
     );
 }
 
@@ -779,14 +949,122 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
     );
 }
 
+/// Adding a family must leave every other family's schemas unchanged (#711).
+/// The eight families that predate SEC and HyperCore still reproduce, byte
+/// for byte, the `CURRENT_SCHEMA_DIGEST` and `DELTA_DATA_SCHEMA_DIGEST` pinned
+/// on origin/main `daf64a9`, the last commit before either was added, so a
+/// later re-pin of the all-family digests cannot hide a change to them.
+#[test]
+fn pre_sec_families_reproduce_their_pre_sec_digests() {
+    assert_eq!(
+        schema_digest_where(
+            pre_sec_family,
+            |_| true,
+            |_, _, schema| Some(schema.clone())
+        ),
+        PRE_SEC_SCHEMA_DIGEST,
+        "an earlier family's mapper schema changed"
+    );
+    assert_eq!(
+        schema_digest_where(
+            pre_sec_family,
+            |_| true,
+            |kind, table, schema| Some(
+                kind.profile()
+                    .delta_types()
+                    .data_schema(table, schema)
+                    .unwrap()
+            )
+        ),
+        PRE_SEC_DELTA_DATA_SCHEMA_DIGEST,
+        "an earlier family's Delta data schema changed"
+    );
+}
+
+/// SEC and HyperCore, the families added after `daf64a9`, each pin their own
+/// mapper and Delta data schema digests over all 160 option/encoding
+/// combinations, so a re-pin of the all-family digests for another family
+/// cannot hide a change to either (#711); `HYPERCORE_SCHEMA_DIGEST` covers
+/// only `hex`. Pinned when #710 was merged into #709: there, the eight older
+/// families with SEC still gave origin/main `ac21a82`'s
+/// `CURRENT_SCHEMA_DIGEST` and `DELTA_DATA_SCHEMA_DIGEST`, and with HyperCore
+/// those of `f8ba317`, so neither family's schemas changed in the merge.
+#[test]
+fn each_later_family_reproduces_its_own_pinned_digests() {
+    for (family, mapper_digest, delta_digest) in [
+        (
+            ChainKind::Sec,
+            SEC_SCHEMA_DIGEST,
+            SEC_DELTA_DATA_SCHEMA_DIGEST,
+        ),
+        (
+            ChainKind::Hypercore,
+            HYPERCORE_ALL_OPTIONS_SCHEMA_DIGEST,
+            HYPERCORE_DELTA_DATA_SCHEMA_DIGEST,
+        ),
+    ] {
+        assert_eq!(
+            schema_digest_where(
+                |kind| kind == family,
+                |_| true,
+                |_, _, schema| Some(schema.clone())
+            ),
+            mapper_digest,
+            "the {family} mapper schema changed"
+        );
+        assert_eq!(
+            schema_digest_where(
+                |kind| kind == family,
+                |_| true,
+                |kind, table, schema| Some(
+                    kind.profile()
+                        .delta_types()
+                        .data_schema(table, schema)
+                        .unwrap()
+                )
+            ),
+            delta_digest,
+            "the {family} Delta data schema changed"
+        );
+    }
+}
+
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "628f1ccf604ae05cf8388e1cf53277c2977cea8316e3dbf85a1019842ae354b7";
+    "8f172021f35d62a4d78139a13214320b0c5bc5a96c0166bd734145b9f5d9a7c1";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "73e83bcbe9547fb43ccd9394c539602b042f929d70829396e007571eb7698a71";
+    "4e8870c8d0a2eb74f8519f10bc95e2343ef0a6b9642be1a33c57d5dbcb90f85e";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
     "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
 
 const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
     "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";
+
+/// `CURRENT_SCHEMA_DIGEST` on origin/main `daf64a9`, before SEC and HyperCore.
+const PRE_SEC_SCHEMA_DIGEST: &str =
+    "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
+
+/// `DELTA_DATA_SCHEMA_DIGEST` on origin/main `daf64a9`, before SEC and HyperCore.
+const PRE_SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
+    "98b767b5b0469e6f49df5c5ce61b55aee7089a2760a0c1db315bbd0e32ff7406";
+
+/// The HyperCore schemas (`docs/chains/hypercore.md`), derivation version 1.
+const HYPERCORE_SCHEMA_DIGEST: &str =
+    "d648e61190297aa2e10fdcf325c8a4db179d06de433caa1024aef9a3703ab9e2";
+
+/// The SEC mapper schemas (`docs/chains/sec.md`), every option and encoding.
+const SEC_SCHEMA_DIGEST: &str = "b7b21a1fb722b904a5beaf2ccb5e94b1f7224da9b03cfcb81fb1f54dea797c62";
+
+/// The SEC Delta data schemas, every option and encoding.
+const SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
+    "1af12c1327ee58787ab4da6d05ec2ee9d0f5920ecfae13ab80fa03dbb0c2a6ae";
+
+/// The HyperCore mapper schemas, derivation version 1, every option and
+/// encoding (`HYPERCORE_SCHEMA_DIGEST` covers only `hex`).
+const HYPERCORE_ALL_OPTIONS_SCHEMA_DIGEST: &str =
+    "da80db4ec48a13dc1be20a3cb98c15f639070514f504979658446158a0174d55";
+
+/// The HyperCore Delta data schemas, every option and encoding.
+const HYPERCORE_DELTA_DATA_SCHEMA_DIGEST: &str =
+    "0c0e784a31d74b41b1163814b8cb6ae99fcb03816e45c92732119b3550d65740";

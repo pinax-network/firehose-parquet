@@ -112,7 +112,7 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 | Column | Type | Description |
 |---|---|---|
 | `block_num` | long | Block number |
-| `block_id` | string | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)); `sec` writes the decimal 10-minute window number as text |
+| `block_id` | string | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)). HyperCore and SEC have no block hash: HyperCore's `block_id` is the decimal block number as text, and `sec` writes the decimal 10-minute window number as text |
 | `parent_num` | long | Parent block number |
 | `parent_id` | string | Parent block ID |
 | `lib_num` | long | Last irreversible block number |
@@ -135,7 +135,8 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
 | `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
 | `beacon` | `hex_0x` | `hex` | `hex` | Block roots and other binary identifiers are `0x`-prefixed hex. |
-| `sec` | decimal text (`hex_0x` in the footer) | — | `raw_xml`: `binary` | `block_id` and `parent_id` are the decimal 10-minute window numbers, written verbatim (`"2979867"`), not hashes; the footer's `firehose-parquet.block_id_encoding` still says `hex_0x`. SEC has no hash or address bytes: `filing_raw_xml.raw_xml` is raw `binary` under every encoding. See [SEC notes](chains/sec.md#block-model). |
+| `sec` | `decimal` | — | `raw_xml`: `binary` | `block_id` and `parent_id` are the decimal 10-minute window numbers, written verbatim (`"2979867"`) under every encoding, not hashes. SEC has no hash or address bytes: `filing_raw_xml.raw_xml` is raw `binary` under every encoding. See [SEC notes](chains/sec.md#block-model). |
+| `hypercore` | `decimal` | `hex` | `hex` | `block_id` and `parent_id` are the decimal block number as text (the Firehose block id; HyperCore has no block hash), written verbatim under every encoding. Hashes, addresses and client order ids are `0x`-prefixed hex; `fills.builder` is the delivered `0x` string. |
 | `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
 
 ## Parquet file metadata
@@ -196,7 +197,19 @@ WHERE key LIKE 'firehose-parquet.%';
 ## Parquet lookup metadata
 
 Ingestion writes bounded Bloom filters for selected scalar
-hash, signature and account/address columns. Readers that support these filters
+hash, signature and account/address columns, chosen by column name (in schema
+order): `hash`, `tx_hash`, `transaction_hash`, `signature`, `address`, `from`,
+`to`, `sender`, `receiver`, `account`, `account_id`, `account_key`, `pubkey`,
+`owner`, `mint`, `program_id`, `caller_address`, `transfer_to_address`,
+`contract_address`, `receiver_id`, `signer_id`, `block_hash`, `blockhash`,
+`receipt_id`, and HyperCore's `user`, `destination`, `vault`, `validator`,
+`liquidated_user` and `sub_account` (no other family has columns of those six
+names). HyperCore's `fills` get filters on `user`, `hash` and `liquidated_user`
+(not `counterparty`, which is the other leg's `user`), `outcome_fills` on `user`
+and `hash`, `liquidations` on `liquidated_user` and `hash`, each event table on
+`hash` and those of `user`, `destination`, `vault`, `validator` and
+`sub_account` it has (`other_events` on all six), `funding_deltas` on `user`
+and `validator_rewards` on `validator`; the `users` lists get none. Readers that support these filters
 can skip row groups for equality lookups; positive matches still require row
 filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
 65,536 rows, with at most eight filters per group. This changes physical layout,
