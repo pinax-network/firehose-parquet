@@ -13,7 +13,10 @@
 //! any table (`docs/chains/hypercore.md`, "Refusals"). Every refusal names the
 //! block, the proto path and the offending value. `derive` then computes the
 //! derived values from the staged block alone (rules R-D1 to R-D6), and never
-//! refuses.
+//! refuses. Before the appends, `check_routed_columns` stops a block whose
+//! staged event values lack a column in their routed table: a mapper bug, not
+//! a data refusal, which no input reaches when staging matches the column
+//! matrix.
 //!
 //! Each proto message is destructured exhaustively (no `..`) and both oneofs
 //! are matched without a `_` arm, so vendoring protos with a new field or case
@@ -1240,6 +1243,130 @@ fn derive<'a>(block: &StagedBlock<'a>) -> Derived<'a> {
     }
 }
 
+impl StagedEvent<'_> {
+    /// The catalogue columns ([`schema::event_fields`]) this row sets beyond
+    /// the shared ones every event table has. Destructured exhaustively, so a
+    /// field added to `StagedEvent` must be listed here.
+    fn populated_columns(&self) -> impl Iterator<Item = &'static str> {
+        let StagedEvent {
+            event_type: _,
+            ledger_type: _,
+            hash: _,
+            event_time_ns: _,
+            users: _,
+            user,
+            destination,
+            vault,
+            validator,
+            sub_account,
+            token,
+            amount,
+            usdc,
+            usdc_value,
+            fee,
+            fee_token,
+            native_token_fee,
+            nonce,
+            source_dex,
+            destination_dex,
+            dex,
+            is_deposit,
+            to_perp,
+            is_undelegate,
+            is_finalized,
+            requested_usd,
+            commission,
+            closing_cost,
+            basis,
+            net_withdrawn_usd,
+            interest_amount,
+            operation,
+            liquidated_ntl_pos,
+            account_value,
+            leverage_type,
+            liquidated_positions,
+            slot_id,
+            previous_winner_ip,
+            end_gas,
+            sub_account_name,
+            item_count,
+            items: _,
+        } = self;
+        [
+            ("user", user.is_some()),
+            ("destination", destination.is_some()),
+            ("vault", vault.is_some()),
+            ("validator", validator.is_some()),
+            ("sub_account", sub_account.is_some()),
+            ("token", token.is_some()),
+            ("amount", amount.is_some()),
+            ("usdc", usdc.is_some()),
+            ("usdc_value", usdc_value.is_some()),
+            ("fee", fee.is_some()),
+            ("fee_token", fee_token.is_some()),
+            ("native_token_fee", native_token_fee.is_some()),
+            ("nonce", nonce.is_some()),
+            ("source_dex", source_dex.is_some()),
+            ("destination_dex", destination_dex.is_some()),
+            ("dex", dex.is_some()),
+            ("is_deposit", is_deposit.is_some()),
+            ("to_perp", to_perp.is_some()),
+            ("is_undelegate", is_undelegate.is_some()),
+            ("is_finalized", is_finalized.is_some()),
+            ("requested_usd", requested_usd.is_some()),
+            ("commission", commission.is_some()),
+            ("closing_cost", closing_cost.is_some()),
+            ("basis", basis.is_some()),
+            ("net_withdrawn_usd", net_withdrawn_usd.is_some()),
+            ("interest_amount", interest_amount.is_some()),
+            ("operation", operation.is_some()),
+            ("liquidated_ntl_pos", liquidated_ntl_pos.is_some()),
+            ("account_value", account_value.is_some()),
+            ("leverage_type", leverage_type.is_some()),
+            ("liquidated_positions", liquidated_positions.is_some()),
+            ("slot_id", slot_id.is_some()),
+            ("previous_winner_ip", previous_winner_ip.is_some()),
+            ("end_gas", end_gas.is_some()),
+            ("sub_account_name", sub_account_name.is_some()),
+            ("item_count", item_count.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(column, set)| set.then_some(column))
+    }
+}
+
+/// Lossless split: every value staged for an event has a column in the event
+/// table R-D6 routes it to. A release whose staging sets a value that table
+/// lacks has a mapper bug (the value belongs in `extra_json`), so the block
+/// stops here, before any append, instead of losing the value. No input can
+/// reach this error in a release whose staging matches the column matrix.
+fn check_routed_columns(
+    check: Check,
+    events: &[StagedEvent<'_>],
+    routes: &[EventTable],
+) -> Result<()> {
+    for (index, (event, table)) in events.iter().zip(routes).enumerate() {
+        if let Some(column) = event
+            .populated_columns()
+            .find(|column| !table.has_column(column))
+        {
+            let label = match event.ledger_type {
+                Some(ledger_type) => format!("{}/{ledger_type}", event.event_type),
+                None => event.event_type.to_string(),
+            };
+            return Err(check.fail(
+                format!("events[{index}]"),
+                format!(
+                    "mapper bug: {label} sets {column}, which {} lacks; a release must \
+                     write such a value to extra_json",
+                    table.name()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // HypercoreBlockMapper
 // ===========================================================================
@@ -1274,7 +1401,8 @@ impl HypercoreBlockMapper {
     }
 
     /// Steps 2–6 of the mapping: the unknown-field guard, the identity, the
-    /// staging of every value, the derivations, then the appends.
+    /// staging of every value, the derivations and the routed-column check,
+    /// then the appends.
     fn map_decoded(
         &mut self,
         block: pb::Block,
@@ -1310,10 +1438,24 @@ impl HypercoreBlockMapper {
             )
             .with_context(|| format!("hypercore block {}: identity", identity.block_num))?;
         let staged = stage(check, &block, block_time_ns)?;
-        let derived = derive(&staged);
-        let fills = u64::from(staged.fill_count);
-        self.append(&staged, &derived, &prepared, fork_step);
-        Ok(fills)
+        self.derive_and_append(check, &staged, &prepared, fork_step)?;
+        Ok(u64::from(staged.fill_count))
+    }
+
+    /// Steps 5 and 6: the derivations, the check that every staged event value
+    /// has a column in its routed table, then the appends. The check runs
+    /// before any builder is touched, so a block it stops appends nothing.
+    fn derive_and_append(
+        &mut self,
+        check: Check,
+        staged: &StagedBlock<'_>,
+        identity: &PreparedIdentity,
+        fork_step: StreamEvent<'_>,
+    ) -> Result<()> {
+        let derived = derive(staged);
+        check_routed_columns(check, &staged.events, &derived.routes)?;
+        self.append(staged, &derived, identity, fork_step);
+        Ok(())
     }
 
     /// Append one staged block and its derivations, in payload order.
@@ -2136,14 +2278,14 @@ fn column_of<T>(table: EventTable, column: &str, make: impl FnOnce() -> T) -> Op
     table.has_column(column).then(make)
 }
 
-/// Appends `value` to a column the event table has. Every value of a routed
-/// type has a column in its table (`schema::EventTable::own_columns`, checked
-/// against the documented column matrix by the value tests), so the `None`
-/// arm only ever sees NULL.
+/// Appends `value` to a column the event table has. `check_routed_columns`
+/// stops a block before any append when a staged value has no column in its
+/// table, so the `None` arm only ever sees NULL. Its assertion is a backstop
+/// that holds in release builds too: a value is never dropped silently.
 fn put<B, V>(builder: &mut Option<B>, value: Option<V>, append: impl FnOnce(&mut B, Option<V>)) {
     match builder {
         Some(builder) => append(builder, value),
-        None => debug_assert!(value.is_none(), "an event value without a column"),
+        None => assert!(value.is_none(), "an event value without a column"),
     }
 }
 
@@ -2808,6 +2950,135 @@ mod tests {
                  exceed u32"
             )
         );
+    }
+
+    /// `populated_columns` names exactly the catalogue columns beyond the
+    /// shared ones and `extra_json`, in catalogue order, so the routed-column
+    /// check cannot pass a misspelt name (`other_events` has every column).
+    #[test]
+    fn populated_columns_are_the_catalogue_columns() {
+        let address = [0x11; 20];
+        let event = StagedEvent {
+            user: Some(&address[..]),
+            destination: Some(&address[..]),
+            vault: Some(&address[..]),
+            validator: Some(&address[..]),
+            sub_account: Some(&address[..]),
+            token: Some("USDC"),
+            amount: Some(1),
+            usdc: Some(1),
+            usdc_value: Some(1),
+            fee: Some(1),
+            fee_token: Some("USDC"),
+            native_token_fee: Some(1),
+            nonce: Some(1),
+            source_dex: Some(""),
+            destination_dex: Some(""),
+            dex: Some(""),
+            is_deposit: Some(true),
+            to_perp: Some(true),
+            is_undelegate: Some(true),
+            is_finalized: Some(true),
+            requested_usd: Some(1),
+            commission: Some(1),
+            closing_cost: Some(1),
+            basis: Some(1),
+            net_withdrawn_usd: Some(1),
+            interest_amount: Some(1),
+            operation: Some("supply"),
+            liquidated_ntl_pos: Some(1),
+            account_value: Some(1),
+            leverage_type: Some("CROSS"),
+            liquidated_positions: Some(vec![]),
+            slot_id: Some(1),
+            previous_winner_ip: Some("127.0.0.1"),
+            end_gas: Some(1),
+            sub_account_name: Some(""),
+            item_count: Some(0),
+            ..StagedEvent::default()
+        };
+        let catalogue: Vec<String> = schema::event_fields(&EncodeBytes::Hex)
+            .iter()
+            .map(|field| field.name().clone())
+            .filter(|name| {
+                !schema::EVENT_SHARED_COLUMNS.contains(&name.as_str()) && name != "extra_json"
+            })
+            .collect();
+        assert_eq!(event.populated_columns().collect::<Vec<_>>(), catalogue);
+        assert_eq!(StagedEvent::default().populated_columns().count(), 0);
+    }
+
+    /// A staged event value that its routed table has no column for (here a
+    /// `dex` on a `send`, which `transfers` lacks) stops the block before any
+    /// append, so a release cannot drop it silently; the same event without
+    /// it maps.
+    #[test]
+    fn a_staged_value_without_a_column_stops_the_block_before_any_append() {
+        const SECONDS: i64 = 1_767_225_600;
+        let mut mapper = HypercoreBlockMapper::new(false, EncodeBytes::Hex);
+        let identity = BlockIdentity {
+            block_num: 7,
+            block_id: "7".to_string(),
+            parent_num: 6,
+            parent_id: "6".to_string(),
+            lib_num: 6,
+            timestamp: SECONDS,
+            timestamp_nanos: 0,
+            fork_step: None,
+        };
+        let prepared = mapper
+            .blocks
+            .canonical
+            .prepare_with_text_ids(&identity, "7", "6")
+            .unwrap();
+        let account = [0x11; 20];
+        let users = [Bytes::from(vec![0x11; 20])];
+        let block = |dex| StagedBlock {
+            block_time_ns: SECONDS * NANOS_PER_SECOND,
+            fill_count: 0,
+            event_count: 1,
+            fills: vec![],
+            events: vec![StagedEvent {
+                event_type: "ledger_update",
+                ledger_type: Some("send"),
+                hash: &[0; 32],
+                event_time_ns: SECONDS * NANOS_PER_SECOND,
+                users: Some(&users[..]),
+                user: Some(&account[..]),
+                destination: Some(&account[..]),
+                source_dex: Some(""),
+                destination_dex: Some("spot"),
+                token: Some("USDC"),
+                amount: Some(10_000_000_000),
+                dex,
+                ..StagedEvent::default()
+            }],
+        };
+        let check = Check { block_num: 7 };
+        let error = mapper
+            .derive_and_append(
+                check,
+                &block(Some("xyz")),
+                &prepared,
+                StreamEvent::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "hypercore block 7: events[0]: mapper bug: ledger_update/send sets dex, which \
+             transfers lacks; a release must write such a value to extra_json"
+        );
+        let tables = mapper.flush().unwrap();
+        assert_eq!(tables.len(), schema::TABLE_NAMES.len());
+        for (table, batch) in &tables {
+            assert_eq!(batch.num_rows(), 0, "{table}");
+        }
+        mapper
+            .derive_and_append(check, &block(None), &prepared, StreamEvent::default())
+            .unwrap();
+        let tables = mapper.flush().unwrap();
+        assert_eq!(tables["blocks"].num_rows(), 1);
+        assert_eq!(tables["transfers"].num_rows(), 1);
     }
 
     #[test]
