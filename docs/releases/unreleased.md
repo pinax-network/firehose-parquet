@@ -23,9 +23,10 @@ empty when the release is cut.
   `parse_issues`. Every protobuf field lands in a column; dates are `date`,
   amounts exact `decimal(38,s)` in five scale families, and every source value
   that a typed column does not reproduce exactly has a `parse_issues` row with
-  its verbatim text. `block_id` is the decimal window number. Heuristics (13F
-  value units, accession dedup, effective 13F and N-PORT reports, N-PX vote
-  normalization) are SQL views shipped in
+  its verbatim text. `block_id` and `parent_id` are decimal window numbers as
+  text, and files record `firehose-parquet.block_id_encoding = decimal`.
+  Heuristics (13F value units, accession dedup, effective 13F and N-PORT
+  reports, N-PX vote normalization) are SQL views shipped in
   [docs/chains/sec.md](../chains/sec.md) (`sec-views-v1`), not mapper output,
   so improving one needs no rebuild; `blocks/tests/sec_docs_sql.rs` runs them,
   and `blocks/tests/sec_golden.rs` checks every column of every table on real
@@ -135,18 +136,6 @@ empty when the release is cut.
 
 ## Fixes
 
-- **SEC block id metadata and schema docs** (merge of #709 into the SEC
-  family of #710): SEC's `block_id` and `parent_id` are decimal window numbers
-  written verbatim with `PreparedIdentity::with_text_ids`, so the SEC profile
-  now sets `ChainProfile::block_id_text`, as HyperCore's does. New SEC files
-  record `firehose-parquet.block_id_encoding = decimal` instead of the
-  misleading `hex_0x`, and [the SEC schema](../schemas/sec.md) types the two
-  columns `string` (decimal) and describes them as window numbers; the
-  [SEC notes](../chains/sec.md) and [output layout](../output-layout.md) no
-  longer tell readers to ignore the footer key. No column, schema digest or
-  protected identity changes: existing SEC roots resume, and only the footer of
-  files written from now on differs.
-
 ## Performance
 
 ## Internal
@@ -156,15 +145,22 @@ empty when the release is cut.
   block and parent ids that are already text verbatim (as their UTF-8 bytes
   under `Binary`); the SEC mapper uses them for its decimal window numbers and
   the HyperCore mapper for its decimal block numbers, and
-  `ChainProfile::block_id_text` marks both families.
+  `ChainProfile::block_id_text` marks both families. SEC roots written by
+  development builds of main between #710 and the merge of #709 record
+  `firehose-parquet.block_id_encoding = hex_0x` in their earlier files (no key
+  under `--bytes-encoding binary`); the key is not part of the protected
+  identity, so they resume, and later files record `decimal`.
 - **Schema digests guard the earlier families** (#711): with SEC and HyperCore
   both added, `CURRENT_SCHEMA_DIGEST` and `DELTA_DATA_SCHEMA_DIGEST` cover ten
   families, and `pre_sec_families_reproduce_their_pre_sec_digests` checks that
   the eight earlier families still reproduce, byte for byte, the digests pinned
   before either was added, so a re-pin for a new family cannot hide a change
-  to an existing one. The historical final-only and pre-#550 digests leave out
-  both new families and are unchanged.
-- **`engine_compat.rs` reads a SEC dataset**, the first with `decimal(38,s)`,
+  to an existing one. `each_later_family_reproduces_its_own_pinned_digests`
+  pins SEC's and HyperCore's own mapper and Delta data schema digests over
+  every option and encoding, so the same holds for them. The historical
+  final-only and pre-#550 digests leave out both new families and are
+  unchanged.
+- **`engine_compat.rs` reads a SEC dataset**, with `decimal(38,s)`,
   non-partition `date`, `array<struct<…>>` and `binary` columns, in DuckDB and
   delta-rs, and the engine compatibility table of
   [reading tables](../reading-tables.md) now lists those types (checked by
