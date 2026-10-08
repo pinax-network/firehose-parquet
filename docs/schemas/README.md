@@ -14,7 +14,7 @@ One file per chain family lists every table `fireparq` writes and every column w
 | Cosmos | `cosmos` | 4 | `hex` | [cosmos.md](cosmos.md) |
 | Tron | `tron` | 6 | `tron_base58` | [tron.md](tron.md) |
 | Beacon | `beacon` | 13 | `hex` | [beacon.md](beacon.md) |
-| HyperCore | `hypercore` | 5 | `hex` | [hypercore.md](hypercore.md) |
+| HyperCore | `hypercore` | 12 | `hex` | [hypercore.md](hypercore.md) |
 
 ## Conventions
 

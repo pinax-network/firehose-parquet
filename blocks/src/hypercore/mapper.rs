@@ -1,15 +1,19 @@
-//! HyperCore (`pinax.hypercore.v1.Block`) mapper, schema epoch 1.
+//! HyperCore (`pinax.hypercore.v1.Block`) mapper.
 //!
-//! One block maps onto five tables (`schema.rs`): one `blocks` row, one
-//! `fills` row per fill, one `events` row per event (its single body, and for
-//! ledger updates its delta, flattened into the row), and the items of funding
-//! and validator-reward events in `funding_deltas` and `validator_rewards`.
+//! One block maps onto twelve tables (`schema.rs`): one `blocks` row, one
+//! `fills` row per fill, one row per event in one of the five event tables
+//! (its single body, and for ledger updates its delta, flattened into the
+//! row), the items of funding and validator-reward events in `funding_deltas`
+//! and `validator_rewards`, and the rows derived from the same block:
+//! `outcome_fills`, `liquidations` and `funding_rates`.
 //!
 //! Every block is decoded, guarded against unknown fields, checked against its
 //! Firehose identity, then validated and converted completely into staged
 //! values before any builder is touched: a refused block appends nothing to
 //! any table (`docs/chains/hypercore.md`, "Refusals"). Every refusal names the
-//! block, the proto path and the offending value.
+//! block, the proto path and the offending value. `derive` then computes the
+//! derived values from the staged block alone (rules R-D1 to R-D6), and never
+//! refuses.
 //!
 //! Each proto message is destructured exhaustively (no `..`) and both oneofs
 //! are matched without a `_` arm, so vendoring protos with a new field or case
@@ -25,7 +29,7 @@ use arrow::array::{
     StringBuilder, StringDictionaryBuilder, StructBuilder, TimestampMillisecondBuilder,
     UInt32Builder, UInt64Builder,
 };
-use arrow::datatypes::{Int32Type, Schema};
+use arrow::datatypes::{Int32Type, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
@@ -39,7 +43,7 @@ use prost::Message;
 
 use super::decimal;
 use super::proto::hypercore as pb;
-use super::schema;
+use super::schema::{self, EventTable};
 use pb::{event_body, ledger_update_delta};
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -257,9 +261,12 @@ struct StagedFill<'a> {
     builder: Option<&'a str>,
     builder_fee: Option<i128>,
     priority_gas: Option<i128>,
+    /// The fill's `extra_json`, which the derived copies carry verbatim (D7).
+    /// This version writes none: every `Fill` field has a typed column.
+    extra_json: Option<&'a str>,
 }
 
-/// One `events` row. A column the row's type does not have stays `None`
+/// One event row. A column the row's type does not have stays `None`
 /// (NULL); the populated set per type is the matrix in
 /// `docs/chains/hypercore.md`.
 #[derive(Default)]
@@ -469,6 +476,7 @@ fn stage_fill(check: Check, index: usize, fill: &pb::Fill) -> Result<StagedFill<
         builder,
         builder_fee,
         priority_gas,
+        extra_json: None,
     })
 }
 
@@ -959,20 +967,293 @@ fn stage_ledger_delta<'a>(
 }
 
 // ===========================================================================
+// Derivations (`docs/chains/hypercore.md`, rules R-D1 to R-D6)
+// ===========================================================================
+//
+// `derive` runs between `stage` and `append`. It reads one staged block only
+// and carries no state across blocks (D2), never refuses (D3), and computes
+// facts only: row selection, copies, joins on exact keys within the block,
+// exact checked sums and counts, and pure parsing of `coin` (D4).
+
+/// Largest magnitude of a `decimal(38,10)` value, in units of 1e-10.
+const DECIMAL_MAX: u128 = 10u128.pow(38) - 1;
+
+/// R-D1: the market class of a coin, a pure function of its form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Market<'a> {
+    /// A perp of the default dex (`dex` `""`) or of a HIP-3 dex.
+    Perp {
+        dex: &'a str,
+    },
+    Spot,
+    /// HIP-4 coin `#<n>`: `n div 10` and `n mod 10`.
+    Outcome {
+        outcome_id: i64,
+        side_index: i64,
+    },
+}
+
+impl<'a> Market<'a> {
+    /// `fills.market_type`.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Market::Perp { .. } => "perp",
+            Market::Spot => "spot",
+            Market::Outcome { .. } => "outcome",
+        }
+    }
+
+    /// `fills.dex`: perps only.
+    pub(crate) fn dex(self) -> Option<&'a str> {
+        match self {
+            Market::Perp { dex } => Some(dex),
+            Market::Spot | Market::Outcome { .. } => None,
+        }
+    }
+}
+
+/// `[A-Za-z0-9]+`.
+fn alphanumeric(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// `[0-9]+`.
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// R-D1. Anchored patterns, tried in order: `#[0-9]+` outcome; `@[0-9]+` or
+/// `[A-Za-z0-9]+/[A-Za-z0-9]+` spot; `[a-z][a-z0-9]*:[A-Za-z0-9]+` HIP-3 perp
+/// (the dex is the text before `:`); `[A-Za-z0-9]+` default-dex perp. Any other
+/// form, and an outcome number above `u64::MAX`, is `None`: never a guess and
+/// never a refusal, because a new form can arrive without a proto change (D3).
+pub(crate) fn market(coin: &str) -> Option<Market<'_>> {
+    if let Some(number) = coin.strip_prefix('#') {
+        let n: u64 = digits(number).then(|| number.parse().ok())??;
+        return Some(Market::Outcome {
+            outcome_id: (n / 10) as i64,
+            side_index: (n % 10) as i64,
+        });
+    }
+    if let Some(number) = coin.strip_prefix('@') {
+        return digits(number).then_some(Market::Spot);
+    }
+    if let Some((base, quote)) = coin.split_once('/') {
+        return (alphanumeric(base) && alphanumeric(quote)).then_some(Market::Spot);
+    }
+    if let Some((dex, symbol)) = coin.split_once(':') {
+        let mut name = dex.bytes();
+        let dex_name = name.next().is_some_and(|first| first.is_ascii_lowercase())
+            && name.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        return (dex_name && alphanumeric(symbol)).then_some(Market::Perp { dex });
+    }
+    alphanumeric(coin).then_some(Market::Perp { dex: "" })
+}
+
+/// R-D2: for each fill, the position of the other leg of its match. Fills
+/// with a non-zero trade id are grouped by `(coin, transaction_id)` within the
+/// block; a group of exactly two fills on different sides pairs them, and any
+/// other group (one leg, three or more, or one side) pairs none. HyperLiquid's
+/// trade id is a hash of the two order ids, so the key is the match itself.
+fn pair_fills(fills: &[StagedFill<'_>]) -> Vec<Option<u32>> {
+    struct Group {
+        first: u32,
+        second: u32,
+        legs: u32,
+    }
+    let mut groups: HashMap<(&str, u64), Group> = HashMap::with_capacity(fills.len());
+    for (index, fill) in fills.iter().enumerate() {
+        if fill.transaction_id == 0 {
+            continue;
+        }
+        let index = index as u32;
+        groups
+            .entry((fill.coin, fill.transaction_id))
+            .and_modify(|group| {
+                if group.legs == 1 {
+                    group.second = index;
+                }
+                group.legs = group.legs.saturating_add(1);
+            })
+            .or_insert(Group {
+                first: index,
+                second: index,
+                legs: 1,
+            });
+    }
+    let mut pairs = vec![None; fills.len()];
+    for group in groups.values() {
+        let (first, second) = (group.first as usize, group.second as usize);
+        if group.legs == 2 && fills[first].side != fills[second].side {
+            pairs[first] = Some(group.second);
+            pairs[second] = Some(group.first);
+        }
+    }
+    pairs
+}
+
+/// R-D6: the event table of an event's labels. Routing only grows (D8): a
+/// label already written stays in its table for the life of a root, and a
+/// label first vendored by a release may be routed by that release (R2 refused
+/// every earlier block that carried it). Everything else is `other_events`.
+pub(crate) fn route_event(event_type: &str, ledger_type: Option<&str>) -> EventTable {
+    match (event_type, ledger_type) {
+        (
+            "ledger_update",
+            Some(
+                "send"
+                | "spot_transfer"
+                | "internal_transfer"
+                | "sub_account_transfer"
+                | "account_class_transfer",
+            ),
+        ) => EventTable::Transfers,
+        ("ledger_update", Some("deposit" | "withdraw")) => EventTable::BridgeTransfers,
+        (
+            "ledger_update",
+            Some(
+                "vault_create"
+                | "vault_deposit"
+                | "vault_withdraw"
+                | "vault_distribution"
+                | "vault_leader_commission",
+            ),
+        ) => EventTable::VaultEvents,
+        ("ledger_update", Some("c_staking_transfer"))
+        | ("c_deposit" | "c_withdrawal" | "delegation", None) => EventTable::StakingEvents,
+        _ => EventTable::OtherEvents,
+    }
+}
+
+/// One `funding_rates` row (R-D5).
+struct FundingRate<'a> {
+    event_index: u32,
+    dex_index: u32,
+    coin: &'a str,
+    /// R-D1 of `coin`.
+    dex: Option<&'a str>,
+    /// `None` once two deltas of the coin differ.
+    funding_rate: Option<i128>,
+    positions: u32,
+    long_positions: u32,
+    short_positions: u32,
+    open_interest: Option<i128>,
+    long_size: Option<i128>,
+    short_size: Option<i128>,
+    positive_funding: Option<i128>,
+    negative_funding: Option<i128>,
+}
+
+/// An exact sum: `None` once it leaves `decimal(38,10)`.
+fn add(sum: Option<i128>, value: i128) -> Option<i128> {
+    sum?.checked_add(value)
+        .filter(|total| total.unsigned_abs() <= DECIMAL_MAX)
+}
+
+impl<'a> FundingRate<'a> {
+    fn new(event_index: u32, dex_index: u32, first: &StagedFundingDelta<'a>) -> Self {
+        Self {
+            event_index,
+            dex_index,
+            coin: first.coin,
+            dex: market(first.coin).and_then(Market::dex),
+            funding_rate: Some(first.funding_rate),
+            positions: 0,
+            long_positions: 0,
+            short_positions: 0,
+            open_interest: Some(0),
+            long_size: Some(0),
+            short_size: Some(0),
+            positive_funding: Some(0),
+            negative_funding: Some(0),
+        }
+    }
+
+    fn add(&mut self, delta: &StagedFundingDelta<'_>) {
+        if self.funding_rate != Some(delta.funding_rate) {
+            self.funding_rate = None;
+        }
+        self.positions = self.positions.saturating_add(1);
+        self.open_interest = add(self.open_interest, delta.szi.abs());
+        if delta.szi > 0 {
+            self.long_positions = self.long_positions.saturating_add(1);
+            self.long_size = add(self.long_size, delta.szi);
+        } else if delta.szi < 0 {
+            self.short_positions = self.short_positions.saturating_add(1);
+            self.short_size = add(self.short_size, -delta.szi);
+        }
+        if delta.funding_amount > 0 {
+            self.positive_funding = add(self.positive_funding, delta.funding_amount);
+        } else if delta.funding_amount < 0 {
+            self.negative_funding = add(self.negative_funding, delta.funding_amount);
+        }
+    }
+}
+
+/// R-D5: per funding event in block order, one row per coin in the order the
+/// coin first appears. `dex_index` is the event's ordinal among the block's
+/// funding events, empty ones included; an empty event has no row.
+fn funding_rates<'a>(events: &[StagedEvent<'a>]) -> Vec<FundingRate<'a>> {
+    let mut rows = Vec::new();
+    let mut dex_index = 0u32;
+    for (event_index, event) in events.iter().enumerate() {
+        let Items::FundingDeltas(deltas) = &event.items else {
+            continue;
+        };
+        let mut by_coin: HashMap<&str, usize> = HashMap::new();
+        for delta in deltas {
+            let row = *by_coin.entry(delta.coin).or_insert_with(|| {
+                rows.push(FundingRate::new(event_index as u32, dex_index, delta));
+                rows.len() - 1
+            });
+            rows[row].add(delta);
+        }
+        dex_index += 1;
+    }
+    rows
+}
+
+/// What `derive` adds to a staged block.
+struct Derived<'a> {
+    /// R-D1, per fill.
+    markets: Vec<Option<Market<'a>>>,
+    /// R-D2, per fill: the position of its paired fill.
+    pairs: Vec<Option<u32>>,
+    /// R-D6, per event.
+    routes: Vec<EventTable>,
+    /// R-D5.
+    funding_rates: Vec<FundingRate<'a>>,
+}
+
+/// The derivations of one staged block. Infallible: every value was checked
+/// while staging, and a shape a rule does not recognise gives NULL (D3).
+fn derive<'a>(block: &StagedBlock<'a>) -> Derived<'a> {
+    Derived {
+        markets: block.fills.iter().map(|fill| market(fill.coin)).collect(),
+        pairs: pair_fills(&block.fills),
+        routes: block
+            .events
+            .iter()
+            .map(|event| route_event(event.event_type, event.ledger_type))
+            .collect(),
+        funding_rates: funding_rates(&block.events),
+    }
+}
+
+// ===========================================================================
 // HypercoreBlockMapper
 // ===========================================================================
 
 pub struct HypercoreBlockMapper {
     blocks: BlocksBuilder,
     fills: FillsBuilder,
-    events: EventsBuilder,
+    outcome_fills: OutcomeFillsBuilder,
+    liquidations: LiquidationsBuilder,
+    /// In [`EventTable::ALL`] order.
+    events: Vec<EventTableBuilder>,
     funding_deltas: FundingDeltasBuilder,
+    funding_rates: FundingRatesBuilder,
     validator_rewards: ValidatorRewardsBuilder,
-    blocks_schema: Schema,
-    fills_schema: Schema,
-    events_schema: Schema,
-    funding_deltas_schema: Schema,
-    validator_rewards_schema: Schema,
 }
 
 impl HypercoreBlockMapper {
@@ -980,22 +1261,20 @@ impl HypercoreBlockMapper {
         Self {
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             fills: FillsBuilder::new(include_fork_step, &encoding),
-            events: EventsBuilder::new(include_fork_step, &encoding),
+            outcome_fills: OutcomeFillsBuilder::new(include_fork_step, &encoding),
+            liquidations: LiquidationsBuilder::new(include_fork_step, &encoding),
+            events: EventTable::ALL
+                .into_iter()
+                .map(|table| EventTableBuilder::new(table, include_fork_step, &encoding))
+                .collect(),
             funding_deltas: FundingDeltasBuilder::new(include_fork_step, &encoding),
+            funding_rates: FundingRatesBuilder::new(include_fork_step, &encoding),
             validator_rewards: ValidatorRewardsBuilder::new(include_fork_step, &encoding),
-            blocks_schema: schema::blocks_schema(include_fork_step, &encoding),
-            fills_schema: schema::fills_schema(include_fork_step, &encoding),
-            events_schema: schema::events_schema(include_fork_step, &encoding),
-            funding_deltas_schema: schema::funding_deltas_schema(include_fork_step, &encoding),
-            validator_rewards_schema: schema::validator_rewards_schema(
-                include_fork_step,
-                &encoding,
-            ),
         }
     }
 
-    /// Steps 2–5 of the mapping: the unknown-field guard, the identity, the
-    /// staging of every value, then the appends.
+    /// Steps 2–6 of the mapping: the unknown-field guard, the identity, the
+    /// staging of every value, the derivations, then the appends.
     fn map_decoded(
         &mut self,
         block: pb::Block,
@@ -1031,26 +1310,69 @@ impl HypercoreBlockMapper {
             )
             .with_context(|| format!("hypercore block {}: identity", identity.block_num))?;
         let staged = stage(check, &block, block_time_ns)?;
+        let derived = derive(&staged);
         let fills = u64::from(staged.fill_count);
-        self.append(&staged, &prepared, fork_step);
+        self.append(&staged, &derived, &prepared, fork_step);
         Ok(fills)
     }
 
-    /// Append one staged block, in payload order. Infallible: every value was
-    /// checked while staging.
+    /// Append one staged block and its derivations, in payload order.
+    /// Infallible: every value was checked while staging.
     fn append(
         &mut self,
         block: &StagedBlock<'_>,
+        derived: &Derived<'_>,
         identity: &PreparedIdentity,
         fork_step: StreamEvent<'_>,
     ) {
         self.blocks.append(block, identity, fork_step);
         for (index, fill) in block.fills.iter().enumerate() {
-            self.fills.append(index as u32, fill, identity, fork_step);
+            let fill_index = index as u32;
+            let market = derived.markets[index];
+            let pair = derived.pairs[index].map(|other| (other, &block.fills[other as usize]));
+            let counterparty = pair.map(|(_, other)| other.user);
+            self.fills
+                .append(fill_index, fill, market, counterparty, identity, fork_step);
+            // R-D3.
+            if let Some(Market::Outcome {
+                outcome_id,
+                side_index,
+            }) = market
+            {
+                self.outcome_fills.append(
+                    fill_index,
+                    fill,
+                    (outcome_id, side_index),
+                    counterparty,
+                    identity,
+                    fork_step,
+                );
+            }
+            // R-D4: the liquidated leg, by byte equality.
+            if let (Some(method), Some(mark_price)) =
+                (fill.liquidation_method, fill.liquidation_mark_px)
+            {
+                if fill.liquidated_user == Some(fill.user) {
+                    self.liquidations.append(
+                        fill_index,
+                        fill,
+                        (method, mark_price),
+                        market,
+                        pair,
+                        identity,
+                        fork_step,
+                    );
+                }
+            }
         }
         for (index, event) in block.events.iter().enumerate() {
             let event_index = index as u32;
-            self.events.append(event_index, event, identity, fork_step);
+            self.events[derived.routes[index] as usize].append(
+                event_index,
+                event,
+                identity,
+                fork_step,
+            );
             match &event.items {
                 Items::None => {}
                 Items::FundingDeltas(deltas) => {
@@ -1077,6 +1399,28 @@ impl HypercoreBlockMapper {
                 }
             }
         }
+        for rate in &derived.funding_rates {
+            self.funding_rates.append(rate, identity, fork_step);
+        }
+    }
+
+    /// The row counts of every table, in [`schema::TABLE_NAMES`] order.
+    fn row_counts(&self) -> [usize; 12] {
+        let events = |table: EventTable| self.events[table as usize].canonical.len();
+        [
+            self.blocks.canonical.len(),
+            self.fills.canonical.len(),
+            self.outcome_fills.canonical.len(),
+            self.liquidations.canonical.len(),
+            events(EventTable::Transfers),
+            events(EventTable::BridgeTransfers),
+            events(EventTable::VaultEvents),
+            events(EventTable::StakingEvents),
+            events(EventTable::OtherEvents),
+            self.funding_deltas.canonical.len(),
+            self.funding_rates.canonical.len(),
+            self.validator_rewards.canonical.len(),
+        ]
     }
 }
 
@@ -1103,57 +1447,50 @@ impl BlockMapper for HypercoreBlockMapper {
     }
 
     fn flush(&mut self) -> Result<HashMap<String, RecordBatch>> {
-        Ok(HashMap::from([
-            (
-                "blocks".to_string(),
-                self.blocks.finish(&self.blocks_schema)?,
-            ),
-            ("fills".to_string(), self.fills.finish(&self.fills_schema)?),
-            (
-                "events".to_string(),
-                self.events.finish(&self.events_schema)?,
-            ),
-            (
-                "funding_deltas".to_string(),
-                self.funding_deltas.finish(&self.funding_deltas_schema)?,
-            ),
-            (
-                "validator_rewards".to_string(),
-                self.validator_rewards
-                    .finish(&self.validator_rewards_schema)?,
-            ),
-        ]))
+        let mut batches = HashMap::with_capacity(schema::TABLE_NAMES.len());
+        batches.insert("blocks".to_string(), self.blocks.finish()?);
+        batches.insert("fills".to_string(), self.fills.finish()?);
+        batches.insert("outcome_fills".to_string(), self.outcome_fills.finish()?);
+        batches.insert("liquidations".to_string(), self.liquidations.finish()?);
+        for builder in &mut self.events {
+            batches.insert(builder.table.name().to_string(), builder.finish()?);
+        }
+        batches.insert("funding_deltas".to_string(), self.funding_deltas.finish()?);
+        batches.insert("funding_rates".to_string(), self.funding_rates.finish()?);
+        batches.insert(
+            "validator_rewards".to_string(),
+            self.validator_rewards.finish()?,
+        );
+        Ok(batches)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks
-            .canonical
-            .len()
-            .max(self.fills.canonical.len())
-            .max(self.events.canonical.len())
-            .max(self.funding_deltas.canonical.len())
-            .max(self.validator_rewards.canonical.len())
+        self.row_counts().into_iter().max().unwrap_or(0)
     }
 
     fn total_rows(&self) -> usize {
-        self.blocks.canonical.len()
-            + self.fills.canonical.len()
-            + self.events.canonical.len()
-            + self.funding_deltas.canonical.len()
-            + self.validator_rewards.canonical.len()
+        self.row_counts().into_iter().sum()
     }
 
     fn table_estimates(&mut self) -> Vec<(&str, usize)> {
-        vec![
+        let mut estimates = vec![
             ("blocks", self.blocks.estimated_bytes()),
             ("fills", self.fills.estimated_bytes()),
-            ("events", self.events.estimated_bytes()),
+            ("outcome_fills", self.outcome_fills.estimated_bytes()),
+            ("liquidations", self.liquidations.estimated_bytes()),
+        ];
+        for builder in &mut self.events {
+            estimates.push((builder.table.name(), builder.estimated_bytes()));
+        }
+        estimates.extend([
             ("funding_deltas", self.funding_deltas.estimated_bytes()),
+            ("funding_rates", self.funding_rates.estimated_bytes()),
             (
                 "validator_rewards",
                 self.validator_rewards.estimated_bytes(),
             ),
-        ]
+        ]);
+        estimates
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -1194,15 +1531,16 @@ fn finish(
     canonical: &mut CanonicalBuilder,
     columns: Vec<ArrayRef>,
     fork_step: &mut Option<ForkStepBuilder>,
-    schema: &Schema,
+    schema: &SchemaRef,
 ) -> Result<RecordBatch> {
     let mut all = canonical.finish();
     all.extend(columns);
     finish_fork_step(fork_step, &mut all);
-    Ok(RecordBatch::try_new(Arc::new(schema.clone()), all)?)
+    Ok(RecordBatch::try_new(schema.clone(), all)?)
 }
 
 struct BlocksBuilder {
+    schema: SchemaRef,
     canonical: CanonicalBuilder,
     block_time_ns: Int64Builder,
     fill_count: UInt32Builder,
@@ -1214,6 +1552,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
+            schema: Arc::new(schema::blocks_schema(include_fork_step, encoding)),
             canonical: CanonicalBuilder::with_encoding(encoding),
             block_time_ns: Int64Builder::new(),
             fill_count: UInt32Builder::new(),
@@ -1233,7 +1572,7 @@ impl BlocksBuilder {
         self.block_time_ns.append_value(block.block_time_ns);
         self.fill_count.append_value(block.fill_count);
         self.event_count.append_value(block.event_count);
-        // Schema epoch 1 writes no extension values.
+        // This version writes no extension values.
         self.extra_json.append_null();
         append_fork_step(&mut self.fork_step, fork_step);
     }
@@ -1247,18 +1586,24 @@ impl BlocksBuilder {
             + est_fork_step(&self.fork_step)
     }
 
-    fn finish(&mut self, schema: &Schema) -> Result<RecordBatch> {
+    fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(self.block_time_ns.finish()),
             Arc::new(self.fill_count.finish()),
             Arc::new(self.event_count.finish()),
             Arc::new(self.extra_json.finish()),
         ];
-        finish(&mut self.canonical, columns, &mut self.fork_step, schema)
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
     }
 }
 
 struct FillsBuilder {
+    schema: SchemaRef,
     canonical: CanonicalBuilder,
     fill_index: UInt32Builder,
     user: BytesColumn,
@@ -1285,6 +1630,9 @@ struct FillsBuilder {
     builder: StringBuilder,
     builder_fee: Decimal128Builder,
     priority_gas: Decimal128Builder,
+    market_type: StringDictionaryBuilder<Int32Type>,
+    dex: StringBuilder,
+    counterparty: BytesColumn,
     extra_json: StringBuilder,
     fork_step: Option<ForkStepBuilder>,
 }
@@ -1292,6 +1640,7 @@ struct FillsBuilder {
 impl FillsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
+            schema: Arc::new(schema::fills_schema(include_fork_step, encoding)),
             canonical: CanonicalBuilder::with_encoding(encoding),
             fill_index: UInt32Builder::new(),
             user: BytesColumn::new(encoding),
@@ -1318,6 +1667,9 @@ impl FillsBuilder {
             builder: StringBuilder::new(),
             builder_fee: decimal_builder(),
             priority_gas: decimal_builder(),
+            market_type: StringDictionaryBuilder::new(),
+            dex: StringBuilder::new(),
+            counterparty: BytesColumn::new(encoding),
             extra_json: StringBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
         }
@@ -1327,6 +1679,8 @@ impl FillsBuilder {
         &mut self,
         fill_index: u32,
         fill: &StagedFill<'_>,
+        market: Option<Market<'_>>,
+        counterparty: Option<&[u8]>,
         identity: &PreparedIdentity,
         fork_step: StreamEvent<'_>,
     ) {
@@ -1358,7 +1712,10 @@ impl FillsBuilder {
         self.builder.append_option(fill.builder);
         self.builder_fee.append_option(fill.builder_fee);
         self.priority_gas.append_option(fill.priority_gas);
-        self.extra_json.append_null();
+        self.market_type.append_option(market.map(Market::label));
+        self.dex.append_option(market.and_then(Market::dex));
+        append_bytes(&mut self.counterparty, counterparty);
+        self.extra_json.append_option(fill.extra_json);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -1390,11 +1747,14 @@ impl FillsBuilder {
             + est_str(&self.builder)
             + est_decimal128(&self.builder_fee)
             + est_decimal128(&self.priority_gas)
+            + estimated_dictionary_index_bytes(rows)
+            + est_str(&self.dex)
+            + self.counterparty.estimated_bytes()
             + est_str(&self.extra_json)
             + est_fork_step(&self.fork_step)
     }
 
-    fn finish(&mut self, schema: &Schema) -> Result<RecordBatch> {
+    fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(self.fill_index.finish()),
             self.user.finish(),
@@ -1421,13 +1781,377 @@ impl FillsBuilder {
             Arc::new(self.builder.finish()),
             Arc::new(self.builder_fee.finish()),
             Arc::new(self.priority_gas.finish()),
+            Arc::new(self.market_type.finish()),
+            Arc::new(self.dex.finish()),
+            self.counterparty.finish(),
             Arc::new(self.extra_json.finish()),
         ];
-        finish(&mut self.canonical, columns, &mut self.fork_step, schema)
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
     }
 }
 
-struct EventsBuilder {
+/// `outcome_fills` (R-D3): a copy of an outcome fill with its parsed coin.
+struct OutcomeFillsBuilder {
+    schema: SchemaRef,
+    canonical: CanonicalBuilder,
+    fill_index: UInt32Builder,
+    user: BytesColumn,
+    coin: StringBuilder,
+    outcome_id: Int64Builder,
+    side_index: Int64Builder,
+    price: Decimal128Builder,
+    size: Decimal128Builder,
+    side: StringDictionaryBuilder<Int32Type>,
+    direction: StringDictionaryBuilder<Int32Type>,
+    start_position: Decimal128Builder,
+    closed_pnl: Decimal128Builder,
+    hash: BytesColumn,
+    order_id: UInt64Builder,
+    crossed: BooleanBuilder,
+    fee: Decimal128Builder,
+    fee_token: StringBuilder,
+    transaction_id: UInt64Builder,
+    twap_id: UInt64Builder,
+    client_order_id: BytesColumn,
+    deployer_fee: Decimal128Builder,
+    builder: StringBuilder,
+    builder_fee: Decimal128Builder,
+    priority_gas: Decimal128Builder,
+    counterparty: BytesColumn,
+    extra_json: StringBuilder,
+    fork_step: Option<ForkStepBuilder>,
+}
+
+impl OutcomeFillsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            schema: Arc::new(schema::outcome_fills_schema(include_fork_step, encoding)),
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            fill_index: UInt32Builder::new(),
+            user: BytesColumn::new(encoding),
+            coin: StringBuilder::new(),
+            outcome_id: Int64Builder::new(),
+            side_index: Int64Builder::new(),
+            price: decimal_builder(),
+            size: decimal_builder(),
+            side: StringDictionaryBuilder::new(),
+            direction: StringDictionaryBuilder::new(),
+            start_position: decimal_builder(),
+            closed_pnl: decimal_builder(),
+            hash: BytesColumn::new(encoding),
+            order_id: UInt64Builder::new(),
+            crossed: BooleanBuilder::new(),
+            fee: decimal_builder(),
+            fee_token: StringBuilder::new(),
+            transaction_id: UInt64Builder::new(),
+            twap_id: UInt64Builder::new(),
+            client_order_id: BytesColumn::new(encoding),
+            deployer_fee: decimal_builder(),
+            builder: StringBuilder::new(),
+            builder_fee: decimal_builder(),
+            priority_gas: decimal_builder(),
+            counterparty: BytesColumn::new(encoding),
+            extra_json: StringBuilder::new(),
+            fork_step: fork_step_builder(include_fork_step),
+        }
+    }
+
+    fn append(
+        &mut self,
+        fill_index: u32,
+        fill: &StagedFill<'_>,
+        (outcome_id, side_index): (i64, i64),
+        counterparty: Option<&[u8]>,
+        identity: &PreparedIdentity,
+        fork_step: StreamEvent<'_>,
+    ) {
+        self.canonical.append(identity);
+        self.fill_index.append_value(fill_index);
+        self.user.append_value(fill.user);
+        self.coin.append_value(fill.coin);
+        self.outcome_id.append_value(outcome_id);
+        self.side_index.append_value(side_index);
+        self.price.append_value(fill.price);
+        self.size.append_value(fill.size);
+        self.side.append_value(fill.side);
+        self.direction.append_value(fill.direction);
+        self.start_position.append_value(fill.start_position);
+        self.closed_pnl.append_value(fill.closed_pnl);
+        self.hash.append_value(fill.hash);
+        self.order_id.append_value(fill.order_id);
+        self.crossed.append_value(fill.crossed);
+        self.fee.append_value(fill.fee);
+        self.fee_token.append_value(fill.fee_token);
+        self.transaction_id.append_value(fill.transaction_id);
+        self.twap_id.append_option(fill.twap_id);
+        append_bytes(&mut self.client_order_id, fill.client_order_id);
+        self.deployer_fee.append_option(fill.deployer_fee);
+        self.builder.append_option(fill.builder);
+        self.builder_fee.append_option(fill.builder_fee);
+        self.priority_gas.append_option(fill.priority_gas);
+        append_bytes(&mut self.counterparty, counterparty);
+        // D7: the fill's own `extra_json`, verbatim.
+        self.extra_json.append_option(fill.extra_json);
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        let rows = self.canonical.len();
+        self.canonical.estimated_bytes()
+            + est_u32(&self.fill_index)
+            + self.user.estimated_bytes()
+            + est_str(&self.coin)
+            + est_i64(&self.outcome_id)
+            + est_i64(&self.side_index)
+            + est_decimal128(&self.price)
+            + est_decimal128(&self.size)
+            + 2 * estimated_dictionary_index_bytes(rows)
+            + est_decimal128(&self.start_position)
+            + est_decimal128(&self.closed_pnl)
+            + self.hash.estimated_bytes()
+            + est_u64(&self.order_id)
+            + est_bool(&self.crossed)
+            + est_decimal128(&self.fee)
+            + est_str(&self.fee_token)
+            + est_u64(&self.transaction_id)
+            + est_u64(&self.twap_id)
+            + self.client_order_id.estimated_bytes()
+            + est_decimal128(&self.deployer_fee)
+            + est_str(&self.builder)
+            + est_decimal128(&self.builder_fee)
+            + est_decimal128(&self.priority_gas)
+            + self.counterparty.estimated_bytes()
+            + est_str(&self.extra_json)
+            + est_fork_step(&self.fork_step)
+    }
+
+    fn finish(&mut self) -> Result<RecordBatch> {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(self.fill_index.finish()),
+            self.user.finish(),
+            Arc::new(self.coin.finish()),
+            Arc::new(self.outcome_id.finish()),
+            Arc::new(self.side_index.finish()),
+            Arc::new(self.price.finish()),
+            Arc::new(self.size.finish()),
+            Arc::new(self.side.finish()),
+            Arc::new(self.direction.finish()),
+            Arc::new(self.start_position.finish()),
+            Arc::new(self.closed_pnl.finish()),
+            self.hash.finish(),
+            Arc::new(self.order_id.finish()),
+            Arc::new(self.crossed.finish()),
+            Arc::new(self.fee.finish()),
+            Arc::new(self.fee_token.finish()),
+            Arc::new(self.transaction_id.finish()),
+            Arc::new(self.twap_id.finish()),
+            self.client_order_id.finish(),
+            Arc::new(self.deployer_fee.finish()),
+            Arc::new(self.builder.finish()),
+            Arc::new(self.builder_fee.finish()),
+            Arc::new(self.priority_gas.finish()),
+            self.counterparty.finish(),
+            Arc::new(self.extra_json.finish()),
+        ];
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
+    }
+}
+
+/// `liquidations` (R-D4): a copy of a liquidated leg with its paired leg.
+struct LiquidationsBuilder {
+    schema: SchemaRef,
+    canonical: CanonicalBuilder,
+    fill_index: UInt32Builder,
+    liquidated_user: BytesColumn,
+    coin: StringBuilder,
+    market_type: StringDictionaryBuilder<Int32Type>,
+    dex: StringBuilder,
+    side: StringDictionaryBuilder<Int32Type>,
+    direction: StringDictionaryBuilder<Int32Type>,
+    price: Decimal128Builder,
+    size: Decimal128Builder,
+    start_position: Decimal128Builder,
+    closed_pnl: Decimal128Builder,
+    fee: Decimal128Builder,
+    fee_token: StringBuilder,
+    crossed: BooleanBuilder,
+    liquidation_method: StringBuilder,
+    mark_price: Decimal128Builder,
+    order_id: UInt64Builder,
+    transaction_id: UInt64Builder,
+    hash: BytesColumn,
+    counterparty: BytesColumn,
+    counterparty_direction: StringDictionaryBuilder<Int32Type>,
+    counterparty_fill_index: UInt32Builder,
+    extra_json: StringBuilder,
+    fork_step: Option<ForkStepBuilder>,
+}
+
+impl LiquidationsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            schema: Arc::new(schema::liquidations_schema(include_fork_step, encoding)),
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            fill_index: UInt32Builder::new(),
+            liquidated_user: BytesColumn::new(encoding),
+            coin: StringBuilder::new(),
+            market_type: StringDictionaryBuilder::new(),
+            dex: StringBuilder::new(),
+            side: StringDictionaryBuilder::new(),
+            direction: StringDictionaryBuilder::new(),
+            price: decimal_builder(),
+            size: decimal_builder(),
+            start_position: decimal_builder(),
+            closed_pnl: decimal_builder(),
+            fee: decimal_builder(),
+            fee_token: StringBuilder::new(),
+            crossed: BooleanBuilder::new(),
+            liquidation_method: StringBuilder::new(),
+            mark_price: decimal_builder(),
+            order_id: UInt64Builder::new(),
+            transaction_id: UInt64Builder::new(),
+            hash: BytesColumn::new(encoding),
+            counterparty: BytesColumn::new(encoding),
+            counterparty_direction: StringDictionaryBuilder::new(),
+            counterparty_fill_index: UInt32Builder::new(),
+            extra_json: StringBuilder::new(),
+            fork_step: fork_step_builder(include_fork_step),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append(
+        &mut self,
+        fill_index: u32,
+        fill: &StagedFill<'_>,
+        (method, mark_price): (&str, i128),
+        market: Option<Market<'_>>,
+        pair: Option<(u32, &StagedFill<'_>)>,
+        identity: &PreparedIdentity,
+        fork_step: StreamEvent<'_>,
+    ) {
+        self.canonical.append(identity);
+        self.fill_index.append_value(fill_index);
+        self.liquidated_user.append_value(fill.user);
+        self.coin.append_value(fill.coin);
+        self.market_type.append_option(market.map(Market::label));
+        self.dex.append_option(market.and_then(Market::dex));
+        self.side.append_value(fill.side);
+        self.direction.append_value(fill.direction);
+        self.price.append_value(fill.price);
+        self.size.append_value(fill.size);
+        self.start_position.append_value(fill.start_position);
+        self.closed_pnl.append_value(fill.closed_pnl);
+        self.fee.append_value(fill.fee);
+        self.fee_token.append_value(fill.fee_token);
+        self.crossed.append_value(fill.crossed);
+        self.liquidation_method.append_value(method);
+        self.mark_price.append_value(mark_price);
+        self.order_id.append_value(fill.order_id);
+        self.transaction_id.append_value(fill.transaction_id);
+        self.hash.append_value(fill.hash);
+        append_bytes(&mut self.counterparty, pair.map(|(_, other)| other.user));
+        self.counterparty_direction
+            .append_option(pair.map(|(_, other)| other.direction));
+        self.counterparty_fill_index
+            .append_option(pair.map(|(index, _)| index));
+        // D7: the fill's own `extra_json`, verbatim.
+        self.extra_json.append_option(fill.extra_json);
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        let rows = self.canonical.len();
+        self.canonical.estimated_bytes()
+            + est_u32(&self.fill_index)
+            + self.liquidated_user.estimated_bytes()
+            + est_str(&self.coin)
+            + 4 * estimated_dictionary_index_bytes(rows)
+            + est_str(&self.dex)
+            + est_decimal128(&self.price)
+            + est_decimal128(&self.size)
+            + est_decimal128(&self.start_position)
+            + est_decimal128(&self.closed_pnl)
+            + est_decimal128(&self.fee)
+            + est_str(&self.fee_token)
+            + est_bool(&self.crossed)
+            + est_str(&self.liquidation_method)
+            + est_decimal128(&self.mark_price)
+            + est_u64(&self.order_id)
+            + est_u64(&self.transaction_id)
+            + self.hash.estimated_bytes()
+            + self.counterparty.estimated_bytes()
+            + est_u32(&self.counterparty_fill_index)
+            + est_str(&self.extra_json)
+            + est_fork_step(&self.fork_step)
+    }
+
+    fn finish(&mut self) -> Result<RecordBatch> {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(self.fill_index.finish()),
+            self.liquidated_user.finish(),
+            Arc::new(self.coin.finish()),
+            Arc::new(self.market_type.finish()),
+            Arc::new(self.dex.finish()),
+            Arc::new(self.side.finish()),
+            Arc::new(self.direction.finish()),
+            Arc::new(self.price.finish()),
+            Arc::new(self.size.finish()),
+            Arc::new(self.start_position.finish()),
+            Arc::new(self.closed_pnl.finish()),
+            Arc::new(self.fee.finish()),
+            Arc::new(self.fee_token.finish()),
+            Arc::new(self.crossed.finish()),
+            Arc::new(self.liquidation_method.finish()),
+            Arc::new(self.mark_price.finish()),
+            Arc::new(self.order_id.finish()),
+            Arc::new(self.transaction_id.finish()),
+            self.hash.finish(),
+            self.counterparty.finish(),
+            Arc::new(self.counterparty_direction.finish()),
+            Arc::new(self.counterparty_fill_index.finish()),
+            Arc::new(self.extra_json.finish()),
+        ];
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
+    }
+}
+
+/// `column` when the event table has it.
+fn column_of<T>(table: EventTable, column: &str, make: impl FnOnce() -> T) -> Option<T> {
+    table.has_column(column).then(make)
+}
+
+/// Appends `value` to a column the event table has. Every value of a routed
+/// type has a column in its table (`schema::EventTable::own_columns`, checked
+/// against the documented column matrix by the value tests), so the `None`
+/// arm only ever sees NULL.
+fn put<B, V>(builder: &mut Option<B>, value: Option<V>, append: impl FnOnce(&mut B, Option<V>)) {
+    match builder {
+        Some(builder) => append(builder, value),
+        None => debug_assert!(value.is_none(), "an event value without a column"),
+    }
+}
+
+/// One event table: the shared columns, and the catalogue columns
+/// (`schema::event_fields`) the table has.
+struct EventTableBuilder {
+    table: EventTable,
+    schema: SchemaRef,
     canonical: CanonicalBuilder,
     event_index: UInt32Builder,
     event_type: StringDictionaryBuilder<Int32Type>,
@@ -1435,49 +2159,56 @@ struct EventsBuilder {
     hash: BytesColumn,
     event_time_ns: Int64Builder,
     users: BytesListColumn,
-    user: BytesColumn,
-    destination: BytesColumn,
-    vault: BytesColumn,
-    validator: BytesColumn,
-    sub_account: BytesColumn,
-    token: StringBuilder,
-    amount: Decimal128Builder,
-    usdc: Decimal128Builder,
-    usdc_value: Decimal128Builder,
-    fee: Decimal128Builder,
-    fee_token: StringBuilder,
-    native_token_fee: Decimal128Builder,
-    nonce: UInt64Builder,
-    source_dex: StringBuilder,
-    destination_dex: StringBuilder,
-    dex: StringBuilder,
-    is_deposit: BooleanBuilder,
-    to_perp: BooleanBuilder,
-    is_undelegate: BooleanBuilder,
-    is_finalized: BooleanBuilder,
-    requested_usd: Decimal128Builder,
-    commission: Decimal128Builder,
-    closing_cost: Decimal128Builder,
-    basis: Decimal128Builder,
-    net_withdrawn_usd: Decimal128Builder,
-    interest_amount: Decimal128Builder,
-    operation: StringBuilder,
-    liquidated_ntl_pos: Decimal128Builder,
-    account_value: Decimal128Builder,
-    leverage_type: StringDictionaryBuilder<Int32Type>,
-    liquidated_positions: ListBuilder<StructBuilder>,
-    slot_id: UInt64Builder,
-    previous_winner_ip: StringBuilder,
-    end_gas: Decimal128Builder,
-    sub_account_name: StringBuilder,
-    item_count: UInt32Builder,
+    user: Option<BytesColumn>,
+    destination: Option<BytesColumn>,
+    vault: Option<BytesColumn>,
+    validator: Option<BytesColumn>,
+    sub_account: Option<BytesColumn>,
+    token: Option<StringBuilder>,
+    amount: Option<Decimal128Builder>,
+    usdc: Option<Decimal128Builder>,
+    usdc_value: Option<Decimal128Builder>,
+    fee: Option<Decimal128Builder>,
+    fee_token: Option<StringBuilder>,
+    native_token_fee: Option<Decimal128Builder>,
+    nonce: Option<UInt64Builder>,
+    source_dex: Option<StringBuilder>,
+    destination_dex: Option<StringBuilder>,
+    dex: Option<StringBuilder>,
+    is_deposit: Option<BooleanBuilder>,
+    to_perp: Option<BooleanBuilder>,
+    is_undelegate: Option<BooleanBuilder>,
+    is_finalized: Option<BooleanBuilder>,
+    requested_usd: Option<Decimal128Builder>,
+    commission: Option<Decimal128Builder>,
+    closing_cost: Option<Decimal128Builder>,
+    basis: Option<Decimal128Builder>,
+    net_withdrawn_usd: Option<Decimal128Builder>,
+    interest_amount: Option<Decimal128Builder>,
+    operation: Option<StringBuilder>,
+    liquidated_ntl_pos: Option<Decimal128Builder>,
+    account_value: Option<Decimal128Builder>,
+    leverage_type: Option<StringDictionaryBuilder<Int32Type>>,
+    liquidated_positions: Option<ListBuilder<StructBuilder>>,
+    slot_id: Option<UInt64Builder>,
+    previous_winner_ip: Option<StringBuilder>,
+    end_gas: Option<Decimal128Builder>,
+    sub_account_name: Option<StringBuilder>,
+    item_count: Option<UInt32Builder>,
     extra_json: StringBuilder,
     fork_step: Option<ForkStepBuilder>,
 }
 
-impl EventsBuilder {
-    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+impl EventTableBuilder {
+    fn new(table: EventTable, include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        let bytes = || BytesColumn::new(encoding);
         Self {
+            table,
+            schema: Arc::new(schema::event_table_schema(
+                table,
+                include_fork_step,
+                encoding,
+            )),
             canonical: CanonicalBuilder::with_encoding(encoding),
             event_index: UInt32Builder::new(),
             event_type: StringDictionaryBuilder::new(),
@@ -1485,46 +2216,45 @@ impl EventsBuilder {
             hash: BytesColumn::new(encoding),
             event_time_ns: Int64Builder::new(),
             users: BytesListColumn::new(encoding),
-            user: BytesColumn::new(encoding),
-            destination: BytesColumn::new(encoding),
-            vault: BytesColumn::new(encoding),
-            validator: BytesColumn::new(encoding),
-            sub_account: BytesColumn::new(encoding),
-            token: StringBuilder::new(),
-            amount: decimal_builder(),
-            usdc: decimal_builder(),
-            usdc_value: decimal_builder(),
-            fee: decimal_builder(),
-            fee_token: StringBuilder::new(),
-            native_token_fee: decimal_builder(),
-            nonce: UInt64Builder::new(),
-            source_dex: StringBuilder::new(),
-            destination_dex: StringBuilder::new(),
-            dex: StringBuilder::new(),
-            is_deposit: BooleanBuilder::new(),
-            to_perp: BooleanBuilder::new(),
-            is_undelegate: BooleanBuilder::new(),
-            is_finalized: BooleanBuilder::new(),
-            requested_usd: decimal_builder(),
-            commission: decimal_builder(),
-            closing_cost: decimal_builder(),
-            basis: decimal_builder(),
-            net_withdrawn_usd: decimal_builder(),
-            interest_amount: decimal_builder(),
-            operation: StringBuilder::new(),
-            liquidated_ntl_pos: decimal_builder(),
-            account_value: decimal_builder(),
-            leverage_type: StringDictionaryBuilder::new(),
-            liquidated_positions: ListBuilder::new(StructBuilder::from_fields(
-                schema::position_fields(),
-                0,
-            ))
-            .with_field(schema::position_item()),
-            slot_id: UInt64Builder::new(),
-            previous_winner_ip: StringBuilder::new(),
-            end_gas: decimal_builder(),
-            sub_account_name: StringBuilder::new(),
-            item_count: UInt32Builder::new(),
+            user: column_of(table, "user", bytes),
+            destination: column_of(table, "destination", bytes),
+            vault: column_of(table, "vault", bytes),
+            validator: column_of(table, "validator", bytes),
+            sub_account: column_of(table, "sub_account", bytes),
+            token: column_of(table, "token", StringBuilder::new),
+            amount: column_of(table, "amount", decimal_builder),
+            usdc: column_of(table, "usdc", decimal_builder),
+            usdc_value: column_of(table, "usdc_value", decimal_builder),
+            fee: column_of(table, "fee", decimal_builder),
+            fee_token: column_of(table, "fee_token", StringBuilder::new),
+            native_token_fee: column_of(table, "native_token_fee", decimal_builder),
+            nonce: column_of(table, "nonce", UInt64Builder::new),
+            source_dex: column_of(table, "source_dex", StringBuilder::new),
+            destination_dex: column_of(table, "destination_dex", StringBuilder::new),
+            dex: column_of(table, "dex", StringBuilder::new),
+            is_deposit: column_of(table, "is_deposit", BooleanBuilder::new),
+            to_perp: column_of(table, "to_perp", BooleanBuilder::new),
+            is_undelegate: column_of(table, "is_undelegate", BooleanBuilder::new),
+            is_finalized: column_of(table, "is_finalized", BooleanBuilder::new),
+            requested_usd: column_of(table, "requested_usd", decimal_builder),
+            commission: column_of(table, "commission", decimal_builder),
+            closing_cost: column_of(table, "closing_cost", decimal_builder),
+            basis: column_of(table, "basis", decimal_builder),
+            net_withdrawn_usd: column_of(table, "net_withdrawn_usd", decimal_builder),
+            interest_amount: column_of(table, "interest_amount", decimal_builder),
+            operation: column_of(table, "operation", StringBuilder::new),
+            liquidated_ntl_pos: column_of(table, "liquidated_ntl_pos", decimal_builder),
+            account_value: column_of(table, "account_value", decimal_builder),
+            leverage_type: column_of(table, "leverage_type", StringDictionaryBuilder::new),
+            liquidated_positions: column_of(table, "liquidated_positions", || {
+                ListBuilder::new(StructBuilder::from_fields(schema::position_fields(), 0))
+                    .with_field(schema::position_item())
+            }),
+            slot_id: column_of(table, "slot_id", UInt64Builder::new),
+            previous_winner_ip: column_of(table, "previous_winner_ip", StringBuilder::new),
+            end_gas: column_of(table, "end_gas", decimal_builder),
+            sub_account_name: column_of(table, "sub_account_name", StringBuilder::new),
+            item_count: column_of(table, "item_count", UInt32Builder::new),
             extra_json: StringBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
         }
@@ -1537,6 +2267,10 @@ impl EventsBuilder {
         identity: &PreparedIdentity,
         fork_step: StreamEvent<'_>,
     ) {
+        let decimal =
+            |builder: &mut Decimal128Builder, value: Option<i128>| builder.append_option(value);
+        let text = |builder: &mut StringBuilder, value: Option<&str>| builder.append_option(value);
+        let flag = |builder: &mut BooleanBuilder, value: Option<bool>| builder.append_option(value);
         self.canonical.append(identity);
         self.event_index.append_value(event_index);
         self.event_type.append_value(event.event_type);
@@ -1552,71 +2286,103 @@ impl EventsBuilder {
             }
             None => self.users.append(false),
         }
-        append_bytes(&mut self.user, event.user);
-        append_bytes(&mut self.destination, event.destination);
-        append_bytes(&mut self.vault, event.vault);
-        append_bytes(&mut self.validator, event.validator);
-        append_bytes(&mut self.sub_account, event.sub_account);
-        self.token.append_option(event.token);
-        self.amount.append_option(event.amount);
-        self.usdc.append_option(event.usdc);
-        self.usdc_value.append_option(event.usdc_value);
-        self.fee.append_option(event.fee);
-        self.fee_token.append_option(event.fee_token);
-        self.native_token_fee.append_option(event.native_token_fee);
-        self.nonce.append_option(event.nonce);
-        self.source_dex.append_option(event.source_dex);
-        self.destination_dex.append_option(event.destination_dex);
-        self.dex.append_option(event.dex);
-        self.is_deposit.append_option(event.is_deposit);
-        self.to_perp.append_option(event.to_perp);
-        self.is_undelegate.append_option(event.is_undelegate);
-        self.is_finalized.append_option(event.is_finalized);
-        self.requested_usd.append_option(event.requested_usd);
-        self.commission.append_option(event.commission);
-        self.closing_cost.append_option(event.closing_cost);
-        self.basis.append_option(event.basis);
-        self.net_withdrawn_usd
-            .append_option(event.net_withdrawn_usd);
-        self.interest_amount.append_option(event.interest_amount);
-        self.operation.append_option(event.operation);
-        self.liquidated_ntl_pos
-            .append_option(event.liquidated_ntl_pos);
-        self.account_value.append_option(event.account_value);
-        self.leverage_type.append_option(event.leverage_type);
-        match &event.liquidated_positions {
-            Some(positions) => {
-                let items = self.liquidated_positions.values();
-                for (coin, szi) in positions {
-                    items
-                        .field_builder::<StringBuilder>(0)
-                        .expect("liquidated_positions.coin is Utf8")
-                        .append_value(coin);
-                    items
-                        .field_builder::<Decimal128Builder>(1)
-                        .expect("liquidated_positions.szi is Decimal128")
-                        .append_value(*szi);
-                    items.append(true);
+        put(&mut self.user, event.user, append_bytes);
+        put(&mut self.destination, event.destination, append_bytes);
+        put(&mut self.vault, event.vault, append_bytes);
+        put(&mut self.validator, event.validator, append_bytes);
+        put(&mut self.sub_account, event.sub_account, append_bytes);
+        put(&mut self.token, event.token, text);
+        put(&mut self.amount, event.amount, decimal);
+        put(&mut self.usdc, event.usdc, decimal);
+        put(&mut self.usdc_value, event.usdc_value, decimal);
+        put(&mut self.fee, event.fee, decimal);
+        put(&mut self.fee_token, event.fee_token, text);
+        put(&mut self.native_token_fee, event.native_token_fee, decimal);
+        put(&mut self.nonce, event.nonce, |builder, value| {
+            builder.append_option(value)
+        });
+        put(&mut self.source_dex, event.source_dex, text);
+        put(&mut self.destination_dex, event.destination_dex, text);
+        put(&mut self.dex, event.dex, text);
+        put(&mut self.is_deposit, event.is_deposit, flag);
+        put(&mut self.to_perp, event.to_perp, flag);
+        put(&mut self.is_undelegate, event.is_undelegate, flag);
+        put(&mut self.is_finalized, event.is_finalized, flag);
+        put(&mut self.requested_usd, event.requested_usd, decimal);
+        put(&mut self.commission, event.commission, decimal);
+        put(&mut self.closing_cost, event.closing_cost, decimal);
+        put(&mut self.basis, event.basis, decimal);
+        put(
+            &mut self.net_withdrawn_usd,
+            event.net_withdrawn_usd,
+            decimal,
+        );
+        put(&mut self.interest_amount, event.interest_amount, decimal);
+        put(&mut self.operation, event.operation, text);
+        put(
+            &mut self.liquidated_ntl_pos,
+            event.liquidated_ntl_pos,
+            decimal,
+        );
+        put(&mut self.account_value, event.account_value, decimal);
+        put(
+            &mut self.leverage_type,
+            event.leverage_type,
+            |builder, value| builder.append_option(value),
+        );
+        put(
+            &mut self.liquidated_positions,
+            event.liquidated_positions.as_ref(),
+            |builder, positions| match positions {
+                Some(positions) => {
+                    let items = builder.values();
+                    for (coin, szi) in positions {
+                        items
+                            .field_builder::<StringBuilder>(0)
+                            .expect("liquidated_positions.coin is Utf8")
+                            .append_value(coin);
+                        items
+                            .field_builder::<Decimal128Builder>(1)
+                            .expect("liquidated_positions.szi is Decimal128")
+                            .append_value(*szi);
+                        items.append(true);
+                    }
+                    builder.append(true);
                 }
-                self.liquidated_positions.append(true);
-            }
-            None => self.liquidated_positions.append(false),
-        }
-        self.slot_id.append_option(event.slot_id);
-        self.previous_winner_ip
-            .append_option(event.previous_winner_ip);
-        self.end_gas.append_option(event.end_gas);
-        self.sub_account_name.append_option(event.sub_account_name);
-        self.item_count.append_option(event.item_count);
+                None => builder.append(false),
+            },
+        );
+        put(&mut self.slot_id, event.slot_id, |builder, value| {
+            builder.append_option(value)
+        });
+        put(&mut self.previous_winner_ip, event.previous_winner_ip, text);
+        put(&mut self.end_gas, event.end_gas, decimal);
+        put(&mut self.sub_account_name, event.sub_account_name, text);
+        put(&mut self.item_count, event.item_count, |builder, value| {
+            builder.append_option(value)
+        });
+        // This version writes no extension values.
         self.extra_json.append_null();
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
     fn estimated_bytes(&mut self) -> usize {
+        fn bytes(column: &Option<BytesColumn>) -> usize {
+            column.as_ref().map_or(0, BytesColumn::estimated_bytes)
+        }
+        fn text(column: &Option<StringBuilder>) -> usize {
+            column.as_ref().map_or(0, est_str)
+        }
+        fn decimal(column: &Option<Decimal128Builder>) -> usize {
+            column.as_ref().map_or(0, est_decimal128)
+        }
+        fn flag(column: &Option<BooleanBuilder>) -> usize {
+            column.as_ref().map_or(0, est_bool)
+        }
         let rows = self.canonical.len();
-        let positions = {
-            let lists = self.liquidated_positions.len();
-            let items = self.liquidated_positions.values();
+        let positions = self.liquidated_positions.as_mut().map_or(0, |positions| {
+            let lists = positions.len();
+            let items = positions.values();
             let coins = est_str(
                 items
                     .field_builder::<StringBuilder>(0)
@@ -1628,104 +2394,124 @@ impl EventsBuilder {
                     .expect("liquidated_positions.szi is Decimal128"),
             );
             (lists + 1) * 4 + coins + sizes
-        };
+        });
         self.canonical.estimated_bytes()
             + est_u32(&self.event_index)
             + 2 * estimated_dictionary_index_bytes(rows)
             + self.hash.estimated_bytes()
             + est_i64(&self.event_time_ns)
             + self.users.estimated_bytes()
-            + self.user.estimated_bytes()
-            + self.destination.estimated_bytes()
-            + self.vault.estimated_bytes()
-            + self.validator.estimated_bytes()
-            + self.sub_account.estimated_bytes()
-            + est_str(&self.token)
-            + est_decimal128(&self.amount)
-            + est_decimal128(&self.usdc)
-            + est_decimal128(&self.usdc_value)
-            + est_decimal128(&self.fee)
-            + est_str(&self.fee_token)
-            + est_decimal128(&self.native_token_fee)
-            + est_u64(&self.nonce)
-            + est_str(&self.source_dex)
-            + est_str(&self.destination_dex)
-            + est_str(&self.dex)
-            + est_bool(&self.is_deposit)
-            + est_bool(&self.to_perp)
-            + est_bool(&self.is_undelegate)
-            + est_bool(&self.is_finalized)
-            + est_decimal128(&self.requested_usd)
-            + est_decimal128(&self.commission)
-            + est_decimal128(&self.closing_cost)
-            + est_decimal128(&self.basis)
-            + est_decimal128(&self.net_withdrawn_usd)
-            + est_decimal128(&self.interest_amount)
-            + est_str(&self.operation)
-            + est_decimal128(&self.liquidated_ntl_pos)
-            + est_decimal128(&self.account_value)
-            + estimated_dictionary_index_bytes(rows)
+            + bytes(&self.user)
+            + bytes(&self.destination)
+            + bytes(&self.vault)
+            + bytes(&self.validator)
+            + bytes(&self.sub_account)
+            + text(&self.token)
+            + decimal(&self.amount)
+            + decimal(&self.usdc)
+            + decimal(&self.usdc_value)
+            + decimal(&self.fee)
+            + text(&self.fee_token)
+            + decimal(&self.native_token_fee)
+            + self.nonce.as_ref().map_or(0, est_u64)
+            + text(&self.source_dex)
+            + text(&self.destination_dex)
+            + text(&self.dex)
+            + flag(&self.is_deposit)
+            + flag(&self.to_perp)
+            + flag(&self.is_undelegate)
+            + flag(&self.is_finalized)
+            + decimal(&self.requested_usd)
+            + decimal(&self.commission)
+            + decimal(&self.closing_cost)
+            + decimal(&self.basis)
+            + decimal(&self.net_withdrawn_usd)
+            + decimal(&self.interest_amount)
+            + text(&self.operation)
+            + decimal(&self.liquidated_ntl_pos)
+            + decimal(&self.account_value)
+            + self
+                .leverage_type
+                .as_ref()
+                .map_or(0, |_| estimated_dictionary_index_bytes(rows))
             + positions
-            + est_u64(&self.slot_id)
-            + est_str(&self.previous_winner_ip)
-            + est_decimal128(&self.end_gas)
-            + est_str(&self.sub_account_name)
-            + est_u32(&self.item_count)
+            + self.slot_id.as_ref().map_or(0, est_u64)
+            + text(&self.previous_winner_ip)
+            + decimal(&self.end_gas)
+            + text(&self.sub_account_name)
+            + self.item_count.as_ref().map_or(0, est_u32)
             + est_str(&self.extra_json)
             + est_fork_step(&self.fork_step)
     }
 
-    fn finish(&mut self, schema: &Schema) -> Result<RecordBatch> {
-        let columns: Vec<ArrayRef> = vec![
+    /// The table's columns in catalogue order (`schema::event_fields`).
+    fn finish(&mut self) -> Result<RecordBatch> {
+        fn array(builder: &mut impl ArrayBuilder) -> ArrayRef {
+            builder.finish()
+        }
+        let mut columns: Vec<ArrayRef> = vec![
             Arc::new(self.event_index.finish()),
             Arc::new(self.event_type.finish()),
             Arc::new(self.ledger_type.finish()),
             self.hash.finish(),
             Arc::new(self.event_time_ns.finish()),
             self.users.finish(),
-            self.user.finish(),
-            self.destination.finish(),
-            self.vault.finish(),
-            self.validator.finish(),
-            self.sub_account.finish(),
-            Arc::new(self.token.finish()),
-            Arc::new(self.amount.finish()),
-            Arc::new(self.usdc.finish()),
-            Arc::new(self.usdc_value.finish()),
-            Arc::new(self.fee.finish()),
-            Arc::new(self.fee_token.finish()),
-            Arc::new(self.native_token_fee.finish()),
-            Arc::new(self.nonce.finish()),
-            Arc::new(self.source_dex.finish()),
-            Arc::new(self.destination_dex.finish()),
-            Arc::new(self.dex.finish()),
-            Arc::new(self.is_deposit.finish()),
-            Arc::new(self.to_perp.finish()),
-            Arc::new(self.is_undelegate.finish()),
-            Arc::new(self.is_finalized.finish()),
-            Arc::new(self.requested_usd.finish()),
-            Arc::new(self.commission.finish()),
-            Arc::new(self.closing_cost.finish()),
-            Arc::new(self.basis.finish()),
-            Arc::new(self.net_withdrawn_usd.finish()),
-            Arc::new(self.interest_amount.finish()),
-            Arc::new(self.operation.finish()),
-            Arc::new(self.liquidated_ntl_pos.finish()),
-            Arc::new(self.account_value.finish()),
-            Arc::new(self.leverage_type.finish()),
-            Arc::new(self.liquidated_positions.finish()),
-            Arc::new(self.slot_id.finish()),
-            Arc::new(self.previous_winner_ip.finish()),
-            Arc::new(self.end_gas.finish()),
-            Arc::new(self.sub_account_name.finish()),
-            Arc::new(self.item_count.finish()),
-            Arc::new(self.extra_json.finish()),
         ];
-        finish(&mut self.canonical, columns, &mut self.fork_step, schema)
+        let bytes = |column: &mut Option<BytesColumn>| column.as_mut().map(BytesColumn::finish);
+        let bytes_columns = [
+            bytes(&mut self.user),
+            bytes(&mut self.destination),
+            bytes(&mut self.vault),
+            bytes(&mut self.validator),
+            bytes(&mut self.sub_account),
+        ];
+        columns.extend(bytes_columns.into_iter().flatten());
+        let others: [Option<ArrayRef>; 32] = [
+            self.token.as_mut().map(array),
+            self.amount.as_mut().map(array),
+            self.usdc.as_mut().map(array),
+            self.usdc_value.as_mut().map(array),
+            self.fee.as_mut().map(array),
+            self.fee_token.as_mut().map(array),
+            self.native_token_fee.as_mut().map(array),
+            self.nonce.as_mut().map(array),
+            self.source_dex.as_mut().map(array),
+            self.destination_dex.as_mut().map(array),
+            self.dex.as_mut().map(array),
+            self.is_deposit.as_mut().map(array),
+            self.to_perp.as_mut().map(array),
+            self.is_undelegate.as_mut().map(array),
+            self.is_finalized.as_mut().map(array),
+            self.requested_usd.as_mut().map(array),
+            self.commission.as_mut().map(array),
+            self.closing_cost.as_mut().map(array),
+            self.basis.as_mut().map(array),
+            self.net_withdrawn_usd.as_mut().map(array),
+            self.interest_amount.as_mut().map(array),
+            self.operation.as_mut().map(array),
+            self.liquidated_ntl_pos.as_mut().map(array),
+            self.account_value.as_mut().map(array),
+            self.leverage_type.as_mut().map(array),
+            self.liquidated_positions.as_mut().map(array),
+            self.slot_id.as_mut().map(array),
+            self.previous_winner_ip.as_mut().map(array),
+            self.end_gas.as_mut().map(array),
+            self.sub_account_name.as_mut().map(array),
+            self.item_count.as_mut().map(array),
+            Some(Arc::new(self.extra_json.finish())),
+        ];
+        columns.extend(others.into_iter().flatten());
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
     }
 }
 
 struct FundingDeltasBuilder {
+    schema: SchemaRef,
     canonical: CanonicalBuilder,
     event_index: UInt32Builder,
     delta_index: UInt32Builder,
@@ -1741,6 +2527,7 @@ struct FundingDeltasBuilder {
 impl FundingDeltasBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
+            schema: Arc::new(schema::funding_deltas_schema(include_fork_step, encoding)),
             canonical: CanonicalBuilder::with_encoding(encoding),
             event_index: UInt32Builder::new(),
             delta_index: UInt32Builder::new(),
@@ -1787,7 +2574,7 @@ impl FundingDeltasBuilder {
             + est_fork_step(&self.fork_step)
     }
 
-    fn finish(&mut self, schema: &Schema) -> Result<RecordBatch> {
+    fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(self.event_index.finish()),
             Arc::new(self.delta_index.finish()),
@@ -1798,11 +2585,132 @@ impl FundingDeltasBuilder {
             Arc::new(self.funding_rate.finish()),
             Arc::new(self.extra_json.finish()),
         ];
-        finish(&mut self.canonical, columns, &mut self.fork_step, schema)
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
+    }
+}
+
+/// `funding_rates` (R-D5).
+struct FundingRatesBuilder {
+    schema: SchemaRef,
+    canonical: CanonicalBuilder,
+    event_index: UInt32Builder,
+    dex_index: UInt32Builder,
+    coin: StringBuilder,
+    dex: StringBuilder,
+    funding_rate: Decimal128Builder,
+    positions: UInt32Builder,
+    long_positions: UInt32Builder,
+    short_positions: UInt32Builder,
+    open_interest: Decimal128Builder,
+    long_size: Decimal128Builder,
+    short_size: Decimal128Builder,
+    positive_funding: Decimal128Builder,
+    negative_funding: Decimal128Builder,
+    extra_json: StringBuilder,
+    fork_step: Option<ForkStepBuilder>,
+}
+
+impl FundingRatesBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            schema: Arc::new(schema::funding_rates_schema(include_fork_step, encoding)),
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            event_index: UInt32Builder::new(),
+            dex_index: UInt32Builder::new(),
+            coin: StringBuilder::new(),
+            dex: StringBuilder::new(),
+            funding_rate: decimal_builder(),
+            positions: UInt32Builder::new(),
+            long_positions: UInt32Builder::new(),
+            short_positions: UInt32Builder::new(),
+            open_interest: decimal_builder(),
+            long_size: decimal_builder(),
+            short_size: decimal_builder(),
+            positive_funding: decimal_builder(),
+            negative_funding: decimal_builder(),
+            extra_json: StringBuilder::new(),
+            fork_step: fork_step_builder(include_fork_step),
+        }
+    }
+
+    fn append(
+        &mut self,
+        rate: &FundingRate<'_>,
+        identity: &PreparedIdentity,
+        fork_step: StreamEvent<'_>,
+    ) {
+        self.canonical.append(identity);
+        self.event_index.append_value(rate.event_index);
+        self.dex_index.append_value(rate.dex_index);
+        self.coin.append_value(rate.coin);
+        self.dex.append_option(rate.dex);
+        self.funding_rate.append_option(rate.funding_rate);
+        self.positions.append_value(rate.positions);
+        self.long_positions.append_value(rate.long_positions);
+        self.short_positions.append_value(rate.short_positions);
+        self.open_interest.append_option(rate.open_interest);
+        self.long_size.append_option(rate.long_size);
+        self.short_size.append_option(rate.short_size);
+        self.positive_funding.append_option(rate.positive_funding);
+        self.negative_funding.append_option(rate.negative_funding);
+        // Reserved: a new `Funding` or `FundingDelta` field goes to the raw
+        // tables' `extra_json`.
+        self.extra_json.append_null();
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u32(&self.event_index)
+            + est_u32(&self.dex_index)
+            + est_str(&self.coin)
+            + est_str(&self.dex)
+            + est_decimal128(&self.funding_rate)
+            + est_u32(&self.positions)
+            + est_u32(&self.long_positions)
+            + est_u32(&self.short_positions)
+            + est_decimal128(&self.open_interest)
+            + est_decimal128(&self.long_size)
+            + est_decimal128(&self.short_size)
+            + est_decimal128(&self.positive_funding)
+            + est_decimal128(&self.negative_funding)
+            + est_str(&self.extra_json)
+            + est_fork_step(&self.fork_step)
+    }
+
+    fn finish(&mut self) -> Result<RecordBatch> {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(self.event_index.finish()),
+            Arc::new(self.dex_index.finish()),
+            Arc::new(self.coin.finish()),
+            Arc::new(self.dex.finish()),
+            Arc::new(self.funding_rate.finish()),
+            Arc::new(self.positions.finish()),
+            Arc::new(self.long_positions.finish()),
+            Arc::new(self.short_positions.finish()),
+            Arc::new(self.open_interest.finish()),
+            Arc::new(self.long_size.finish()),
+            Arc::new(self.short_size.finish()),
+            Arc::new(self.positive_funding.finish()),
+            Arc::new(self.negative_funding.finish()),
+            Arc::new(self.extra_json.finish()),
+        ];
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
     }
 }
 
 struct ValidatorRewardsBuilder {
+    schema: SchemaRef,
     canonical: CanonicalBuilder,
     event_index: UInt32Builder,
     reward_index: UInt32Builder,
@@ -1815,6 +2723,10 @@ struct ValidatorRewardsBuilder {
 impl ValidatorRewardsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
+            schema: Arc::new(schema::validator_rewards_schema(
+                include_fork_step,
+                encoding,
+            )),
             canonical: CanonicalBuilder::with_encoding(encoding),
             event_index: UInt32Builder::new(),
             reward_index: UInt32Builder::new(),
@@ -1852,7 +2764,7 @@ impl ValidatorRewardsBuilder {
             + est_fork_step(&self.fork_step)
     }
 
-    fn finish(&mut self, schema: &Schema) -> Result<RecordBatch> {
+    fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(self.event_index.finish()),
             Arc::new(self.reward_index.finish()),
@@ -1860,7 +2772,12 @@ impl ValidatorRewardsBuilder {
             Arc::new(self.reward.finish()),
             Arc::new(self.extra_json.finish()),
         ];
-        finish(&mut self.canonical, columns, &mut self.fork_step, schema)
+        finish(
+            &mut self.canonical,
+            columns,
+            &mut self.fork_step,
+            &self.schema,
+        )
     }
 }
 

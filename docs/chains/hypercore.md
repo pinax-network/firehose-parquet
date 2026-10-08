@@ -259,37 +259,37 @@ that is NULL when the value is absent or empty.
 `blocks/src/hypercore/value_tests.rs` checks every fixture row against this
 table.
 
-| Type | Columns set |
-|---|---|
-| `funding` | `item_count` |
-| `validator_rewards` | `item_count` |
-| `c_withdrawal` | `user`, `amount`, `is_finalized` |
-| `c_deposit` | `user`, `amount` |
-| `delegation` | `user`, `validator`, `amount`, `is_undelegate` |
-| `gossip_priority_auction_restart` | `slot_id`, `previous_winner_ip`?, `end_gas`? |
-| `create_sub_account` | `user`, `sub_account`, `sub_account_name` |
-| `ledger_update` / `spot_transfer` (1) | `token`, `amount`, `usdc_value`, `user`, `destination`, `fee`, `native_token_fee`, `nonce`, `fee_token`? |
-| `ledger_update` / `c_staking_transfer` (2) | `token`, `amount`, `is_deposit` |
-| `ledger_update` / `account_class_transfer` (3) | `usdc`, `to_perp` |
-| `ledger_update` / `internal_transfer` (4) | `usdc`, `user`, `destination`, `fee` |
-| `ledger_update` / `sub_account_transfer` (5) | `usdc`, `user`, `destination` |
-| `ledger_update` / `send` (6) | `user`, `destination`, `source_dex`, `destination_dex`, `token`, `amount`, `usdc_value`, `fee`, `native_token_fee`, `nonce`, `fee_token`? |
-| `ledger_update` / `deposit` (7) | `usdc` |
-| `ledger_update` / `withdraw` (8) | `usdc`, `nonce`, `fee` |
-| `ledger_update` / `vault_deposit` (9) | `vault`, `usdc` |
-| `ledger_update` / `rewards_claim` (10) | `amount`, `token` |
-| `ledger_update` / `vault_withdraw` (11) | `vault`, `user`, `requested_usd`, `commission`, `closing_cost`, `basis`, `net_withdrawn_usd` |
-| `ledger_update` / `vault_leader_commission` (12) | `user`, `usdc` |
-| `ledger_update` / `deploy_gas_auction` (13) | `token`, `amount` |
-| `ledger_update` / `account_activation_gas` (14) | `amount`, `token` |
-| `ledger_update` / `activate_dex_abstraction` (15) | `dex`, `token`, `amount` |
-| `ledger_update` / `liquidation` (16) | `liquidated_ntl_pos`, `account_value`, `leverage_type`, `liquidated_positions` |
-| `ledger_update` / `spot_genesis` (17) | `token`, `amount` |
-| `ledger_update` / `vault_distribution` (18) | `vault`, `usdc` |
-| `ledger_update` / `borrow_lend` (19) | `token`, `amount`, `interest_amount`, `operation` |
-| `ledger_update` / `vault_create` (20) | `vault`, `usdc`, `fee` |
-| `ledger_update` / `gossip_priority_gas_auction` (21) | `token`, `amount` |
-| `ledger_update` / `hip3_liquidator_deposit` (22) | `dex`, `token`, `amount` |
+| Type | Table | Columns set |
+|---|---|---|
+| `funding` | `other_events` | `item_count` |
+| `validator_rewards` | `other_events` | `item_count` |
+| `c_withdrawal` | `staking_events` | `user`, `amount`, `is_finalized` |
+| `c_deposit` | `staking_events` | `user`, `amount` |
+| `delegation` | `staking_events` | `user`, `validator`, `amount`, `is_undelegate` |
+| `gossip_priority_auction_restart` | `other_events` | `slot_id`, `previous_winner_ip`?, `end_gas`? |
+| `create_sub_account` | `other_events` | `user`, `sub_account`, `sub_account_name` |
+| `ledger_update` / `spot_transfer` (1) | `transfers` | `token`, `amount`, `usdc_value`, `user`, `destination`, `fee`, `native_token_fee`, `nonce`, `fee_token`? |
+| `ledger_update` / `c_staking_transfer` (2) | `staking_events` | `token`, `amount`, `is_deposit` |
+| `ledger_update` / `account_class_transfer` (3) | `transfers` | `usdc`, `to_perp` |
+| `ledger_update` / `internal_transfer` (4) | `transfers` | `usdc`, `user`, `destination`, `fee` |
+| `ledger_update` / `sub_account_transfer` (5) | `transfers` | `usdc`, `user`, `destination` |
+| `ledger_update` / `send` (6) | `transfers` | `user`, `destination`, `source_dex`, `destination_dex`, `token`, `amount`, `usdc_value`, `fee`, `native_token_fee`, `nonce`, `fee_token`? |
+| `ledger_update` / `deposit` (7) | `bridge_transfers` | `usdc` |
+| `ledger_update` / `withdraw` (8) | `bridge_transfers` | `usdc`, `nonce`, `fee` |
+| `ledger_update` / `vault_deposit` (9) | `vault_events` | `vault`, `usdc` |
+| `ledger_update` / `rewards_claim` (10) | `other_events` | `amount`, `token` |
+| `ledger_update` / `vault_withdraw` (11) | `vault_events` | `vault`, `user`, `requested_usd`, `commission`, `closing_cost`, `basis`, `net_withdrawn_usd` |
+| `ledger_update` / `vault_leader_commission` (12) | `vault_events` | `user`, `usdc` |
+| `ledger_update` / `deploy_gas_auction` (13) | `other_events` | `token`, `amount` |
+| `ledger_update` / `account_activation_gas` (14) | `other_events` | `amount`, `token` |
+| `ledger_update` / `activate_dex_abstraction` (15) | `other_events` | `dex`, `token`, `amount` |
+| `ledger_update` / `liquidation` (16) | `other_events` | `liquidated_ntl_pos`, `account_value`, `leverage_type`, `liquidated_positions` |
+| `ledger_update` / `spot_genesis` (17) | `other_events` | `token`, `amount` |
+| `ledger_update` / `vault_distribution` (18) | `vault_events` | `vault`, `usdc` |
+| `ledger_update` / `borrow_lend` (19) | `other_events` | `token`, `amount`, `interest_amount`, `operation` |
+| `ledger_update` / `vault_create` (20) | `vault_events` | `vault`, `usdc`, `fee` |
+| `ledger_update` / `gossip_priority_gas_auction` (21) | `other_events` | `token`, `amount` |
+| `ledger_update` / `hip3_liquidator_deposit` (22) | `other_events` | `dex`, `token`, `amount` |
 
 The numbers are the `LedgerUpdateDelta` case numbers.
 

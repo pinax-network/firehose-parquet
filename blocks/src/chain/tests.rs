@@ -730,10 +730,11 @@ fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     );
 }
 
-/// SHA-256 over the five HyperCore schemas with the default `hex` encoding,
-/// final and non-final, for every other option. These schemas are bound into
-/// every HyperCore root's protected identity, and upstream additions must be
-/// placed without changing them (`docs/chains/hypercore.md`, "Schema epochs").
+/// SHA-256 over the twelve HyperCore schemas, their schema metadata (the
+/// derivation version) included, with the default `hex` encoding, final and
+/// non-final, for every other option. These schemas are bound into every
+/// HyperCore root's protected identity, and upstream additions must be placed
+/// without changing them (`docs/chains/hypercore.md`, "Schema changes").
 #[test]
 fn hypercore_schemas_match_the_pinned_epoch_digest() {
     assert_eq!(
@@ -743,8 +744,112 @@ fn hypercore_schemas_match_the_pinned_epoch_digest() {
             |_, _, schema| Some(schema.clone())
         ),
         HYPERCORE_SCHEMA_DIGEST,
-        "the HyperCore schema changed: this requires a new output root (schema epoch); \
-         re-pin only together with a documented epoch"
+        "the HyperCore schema changed: this requires a new output root; re-pin only \
+         together with a documented, rebuild-required change"
+    );
+}
+
+/// D6 (`docs/chains/hypercore.md`, "Derivation rules"): the HyperCore
+/// derivation version is schema metadata, so a change of a derivation rule
+/// alone, with the same columns, changes every table's declared digest, and a
+/// root started under one version refuses to resume under another. The same
+/// version resumes.
+#[tokio::test]
+async fn a_hypercore_derivation_version_change_alone_is_refused_on_resume() {
+    use crate::hypercore::schema::{DERIVATION_KEY, DERIVATION_VERSION};
+    use arrow::record_batch::RecordBatch;
+    use firehose_parquet::config::Config;
+    use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
+    use firehose_parquet::ingest::{
+        declare_data_schemas, declare_inventory, BlockFamily, IngestionSession, MapperSemantics,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let kind = ChainKind::Hypercore;
+    let delta_types = kind.profile().delta_types();
+    let mut mapper = kind.create_mapper(MapperOptions {
+        extended: false,
+        with_votes: false,
+        include_fork_step: false,
+        encode_bytes: EncodeBytes::Hex,
+        synthetic_partition_routing: false,
+        include_failed_transactions: false,
+    });
+    let names: Vec<String> = mapper
+        .table_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let declared: Vec<&str> = names.iter().map(String::as_str).collect();
+    let current = mapper.flush().unwrap();
+    // The same tables and columns under the next derivation version.
+    let next: HashMap<String, RecordBatch> = current
+        .iter()
+        .map(|(name, batch)| {
+            let mut metadata = batch.schema().metadata().clone();
+            assert_eq!(
+                metadata.insert(DERIVATION_KEY.to_string(), "2".to_string()),
+                Some(DERIVATION_VERSION.to_string()),
+                "{name}"
+            );
+            let schema = batch.schema().as_ref().clone().with_metadata(metadata);
+            (name.clone(), RecordBatch::new_empty(Arc::new(schema)))
+        })
+        .collect();
+    let semantics = |batches: &HashMap<String, RecordBatch>| MapperSemantics {
+        chain: "hypercore".into(),
+        family: BlockFamily::Hypercore,
+        bytes_encoding: "hex".into(),
+        extended: false,
+        with_votes: false,
+        include_failed_transactions: false,
+        tables: declare_inventory(batches, &declared, &delta_types).unwrap(),
+        data_schemas: declare_data_schemas(batches, &declared, &delta_types).unwrap(),
+        delta_types,
+    };
+    let (first, second) = (semantics(&current), semantics(&next));
+    assert_eq!(first.tables.len(), 12);
+    for name in &names {
+        assert_ne!(first.tables[name], second.tables[name], "{name}");
+        assert_eq!(
+            first.data_schemas[name].fields(),
+            second.data_schemas[name].fields(),
+            "{name}: only the metadata differs"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        output: dir.path().join("hypercore"),
+        start_block: Some(846_903_317),
+        final_blocks_only: true,
+        ..Default::default()
+    };
+    let owner = DatasetOwnership::acquire(
+        "test",
+        vec![MutationScope::directory(config.output.to_string_lossy())],
+        None,
+    )
+    .await
+    .unwrap();
+    drop(
+        IngestionSession::open(&config, first, &owner, None, None)
+            .await
+            .unwrap(),
+    );
+    let refused = IngestionSession::open(&config, second, &owner, None, None)
+        .await
+        .err()
+        .expect("a root of derivation version 1 refuses version 2");
+    assert!(
+        format!("{refused:#}").contains("existing authoritative stream differs from this request"),
+        "{refused:#}"
+    );
+    drop(
+        IngestionSession::open(&config, semantics(&current), &owner, None, None)
+            .await
+            .unwrap(),
     );
 }
 
@@ -816,10 +921,10 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
 }
 
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "027ed07afb88e0c3faf5a70ea7dfe803491ff6366b55f757078dc7267df281f8";
+    "b1a17b31ef90df600363152631adabfe7fd5b86247168b29e50d8d2245859b7a";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "651f9f74de20ffd955c267835d64715ac11301f479ddef2d54fe6480ae1ae61f";
+    "53e842d34a364cac8116dddc2ba05cbff7bc33a66b69e88a82d57cc578693d3b";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
     "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
@@ -827,6 +932,6 @@ const FINAL_ONLY_SCHEMA_DIGEST: &str =
 const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
     "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";
 
-/// HyperCore schema epoch 1 (`docs/chains/hypercore.md`).
+/// The HyperCore schemas (`docs/chains/hypercore.md`), derivation version 1.
 const HYPERCORE_SCHEMA_DIGEST: &str =
-    "bfc34061470c195d5e6c932e8d6beda9dfece81dd271fc4fbe038317e0ce314d";
+    "d648e61190297aa2e10fdcf325c8a4db179d06de433caa1024aef9a3703ab9e2";

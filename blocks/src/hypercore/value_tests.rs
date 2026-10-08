@@ -1,13 +1,18 @@
-//! HyperCore golden, round-trip, refusal and unit tests (schema epoch 1).
+//! HyperCore golden, round-trip, derivation, refusal and unit tests.
 //!
 //! The 36 real fixtures (`blocks/tests/fixtures/hypercore/`) are mapped with
 //! their true identities under `hex` and `binary`:
 //!
 //! - T1 row counts, T2 label coverage, T3 pinned values;
-//! - T4 a byte-exact rebuild of every payload from the five output tables;
-//! - T5 the populated-column matrix of `docs/chains/hypercore.md`;
+//! - T4 a byte-exact rebuild of every payload from the raw tables: `blocks`,
+//!   the raw columns of `fills`, the union of the five event tables,
+//!   `funding_deltas` and `validator_rewards`;
+//! - T5 the populated-column matrix of `docs/chains/hypercore.md`, per event
+//!   table, and the pinned event routing;
 //! - T6 `extra_json` is NULL everywhere;
-//! - T7 a pinned hash of the whole output, the release invariant.
+//! - T7 a pinned hash of the whole output, the release invariant;
+//! - T8 golden derived rows of named fixtures, and an independent, naive
+//!   re-derivation of every derived row and column from the raw output.
 //!
 //! Then every refusal rule (R1–R11) with its error text, atomicity, the
 //! empty/NULL rules and the enum labels.
@@ -15,7 +20,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{new_null_array, Array, AsArray, UInt32Array};
+use arrow::compute::{concat_batches, take_record_batch};
 use arrow::datatypes::{
     DataType, Date32Type, Decimal128Type, Int32Type, Int64Type, TimeUnit, TimestampMillisecondType,
     UInt32Type, UInt64Type,
@@ -29,9 +35,9 @@ use sha2::{Digest, Sha256};
 
 use super::decimal::canonical_text;
 use super::fixtures::{identity_of, real_blocks, FUNDING_BLOCK};
-use super::mapper::HypercoreBlockMapper;
+use super::mapper::{market, route_event, HypercoreBlockMapper, Market};
 use super::proto::hypercore as pb;
-use super::schema::TABLE_NAMES;
+use super::schema::{EventTable, TABLE_NAMES};
 use pb::{event_body, ledger_update_delta};
 
 type Tables = HashMap<String, RecordBatch>;
@@ -71,7 +77,7 @@ fn map_all(encoding: EncodeBytes) -> Tables {
             .unwrap_or_else(|error| panic!("{encoding:?} {number}: {error:#}"));
         assert_eq!(fills, block.fills.len() as u64, "{number}");
     }
-    mapper.flush().unwrap()
+    with_events(mapper.flush().unwrap())
 }
 
 fn golden(encoding: &EncodeBytes) -> &'static Tables {
@@ -98,7 +104,50 @@ fn map_with(
 ) -> anyhow::Result<Tables> {
     let mut mapper = HypercoreBlockMapper::new(false, encoding);
     mapper.map_block(&block.encode_to_vec(), identity, StreamEvent::default())?;
-    mapper.flush()
+    Ok(with_events(mapper.flush()?))
+}
+
+/// The output tables plus `events`, the union of the five event tables (the
+/// `events` view of the chain notes), which these tests read as one table.
+fn with_events(mut tables: Tables) -> Tables {
+    let events = events_union(&tables);
+    tables.insert("events".to_string(), events);
+    tables
+}
+
+/// The five event tables' rows in `(block_num, event_index)` order, with
+/// every catalogue column, NULL where a table lacks it.
+fn events_union(tables: &Tables) -> RecordBatch {
+    let schema = tables["other_events"].schema();
+    let parts: Vec<RecordBatch> = EventTable::ALL
+        .into_iter()
+        .map(|table| {
+            let batch = &tables[table.name()];
+            let columns = schema
+                .fields()
+                .iter()
+                .map(|field| match batch.column_by_name(field.name()) {
+                    Some(column) => column.clone(),
+                    None => {
+                        assert!(!table.has_column(field.name()));
+                        new_null_array(field.data_type(), batch.num_rows())
+                    }
+                })
+                .collect();
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
+        })
+        .collect();
+    let all = concat_batches(&schema, &parts).unwrap();
+    let numbers = all.column_by_name("block_num").unwrap();
+    let positions = all.column_by_name("event_index").unwrap();
+    let mut order: Vec<u32> = (0..all.num_rows() as u32).collect();
+    order.sort_by_key(|row| {
+        (
+            numbers.as_primitive::<UInt64Type>().value(*row as usize),
+            positions.as_primitive::<UInt32Type>().value(*row as usize),
+        )
+    });
+    take_record_batch(&all, &UInt32Array::from(order)).unwrap()
 }
 
 /// The full error text of a refused block.
@@ -270,56 +319,89 @@ fn rows_of(view: &View<'_>, number: u64) -> Vec<usize> {
 // T1 row counts
 // ---------------------------------------------------------------------------
 
-/// `(block, fills, events, funding_deltas, validator_rewards)` per fixture.
-const ROW_COUNTS: [(u64, usize, usize, usize, usize); 36] = [
-    (846001240, 0, 3, 0, 0),
-    (846903317, 1527, 7, 202449, 30),
-    (847193990, 0, 2, 0, 0),
-    (889872017, 0, 1, 0, 0),
-    (895702803, 0, 2, 0, 0),
-    (897888967, 2, 2, 0, 0),
-    (987247825, 0, 3, 0, 31),
-    (1009557224, 0, 2, 0, 0),
-    (1009612597, 0, 1, 0, 0),
-    (1009686466, 0, 1, 0, 0),
-    (1009701302, 2, 0, 0, 0),
-    (1009721907, 0, 2, 0, 0),
-    (1009855075, 314, 0, 0, 0),
-    (1009867965, 0, 1, 0, 0),
-    (1009868295, 0, 1, 0, 0),
-    (1009877929, 0, 1, 0, 0),
-    (1009907496, 0, 1, 0, 0),
-    (1009925229, 0, 1, 0, 0),
-    (1009958482, 0, 1, 0, 0),
-    (1010128732, 0, 1, 0, 0),
-    (1010355937, 2, 0, 0, 0),
-    (1010423738, 0, 1, 0, 0),
-    (1010581248, 16, 0, 0, 0),
-    (1075395014, 3, 0, 0, 0),
-    (1075987296, 26, 1, 0, 0),
-    (1078677210, 3, 0, 0, 0),
-    (1110656252, 2, 0, 0, 0),
-    (1127672017, 38, 12, 0, 0),
-    (1165601237, 28, 1, 0, 0),
-    (1173346041, 0, 1, 0, 0),
-    (1173352606, 0, 1, 0, 0),
-    (1173408840, 6, 1, 0, 0),
-    (1173546257, 0, 3, 0, 0),
-    (1173674198, 2, 1, 0, 0),
-    (1173744709, 0, 1, 0, 0),
-    (1173886256, 0, 1, 0, 0),
+/// The tables [`ROW_COUNTS`] counts, every table but `blocks`.
+const COUNTED_TABLES: [&str; 11] = [
+    "fills",
+    "outcome_fills",
+    "liquidations",
+    "transfers",
+    "bridge_transfers",
+    "vault_events",
+    "staking_events",
+    "other_events",
+    "funding_deltas",
+    "funding_rates",
+    "validator_rewards",
+];
+
+/// Rows per fixture in each of [`COUNTED_TABLES`]; every fixture has one
+/// `blocks` row.
+const ROW_COUNTS: [(u64, [usize; 11]); 36] = [
+    (846001240, [0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0]),
+    (846903317, [1527, 0, 0, 0, 0, 0, 0, 7, 202449, 225, 30]),
+    (847193990, [0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0]),
+    (889872017, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (895702803, [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0]),
+    (897888967, [2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    (987247825, [0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 31]),
+    (1009557224, [0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0]),
+    (1009612597, [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+    (1009686466, [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]),
+    (1009701302, [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1009721907, [0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0]),
+    (1009855075, [314, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1009867965, [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]),
+    (1009868295, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1009877929, [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]),
+    (1009907496, [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+    (1009925229, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1009958482, [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]),
+    (1010128732, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1010355937, [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1010423738, [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+    (1010581248, [16, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1075395014, [3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1075987296, [26, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1078677210, [3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1110656252, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (1127672017, [38, 0, 12, 0, 0, 0, 0, 12, 0, 0, 0]),
+    (1165601237, [28, 2, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1173346041, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1173352606, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1173408840, [6, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+    (1173546257, [0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0]),
+    (1173674198, [2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1173744709, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
+    (1173886256, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]),
 ];
 
 #[test]
 fn t1_row_counts_per_fixture_and_in_total() {
+    let totals: [(&str, usize); 12] = [
+        ("blocks", 36),
+        ("fills", 1_971),
+        ("outcome_fills", 16),
+        ("liquidations", 19),
+        ("transfers", 7),
+        ("bridge_transfers", 3),
+        ("vault_events", 6),
+        ("staking_events", 7),
+        ("other_events", 34),
+        ("funding_deltas", 202_449),
+        ("funding_rates", 225),
+        ("validator_rewards", 61),
+    ];
+    assert_eq!(totals.map(|(table, _)| table), TABLE_NAMES);
     for encoding in &GOLDEN_ENCODINGS {
         let tables = golden(encoding);
-        let count = |table: &str| tables[table].num_rows();
-        assert_eq!(count("blocks"), 36, "{encoding:?}");
-        assert_eq!(count("fills"), 1_971, "{encoding:?}");
-        assert_eq!(count("events"), 57, "{encoding:?}");
-        assert_eq!(count("funding_deltas"), 202_449, "{encoding:?}");
-        assert_eq!(count("validator_rewards"), 61, "{encoding:?}");
+        for (table, rows) in totals {
+            assert_eq!(tables[table].num_rows(), rows, "{encoding:?} {table}");
+        }
+        assert_eq!(
+            tables["events"].num_rows(),
+            57,
+            "the union of the event tables"
+        );
         let per_block = |table: &str| {
             let view = View::new(tables, table, encoding);
             let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
@@ -330,30 +412,21 @@ fn t1_row_counts_per_fixture_and_in_total() {
             }
             counts
         };
-        let (blocks_of, fills_of, events_of, deltas_of, rewards_of) = (
-            per_block("blocks"),
-            per_block("fills"),
-            per_block("events"),
-            per_block("funding_deltas"),
-            per_block("validator_rewards"),
-        );
+        let blocks_of = per_block("blocks");
+        let counted = COUNTED_TABLES.map(per_block);
         let blocks = View::new(tables, "blocks", encoding);
-        for (number, fills, events, deltas, rewards) in ROW_COUNTS {
+        for (number, counts) in ROW_COUNTS {
             let of = |counts: &BTreeMap<u64, usize>| counts.get(&number).copied().unwrap_or(0);
+            assert_eq!(of(&blocks_of), 1, "{number}");
+            assert_eq!(counted.each_ref().map(of), counts, "{number}");
+            let row = rows_of(&blocks, number)[0];
+            assert_eq!(blocks.u32("fill_count", row), Some(counts[0] as u32));
+            // `event_count` is the block's total over the five event tables.
             assert_eq!(
-                (
-                    of(&blocks_of),
-                    of(&fills_of),
-                    of(&events_of),
-                    of(&deltas_of),
-                    of(&rewards_of)
-                ),
-                (1, fills, events, deltas, rewards),
+                blocks.u32("event_count", row),
+                Some(counts[3..8].iter().sum::<usize>() as u32),
                 "{number}"
             );
-            let row = rows_of(&blocks, number)[0];
-            assert_eq!(blocks.u32("fill_count", row), Some(fills as u32));
-            assert_eq!(blocks.u32("event_count", row), Some(events as u32));
         }
     }
 }
@@ -1185,71 +1258,40 @@ fn t4_every_payload_is_rebuilt_byte_for_byte_from_the_tables() {
 // T5 populated-column matrix, T6 extra_json
 // ---------------------------------------------------------------------------
 
-/// The `events` columns after the canonical ones.
-const EVENT_PAYLOAD_COLUMNS: [&str; 43] = [
-    "event_index",
-    "event_type",
-    "ledger_type",
-    "hash",
-    "event_time_ns",
-    "users",
-    "user",
-    "destination",
-    "vault",
-    "validator",
-    "sub_account",
-    "token",
-    "amount",
-    "usdc",
-    "usdc_value",
-    "fee",
-    "fee_token",
-    "native_token_fee",
-    "nonce",
-    "source_dex",
-    "destination_dex",
-    "dex",
-    "is_deposit",
-    "to_perp",
-    "is_undelegate",
-    "is_finalized",
-    "requested_usd",
-    "commission",
-    "closing_cost",
-    "basis",
-    "net_withdrawn_usd",
-    "interest_amount",
-    "operation",
-    "liquidated_ntl_pos",
-    "account_value",
-    "leverage_type",
-    "liquidated_positions",
-    "slot_id",
-    "previous_winner_ip",
-    "end_gas",
-    "sub_account_name",
-    "item_count",
-    "extra_json",
-];
+/// The columns of a table after the canonical ones.
+fn payload_columns(batch: &RecordBatch) -> Vec<String> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .skip(CANONICAL_COLUMN_COUNT)
+        .map(|field| field.name().clone())
+        .collect()
+}
 
-type Matrix = BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>;
+/// `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`,
+/// `timestamp`, `date`.
+const CANONICAL_COLUMN_COUNT: usize = 7;
 
-/// The matrix as `docs/chains/hypercore.md` states it: `(columns, optional
-/// columns)` keyed by `event_type` or `ledger_update/<ledger_type>`.
+/// `(table, columns, optional columns)` per type.
+type Matrix = BTreeMap<String, (String, BTreeSet<String>, BTreeSet<String>)>;
+
+/// The matrix as `docs/chains/hypercore.md` states it: `(table, columns,
+/// optional columns)` keyed by `event_type` or `ledger_update/<ledger_type>`.
 fn documented_matrix() -> Matrix {
     let doc = include_str!("../../../docs/chains/hypercore.md");
     let start = doc
-        .find("| Type | Columns set |")
+        .find("| Type | Table | Columns set |")
         .expect("the matrix in docs/chains/hypercore.md");
     let mut matrix = BTreeMap::new();
     for line in doc[start..].lines().skip(2) {
         let Some(row) = line.strip_prefix("| ") else {
             break;
         };
-        let (kind, columns) = row
-            .trim_end_matches(" |")
-            .split_once(" | ")
-            .expect("two cells");
+        let cells: Vec<&str> = row.trim_end_matches(" |").split(" | ").collect();
+        let [kind, table, columns] = cells[..] else {
+            panic!("three cells: {line}");
+        };
         let names: Vec<&str> = kind
             .split(" / ")
             .map(|part| part.split(' ').next().unwrap().trim_matches('`'))
@@ -1263,46 +1305,179 @@ fn documented_matrix() -> Matrix {
             }
             set.insert(name);
         }
-        matrix.insert(names.join("/"), (set, optional));
+        let previous = matrix.insert(
+            names.join("/"),
+            (table.trim_matches('`').to_string(), set, optional),
+        );
+        assert!(previous.is_none(), "{line}");
     }
     matrix
 }
 
+/// The labels of a matrix key.
+fn labels(key: &str) -> (&str, Option<&str>) {
+    match key.split_once('/') {
+        Some((event_type, ledger_type)) => (event_type, Some(ledger_type)),
+        None => (key, None),
+    }
+}
+
+/// Every label and its event table, pinned (rule D8): a label's table never
+/// changes for the life of a root, and this list may only grow, when a release
+/// vendors a new label.
+const ROUTES: [(&str, &str); 29] = [
+    ("funding", "other_events"),
+    ("validator_rewards", "other_events"),
+    ("c_withdrawal", "staking_events"),
+    ("c_deposit", "staking_events"),
+    ("delegation", "staking_events"),
+    ("gossip_priority_auction_restart", "other_events"),
+    ("create_sub_account", "other_events"),
+    ("ledger_update/spot_transfer", "transfers"),
+    ("ledger_update/c_staking_transfer", "staking_events"),
+    ("ledger_update/account_class_transfer", "transfers"),
+    ("ledger_update/internal_transfer", "transfers"),
+    ("ledger_update/sub_account_transfer", "transfers"),
+    ("ledger_update/send", "transfers"),
+    ("ledger_update/deposit", "bridge_transfers"),
+    ("ledger_update/withdraw", "bridge_transfers"),
+    ("ledger_update/vault_deposit", "vault_events"),
+    ("ledger_update/rewards_claim", "other_events"),
+    ("ledger_update/vault_withdraw", "vault_events"),
+    ("ledger_update/vault_leader_commission", "vault_events"),
+    ("ledger_update/deploy_gas_auction", "other_events"),
+    ("ledger_update/account_activation_gas", "other_events"),
+    ("ledger_update/activate_dex_abstraction", "other_events"),
+    ("ledger_update/liquidation", "other_events"),
+    ("ledger_update/spot_genesis", "other_events"),
+    ("ledger_update/vault_distribution", "vault_events"),
+    ("ledger_update/borrow_lend", "other_events"),
+    ("ledger_update/vault_create", "vault_events"),
+    ("ledger_update/gossip_priority_gas_auction", "other_events"),
+    ("ledger_update/hip3_liquidator_deposit", "other_events"),
+];
+
+fn table_named(name: &str) -> EventTable {
+    EventTable::ALL
+        .into_iter()
+        .find(|table| table.name() == name)
+        .unwrap_or_else(|| panic!("no event table {name}"))
+}
+
+/// R-D6: every label of the vendored protos routes to its pinned table, the
+/// chain notes document exactly that routing, and an unknown label goes to
+/// `other_events`.
 #[test]
-fn t5_each_event_type_sets_exactly_its_documented_columns() {
+fn event_routing_is_pinned_and_documented() {
+    let mut labels_of_protos: BTreeSet<String> = EVENT_TYPES
+        .iter()
+        .filter(|label| **label != "ledger_update")
+        .map(|label| label.to_string())
+        .collect();
+    labels_of_protos.extend(
+        LEDGER_TYPES
+            .iter()
+            .map(|label| format!("ledger_update/{label}")),
+    );
+    let pinned: BTreeMap<String, String> = ROUTES
+        .iter()
+        .map(|(key, table)| (key.to_string(), table.to_string()))
+        .collect();
+    assert_eq!(pinned.len(), ROUTES.len(), "a label pinned twice");
+    assert_eq!(
+        pinned.keys().cloned().collect::<BTreeSet<_>>(),
+        labels_of_protos
+    );
+    for (key, table) in &pinned {
+        let (event_type, ledger_type) = labels(key);
+        assert_eq!(route_event(event_type, ledger_type).name(), table, "{key}");
+    }
+    let documented: BTreeMap<String, String> = documented_matrix()
+        .into_iter()
+        .map(|(key, (table, _, _))| (key, table))
+        .collect();
+    assert_eq!(documented, pinned, "the chain notes' routing");
+    for (event_type, ledger_type) in [
+        ("ledger_update", Some("a_future_delta")),
+        ("a_future_body", None),
+        ("c_deposit", Some("send")),
+        ("ledger_update", None),
+    ] {
+        assert_eq!(
+            route_event(event_type, ledger_type),
+            EventTable::OtherEvents,
+            "{event_type} {ledger_type:?}"
+        );
+    }
+}
+
+/// Every column a routed type sets is a column of its table (so the split
+/// loses nothing), and every own column of a domain table is set by one of its
+/// types (so it has no dead column).
+#[test]
+fn every_routed_type_has_its_columns_in_its_table() {
+    let matrix = documented_matrix();
+    let mut used: BTreeMap<EventTable, BTreeSet<String>> = BTreeMap::new();
+    for (key, (table, columns, _)) in &matrix {
+        let table = table_named(table);
+        for column in columns {
+            assert!(table.has_column(column), "{key}: {column} not in {table:?}");
+        }
+        used.entry(table)
+            .or_default()
+            .extend(columns.iter().cloned());
+    }
+    for table in EventTable::ALL {
+        let Some(own) = table.own_columns() else {
+            continue;
+        };
+        let own: BTreeSet<String> = own.iter().map(|column| column.to_string()).collect();
+        assert_eq!(own, used[&table], "{table:?}");
+    }
+}
+
+#[test]
+fn t5_each_event_table_holds_its_types_with_exactly_their_documented_columns() {
     let matrix = documented_matrix();
     assert_eq!(matrix.len(), 7 + 22, "{:?}", matrix.keys());
     for encoding in &GOLDEN_ENCODINGS {
         let tables = golden(encoding);
-        let events = View::new(tables, "events", encoding);
         let mut seen = BTreeSet::new();
-        for row in 0..events.len() {
-            let event_type = events.text("event_type", row).unwrap();
-            let mut always: BTreeSet<String> =
-                ["event_index", "event_type", "hash", "event_time_ns"]
-                    .map(String::from)
-                    .into();
-            let key = match events.text("ledger_type", row) {
-                Some(ledger_type) => {
-                    always.extend(["ledger_type".to_string(), "users".to_string()]);
-                    format!("{event_type}/{ledger_type}")
-                }
-                None => event_type.to_string(),
-            };
-            let (columns, optional) = &matrix[&key];
-            let expected: BTreeSet<String> = always.union(columns).cloned().collect();
-            let set: BTreeSet<String> = EVENT_PAYLOAD_COLUMNS
-                .iter()
-                .filter(|column| !events.is_null(column, row))
-                .map(|column| column.to_string())
-                .collect();
-            assert!(
-                set.is_subset(&expected),
-                "{key}: {set:?} not in {expected:?}"
-            );
-            let missing: BTreeSet<String> = expected.difference(&set).cloned().collect();
-            assert!(missing.is_subset(optional), "{key}: {missing:?} are NULL");
-            seen.insert(key);
+        for table in EventTable::ALL {
+            let view = View::new(tables, table.name(), encoding);
+            let columns = payload_columns(view.batch);
+            assert!(view.len() > 0, "{table:?} has rows in the fixtures");
+            for row in 0..view.len() {
+                let event_type = view.text("event_type", row).unwrap();
+                let ledger_type = view.text("ledger_type", row);
+                assert_eq!(route_event(event_type, ledger_type), table);
+                let mut always: BTreeSet<String> =
+                    ["event_index", "event_type", "hash", "event_time_ns"]
+                        .map(String::from)
+                        .into();
+                let key = match ledger_type {
+                    Some(ledger_type) => {
+                        always.extend(["ledger_type".to_string(), "users".to_string()]);
+                        format!("{event_type}/{ledger_type}")
+                    }
+                    None => event_type.to_string(),
+                };
+                let (documented_table, set_columns, optional) = &matrix[&key];
+                assert_eq!(documented_table, table.name(), "{key}");
+                let expected: BTreeSet<String> = always.union(set_columns).cloned().collect();
+                let set: BTreeSet<String> = columns
+                    .iter()
+                    .filter(|column| !view.is_null(column, row))
+                    .cloned()
+                    .collect();
+                assert!(
+                    set.is_subset(&expected),
+                    "{key}: {set:?} not in {expected:?}"
+                );
+                let missing: BTreeSet<String> = expected.difference(&set).cloned().collect();
+                assert!(missing.is_subset(optional), "{key}: {missing:?} are NULL");
+                seen.insert(key);
+            }
         }
         assert_eq!(
             seen.len(),
@@ -1412,21 +1587,684 @@ fn output_digest(tables: &Tables) -> String {
         .collect()
 }
 
-/// The release invariant of schema epoch 1: every later release must map the
-/// 36 fixtures to exactly this output, value for value, under `hex` and
-/// `binary`. A change here is a change of the data in existing roots.
+/// The release invariant: every later release must map the 36 fixtures to
+/// exactly this output, value for value, under `hex` and `binary`, all twelve
+/// tables included. A change here is a change of the data in existing roots.
 #[test]
 fn t7_fixture_output_matches_the_pinned_release_invariant() {
     assert_eq!(
         output_digest(golden(&EncodeBytes::Hex)),
-        "0f2f619c947d8c73d68d7f58a483a9f1d6b3dd759ba08e2690c5731dd63c4da9",
+        "7d7470e37fd3eb071ba348b7950385c0423c6ab03cc4131e866463b636827789",
         "hex output changed"
     );
     assert_eq!(
         output_digest(golden(&EncodeBytes::Binary)),
-        "85156402652c799b88176dda9071989e39e322828648da7069d99d8366c82204",
+        "e4cd0862905894efd79abb71aa0f3493ad34c6432f489c2be6fa3a2899947d88",
         "binary output changed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T8 derived rows
+// ---------------------------------------------------------------------------
+
+/// One cell in the canonical text of [`write_value`].
+fn cell(batch: &RecordBatch, column: &str, row: usize) -> String {
+    let mut text = String::new();
+    write_value(
+        batch
+            .column_by_name(column)
+            .unwrap_or_else(|| panic!("no column {column}"))
+            .as_ref(),
+        row,
+        &mut text,
+    );
+    text
+}
+
+/// A text value as [`write_value`] writes a `Utf8` or dictionary cell.
+fn text_cell(value: Option<&str>) -> String {
+    value.map_or_else(|| "~".to_string(), |text| format!("{}:{text}", text.len()))
+}
+
+/// A number as [`write_value`] writes an integer or decimal cell.
+fn number_cell(value: Option<i128>) -> String {
+    value.map_or_else(|| "~".to_string(), |value| value.to_string())
+}
+
+/// Every row of a table as its cells, in column order.
+fn table_cells(batch: &RecordBatch) -> Vec<Vec<String>> {
+    let names: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    (0..batch.num_rows())
+        .map(|row| names.iter().map(|name| cell(batch, name, row)).collect())
+        .collect()
+}
+
+/// R-D1, written a second time without the mapper's code: a character
+/// scan per pattern of the chain notes. `(market_type, dex, (outcome_id,
+/// side_index))`.
+fn naive_market(coin: &str) -> (Option<&'static str>, Option<String>, Option<(i64, i64)>) {
+    let chars: Vec<char> = coin.chars().collect();
+    let every = |part: &[char], keep: fn(&char) -> bool| !part.is_empty() && part.iter().all(keep);
+    if chars.first() == Some(&'#') && every(&chars[1..], char::is_ascii_digit) {
+        let mut number: u128 = 0;
+        for digit in &chars[1..] {
+            number = number * 10 + u128::from(digit.to_digit(10).unwrap());
+            if number > u128::from(u64::MAX) {
+                return (None, None, None);
+            }
+        }
+        return (
+            Some("outcome"),
+            None,
+            Some(((number / 10) as i64, (number % 10) as i64)),
+        );
+    }
+    if chars.first() == Some(&'@') && every(&chars[1..], char::is_ascii_digit) {
+        return (Some("spot"), None, None);
+    }
+    let slashes: Vec<usize> = (0..chars.len()).filter(|at| chars[*at] == '/').collect();
+    if let [slash] = slashes[..] {
+        if every(&chars[..slash], char::is_ascii_alphanumeric)
+            && every(&chars[slash + 1..], char::is_ascii_alphanumeric)
+        {
+            return (Some("spot"), None, None);
+        }
+    }
+    let colons: Vec<usize> = (0..chars.len()).filter(|at| chars[*at] == ':').collect();
+    if let [colon] = colons[..] {
+        let dex = &chars[..colon];
+        if colon > 0
+            && dex[0].is_ascii_lowercase()
+            && dex
+                .iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && every(&chars[colon + 1..], char::is_ascii_alphanumeric)
+        {
+            return (Some("perp"), Some(dex.iter().collect()), None);
+        }
+    }
+    if every(&chars, char::is_ascii_alphanumeric) {
+        return (Some("perp"), Some(String::new()), None);
+    }
+    (None, None, None)
+}
+
+/// R-D2, written a second time: for each fill row, the row of the other leg,
+/// by scanning every fill of its block.
+fn naive_pairs(fills: &RecordBatch) -> Vec<Option<usize>> {
+    let view = View {
+        batch: fills,
+        encoding: EncodeBytes::Hex,
+    };
+    let blocks = rows_by_block(&view);
+    let mut pairs = vec![None; fills.num_rows()];
+    for rows in blocks.values() {
+        for &row in rows {
+            let tid = view.u64("transaction_id", row).unwrap();
+            if tid == 0 {
+                continue;
+            }
+            let legs: Vec<usize> = rows
+                .iter()
+                .copied()
+                .filter(|other| {
+                    view.u64("transaction_id", *other) == Some(tid)
+                        && view.text("coin", *other) == view.text("coin", row)
+                })
+                .collect();
+            if let [a, b] = legs[..] {
+                if view.text("side", a) != view.text("side", b) {
+                    pairs[row] = Some(if a == row { b } else { a });
+                }
+            }
+        }
+    }
+    pairs
+}
+
+const CANONICAL_NAMES: [&str; 7] = [
+    "block_num",
+    "block_id",
+    "parent_num",
+    "parent_id",
+    "lib_num",
+    "timestamp",
+    "date",
+];
+
+/// Every derived row and column, re-derived naively from the raw output
+/// tables (`fills`, the event union and `funding_deltas`) and compared cell
+/// by cell with the mapper's output, on all 36 fixtures under both
+/// encodings.
+#[test]
+fn t8_every_derived_value_matches_an_independent_naive_derivation() {
+    for encoding in &GOLDEN_ENCODINGS {
+        let tables = golden(encoding);
+        let fills = &tables["fills"];
+        let fills_view = View::new(tables, "fills", encoding);
+        let pairs = naive_pairs(fills);
+        let markets: Vec<_> = (0..fills.num_rows())
+            .map(|row| naive_market(fills_view.text("coin", row).unwrap()))
+            .collect();
+
+        // fills.market_type, fills.dex, fills.counterparty.
+        for row in 0..fills.num_rows() {
+            let (market_type, dex, _) = &markets[row];
+            assert_eq!(cell(fills, "market_type", row), text_cell(*market_type));
+            assert_eq!(cell(fills, "dex", row), text_cell(dex.as_deref()));
+            let counterparty =
+                pairs[row].map_or_else(|| "~".to_string(), |other| cell(fills, "user", other));
+            assert_eq!(cell(fills, "counterparty", row), counterparty, "fill {row}");
+        }
+
+        // outcome_fills: same-named copies, the parsed coin and the pair.
+        let mut expected = Vec::new();
+        for (row, (_, _, outcome)) in markets.iter().enumerate() {
+            let Some((outcome_id, side_index)) = outcome else {
+                continue;
+            };
+            let cells: Vec<String> = payload_names(&tables["outcome_fills"])
+                .iter()
+                .map(|column| match column.as_str() {
+                    "outcome_id" => number_cell(Some(i128::from(*outcome_id))),
+                    "side_index" => number_cell(Some(i128::from(*side_index))),
+                    "counterparty" => pairs[row]
+                        .map_or_else(|| "~".to_string(), |other| cell(fills, "user", other)),
+                    same => cell(fills, same, row),
+                })
+                .collect();
+            expected.push(cells);
+        }
+        assert_eq!(
+            table_cells(&tables["outcome_fills"]),
+            expected,
+            "{encoding:?}"
+        );
+
+        // liquidations: the liquidated legs, their copies and their pairs.
+        let mut expected = Vec::new();
+        for row in 0..fills.num_rows() {
+            if fills_view.is_null("liquidation_method", row)
+                || fills_view.bytes("user", row) != fills_view.bytes("liquidated_user", row)
+            {
+                continue;
+            }
+            let pair = pairs[row];
+            let of_pair = |column: &str| {
+                pair.map_or_else(|| "~".to_string(), |other| cell(fills, column, other))
+            };
+            let (market_type, dex, _) = &markets[row];
+            let cells: Vec<String> = payload_names(&tables["liquidations"])
+                .iter()
+                .map(|column| match column.as_str() {
+                    "liquidated_user" => cell(fills, "user", row),
+                    "mark_price" => cell(fills, "liquidation_mark_px", row),
+                    "market_type" => text_cell(*market_type),
+                    "dex" => text_cell(dex.as_deref()),
+                    "counterparty" => of_pair("user"),
+                    "counterparty_direction" => of_pair("direction"),
+                    "counterparty_fill_index" => of_pair("fill_index"),
+                    same => cell(fills, same, row),
+                })
+                .collect();
+            expected.push(cells);
+        }
+        assert_eq!(
+            table_cells(&tables["liquidations"]),
+            expected,
+            "{encoding:?}"
+        );
+
+        // funding_rates: per funding header, its deltas grouped by coin.
+        let events = &tables["events"];
+        let events_view = View::new(tables, "events", encoding);
+        let deltas = &tables["funding_deltas"];
+        let deltas_view = View::new(tables, "funding_deltas", encoding);
+        let mut expected = Vec::new();
+        for (number, rows) in rows_by_block(&events_view) {
+            let headers: Vec<usize> = rows
+                .into_iter()
+                .filter(|row| events_view.text("event_type", *row) == Some("funding"))
+                .collect();
+            for (dex_index, header) in headers.into_iter().enumerate() {
+                let event_index = events_view.u32("event_index", header).unwrap();
+                let mut items: Vec<usize> = (0..deltas.num_rows())
+                    .filter(|row| {
+                        deltas_view.u64("block_num", *row) == Some(number)
+                            && deltas_view.u32("event_index", *row) == Some(event_index)
+                    })
+                    .collect();
+                items.sort_by_key(|row| deltas_view.u32("delta_index", *row));
+                let mut coins: Vec<(String, Vec<usize>)> = Vec::new();
+                for item in items {
+                    let coin = deltas_view.text("coin", item).unwrap().to_string();
+                    match coins.iter_mut().find(|(seen, _)| *seen == coin) {
+                        Some((_, rows)) => rows.push(item),
+                        None => coins.push((coin, vec![item])),
+                    }
+                }
+                for (coin, rows) in coins {
+                    let value = |column: &str, row: usize| deltas_view.dec(column, row).unwrap();
+                    let total = |keep: &dyn Fn(i128) -> bool, column: &str, sign: i128| {
+                        let mut sum: Option<i128> = Some(0);
+                        for row in &rows {
+                            let value = value(column, *row);
+                            if keep(value) {
+                                sum = sum.and_then(|sum| sum.checked_add(sign * value.abs()));
+                            }
+                        }
+                        sum.filter(|sum| sum.unsigned_abs() < 10u128.pow(38))
+                    };
+                    let mut rates: Vec<i128> =
+                        rows.iter().map(|row| value("funding_rate", *row)).collect();
+                    rates.dedup();
+                    let rates: BTreeSet<i128> = rates.into_iter().collect();
+                    let count = |keep: &dyn Fn(i128) -> bool| {
+                        rows.iter().filter(|row| keep(value("szi", **row))).count() as i128
+                    };
+                    let cells: Vec<String> = payload_names(&tables["funding_rates"])
+                        .iter()
+                        .map(|column| match column.as_str() {
+                            "event_index" => number_cell(Some(i128::from(event_index))),
+                            "dex_index" => number_cell(Some(dex_index as i128)),
+                            "coin" => text_cell(Some(&coin)),
+                            "dex" => text_cell(naive_market(&coin).1.as_deref()),
+                            "funding_rate" => {
+                                number_cell((rates.len() == 1).then(|| *rates.first().unwrap()))
+                            }
+                            "positions" => number_cell(Some(rows.len() as i128)),
+                            "long_positions" => number_cell(Some(count(&|szi| szi > 0))),
+                            "short_positions" => number_cell(Some(count(&|szi| szi < 0))),
+                            "open_interest" => number_cell(total(&|_| true, "szi", 1)),
+                            "long_size" => number_cell(total(&|szi| szi > 0, "szi", 1)),
+                            "short_size" => number_cell(total(&|szi| szi < 0, "szi", 1)),
+                            "positive_funding" => {
+                                number_cell(total(&|amount| amount > 0, "funding_amount", 1))
+                            }
+                            "negative_funding" => {
+                                number_cell(total(&|amount| amount < 0, "funding_amount", -1))
+                            }
+                            "extra_json" => "~".to_string(),
+                            canonical => {
+                                assert!(CANONICAL_NAMES.contains(&canonical), "{canonical}");
+                                cell(events, canonical, header)
+                            }
+                        })
+                        .collect();
+                    expected.push(cells);
+                }
+            }
+        }
+        assert_eq!(expected.len(), 225);
+        assert_eq!(
+            table_cells(&tables["funding_rates"]),
+            expected,
+            "{encoding:?}"
+        );
+    }
+}
+
+/// The cells of one row of a table, by column name, without the canonical
+/// columns.
+fn row_cells(batch: &RecordBatch, row: usize) -> Vec<String> {
+    payload_names(batch)
+        .iter()
+        .skip(CANONICAL_COLUMN_COUNT)
+        .map(|name| format!("{name}={}", cell(batch, name, row)))
+        .collect()
+}
+
+/// The rows of a table in one block.
+fn block_rows(tables: &Tables, table: &str, number: u64) -> Vec<usize> {
+    rows_of(&View::new(tables, table, &EncodeBytes::Hex), number)
+}
+
+/// Golden derived rows of named fixtures (hex encoding), cross-checked against
+/// the DuckDB reference derivation of the chain notes.
+#[test]
+fn t8_golden_derived_rows() {
+    let tables = golden(&EncodeBytes::Hex);
+    let liquidations = &tables["liquidations"];
+
+    // 1127672017: twelve backstop takeovers of TRUMP, each against the backstop
+    // liquidator's `LIQUIDATED_*` leg, the liquidated leg not crossed.
+    let takeovers = block_rows(tables, "liquidations", 1_127_672_017);
+    assert_eq!(takeovers.len(), 12);
+    assert_eq!(
+        row_cells(liquidations, takeovers[0]),
+        [
+            "fill_index=15",
+            "liquidated_user=42:0x07bc8722872197a2e013ff64d19c78d63af35dac",
+            "coin=5:TRUMP",
+            "market_type=4:perp",
+            "dex=0:",
+            "side=3:ASK",
+            "direction=24:LIQUIDATED_ISOLATED_LONG",
+            "price=26715000000",
+            "size=6867000000000",
+            "start_position=6867000000000",
+            "closed_pnl=-2043619200000",
+            "fee=0",
+            "fee_token=4:USDC",
+            "crossed=false",
+            "liquidation_method=8:backstop",
+            "mark_price=26689900000",
+            "order_id=530220410945",
+            "transaction_id=543031764469896",
+            "hash=66:0xae16c5089978a676af90044336e8d10202b200ee347bc54851df705b587c8061",
+            "counterparty=42:0x5e177e5e39c0f4e421f5865a6d8beed8d921cb70",
+            "counterparty_direction=24:LIQUIDATED_ISOLATED_LONG",
+            "counterparty_fill_index=14",
+            "extra_json=~",
+        ]
+    );
+    for row in &takeovers {
+        assert_eq!(cell(liquidations, "liquidation_method", *row), "8:backstop");
+        assert_eq!(cell(liquidations, "crossed", *row), "false");
+        assert!(cell(liquidations, "counterparty_direction", *row).contains(":LIQUIDATED_"));
+        assert_eq!(
+            cell(liquidations, "counterparty", *row),
+            "42:0x5e177e5e39c0f4e421f5865a6d8beed8d921cb70"
+        );
+    }
+
+    // 1010581248: one HIP-3 liquidation settled by ADL (three legs against
+    // `AUTO_DELEVERAGING` counterparties) and the same hash's market fills.
+    let rows = block_rows(tables, "liquidations", 1_010_581_248);
+    let kinds: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                cell(liquidations, "liquidation_method", *row),
+                cell(liquidations, "crossed", *row),
+                cell(liquidations, "counterparty_direction", *row),
+            )
+        })
+        .collect();
+    let adl = (
+        "8:backstop".to_string(),
+        "false".to_string(),
+        "17:AUTO_DELEVERAGING".to_string(),
+    );
+    let market = (
+        "6:market".to_string(),
+        "true".to_string(),
+        "10:OPEN_SHORT".to_string(),
+    );
+    assert_eq!(
+        kinds,
+        [&adl, &adl, &adl, &market, &market, &market, &market].map(Clone::clone)
+    );
+    assert_eq!(
+        row_cells(liquidations, rows[0]),
+        [
+            "fill_index=2",
+            "liquidated_user=42:0x151b9d5bdfa3dd53e78a4583f750cf31c6dc6796",
+            "coin=8:xyz:SMSN",
+            "market_type=4:perp",
+            "dex=3:xyz",
+            "side=3:BUY",
+            "direction=25:LIQUIDATED_ISOLATED_SHORT",
+            "price=1904400000000",
+            "size=6690000000",
+            "start_position=-86690000000",
+            "closed_pnl=-99279600000",
+            "fee=0",
+            "fee_token=4:USDC",
+            "crossed=false",
+            "liquidation_method=8:backstop",
+            "mark_price=1923400000000",
+            "order_id=442256167461",
+            "transaction_id=842643195720910",
+            "hash=66:0xbad49dcf6aaa87e7bc4e043c3c3f0002011200b505ada6b95e9d492229ae61d2",
+            "counterparty=42:0xd40cfcc30eafe0930482690fac245d88d52231c4",
+            "counterparty_direction=17:AUTO_DELEVERAGING",
+            "counterparty_fill_index=3",
+            "extra_json=~",
+        ]
+    );
+
+    // 846903317: the funding roll-up (dex 5 had no payments, so no rows) and
+    // the daily dust conversion, whose trade id 0 pairs nothing.
+    let rates = &tables["funding_rates"];
+    let rate_rows = block_rows(tables, "funding_rates", FUNDING_BLOCK);
+    assert_eq!(rate_rows.len(), 225);
+    let mut per_dex: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &rate_rows {
+        *per_dex.entry(cell(rates, "dex_index", *row)).or_default() += 1;
+    }
+    assert_eq!(
+        per_dex,
+        BTreeMap::from(
+            [("0", 187), ("1", 22), ("2", 6), ("3", 4), ("4", 6)]
+                .map(|(dex, rows)| (dex.to_string(), rows))
+        )
+    );
+    let coin_row = |coin: &str| {
+        *rate_rows
+            .iter()
+            .find(|row| cell(rates, "coin", **row) == text_cell(Some(coin)))
+            .unwrap()
+    };
+    assert_eq!(
+        row_cells(rates, coin_row("BTC")),
+        [
+            "event_index=0",
+            "dex_index=0",
+            "coin=3:BTC",
+            "dex=0:",
+            "funding_rate=125000",
+            "positions=24107",
+            "long_positions=14900",
+            "short_positions=9207",
+            "open_interest=231212761200000",
+            "long_size=115606380600000",
+            "short_size=115606380600000",
+            "positive_funding=126651078610000",
+            "negative_funding=-126651050320000",
+            "extra_json=~",
+        ]
+    );
+    assert_eq!(
+        row_cells(rates, coin_row("xyz:XYZ100")),
+        [
+            "event_index=1",
+            "dex_index=1",
+            "coin=10:xyz:XYZ100",
+            "dex=3:xyz",
+            "funding_rate=62500",
+            "positions=1767",
+            "long_positions=1221",
+            "short_positions=546",
+            "open_interest=39690206000000",
+            "long_size=19845103000000",
+            "short_size=19845103000000",
+            "positive_funding=3127213540000",
+            "negative_funding=-3127210500000",
+            "extra_json=~",
+        ]
+    );
+    let fills = &tables["fills"];
+    let fills_view = View::new(tables, "fills", &EncodeBytes::Hex);
+    let funding_fills = rows_of(&fills_view, FUNDING_BLOCK);
+    let unpaired: Vec<usize> = funding_fills
+        .iter()
+        .copied()
+        .filter(|row| fills_view.is_null("counterparty", *row))
+        .collect();
+    assert_eq!(unpaired.len(), 1_451);
+    assert!(unpaired
+        .iter()
+        .all(|row| fills_view.u64("transaction_id", *row) == Some(0)));
+
+    // 1009855075: a delisted-perp settlement; every leg is paired, 157 of
+    // them against the zero address.
+    let settlement = rows_of(&fills_view, 1_009_855_075);
+    assert!(settlement
+        .iter()
+        .all(|row| !fills_view.is_null("counterparty", *row)));
+    assert_eq!(
+        settlement
+            .iter()
+            .filter(|row| fills_view.bytes("counterparty", **row).unwrap() == ZERO_ADDRESS)
+            .count(),
+        157
+    );
+
+    // HIP-4: split, merge, merge-question and negate legs and a burn are
+    // single-leg trade ids (no counterparty); a settlement pairs each side
+    // coin with its `0x3200…` system account.
+    let outcomes = &tables["outcome_fills"];
+    let shapes: Vec<String> = (0..outcomes.num_rows())
+        .map(|row| {
+            format!(
+                "{} {} {} {} {}",
+                cell(outcomes, "block_num", row),
+                cell(outcomes, "outcome_id", row),
+                cell(outcomes, "side_index", row),
+                cell(outcomes, "direction", row),
+                cell(outcomes, "counterparty", row) != "~",
+            )
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            "1009701302 97 0 13:SPLIT_OUTCOME false",
+            "1009701302 97 1 13:SPLIT_OUTCOME false",
+            "1010355937 95 0 13:MERGE_OUTCOME false",
+            "1010355937 95 1 13:MERGE_OUTCOME false",
+            "1075395014 171 0 14:MERGE_QUESTION false",
+            "1075395014 173 0 14:MERGE_QUESTION false",
+            "1075395014 212 0 14:MERGE_QUESTION false",
+            "1078677210 173 1 14:NEGATE_OUTCOME false",
+            "1078677210 171 0 14:NEGATE_OUTCOME false",
+            "1078677210 212 0 14:NEGATE_OUTCOME false",
+            "1165601237 6214 1 4:SELL false",
+            "1165601237 6214 0 4:SELL false",
+            "1173408840 8976 0 10:SETTLEMENT true",
+            "1173408840 8976 0 10:SETTLEMENT true",
+            "1173408840 8976 1 10:SETTLEMENT true",
+            "1173408840 8976 1 10:SETTLEMENT true",
+        ]
+    );
+    let settled = block_rows(tables, "outcome_fills", 1_173_408_840);
+    assert_eq!(
+        cell(outcomes, "counterparty", settled[1]),
+        "42:0x3200000000000000000000000000000000000214"
+    );
+    // Every outcome row is its `fills` row, with `market_type = 'outcome'`.
+    for row in 0..outcomes.num_rows() {
+        let number = fills_view.len();
+        let source = (0..number)
+            .find(|fill| {
+                cell(fills, "block_num", *fill) == cell(outcomes, "block_num", row)
+                    && cell(fills, "fill_index", *fill) == cell(outcomes, "fill_index", row)
+            })
+            .unwrap();
+        assert_eq!(cell(fills, "market_type", source), "7:outcome");
+        assert_eq!(cell(fills, "dex", source), "~");
+    }
+
+    // Market classes and dexes of every fixture fill (monitor M19: none
+    // unknown).
+    let mut classes: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for row in 0..fills.num_rows() {
+        *classes
+            .entry((cell(fills, "market_type", row), cell(fills, "dex", row)))
+            .or_default() += 1;
+    }
+    assert_eq!(
+        classes,
+        BTreeMap::from(
+            [
+                (("7:outcome", "~"), 16),
+                (("4:perp", "0:"), 396),
+                (("4:perp", "2:io"), 2),
+                (("4:perp", "3:xyz"), 30),
+                (("4:spot", "~"), 1_527),
+            ]
+            .map(|((class, dex), fills)| ((class.to_string(), dex.to_string()), fills))
+        )
+    );
+}
+
+/// Every column name of a table, canonical ones included.
+fn payload_names(batch: &RecordBatch) -> Vec<String> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect()
+}
+
+/// The naive matcher agrees with the mapper's R-D1 on hand-picked forms,
+/// unknown ones included.
+#[test]
+fn market_classes_follow_the_coin_patterns() {
+    let cases: [(&str, Option<Market<'_>>); 22] = [
+        ("BTC", Some(Market::Perp { dex: "" })),
+        ("kPEPE", Some(Market::Perp { dex: "" })),
+        ("1000PEPE", Some(Market::Perp { dex: "" })),
+        ("xyz:TSLA", Some(Market::Perp { dex: "xyz" })),
+        ("km2:US500", Some(Market::Perp { dex: "km2" })),
+        ("@0", Some(Market::Spot)),
+        ("@107", Some(Market::Spot)),
+        ("PURR/USDC", Some(Market::Spot)),
+        (
+            "#0",
+            Some(Market::Outcome {
+                outcome_id: 0,
+                side_index: 0,
+            }),
+        ),
+        (
+            "#91",
+            Some(Market::Outcome {
+                outcome_id: 9,
+                side_index: 1,
+            }),
+        ),
+        (
+            "#18446744073709551615",
+            Some(Market::Outcome {
+                outcome_id: 1_844_674_407_370_955_161,
+                side_index: 5,
+            }),
+        ),
+        ("#18446744073709551616", None),
+        ("#", None),
+        ("#1a", None),
+        ("@", None),
+        ("@x1", None),
+        ("Xyz:TSLA", None),
+        ("xyz:", None),
+        (":TSLA", None),
+        ("a/b/c", None),
+        ("BTC-PERP", None),
+        ("", None),
+    ];
+    for (coin, expected) in cases {
+        assert_eq!(market(coin), expected, "{coin}");
+        let (market_type, dex, outcome) = naive_market(coin);
+        assert_eq!(market_type, expected.map(Market::label), "{coin}");
+        assert_eq!(dex.as_deref(), expected.and_then(Market::dex), "{coin}");
+        let parsed = match expected {
+            Some(Market::Outcome {
+                outcome_id,
+                side_index,
+            }) => Some((outcome_id, side_index)),
+            _ => None,
+        };
+        assert_eq!(outcome, parsed, "{coin}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2224,6 +3062,133 @@ fn empty_values_follow_the_null_and_keep_lists() {
 }
 
 // ---------------------------------------------------------------------------
+// Derivations never refuse (D3)
+// ---------------------------------------------------------------------------
+
+/// A shape a derivation rule does not recognise gives NULL derived values,
+/// never a refusal: an unknown coin form, a trade id shared by three legs or
+/// by two legs on one side, funding deltas whose rates differ, and sums beyond
+/// `decimal(38,10)`. An empty funding event has no `funding_rates` row.
+#[test]
+fn unrecognised_shapes_give_null_derived_values() {
+    let busy = fixture(BUSY_BLOCK);
+    let (a, b) = (0..busy.fills.len() - 1)
+        .map(|at| (at, at + 1))
+        .find(|(a, b)| {
+            busy.fills[*a].transaction_id == busy.fills[*b].transaction_id
+                && busy.fills[*a].transaction_id != 0
+        })
+        .expect("a pair");
+    let free = (0..busy.fills.len())
+        .find(|at| {
+            *at != a && *at != b && busy.fills[*at].transaction_id != busy.fills[a].transaction_id
+        })
+        .unwrap();
+
+    // An unknown coin form: market_type and dex NULL, and the legs no longer
+    // share a coin, so neither is paired.
+    let mut block = busy.clone();
+    block.fills[a].coin = "BTC-PERP".to_string();
+    let tables = map_one(&block).unwrap();
+    let fills = View::new(&tables, "fills", &EncodeBytes::Hex);
+    assert!(fills.is_null("market_type", a) && fills.is_null("dex", a));
+    assert!(fills.is_null("counterparty", a) && fills.is_null("counterparty", b));
+
+    // A third leg on the same (coin, trade id): no leg is paired.
+    let mut block = busy.clone();
+    block.fills[free].coin = block.fills[a].coin.clone();
+    block.fills[free].transaction_id = block.fills[a].transaction_id;
+    let tables = map_one(&block).unwrap();
+    let fills = View::new(&tables, "fills", &EncodeBytes::Hex);
+    for row in [a, b, free] {
+        assert!(fills.is_null("counterparty", row), "{row}");
+    }
+
+    // Two legs on one side: not a match.
+    let mut block = busy.clone();
+    block.fills[b].side = block.fills[a].side;
+    let tables = map_one(&block).unwrap();
+    let fills = View::new(&tables, "fills", &EncodeBytes::Hex);
+    assert!(fills.is_null("counterparty", a) && fills.is_null("counterparty", b));
+
+    // Funding: differing rates, and sums past decimal(38,10); the empty event
+    // that follows still counts in dex_index but has no row.
+    let mut block = fixture(SMALL_BLOCK);
+    let huge = "9".repeat(28);
+    let deltas = vec![
+        pb::FundingDelta {
+            szi: huge.clone(),
+            funding_amount: huge.clone(),
+            ..funding_delta()
+        },
+        pb::FundingDelta {
+            szi: huge.clone(),
+            funding_amount: format!("-{huge}"),
+            funding_rate: "0.00001".to_string(),
+            ..funding_delta()
+        },
+        pb::FundingDelta {
+            szi: format!("-{huge}"),
+            funding_amount: format!("-{huge}"),
+            ..funding_delta()
+        },
+        pb::FundingDelta {
+            coin: "xyz:TSLA".to_string(),
+            ..funding_delta()
+        },
+    ];
+    let empty = synthetic_event(
+        &block,
+        event_body::Event::Funding(pb::Funding { deltas: vec![] }),
+    );
+    let funding = synthetic_event(&block, event_body::Event::Funding(pb::Funding { deltas }));
+    block.events.insert(0, empty);
+    block.events.insert(0, funding);
+    let tables = map_one(&block).unwrap();
+    let rates = &tables["funding_rates"];
+    assert_eq!(rates.num_rows(), 2);
+    assert_eq!(
+        row_cells(rates, 0),
+        [
+            "event_index=0",
+            "dex_index=0",
+            "coin=3:BTC",
+            "dex=0:",
+            "funding_rate=~",
+            "positions=3",
+            "long_positions=2",
+            "short_positions=1",
+            "open_interest=~",
+            "long_size=~",
+            "short_size=99999999999999999999999999990000000000",
+            "positive_funding=99999999999999999999999999990000000000",
+            "negative_funding=~",
+            "extra_json=~",
+        ]
+    );
+    assert_eq!(
+        row_cells(rates, 1),
+        [
+            "event_index=0",
+            "dex_index=0",
+            "coin=8:xyz:TSLA",
+            "dex=3:xyz",
+            "funding_rate=125000",
+            "positions=1",
+            "long_positions=1",
+            "short_positions=0",
+            "open_interest=2500000000",
+            "long_size=2500000000",
+            "short_size=0",
+            "positive_funding=0",
+            "negative_funding=-15000000000",
+            "extra_json=~",
+        ]
+    );
+    assert_eq!(tables["funding_deltas"].num_rows(), 4);
+}
+
+// ---------------------------------------------------------------------------
 // Labels, entry points, Bloom filters
 // ---------------------------------------------------------------------------
 
@@ -2286,16 +3251,23 @@ fn owned_and_borrowed_payloads_map_alike() {
 
 /// The account and validator lookups get Bloom filters
 /// (`docs/output-layout.md`, "Parquet lookup metadata"); `users`, a list, does
-/// not.
+/// not, and neither does `counterparty` (its fills are the `user` of the
+/// other leg).
 #[test]
 fn lookup_columns_get_bloom_filters() {
     use firehose_parquet::config::Compression;
     use parquet::schema::types::ColumnPath;
-    let expected: [(&str, &[&str]); 5] = [
+    let expected: [(&str, &[&str]); 12] = [
         ("blocks", &[]),
         ("fills", &["user", "hash", "liquidated_user"]),
+        ("outcome_fills", &["user", "hash"]),
+        ("liquidations", &["liquidated_user", "hash"]),
+        ("transfers", &["hash", "user", "destination"]),
+        ("bridge_transfers", &["hash"]),
+        ("vault_events", &["hash", "user", "vault"]),
+        ("staking_events", &["hash", "user", "validator"]),
         (
-            "events",
+            "other_events",
             &[
                 "hash",
                 "user",
@@ -2306,8 +3278,10 @@ fn lookup_columns_get_bloom_filters() {
             ],
         ),
         ("funding_deltas", &["user"]),
+        ("funding_rates", &[]),
         ("validator_rewards", &["validator"]),
     ];
+    assert_eq!(expected.map(|(table, _)| table), TABLE_NAMES);
     let mut mapper = HypercoreBlockMapper::new(false, EncodeBytes::Hex);
     let tables = mapper.flush().unwrap();
     for (table, columns) in expected {

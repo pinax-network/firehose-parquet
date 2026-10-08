@@ -438,12 +438,24 @@ fn duplicate_field_names(batch: &RecordBatch) -> Vec<String> {
         .collect()
 }
 
-/// Encode `batch` as an ingestion part is encoded, then read it back.
+/// Encode `batch` as an ingestion part is encoded, then read it back, with
+/// the file's Arrow schema. A record batch reader leaves schema metadata out
+/// of its batches (HyperCore's derivation version); the footer's Arrow schema
+/// keeps it, as protected verification reads it.
 fn parquet_round_trip(batch: &RecordBatch) -> RecordBatch {
     let bytes = encode_parquet(batch, Compression::Zstd, &ParquetFileMetadata::new())
         .expect("encode parquet");
+    let footer_schema = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        prost::bytes::Bytes::from(bytes.clone()),
+    )
+    .expect("read the footer")
+    .schema()
+    .clone();
     let batches = decode_parquet(bytes).expect("read parquet");
-    concat_batches(&batches[0].schema(), &batches).expect("concat read batches")
+    concat_batches(&batches[0].schema(), &batches)
+        .expect("concat read batches")
+        .with_schema(footer_schema)
+        .expect("the footer schema describes the rows")
 }
 
 fn display_values(batch: &RecordBatch, column: &str) -> BTreeSet<String> {

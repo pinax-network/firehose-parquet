@@ -137,9 +137,20 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
              `DECIMAL(38,10)` (which rounds to 10 places) before a third multiplication.",
             "All-zero hashes and the zero address are stored as delivered: they mark system \
              and time-triggered items. Exclude zero hashes before joining on `hash`.",
+            "The raw record is `blocks`, `fills` without its three derived columns, the five \
+             event tables (`transfers`, `bridge_transfers`, `vault_events`, \
+             `staking_events`, `other_events`; every event in exactly one), \
+             `funding_deltas` and `validator_rewards`. `outcome_fills`, `liquidations`, \
+             `funding_rates` and `fills.market_type`, `fills.dex` and `fills.counterparty` \
+             are derived from the same block by fact-only rules (R-D1 to R-D6 in the chain \
+             notes).",
+            "Every table's schema carries the metadata `fireparq.hypercore.derivation = \
+             \"1\"`, the version of those rules. It is part of each table's declared \
+             digest, so a root refuses to resume under other rules; compacted files do not \
+             carry it, so do not read it from files.",
             "`extra_json` is NULL in every row written by this schema version; it is reserved \
              for fields upstream adds later.",
-            "Pairing, liquidation, funding, staking and evolution notes: \
+            "Pairing, liquidation, funding, staking, routing and evolution notes: \
              [HyperCore notes](../chains/hypercore.md).",
         ],
         ChainKind::Solana
@@ -248,18 +259,62 @@ const TABLE_DESCRIPTIONS: &[(ChainKind, &str, &str)] = &[
     (
         ChainKind::Hypercore,
         "fills",
-        "One row per fill: each participant's side of a match, in execution order. A normal \
-         trade is two adjacent rows, `BUY` then `ASK`, sharing `transaction_id`, `hash`, \
-         `price` and `size`, with exactly one `crossed` leg.",
+        "One row per fill: each participant's side of a match, in execution order, for every \
+         market (perps, spot and HIP-4 outcomes). A normal trade is two adjacent rows, `BUY` \
+         then `ASK`, sharing `transaction_id`, `hash`, `price` and `size`, with exactly one \
+         `crossed` leg. `market_type`, `dex` and `counterparty` are derived from the block.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
-        "One row per `Event`. Its single `EventBody`, and for ledger updates its \
-         `LedgerUpdateDelta`, are flattened into the row; columns the row's type does not \
-         have are NULL (the HyperCore chain notes list which columns each type sets). Funding \
-         and validator-reward events are header rows whose items are in `funding_deltas` and \
-         `validator_rewards`.",
+        "outcome_fills",
+        "Derived: one row per HIP-4 outcome fill (`fills.market_type = 'outcome'`, coin \
+         `#<n>`), in fill order, copied from `fills` with the outcome and its side parsed from \
+         `coin`. These fills stay in `fills` too: never add the two tables.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "Derived: one row per liquidated leg, a fill with a liquidation whose `user` is the \
+         liquidated account, in fill order, copied from `fills` with its paired leg. The \
+         ledger `liquidation` event is joined in the `liquidations_v` view, not stored.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "transfers",
+        "One row per ledger `send`, `spot_transfer`, `internal_transfer`, \
+         `sub_account_transfer` and `account_class_transfer` event, with the columns of \
+         `other_events` these types set. HyperEVM↔HyperCore moves are `send` and \
+         `spot_transfer` rows with a `0x20…` or `0x2222…` system address.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "bridge_transfers",
+        "One row per ledger `deposit` and `withdraw` event: the Arbitrum USDC bridge, not HYPE \
+         staking.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "vault_events",
+        "One row per ledger `vault_create`, `vault_deposit`, `vault_withdraw`, \
+         `vault_distribution` and `vault_leader_commission` event.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "staking_events",
+        "One row per HYPE staking event: `c_deposit`, `c_withdrawal`, `delegation` and ledger \
+         `c_staking_transfer`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "other_events",
+        "One row per event of every other type: funding and validator-reward headers (their \
+         items are in `funding_deltas` and `validator_rewards`), gossip auctions, lending, \
+         sub-accounts, the ledger `liquidation`, HIP-3 dex events, gas and genesis, and later \
+         types that fit no other event table. The event's single `EventBody`, and for ledger \
+         updates its `LedgerUpdateDelta`, are flattened into the row; columns its type does \
+         not have are NULL. The five event tables hold every event exactly once, with the \
+         columns, types and descriptions of this table; the HyperCore chain notes list the \
+         table and the columns of each type.",
     ),
     (
         ChainKind::Hypercore,
@@ -267,6 +322,15 @@ const TABLE_DESCRIPTIONS: &[(ChainKind, &str, &str)] = &[
         "One row per `FundingDelta`: the hourly funding settlement per account and perp coin, \
          which also snapshots every open perp position. All rows of one hour arrive in one \
          block.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "Derived: one row per funding event and coin with at least one `funding_deltas` row, \
+         in event order, then in the order each coin first appears: the hourly settled \
+         funding rate, the open-interest census and the funding flows, summed exactly from \
+         the event's deltas. A coin-hour without a row is unknown, not zero: HyperLiquid \
+         appears to omit coins whose rate is 0.",
     ),
     (
         ChainKind::Hypercore,
@@ -586,7 +650,9 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "blocks",
         "event_count",
-        "Number of events in the block, equal to this block's row count in `events`.",
+        "Number of events in the block, equal to this block's row count over the five event \
+         tables (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, \
+         `other_events`).",
     ),
     (
         ChainKind::Hypercore,
@@ -740,10 +806,10 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "fills",
         "liquidation_method",
-        "`market` (liquidation order sent to the book) or `backstop` (taken over by the backstop \
-         liquidator, or settled against `AUTO_DELEVERAGING` counterparties; only takeovers, where \
-         both legs are `LIQUIDATED_*`, have a ledger `liquidation` event of the same hash), \
-         verbatim. Not NULL exactly when the fill is a liquidation.",
+        "`market` (liquidation order sent to the book) or `backstop` (taken over by the \
+         backstop liquidator, or settled against `AUTO_DELEVERAGING` counterparties; only \
+         takeovers, where both legs are `LIQUIDATED_*`, have a ledger `liquidation` event of \
+         the same hash), verbatim. Not NULL exactly when the fill is a liquidation.",
     ),
     (
         ChainKind::Hypercore,
@@ -756,16 +822,16 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "fills",
         "builder",
-        "Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string, \
-         so not re-encoded). NULL when none; before block 957002478 NULL can also mean not \
-         captured (capture there is partial).",
+        "Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto \
+         string, so not re-encoded). NULL when none; before block 957002478 NULL can also \
+         mean not captured (capture there is partial).",
     ),
     (
         ChainKind::Hypercore,
         "fills",
         "builder_fee",
-        "Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a \
-         builder can appear with a NULL fee. Before block 957002478 NULL can also mean not \
+        "Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so \
+         a builder can appear with a NULL fee. Before block 957002478 NULL can also mean not \
          captured.",
     ),
     (
@@ -778,19 +844,345 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     (
         ChainKind::Hypercore,
         "fills",
+        "market_type",
+        "Derived from `coin` (rule R-D1): `perp` (core and HIP-3 perps), `spot` (`@<n>` and \
+         `PURR/USDC`) or `outcome` (HIP-4 `#<n>`). NULL when the coin has a form this version \
+         does not know.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "fills",
+        "dex",
+        "Derived from `coin` (rule R-D1), perps only: `''` for the default (core) perp dex, \
+         HyperLiquid's own name for it and the `source_dex` value of a `send`; otherwise the \
+         HIP-3 dex name, the text before `:`. NULL for spot, outcomes and unknown coin forms. \
+         HIP-3 is `market_type = 'perp' AND dex <> ''`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "fills",
+        "counterparty",
+        "Derived (rule R-D2): the `user` of the other fill of the block with the same `coin` \
+         and `transaction_id`, when exactly two fills share them and their sides differ. NULL \
+         otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4 fills \
+         (mint, burn, split, merge, negate). The zero address on delisted-perp `SETTLEMENT` \
+         fills.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "fills",
         "extra_json",
         HYPERCORE_EXTRA_JSON,
     ),
     (
         ChainKind::Hypercore,
-        "events",
-        "event_index",
-        "0-based position of the event in the block (execution order). Key with `block_num`; \
-         joins `funding_deltas` and `validator_rewards`.",
+        "outcome_fills",
+        "fill_index",
+        "Position of the fill in the block: joins `fills` on `(block_num, fill_index)`.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "outcome_fills",
+        "user",
+        "Account this fill belongs to (`fills.user`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "coin",
+        "Outcome side coin `#<n>`, where `n = 10·outcome_id + side_index` (`fills.coin`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "outcome_id",
+        "HIP-4 outcome id: `n div 10` of coin `#<n>`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "side_index",
+        "Outcome side: `n mod 10` of coin `#<n>`. Side 0 is the first side of the outcome's \
+         specification (\"Yes\" on a binary outcome). Not `side` (`BUY` or `ASK`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "price",
+        "Price of one share, a probability between 0 and 1 (`fills.price`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "size",
+        "Shares filled, positive (`fills.size`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "side",
+        "`BUY` = shares received, `ASK` = shares given (`fills.side`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "direction",
+        "`BUY`, `SELL`, `SETTLEMENT`, `SPLIT_OUTCOME`, `MERGE_OUTCOME`, `MERGE_QUESTION` or \
+         `NEGATE_OUTCOME` (`fills.direction`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "start_position",
+        "Share balance of this side coin before the fill (`fills.start_position`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "closed_pnl",
+        "`fills.closed_pnl`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "hash",
+        "`fills.hash`; all zero bytes when there is no L1 transaction.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "order_id",
+        "`fills.order_id`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "crossed",
+        "`fills.crossed`: the taker leg, and every single split, merge and negate fill.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "fee",
+        "`fills.fee`, in `fee_token`: outcome fills do pay fees.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "fee_token",
+        "`fills.fee_token`: `+<n>` (the outcome token) in May 2026, `USDC` later.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "transaction_id",
+        "`fills.transaction_id`, the HyperLiquid trade id.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "twap_id",
+        "`fills.twap_id`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "client_order_id",
+        "`fills.client_order_id`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "deployer_fee",
+        "`fills.deployer_fee`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "builder",
+        "`fills.builder`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "builder_fee",
+        "`fills.builder_fee`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "priority_gas",
+        "`fills.priority_gas`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "counterparty",
+        "`fills.counterparty`: set on direct trades and settlements (a `0x3200…` system \
+         account), NULL on mint, burn, split, merge and negate legs.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "outcome_fills",
+        "extra_json",
+        "The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream \
+         adds later reaches this table without a rebuild. NULL in every row written by this \
+         version.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "fill_index",
+        "Position of the liquidated fill in the block: joins `fills` on `(block_num, \
+         fill_index)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "liquidated_user",
+        "The liquidated account (`fills.user`, equal to `fills.liquidated_user`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "coin",
+        "`fills.coin`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "market_type",
+        "`fills.market_type`: `perp`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "dex",
+        "`fills.dex`: `''` for the default (core) perp dex, else the HIP-3 dex name.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "side",
+        "The liquidated side, `BUY` or `ASK` (`fills.side`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "direction",
+        "`fills.direction`: `market` liquidations use the ordinary `CLOSE_*` and `*_TO_*` \
+         labels, `backstop` ones `LIQUIDATED_*`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "price",
+        "`fills.price`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "size",
+        "`fills.size`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "start_position",
+        "`fills.start_position`: the liquidated position before the fill.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "closed_pnl",
+        "`fills.closed_pnl`.",
+    ),
+    (ChainKind::Hypercore, "liquidations", "fee", "`fills.fee`."),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "fee_token",
+        "`fills.fee_token`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "crossed",
+        "`fills.crossed`: true on `market` liquidations (the liquidation order), false on \
+         `backstop` ones (takeover and ADL alike).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "liquidation_method",
+        "`market` (a liquidation order sent to the book) or `backstop` (taken over by the \
+         backstop liquidator, or settled against `AUTO_DELEVERAGING` counterparties) \
+         (`fills.liquidation_method`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "mark_price",
+        "Mark price at liquidation (`fills.liquidation_mark_px`).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "order_id",
+        "`fills.order_id`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "transaction_id",
+        "`fills.transaction_id`, the HyperLiquid trade id.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "hash",
+        "`fills.hash`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "counterparty",
+        "`fills.counterparty`: the other leg's `user`, the liquidator on `market` and \
+         takeover liquidations, the deleveraged account under ADL. NULL when the fill has no \
+         single opposite leg (never observed).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "counterparty_direction",
+        "The other leg's `direction`: `AUTO_DELEVERAGING` marks ADL, `LIQUIDATED_*` a \
+         backstop takeover. NULL with `counterparty`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "counterparty_fill_index",
+        "The other leg's `fill_index`: joins its `fills` row. NULL with `counterparty`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "liquidations",
+        "extra_json",
+        "The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream \
+         adds later reaches this table without a rebuild. NULL in every row written by this \
+         version.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "other_events",
+        "event_index",
+        "0-based position of the event in the block (execution order), counted over all five \
+         event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and \
+         `validator_rewards`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "other_events",
         "event_type",
         "`EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, \
          `c_deposit`, `delegation`, `gossip_priority_auction_restart` or \
@@ -798,14 +1190,14 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "ledger_type",
         "Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, \
          `liquidation`); NULL on other rows.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "hash",
         "Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, \
          the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes \
@@ -815,14 +1207,14 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "event_time_ns",
         "Event time in nanoseconds since the Unix epoch. Equal to `blocks.block_time_ns` in \
          every block observed; stored as delivered, not checked.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "users",
         "Accounts whose ledger changed (HyperLiquid's index for ledger history), proto order \
          kept, 1 or 2 entries; the order is a per-type convention, not a direction. For most \
@@ -830,7 +1222,7 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "user",
         "The body's own `user`: sender (`send`, `spot_transfer`, `internal_transfer`, \
          `sub_account_transfer`), withdrawing depositor (`vault_withdraw`), vault leader \
@@ -840,34 +1232,39 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "destination",
         "Recipient of `send`, `spot_transfer`, `internal_transfer` and \
          `sub_account_transfer`.",
     ),
-    (ChainKind::Hypercore, "events", "vault", "Vault address."),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
+        "vault",
+        "Vault address.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "other_events",
         "validator",
         "Validator of a `delegation`.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "sub_account",
         "Sub-account created by `create_sub_account`.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "token",
         "Token symbol of `amount`. NULL on `c_deposit`, `c_withdrawal` and `delegation`, \
          whose `amount` is HYPE.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "amount",
         "Quantity in `token` units; HYPE for `c_deposit`, `c_withdrawal` and `delegation`. A \
          `c_deposit` and its paired `c_staking_transfer` (same hash and amount) describe one \
@@ -875,20 +1272,20 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "usdc",
         "USDC amount, never negative; the direction comes from the type and its flags. For \
          `vault_create`, the leader's initial deposit.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "usdc_value",
         "USDC valuation of `amount`; the exact definition is not documented.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "fee",
         "Fee of the action: in `fee_token` for `send` and `spot_transfer` (`0.0` when \
          `fee_token` is NULL); USDC for `internal_transfer` (0 or 1), `withdraw` (bridge fee, \
@@ -896,19 +1293,19 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "fee_token",
         "Token of `fee` for `send` and `spot_transfer`; NULL when there is no fee.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "native_token_fee",
         "Fee in HYPE, e.g. for HyperEVM bridging.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "nonce",
         "For `send` and `spot_transfer`: the action nonce, in epoch milliseconds for \
          user-signed actions or a global sequence number for HyperEVM-originated ones (can be \
@@ -916,40 +1313,45 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "source_dex",
         "Balance a `send` debits: `''` = the default USDC perp dex (a value, not missing), \
          `spot`, or a HIP-3 dex name.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "destination_dex",
         "Balance a `send` credits, with the same values as `source_dex`.",
     ),
-    (ChainKind::Hypercore, "events", "dex", "HIP-3 dex name."),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
+        "dex",
+        "HIP-3 dex name.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "other_events",
         "is_deposit",
         "For `c_staking_transfer`: true = spot to staking (pairs with `c_deposit`); false = \
          staking to spot (pairs with a `c_withdrawal` finalization).",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "to_perp",
         "For `account_class_transfer`: true = spot to perp.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "is_undelegate",
         "For `delegation`: true = undelegate.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "is_finalized",
         "For `c_withdrawal`: false = unstake request (user's hash, no balance change); true = \
          finalization about 7 days later (zero hash, paired with a `c_staking_transfer` whose \
@@ -957,83 +1359,83 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "requested_usd",
         "For `vault_withdraw`: amount requested, USDC.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "commission",
         "For `vault_withdraw`: the leader's profit share, USDC.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "closing_cost",
         "For `vault_withdraw`: closing cost, USDC.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "basis",
         "For `vault_withdraw`: cost basis of the withdrawn equity, USDC.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "net_withdrawn_usd",
         "For `vault_withdraw`: net amount withdrawn, USDC.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "interest_amount",
         "For `borrow_lend`: interest realized with this operation, in `token`.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "operation",
         "For `borrow_lend`: the operation, verbatim (`supply`, `withdraw`, `borrow`, `repay` \
          observed).",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "liquidated_ntl_pos",
-        "For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop takeovers; \
-         their hash equals the hash of the takeover's two `LIQUIDATED_*` fills. ADL-settled \
-         backstop liquidations have no ledger event.",
+        "For `liquidation`: notional liquidated, USDC. Ledger liquidations are backstop \
+         takeovers; their hash equals the hash of the takeover's two `LIQUIDATED_*` fills. \
+         ADL-settled backstop liquidations have no ledger event.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "account_value",
         "For `liquidation`: account value, can be negative.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "leverage_type",
         "For `liquidation`: `CROSS` or `ISOLATED`.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "liquidated_positions",
         "For `liquidation`: positions liquidated as `coin` and `szi`, in proto order. One \
          element and positive sizes in every observation.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "slot_id",
         "For `gossip_priority_auction_restart`: auction slot; 0 is a real slot.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "previous_winner_ip",
         "For `gossip_priority_auction_restart`: IPv4 address of the previous slot winner; \
          NULL when there was none (always together with `end_gas`). Before block 957002477 it \
@@ -1041,28 +1443,29 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "end_gas",
-        "For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to the \
-         amount of the preceding `gossip_priority_gas_auction` ledger delta (paid a few seconds \
-         before the restart, in the same 3-minute auction). NULL when there was no winner.",
+        "For `gossip_priority_auction_restart`: HYPE clearing price the winner paid, equal to \
+         the amount of the preceding `gossip_priority_gas_auction` ledger delta (paid a few \
+         seconds before the restart, in the same 3-minute auction). NULL when there was no \
+         winner.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "sub_account_name",
         "For `create_sub_account`: the user-chosen name, verbatim.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "item_count",
         "For `funding`: number of `funding_deltas` rows, 0 when the event had no payments. \
          For `validator_rewards`: number of `validator_rewards` rows. NULL for other types.",
     ),
     (
         ChainKind::Hypercore,
-        "events",
+        "other_events",
         "extra_json",
         HYPERCORE_EXTRA_JSON,
     ),
@@ -1070,9 +1473,9 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "funding_deltas",
         "event_index",
-        "Position of the parent funding event in the block; joins `events`. The event's \
-         ordinal among the block's funding events is the perp-dex index (observed, not \
-         documented upstream).",
+        "Position of the parent funding event in the block; joins its header in \
+         `other_events` and its rows in `funding_rates`. The event's ordinal among the \
+         block's funding events is the perp-dex index (observed, not documented upstream).",
     ),
     (
         ChainKind::Hypercore,
@@ -1119,9 +1522,104 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     ),
     (
         ChainKind::Hypercore,
+        "funding_rates",
+        "event_index",
+        "Position of the funding event in the block: joins its header in `other_events` and \
+         its `funding_deltas` rows.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "dex_index",
+        "0-based ordinal of the event among the block's funding events. By observation it is \
+         the perp-dex index of HyperLiquid's `perpDexs` (0 = the default dex); that meaning \
+         is not documented upstream.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "coin",
+        "Perp symbol (`funding_deltas.coin`); HIP-3 coins carry their `<dex>:` prefix.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "dex",
+        "Perp dex from `coin`, as `fills.dex`: `''` for the default dex, else the HIP-3 dex \
+         name. NULL only for a coin form this version does not know.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "funding_rate",
+        "The hourly funding rate of the coin's deltas, signed. NULL if they differ (never \
+         observed).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "positions",
+        "Number of the coin's deltas: its open positions (`szi` is never 0).",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "long_positions",
+        "Number of deltas with `szi > 0`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "short_positions",
+        "Number of deltas with `szi < 0`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "open_interest",
+        "Σ|`szi`| in coin units: HyperLiquid's `openInterest`, which counts both sides. NULL \
+         only if the sum does not fit `decimal(38,10)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "long_size",
+        "Σ`szi` over `szi > 0`. NULL only if the sum does not fit `decimal(38,10)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "short_size",
+        "−Σ`szi` over `szi < 0`, positive; equal to `long_size` up to `f64` noise. NULL only \
+         if the sum does not fit `decimal(38,10)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "positive_funding",
+        "Σ`funding_amount` over amounts above 0 (received), in the dex collateral. NULL only \
+         if the sum does not fit `decimal(38,10)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "negative_funding",
+        "Σ`funding_amount` over amounts below 0 (paid), kept negative. NULL only if the sum \
+         does not fit `decimal(38,10)`.",
+    ),
+    (
+        ChainKind::Hypercore,
+        "funding_rates",
+        "extra_json",
+        "Reserved: NULL in every row. A field upstream adds to `Funding` or `FundingDelta` \
+         goes to `other_events.extra_json` or `funding_deltas.extra_json`.",
+    ),
+    (
+        ChainKind::Hypercore,
         "validator_rewards",
         "event_index",
-        "Position of the parent validator-rewards event in the block; joins `events`.",
+        "Position of the parent validator-rewards event in the block; joins its header in \
+         `other_events`.",
     ),
     (
         ChainKind::Hypercore,
@@ -1197,6 +1695,15 @@ fn is_text_id(kind: ChainKind, column: &str) -> bool {
 }
 
 fn column_description(kind: ChainKind, table: &str, column: &str) -> Option<&'static str> {
+    // HyperCore's event tables share `other_events`' column catalogue and its
+    // descriptions (`hypercore::schema::event_fields`).
+    let table = match (kind, table) {
+        (
+            ChainKind::Hypercore,
+            "transfers" | "bridge_transfers" | "vault_events" | "staking_events",
+        ) => "other_events",
+        _ => table,
+    };
     chain_canonical_description(kind, column)
         .or_else(|| canonical_description(column))
         .or_else(|| {
@@ -2326,10 +2833,17 @@ mod tests {
                 );
             }
         }
+        let event_tables = hypercore::schema::EventTable::ALL.map(|table| table.name());
         for table in hypercore::schema::TABLE_NAMES {
+            // The event tables select their columns from one catalogue.
+            let function = if event_tables.contains(&table) {
+                "pub fn event_fields(".to_string()
+            } else {
+                format!("pub fn {table}_schema(")
+            };
             let start = source
-                .find(&format!("pub fn {table}_schema("))
-                .unwrap_or_else(|| panic!("{table}_schema"));
+                .find(&function)
+                .unwrap_or_else(|| panic!("{function}"));
             let body = &source[start..];
             let body = &body[..body.find("\n}\n").expect("end of function")];
             let mut comment = Vec::new();
@@ -2340,6 +2854,13 @@ mod tests {
                 } else if let Some(rest) = line.strip_prefix("Field::new(\"") {
                     let name = &rest[..rest.find('"').unwrap()];
                     let text = comment.join(" ");
+                    comment.clear();
+                    let event_table = hypercore::schema::EventTable::ALL
+                        .into_iter()
+                        .find(|event_table| event_table.name() == table);
+                    if event_table.is_some_and(|event_table| !event_table.has_column(name)) {
+                        continue;
+                    }
                     let expected = column_description(ChainKind::Hypercore, table, name)
                         .unwrap_or_else(|| panic!("{table}.{name}"));
                     if text == "EXTRA_JSON_DESCRIPTION (the same in every table)." {
@@ -2347,7 +2868,6 @@ mod tests {
                     } else {
                         assert_eq!(text, expected, "{table}.{name}");
                     }
-                    comment.clear();
                     fields += 1;
                 }
             }

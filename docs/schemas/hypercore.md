@@ -12,17 +12,26 @@ Generated from the `hypercore` mapper; do not edit by hand. Regenerate with `car
 - `block_id` and `parent_id` hold the decimal block number as text (ASCII bytes under `binary`). HyperCore has no block hash.
 - Amounts are `decimal(38,10)`, the exact values of HyperLiquid's decimal strings. In DuckDB a product of two is `DECIMAL(38,20)`; cast to `DOUBLE` or `DECIMAL(38,10)` (which rounds to 10 places) before a third multiplication.
 - All-zero hashes and the zero address are stored as delivered: they mark system and time-triggered items. Exclude zero hashes before joining on `hash`.
+- The raw record is `blocks`, `fills` without its three derived columns, the five event tables (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, `other_events`; every event in exactly one), `funding_deltas` and `validator_rewards`. `outcome_fills`, `liquidations`, `funding_rates` and `fills.market_type`, `fills.dex` and `fills.counterparty` are derived from the same block by fact-only rules (R-D1 to R-D6 in the chain notes).
+- Every table's schema carries the metadata `fireparq.hypercore.derivation = "1"`, the version of those rules. It is part of each table's declared digest, so a root refuses to resume under other rules; compacted files do not carry it, so do not read it from files.
 - `extra_json` is NULL in every row written by this schema version; it is reserved for fields upstream adds later.
-- Pairing, liquidation, funding, staking and evolution notes: [HyperCore notes](../chains/hypercore.md).
+- Pairing, liquidation, funding, staking, routing and evolution notes: [HyperCore notes](../chains/hypercore.md).
 
 ## Tables
 
 | Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 11 | Always. |
-| [`fills`](#fills) | 33 | Always. |
-| [`events`](#events) | 50 | Always. |
+| [`fills`](#fills) | 36 | Always. |
+| [`outcome_fills`](#outcome_fills) | 32 | Always. |
+| [`liquidations`](#liquidations) | 30 | Always. |
+| [`transfers`](#transfers) | 27 | Always. |
+| [`bridge_transfers`](#bridge_transfers) | 17 | Always. |
+| [`vault_events`](#vault_events) | 23 | Always. |
+| [`staking_events`](#staking_events) | 21 | Always. |
+| [`other_events`](#other_events) | 50 | Always. |
 | [`funding_deltas`](#funding_deltas) | 15 | Always. |
+| [`funding_rates`](#funding_rates) | 21 | Always. |
 | [`validator_rewards`](#validator_rewards) | 12 | Always. |
 
 ## `blocks`
@@ -40,14 +49,14 @@ One row per Firehose block, including blocks with no fills and no events (about 
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
 | `block_time_ns` | `long` | no | Consensus block time in nanoseconds since the Unix epoch (UTC). The only exact block time: `timestamp` is this value truncated to milliseconds. |
 | `fill_count` | `long` | no | Number of fills in the block, equal to this block's row count in `fills`. |
-| `event_count` | `long` | no | Number of events in the block, equal to this block's row count in `events`. |
+| `event_count` | `long` | no | Number of events in the block, equal to this block's row count over the five event tables (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, `other_events`). |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `fills`
 
-One row per fill: each participant's side of a match, in execution order. A normal trade is two adjacent rows, `BUY` then `ASK`, sharing `transaction_id`, `hash`, `price` and `size`, with exactly one `crossed` leg.
+One row per fill: each participant's side of a match, in execution order, for every market (perps, spot and HIP-4 outcomes). A normal trade is two adjacent rows, `BUY` then `ASK`, sharing `transaction_id`, `hash`, `price` and `size`, with exactly one `crossed` leg. `market_type`, `dex` and `counterparty` are derived from the block.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -83,13 +92,16 @@ One row per fill: each participant's side of a match, in execution order. A norm
 | `builder` | `string` | yes | Builder-code address as delivered, `0x` plus 40 lowercase hex characters (a proto string, so not re-encoded). NULL when none; before block 957002478 NULL can also mean not captured (capture there is partial). |
 | `builder_fee` | `decimal(38,10)` | yes | Fee paid to `builder`, in `fee_token`, included in `fee`. HyperLiquid omits zero, so a builder can appear with a NULL fee. Before block 957002478 NULL can also mean not captured. |
 | `priority_gas` | `decimal(38,10)` | yes | IOC priority fee paid in HYPE, on the taker leg only. NULL when none; the feature launched around 2026-04-20. |
+| `market_type` | `string` | yes | Derived from `coin` (rule R-D1): `perp` (core and HIP-3 perps), `spot` (`@<n>` and `PURR/USDC`) or `outcome` (HIP-4 `#<n>`). NULL when the coin has a form this version does not know. |
+| `dex` | `string` | yes | Derived from `coin` (rule R-D1), perps only: `''` for the default (core) perp dex, HyperLiquid's own name for it and the `source_dex` value of a `send`; otherwise the HIP-3 dex name, the text before `:`. NULL for spot, outcomes and unknown coin forms. HIP-3 is `market_type = 'perp' AND dex <> ''`. |
+| `counterparty` | `string` (hex) | yes | Derived (rule R-D2): the `user` of the other fill of the block with the same `coin` and `transaction_id`, when exactly two fills share them and their sides differ. NULL otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4 fills (mint, burn, split, merge, negate). The zero address on delisted-perp `SETTLEMENT` fills. |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
-## `events`
+## `outcome_fills`
 
-One row per `Event`. Its single `EventBody`, and for ledger updates its `LedgerUpdateDelta`, are flattened into the row; columns the row's type does not have are NULL (the HyperCore chain notes list which columns each type sets). Funding and validator-reward events are header rows whose items are in `funding_deltas` and `validator_rewards`.
+Derived: one row per HIP-4 outcome fill (`fills.market_type = 'outcome'`, coin `#<n>`), in fill order, copied from `fills` with the outcome and its side parsed from `coin`. These fills stay in `fills` too: never add the two tables.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -100,7 +112,211 @@ One row per `Event`. Its single `EventBody`, and for ledger updates its `LedgerU
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
-| `event_index` | `long` | no | 0-based position of the event in the block (execution order). Key with `block_num`; joins `funding_deltas` and `validator_rewards`. |
+| `fill_index` | `long` | no | Position of the fill in the block: joins `fills` on `(block_num, fill_index)`. |
+| `user` | `string` (hex) | no | Account this fill belongs to (`fills.user`). |
+| `coin` | `string` | no | Outcome side coin `#<n>`, where `n = 10·outcome_id + side_index` (`fills.coin`). |
+| `outcome_id` | `long` | no | HIP-4 outcome id: `n div 10` of coin `#<n>`. |
+| `side_index` | `long` | no | Outcome side: `n mod 10` of coin `#<n>`. Side 0 is the first side of the outcome's specification ("Yes" on a binary outcome). Not `side` (`BUY` or `ASK`). |
+| `price` | `decimal(38,10)` | no | Price of one share, a probability between 0 and 1 (`fills.price`). |
+| `size` | `decimal(38,10)` | no | Shares filled, positive (`fills.size`). |
+| `side` | `string` | no | `BUY` = shares received, `ASK` = shares given (`fills.side`). |
+| `direction` | `string` | no | `BUY`, `SELL`, `SETTLEMENT`, `SPLIT_OUTCOME`, `MERGE_OUTCOME`, `MERGE_QUESTION` or `NEGATE_OUTCOME` (`fills.direction`). |
+| `start_position` | `decimal(38,10)` | no | Share balance of this side coin before the fill (`fills.start_position`). |
+| `closed_pnl` | `decimal(38,10)` | no | `fills.closed_pnl`. |
+| `hash` | `string` (hex) | no | `fills.hash`; all zero bytes when there is no L1 transaction. |
+| `order_id` | `long` | no | `fills.order_id`. |
+| `crossed` | `boolean` | no | `fills.crossed`: the taker leg, and every single split, merge and negate fill. |
+| `fee` | `decimal(38,10)` | no | `fills.fee`, in `fee_token`: outcome fills do pay fees. |
+| `fee_token` | `string` | no | `fills.fee_token`: `+<n>` (the outcome token) in May 2026, `USDC` later. |
+| `transaction_id` | `long` | no | `fills.transaction_id`, the HyperLiquid trade id. |
+| `twap_id` | `long` | yes | `fills.twap_id`. |
+| `client_order_id` | `string` (hex) | yes | `fills.client_order_id`. |
+| `deployer_fee` | `decimal(38,10)` | yes | `fills.deployer_fee`. |
+| `builder` | `string` | yes | `fills.builder`. |
+| `builder_fee` | `decimal(38,10)` | yes | `fills.builder_fee`. |
+| `priority_gas` | `decimal(38,10)` | yes | `fills.priority_gas`. |
+| `counterparty` | `string` (hex) | yes | `fills.counterparty`: set on direct trades and settlements (a `0x3200…` system account), NULL on mint, burn, split, merge and negate legs. |
+| `extra_json` | `string` | yes | The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream adds later reaches this table without a rebuild. NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `liquidations`
+
+Derived: one row per liquidated leg, a fill with a liquidation whose `user` is the liquidated account, in fill order, copied from `fills` with its paired leg. The ledger `liquidation` event is joined in the `liquidations_v` view, not stored.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `fill_index` | `long` | no | Position of the liquidated fill in the block: joins `fills` on `(block_num, fill_index)`. |
+| `liquidated_user` | `string` (hex) | no | The liquidated account (`fills.user`, equal to `fills.liquidated_user`). |
+| `coin` | `string` | no | `fills.coin`. |
+| `market_type` | `string` | yes | `fills.market_type`: `perp`. |
+| `dex` | `string` | yes | `fills.dex`: `''` for the default (core) perp dex, else the HIP-3 dex name. |
+| `side` | `string` | no | The liquidated side, `BUY` or `ASK` (`fills.side`). |
+| `direction` | `string` | no | `fills.direction`: `market` liquidations use the ordinary `CLOSE_*` and `*_TO_*` labels, `backstop` ones `LIQUIDATED_*`. |
+| `price` | `decimal(38,10)` | no | `fills.price`. |
+| `size` | `decimal(38,10)` | no | `fills.size`. |
+| `start_position` | `decimal(38,10)` | no | `fills.start_position`: the liquidated position before the fill. |
+| `closed_pnl` | `decimal(38,10)` | no | `fills.closed_pnl`. |
+| `fee` | `decimal(38,10)` | no | `fills.fee`. |
+| `fee_token` | `string` | no | `fills.fee_token`. |
+| `crossed` | `boolean` | no | `fills.crossed`: true on `market` liquidations (the liquidation order), false on `backstop` ones (takeover and ADL alike). |
+| `liquidation_method` | `string` | no | `market` (a liquidation order sent to the book) or `backstop` (taken over by the backstop liquidator, or settled against `AUTO_DELEVERAGING` counterparties) (`fills.liquidation_method`). |
+| `mark_price` | `decimal(38,10)` | no | Mark price at liquidation (`fills.liquidation_mark_px`). |
+| `order_id` | `long` | no | `fills.order_id`. |
+| `transaction_id` | `long` | no | `fills.transaction_id`, the HyperLiquid trade id. |
+| `hash` | `string` (hex) | no | `fills.hash`. |
+| `counterparty` | `string` (hex) | yes | `fills.counterparty`: the other leg's `user`, the liquidator on `market` and takeover liquidations, the deleveraged account under ADL. NULL when the fill has no single opposite leg (never observed). |
+| `counterparty_direction` | `string` | yes | The other leg's `direction`: `AUTO_DELEVERAGING` marks ADL, `LIQUIDATED_*` a backstop takeover. NULL with `counterparty`. |
+| `counterparty_fill_index` | `long` | yes | The other leg's `fill_index`: joins its `fills` row. NULL with `counterparty`. |
+| `extra_json` | `string` | yes | The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream adds later reaches this table without a rebuild. NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `transfers`
+
+One row per ledger `send`, `spot_transfer`, `internal_transfer`, `sub_account_transfer` and `account_class_transfer` event, with the columns of `other_events` these types set. HyperEVM↔HyperCore moves are `send` and `spot_transfer` rows with a `0x20…` or `0x2222…` system address.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | 0-based position of the event in the block (execution order), counted over all five event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and `validator_rewards`. |
+| `event_type` | `string` | no | `EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, `c_deposit`, `delegation`, `gossip_priority_auction_restart` or `create_sub_account`. |
+| `ledger_type` | `string` | yes | Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, `liquidation`); NULL on other rows. |
+| `hash` | `string` (hex) | no | Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes for system and time-triggered events (funding, validator rewards, gossip restarts, staking-withdrawal finalization and its transfer) and rare sends. Events from one action share it. |
+| `event_time_ns` | `long` | no | Event time in nanoseconds since the Unix epoch. Equal to `blocks.block_time_ns` in every block observed; stored as delivered, not checked. |
+| `users` | `array<string>` (hex) | yes | Accounts whose ledger changed (HyperLiquid's index for ledger history), proto order kept, 1 or 2 entries; the order is a per-type convention, not a direction. For most ledger types it holds the only address. NULL on non-ledger rows. |
+| `user` | `string` (hex) | yes | The body's own `user`: sender (`send`, `spot_transfer`, `internal_transfer`, `sub_account_transfer`), withdrawing depositor (`vault_withdraw`), vault leader (`vault_leader_commission`), staker (`c_deposit`, `c_withdrawal`), delegator (`delegation`) or master account (`create_sub_account`). NULL for types without one: use `users`. |
+| `destination` | `string` (hex) | yes | Recipient of `send`, `spot_transfer`, `internal_transfer` and `sub_account_transfer`. |
+| `token` | `string` | yes | Token symbol of `amount`. NULL on `c_deposit`, `c_withdrawal` and `delegation`, whose `amount` is HYPE. |
+| `amount` | `decimal(38,10)` | yes | Quantity in `token` units; HYPE for `c_deposit`, `c_withdrawal` and `delegation`. A `c_deposit` and its paired `c_staking_transfer` (same hash and amount) describe one move: do not add them. |
+| `usdc` | `decimal(38,10)` | yes | USDC amount, never negative; the direction comes from the type and its flags. For `vault_create`, the leader's initial deposit. |
+| `usdc_value` | `decimal(38,10)` | yes | USDC valuation of `amount`; the exact definition is not documented. |
+| `fee` | `decimal(38,10)` | yes | Fee of the action: in `fee_token` for `send` and `spot_transfer` (`0.0` when `fee_token` is NULL); USDC for `internal_transfer` (0 or 1), `withdraw` (bridge fee, 1) and `vault_create` (creation fee). |
+| `fee_token` | `string` | yes | Token of `fee` for `send` and `spot_transfer`; NULL when there is no fee. |
+| `native_token_fee` | `decimal(38,10)` | yes | Fee in HYPE, e.g. for HyperEVM bridging. |
+| `nonce` | `long` | yes | For `send` and `spot_transfer`: the action nonce, in epoch milliseconds for user-signed actions or a global sequence number for HyperEVM-originated ones (can be 0). For `withdraw`: the action nonce times 1000. Not a clock. |
+| `source_dex` | `string` | yes | Balance a `send` debits: `''` = the default USDC perp dex (a value, not missing), `spot`, or a HIP-3 dex name. |
+| `destination_dex` | `string` | yes | Balance a `send` credits, with the same values as `source_dex`. |
+| `to_perp` | `boolean` | yes | For `account_class_transfer`: true = spot to perp. |
+| `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `bridge_transfers`
+
+One row per ledger `deposit` and `withdraw` event: the Arbitrum USDC bridge, not HYPE staking.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | 0-based position of the event in the block (execution order), counted over all five event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and `validator_rewards`. |
+| `event_type` | `string` | no | `EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, `c_deposit`, `delegation`, `gossip_priority_auction_restart` or `create_sub_account`. |
+| `ledger_type` | `string` | yes | Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, `liquidation`); NULL on other rows. |
+| `hash` | `string` (hex) | no | Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes for system and time-triggered events (funding, validator rewards, gossip restarts, staking-withdrawal finalization and its transfer) and rare sends. Events from one action share it. |
+| `event_time_ns` | `long` | no | Event time in nanoseconds since the Unix epoch. Equal to `blocks.block_time_ns` in every block observed; stored as delivered, not checked. |
+| `users` | `array<string>` (hex) | yes | Accounts whose ledger changed (HyperLiquid's index for ledger history), proto order kept, 1 or 2 entries; the order is a per-type convention, not a direction. For most ledger types it holds the only address. NULL on non-ledger rows. |
+| `usdc` | `decimal(38,10)` | yes | USDC amount, never negative; the direction comes from the type and its flags. For `vault_create`, the leader's initial deposit. |
+| `fee` | `decimal(38,10)` | yes | Fee of the action: in `fee_token` for `send` and `spot_transfer` (`0.0` when `fee_token` is NULL); USDC for `internal_transfer` (0 or 1), `withdraw` (bridge fee, 1) and `vault_create` (creation fee). |
+| `nonce` | `long` | yes | For `send` and `spot_transfer`: the action nonce, in epoch milliseconds for user-signed actions or a global sequence number for HyperEVM-originated ones (can be 0). For `withdraw`: the action nonce times 1000. Not a clock. |
+| `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `vault_events`
+
+One row per ledger `vault_create`, `vault_deposit`, `vault_withdraw`, `vault_distribution` and `vault_leader_commission` event.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | 0-based position of the event in the block (execution order), counted over all five event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and `validator_rewards`. |
+| `event_type` | `string` | no | `EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, `c_deposit`, `delegation`, `gossip_priority_auction_restart` or `create_sub_account`. |
+| `ledger_type` | `string` | yes | Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, `liquidation`); NULL on other rows. |
+| `hash` | `string` (hex) | no | Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes for system and time-triggered events (funding, validator rewards, gossip restarts, staking-withdrawal finalization and its transfer) and rare sends. Events from one action share it. |
+| `event_time_ns` | `long` | no | Event time in nanoseconds since the Unix epoch. Equal to `blocks.block_time_ns` in every block observed; stored as delivered, not checked. |
+| `users` | `array<string>` (hex) | yes | Accounts whose ledger changed (HyperLiquid's index for ledger history), proto order kept, 1 or 2 entries; the order is a per-type convention, not a direction. For most ledger types it holds the only address. NULL on non-ledger rows. |
+| `user` | `string` (hex) | yes | The body's own `user`: sender (`send`, `spot_transfer`, `internal_transfer`, `sub_account_transfer`), withdrawing depositor (`vault_withdraw`), vault leader (`vault_leader_commission`), staker (`c_deposit`, `c_withdrawal`), delegator (`delegation`) or master account (`create_sub_account`). NULL for types without one: use `users`. |
+| `vault` | `string` (hex) | yes | Vault address. |
+| `usdc` | `decimal(38,10)` | yes | USDC amount, never negative; the direction comes from the type and its flags. For `vault_create`, the leader's initial deposit. |
+| `fee` | `decimal(38,10)` | yes | Fee of the action: in `fee_token` for `send` and `spot_transfer` (`0.0` when `fee_token` is NULL); USDC for `internal_transfer` (0 or 1), `withdraw` (bridge fee, 1) and `vault_create` (creation fee). |
+| `requested_usd` | `decimal(38,10)` | yes | For `vault_withdraw`: amount requested, USDC. |
+| `commission` | `decimal(38,10)` | yes | For `vault_withdraw`: the leader's profit share, USDC. |
+| `closing_cost` | `decimal(38,10)` | yes | For `vault_withdraw`: closing cost, USDC. |
+| `basis` | `decimal(38,10)` | yes | For `vault_withdraw`: cost basis of the withdrawn equity, USDC. |
+| `net_withdrawn_usd` | `decimal(38,10)` | yes | For `vault_withdraw`: net amount withdrawn, USDC. |
+| `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `staking_events`
+
+One row per HYPE staking event: `c_deposit`, `c_withdrawal`, `delegation` and ledger `c_staking_transfer`.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | 0-based position of the event in the block (execution order), counted over all five event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and `validator_rewards`. |
+| `event_type` | `string` | no | `EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, `c_deposit`, `delegation`, `gossip_priority_auction_restart` or `create_sub_account`. |
+| `ledger_type` | `string` | yes | Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, `liquidation`); NULL on other rows. |
+| `hash` | `string` (hex) | no | Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes for system and time-triggered events (funding, validator rewards, gossip restarts, staking-withdrawal finalization and its transfer) and rare sends. Events from one action share it. |
+| `event_time_ns` | `long` | no | Event time in nanoseconds since the Unix epoch. Equal to `blocks.block_time_ns` in every block observed; stored as delivered, not checked. |
+| `users` | `array<string>` (hex) | yes | Accounts whose ledger changed (HyperLiquid's index for ledger history), proto order kept, 1 or 2 entries; the order is a per-type convention, not a direction. For most ledger types it holds the only address. NULL on non-ledger rows. |
+| `user` | `string` (hex) | yes | The body's own `user`: sender (`send`, `spot_transfer`, `internal_transfer`, `sub_account_transfer`), withdrawing depositor (`vault_withdraw`), vault leader (`vault_leader_commission`), staker (`c_deposit`, `c_withdrawal`), delegator (`delegation`) or master account (`create_sub_account`). NULL for types without one: use `users`. |
+| `validator` | `string` (hex) | yes | Validator of a `delegation`. |
+| `token` | `string` | yes | Token symbol of `amount`. NULL on `c_deposit`, `c_withdrawal` and `delegation`, whose `amount` is HYPE. |
+| `amount` | `decimal(38,10)` | yes | Quantity in `token` units; HYPE for `c_deposit`, `c_withdrawal` and `delegation`. A `c_deposit` and its paired `c_staking_transfer` (same hash and amount) describe one move: do not add them. |
+| `is_deposit` | `boolean` | yes | For `c_staking_transfer`: true = spot to staking (pairs with `c_deposit`); false = staking to spot (pairs with a `c_withdrawal` finalization). |
+| `is_undelegate` | `boolean` | yes | For `delegation`: true = undelegate. |
+| `is_finalized` | `boolean` | yes | For `c_withdrawal`: false = unstake request (user's hash, no balance change); true = finalization about 7 days later (zero hash, paired with a `c_staking_transfer` whose `is_deposit` is false). |
+| `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `other_events`
+
+One row per event of every other type: funding and validator-reward headers (their items are in `funding_deltas` and `validator_rewards`), gossip auctions, lending, sub-accounts, the ledger `liquidation`, HIP-3 dex events, gas and genesis, and later types that fit no other event table. The event's single `EventBody`, and for ledger updates its `LedgerUpdateDelta`, are flattened into the row; columns its type does not have are NULL. The five event tables hold every event exactly once, with the columns, types and descriptions of this table; the HyperCore chain notes list the table and the columns of each type.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | 0-based position of the event in the block (execution order), counted over all five event tables. Key with `block_num`; joins `funding_deltas`, `funding_rates` and `validator_rewards`. |
 | `event_type` | `string` | no | `EventBody` case: `ledger_update`, `funding`, `validator_rewards`, `c_withdrawal`, `c_deposit`, `delegation`, `gossip_priority_auction_restart` or `create_sub_account`. |
 | `ledger_type` | `string` | yes | Ledger delta case for `ledger_update` rows (22 values, e.g. `send`, `withdraw`, `liquidation`); NULL on other rows. |
 | `hash` | `string` (hex) | no | Event hash, not unique. It is the HyperCore L1 transaction hash for user actions, the Arbitrum One transaction hash for `deposit` and `withdraw`, and all zero bytes for system and time-triggered events (funding, validator rewards, gossip restarts, staking-withdrawal finalization and its transfer) and rare sends. Events from one action share it. |
@@ -159,7 +375,7 @@ One row per `FundingDelta`: the hourly funding settlement per account and perp c
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
-| `event_index` | `long` | no | Position of the parent funding event in the block; joins `events`. The event's ordinal among the block's funding events is the perp-dex index (observed, not documented upstream). |
+| `event_index` | `long` | no | Position of the parent funding event in the block; joins its header in `other_events` and its rows in `funding_rates`. The event's ordinal among the block's funding events is the perp-dex index (observed, not documented upstream). |
 | `delta_index` | `long` | no | 0-based position of the payment in its funding event. |
 | `user` | `string` (hex) | no | Account paying or receiving funding. |
 | `coin` | `string` | no | Perp symbol; HIP-3 coins carry their `<dex>:` prefix. |
@@ -167,6 +383,36 @@ One row per `FundingDelta`: the hourly funding settlement per account and perp c
 | `szi` | `decimal(38,10)` | no | Signed position size at funding time, negative = short. |
 | `funding_rate` | `decimal(38,10)` | no | Hourly funding rate, signed; the same for every row of a coin in one event. |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `funding_rates`
+
+Derived: one row per funding event and coin with at least one `funding_deltas` row, in event order, then in the order each coin first appears: the hourly settled funding rate, the open-interest census and the funding flows, summed exactly from the event's deltas. A coin-hour without a row is unknown, not zero: HyperLiquid appears to omit coins whose rate is 0.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (decimal) | no | Decimal block number as text: HyperCore has no block hash, and this is the Firehose block id. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (decimal) | no | Decimal text of `parent_num`. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `event_index` | `long` | no | Position of the funding event in the block: joins its header in `other_events` and its `funding_deltas` rows. |
+| `dex_index` | `long` | no | 0-based ordinal of the event among the block's funding events. By observation it is the perp-dex index of HyperLiquid's `perpDexs` (0 = the default dex); that meaning is not documented upstream. |
+| `coin` | `string` | no | Perp symbol (`funding_deltas.coin`); HIP-3 coins carry their `<dex>:` prefix. |
+| `dex` | `string` | yes | Perp dex from `coin`, as `fills.dex`: `''` for the default dex, else the HIP-3 dex name. NULL only for a coin form this version does not know. |
+| `funding_rate` | `decimal(38,10)` | yes | The hourly funding rate of the coin's deltas, signed. NULL if they differ (never observed). |
+| `positions` | `long` | no | Number of the coin's deltas: its open positions (`szi` is never 0). |
+| `long_positions` | `long` | no | Number of deltas with `szi > 0`. |
+| `short_positions` | `long` | no | Number of deltas with `szi < 0`. |
+| `open_interest` | `decimal(38,10)` | yes | Σ\|`szi`\| in coin units: HyperLiquid's `openInterest`, which counts both sides. NULL only if the sum does not fit `decimal(38,10)`. |
+| `long_size` | `decimal(38,10)` | yes | Σ`szi` over `szi > 0`. NULL only if the sum does not fit `decimal(38,10)`. |
+| `short_size` | `decimal(38,10)` | yes | −Σ`szi` over `szi < 0`, positive; equal to `long_size` up to `f64` noise. NULL only if the sum does not fit `decimal(38,10)`. |
+| `positive_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts above 0 (received), in the dex collateral. NULL only if the sum does not fit `decimal(38,10)`. |
+| `negative_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts below 0 (paid), kept negative. NULL only if the sum does not fit `decimal(38,10)`. |
+| `extra_json` | `string` | yes | Reserved: NULL in every row. A field upstream adds to `Funding` or `FundingDelta` goes to `other_events.extra_json` or `funding_deltas.extra_json`. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -183,7 +429,7 @@ One row per `ValidatorReward`: the per-minute reward accrual of every validator.
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
-| `event_index` | `long` | no | Position of the parent validator-rewards event in the block; joins `events`. |
+| `event_index` | `long` | no | Position of the parent validator-rewards event in the block; joins its header in `other_events`. |
 | `reward_index` | `long` | no | 0-based position of the validator in the reward list. |
 | `validator` | `string` (hex) | no | Validator address. |
 | `reward` | `decimal(38,10)` | no | Reward accrued in this minute, HYPE (often 0). Whether it is before or after commission is not documented. |
@@ -197,9 +443,9 @@ The mapper builds Arrow types; every flush maps them onto the Delta types above 
 
 | Mapper Arrow type | Delta type | Conversion | Columns |
 |---|---|---|---|
-| `UInt64` | `long` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `block_num`; `parent_num`; `lib_num`; `stream_ordinal`; `order_id` (`fills`); `transaction_id` (`fills`); `twap_id` (`fills`); `nonce` (`events`); `slot_id` (`events`) |
-| `UInt32` | `long` | lossless | `fill_count` (`blocks`); `event_count` (`blocks`); `fill_index` (`fills`); `event_index` (every table but `blocks` and `fills`); `item_count` (`events`); `delta_index` (`funding_deltas`); `reward_index` (`validator_rewards`) |
-| `Dictionary(Int32, Utf8)` | `string` | the same labels; Parquet still dictionary-encodes the pages | `side` (`fills`); `direction` (`fills`); `event_type` (`events`); `ledger_type` (`events`); `leverage_type` (`events`) |
+| `UInt64` | `long` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `block_num`; `parent_num`; `lib_num`; `stream_ordinal`; `order_id` (`fills`, `outcome_fills`, `liquidations`); `transaction_id` (`fills`, `outcome_fills`, `liquidations`); `twap_id` (`fills`, `outcome_fills`); `nonce` (`transfers`, `bridge_transfers`, `other_events`); `slot_id` (`other_events`) |
+| `UInt32` | `long` | lossless | `fill_count` (`blocks`); `event_count` (`blocks`); `fill_index` (`fills`, `outcome_fills`, `liquidations`); `counterparty_fill_index` (`liquidations`); `event_index` (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, `other_events`, `funding_deltas`, `funding_rates`, `validator_rewards`); `item_count` (`other_events`); `delta_index` (`funding_deltas`); `dex_index` (`funding_rates`); `positions` (`funding_rates`); `long_positions` (`funding_rates`); `short_positions` (`funding_rates`); `reward_index` (`validator_rewards`) |
+| `Dictionary(Int32, Utf8)` | `string` | the same labels; Parquet still dictionary-encodes the pages | `side` (`fills`, `outcome_fills`, `liquidations`); `direction` (`fills`, `outcome_fills`, `liquidations`); `market_type` (`fills`, `liquidations`); `counterparty_direction` (`liquidations`); `event_type` (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, `other_events`); `ledger_type` (`transfers`, `bridge_transfers`, `vault_events`, `staking_events`, `other_events`); `leverage_type` (`other_events`) |
 | `Timestamp(Millisecond, "UTC")` | `timestamp` | the same instant, stored as `TIMESTAMP(MICROS, UTC)` (whole milliseconds) | `timestamp`; `fill_time` (`fills`) |
 | `date` column (`Date32`) | partition column | stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files | `date` |
 
