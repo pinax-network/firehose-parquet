@@ -1147,9 +1147,9 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "liquidations",
         "counterparty",
-        "`fills.counterparty`: the other leg's `user`, the liquidator on `market` and \
-         takeover liquidations, the deleveraged account under ADL. NULL when the fill has no \
-         single opposite leg (never observed).",
+        "`fills.counterparty`: the other leg's `user`, the resting order's account on a \
+         `market` liquidation, the backstop liquidator on a takeover, the deleveraged account \
+         under ADL. NULL when the fill has no single opposite leg (never observed).",
     ),
     (
         ChainKind::Hypercore,

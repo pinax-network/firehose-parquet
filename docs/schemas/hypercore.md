@@ -172,7 +172,7 @@ Derived: one row per liquidated leg, a fill with a liquidation whose `user` is t
 | `order_id` | `long` | no | `fills.order_id`. |
 | `transaction_id` | `long` | no | `fills.transaction_id`, the HyperLiquid trade id. |
 | `hash` | `string` (hex) | no | `fills.hash`. |
-| `counterparty` | `string` (hex) | yes | `fills.counterparty`: the other leg's `user`, the liquidator on `market` and takeover liquidations, the deleveraged account under ADL. NULL when the fill has no single opposite leg (never observed). |
+| `counterparty` | `string` (hex) | yes | `fills.counterparty`: the other leg's `user`, the resting order's account on a `market` liquidation, the backstop liquidator on a takeover, the deleveraged account under ADL. NULL when the fill has no single opposite leg (never observed). |
 | `counterparty_direction` | `string` | yes | The other leg's `direction`: `AUTO_DELEVERAGING` marks ADL, `LIQUIDATED_*` a backstop takeover. NULL with `counterparty`. |
 | `counterparty_fill_index` | `long` | yes | The other leg's `fill_index`: joins its `fills` row. NULL with `counterparty`. |
 | `extra_json` | `string` | yes | The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream adds later reaches this table without a rebuild. NULL in every row written by this version. |

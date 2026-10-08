@@ -341,9 +341,9 @@ pub fn liquidations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
             Field::new("transaction_id", DataType::UInt64, false),
             // `fills.hash`.
             Field::new("hash", bd.clone(), false),
-            // `fills.counterparty`: the other leg's `user`, the liquidator on `market` and takeover
-            // liquidations, the deleveraged account under ADL. NULL when the fill has no single
-            // opposite leg (never observed).
+            // `fills.counterparty`: the other leg's `user`, the resting order's account on a `market`
+            // liquidation, the backstop liquidator on a takeover, the deleveraged account under
+            // ADL. NULL when the fill has no single opposite leg (never observed).
             Field::new("counterparty", bd.clone(), true),
             // The other leg's `direction`: `AUTO_DELEVERAGING` marks ADL, `LIQUIDATED_*` a
             // backstop takeover. NULL with `counterparty`.

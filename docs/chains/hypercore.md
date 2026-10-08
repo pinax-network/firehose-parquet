@@ -1261,7 +1261,7 @@ FROM hypercore_fills_v WHERE is_taker AND NOT is_non_trade GROUP BY ALL ORDER BY
 -- C2 the trades of one HIP-3 dex with taker and maker
 SELECT block_num, timestamp, coin, trade_id, taker_side, price, size, taker, maker
 FROM trades_v WHERE family = 'hip3' AND dex = 'xyz' ORDER BY block_num, fill_index;
--- C3 every liquidated leg, with the liquidator (or under ADL the deleveraged account)
+-- C3 every liquidated leg with its counterparty: the resting order, the backstop liquidator, or under ADL the deleveraged account
 SELECT block_num, fill_index, liquidated_user, coin, direction, liquidation_method, mark_price, price, size, counterparty
 FROM liquidations;
 -- C4 buyer and seller of each trade (dust conversions, HIP-4 mints and burns have no counterparty)

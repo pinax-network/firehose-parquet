@@ -1471,7 +1471,7 @@ async fn validate_blocks(cwd: &Path, root: &Path) {
     );
 }
 
-/// D6 (`docs/chains/hypercore.md`, "Derivation rules"): the derivation version
+/// `docs/chains/hypercore.md`, "Derivation version": the derivation version
 /// is schema metadata that guards resume only. Every part fireparq writes
 /// carries it; the maintenance job rewrites files from the Delta schema, which
 /// does not. A HyperCore root whose dates were compacted still validates,

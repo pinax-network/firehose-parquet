@@ -749,7 +749,7 @@ fn hypercore_schemas_match_the_pinned_epoch_digest() {
     );
 }
 
-/// D6 (`docs/chains/hypercore.md`, "Derivation rules"): the HyperCore
+/// `docs/chains/hypercore.md`, "Derivation version": the HyperCore
 /// derivation version is schema metadata, so a change of a derivation rule
 /// alone, with the same columns, changes every table's declared digest, and a
 /// root started under one version refuses to resume under another. The same

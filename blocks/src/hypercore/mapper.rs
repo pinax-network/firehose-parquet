@@ -261,7 +261,7 @@ struct StagedFill<'a> {
     builder: Option<&'a str>,
     builder_fee: Option<i128>,
     priority_gas: Option<i128>,
-    /// The fill's `extra_json`, which the derived copies carry verbatim (D7).
+    /// The fill's `extra_json`, which the derived copies carry verbatim.
     /// This version writes none: every `Fill` field has a typed column.
     extra_json: Option<&'a str>,
 }
@@ -971,9 +971,9 @@ fn stage_ledger_delta<'a>(
 // ===========================================================================
 //
 // `derive` runs between `stage` and `append`. It reads one staged block only
-// and carries no state across blocks (D2), never refuses (D3), and computes
+// and carries no state across blocks, never refuses, and computes
 // facts only: row selection, copies, joins on exact keys within the block,
-// exact checked sums and counts, and pure parsing of `coin` (D4).
+// exact checked sums and counts, and pure parsing of `coin`.
 
 /// Largest magnitude of a `decimal(38,10)` value, in units of 1e-10.
 const DECIMAL_MAX: u128 = 10u128.pow(38) - 1;
@@ -1026,7 +1026,7 @@ fn digits(text: &str) -> bool {
 /// `[A-Za-z0-9]+/[A-Za-z0-9]+` spot; `[a-z][a-z0-9]*:[A-Za-z0-9]+` HIP-3 perp
 /// (the dex is the text before `:`); `[A-Za-z0-9]+` default-dex perp. Any other
 /// form, and an outcome number above `u64::MAX`, is `None`: never a guess and
-/// never a refusal, because a new form can arrive without a proto change (D3).
+/// never a refusal, because a new form can arrive without a proto change.
 pub(crate) fn market(coin: &str) -> Option<Market<'_>> {
     if let Some(number) = coin.strip_prefix('#') {
         let n: u64 = digits(number).then(|| number.parse().ok())??;
@@ -1092,7 +1092,7 @@ fn pair_fills(fills: &[StagedFill<'_>]) -> Vec<Option<u32>> {
     pairs
 }
 
-/// R-D6: the event table of an event's labels. Routing only grows (D8): a
+/// R-D6: the event table of an event's labels. Routing only grows: a
 /// label already written stays in its table for the life of a root, and a
 /// label first vendored by a release may be routed by that release (R2 refused
 /// every earlier block that carried it). Everything else is `other_events`.
@@ -1226,7 +1226,7 @@ struct Derived<'a> {
 }
 
 /// The derivations of one staged block. Infallible: every value was checked
-/// while staging, and a shape a rule does not recognise gives NULL (D3).
+/// while staging, and a shape a rule does not recognise gives NULL.
 fn derive<'a>(block: &StagedBlock<'a>) -> Derived<'a> {
     Derived {
         markets: block.fills.iter().map(|fill| market(fill.coin)).collect(),
@@ -1895,7 +1895,7 @@ impl OutcomeFillsBuilder {
         self.builder_fee.append_option(fill.builder_fee);
         self.priority_gas.append_option(fill.priority_gas);
         append_bytes(&mut self.counterparty, counterparty);
-        // D7: the fill's own `extra_json`, verbatim.
+        // The fill's own `extra_json`, verbatim.
         self.extra_json.append_option(fill.extra_json);
         append_fork_step(&mut self.fork_step, fork_step);
     }
@@ -2065,7 +2065,7 @@ impl LiquidationsBuilder {
             .append_option(pair.map(|(_, other)| other.direction));
         self.counterparty_fill_index
             .append_option(pair.map(|(index, _)| index));
-        // D7: the fill's own `extra_json`, verbatim.
+        // The fill's own `extra_json`, verbatim.
         self.extra_json.append_option(fill.extra_json);
         append_fork_step(&mut self.fork_step, fork_step);
     }
