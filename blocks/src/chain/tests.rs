@@ -734,9 +734,9 @@ fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
 /// derivation version) included, with the default `hex` encoding, final and
 /// non-final, for every other option. These schemas are bound into every
 /// HyperCore root's protected identity, and upstream additions must be placed
-/// without changing them (`docs/chains/hypercore.md`, "Schema changes").
+/// without changing them (`docs/chains/hypercore.md`, "`extra_json` and schema changes").
 #[test]
-fn hypercore_schemas_match_the_pinned_epoch_digest() {
+fn hypercore_schemas_match_the_pinned_digest() {
     assert_eq!(
         schema_digest_where(
             |kind| kind == ChainKind::Hypercore,

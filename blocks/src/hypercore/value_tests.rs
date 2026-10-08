@@ -1366,21 +1366,45 @@ fn table_named(name: &str) -> EventTable {
         .unwrap_or_else(|| panic!("no event table {name}"))
 }
 
-/// R-D6: every label of the vendored protos routes to its pinned table, the
+/// The field names of `oneof <name> { ... }` in a vendored `.proto` source.
+fn oneof_cases(proto: &str, oneof: &str) -> BTreeSet<String> {
+    let start = proto
+        .find(&format!("oneof {oneof} {{"))
+        .unwrap_or_else(|| panic!("no oneof {oneof}"));
+    let rest = &proto[start..];
+    let body = &rest[rest.find('{').unwrap() + 1..rest.find('}').unwrap()];
+    body.lines()
+        .map(str::trim)
+        .filter(|line| line.contains('=') && !line.starts_with("//"))
+        .map(|line| line.split_whitespace().nth(1).unwrap().to_string())
+        .collect()
+}
+
+/// R-D6: every case of the vendored `EventBody` and `LedgerUpdateDelta`
+/// oneofs, read from `event.proto` itself, routes to its pinned table, the
 /// chain notes document exactly that routing, and an unknown label goes to
-/// `other_events`.
+/// `other_events`. A release that vendors a new case fails here until it pins
+/// and documents the case's table.
 #[test]
 fn event_routing_is_pinned_and_documented() {
-    let mut labels_of_protos: BTreeSet<String> = EVENT_TYPES
-        .iter()
-        .filter(|label| **label != "ledger_update")
-        .map(|label| label.to_string())
-        .collect();
-    labels_of_protos.extend(
-        LEDGER_TYPES
-            .iter()
-            .map(|label| format!("ledger_update/{label}")),
+    let proto = include_str!("../../../proto/pinax/hypercore/v1/event.proto");
+    let bodies = oneof_cases(proto, "event");
+    let deltas = oneof_cases(proto, "delta");
+    assert_eq!(
+        bodies,
+        BTreeSet::from(EVENT_TYPES.map(String::from)),
+        "EventBody cases"
     );
+    assert_eq!(
+        deltas,
+        BTreeSet::from(LEDGER_TYPES.map(String::from)),
+        "LedgerUpdateDelta cases"
+    );
+    let mut labels_of_protos: BTreeSet<String> = bodies
+        .into_iter()
+        .filter(|label| label != "ledger_update")
+        .collect();
+    labels_of_protos.extend(deltas.iter().map(|label| format!("ledger_update/{label}")));
     let pinned: BTreeMap<String, String> = ROUTES
         .iter()
         .map(|(key, table)| (key.to_string(), table.to_string()))
@@ -2211,7 +2235,7 @@ fn payload_names(batch: &RecordBatch) -> Vec<String> {
 /// unknown ones included.
 #[test]
 fn market_classes_follow_the_coin_patterns() {
-    let cases: [(&str, Option<Market<'_>>); 22] = [
+    let cases: [(&str, Option<Market<'_>>); 24] = [
         ("BTC", Some(Market::Perp { dex: "" })),
         ("kPEPE", Some(Market::Perp { dex: "" })),
         ("1000PEPE", Some(Market::Perp { dex: "" })),
@@ -2235,6 +2259,13 @@ fn market_classes_follow_the_coin_patterns() {
             }),
         ),
         (
+            "#007",
+            Some(Market::Outcome {
+                outcome_id: 0,
+                side_index: 7,
+            }),
+        ),
+        (
             "#18446744073709551615",
             Some(Market::Outcome {
                 outcome_id: 1_844_674_407_370_955_161,
@@ -2250,6 +2281,7 @@ fn market_classes_follow_the_coin_patterns() {
         ("xyz:", None),
         (":TSLA", None),
         ("a/b/c", None),
+        ("a:b:c", None),
         ("BTC-PERP", None),
         ("", None),
     ];
@@ -3070,7 +3102,8 @@ fn empty_values_follow_the_null_and_keep_lists() {
 /// A shape a derivation rule does not recognise gives NULL derived values,
 /// never a refusal: an unknown coin form, a trade id shared by three legs or
 /// by two legs on one side, funding deltas whose rates differ, and sums beyond
-/// `decimal(38,10)`. An empty funding event has no `funding_rates` row.
+/// `decimal(38,10)`. An empty funding event has no `funding_rates` row but
+/// counts in the `dex_index` of the funding events after it.
 #[test]
 fn unrecognised_shapes_give_null_derived_values() {
     let busy = fixture(BUSY_BLOCK);
@@ -3113,8 +3146,9 @@ fn unrecognised_shapes_give_null_derived_values() {
     let fills = View::new(&tables, "fills", &EncodeBytes::Hex);
     assert!(fills.is_null("counterparty", a) && fills.is_null("counterparty", b));
 
-    // Funding: differing rates, and sums past decimal(38,10); the empty event
-    // that follows still counts in dex_index but has no row.
+    // Funding: differing rates, and sums past decimal(38,10). The empty event
+    // that follows has no row but still counts in dex_index, so the funding
+    // event after it is dex 2 (October blocks have empty events mid-block).
     let mut block = fixture(SMALL_BLOCK);
     let huge = "9".repeat(28);
     let deltas = vec![
@@ -3144,11 +3178,21 @@ fn unrecognised_shapes_give_null_derived_values() {
         event_body::Event::Funding(pb::Funding { deltas: vec![] }),
     );
     let funding = synthetic_event(&block, event_body::Event::Funding(pb::Funding { deltas }));
+    let after = synthetic_event(
+        &block,
+        event_body::Event::Funding(pb::Funding {
+            deltas: vec![funding_delta()],
+        }),
+    );
+    block.events.insert(0, after);
     block.events.insert(0, empty);
     block.events.insert(0, funding);
     let tables = map_one(&block).unwrap();
     let rates = &tables["funding_rates"];
-    assert_eq!(rates.num_rows(), 2);
+    assert_eq!(rates.num_rows(), 3);
+    let view = View::new(&tables, "funding_rates", &EncodeBytes::Hex);
+    assert_eq!(view.u32("event_index", 2), Some(2));
+    assert_eq!(view.u32("dex_index", 2), Some(2));
     assert_eq!(
         row_cells(rates, 0),
         [
@@ -3187,7 +3231,122 @@ fn unrecognised_shapes_give_null_derived_values() {
             "extra_json=~",
         ]
     );
-    assert_eq!(tables["funding_deltas"].num_rows(), 4);
+    assert_eq!(tables["funding_deltas"].num_rows(), 5);
+}
+
+/// The R-D2 and R-D4 edge cases the chain notes document but no fixture
+/// holds: a self-trade, a pair whose legs are not adjacent, one trade id on
+/// two coins, four legs of one trade id, a liquidated self-trade (two
+/// liquidated legs), a liquidated leg with no opposite leg, a liquidation of
+/// an account that is neither leg, and an empty liquidated account.
+#[test]
+fn derived_edge_cases_follow_the_documented_rules() {
+    const ASK: i32 = 1;
+    const BUY: i32 = 2;
+    let busy = fixture(BUSY_BLOCK);
+    let template = pb::Fill {
+        liquidation: None,
+        ..busy.fills[0].clone()
+    };
+    let account = |byte: u8| Bytes::from(vec![byte; 20]);
+    let fill = |user: u8, coin: &str, transaction_id: u64, side: i32| pb::Fill {
+        user: account(user),
+        coin: coin.to_string(),
+        transaction_id,
+        side,
+        ..template.clone()
+    };
+    let liquidated = |fill: pb::Fill, liquidated_user: Bytes| pb::Fill {
+        liquidation: Some(pb::FillLiquidation {
+            liquidated_user,
+            mark_px: "2.5".to_string(),
+            method: "market".to_string(),
+        }),
+        ..fill
+    };
+    let mut block = busy.clone();
+    block.fills = vec![
+        // 0, 1: a self-trade.
+        fill(0xa1, "BTC", 1, BUY),
+        fill(0xa1, "BTC", 1, ASK),
+        // 2 and 4, split by the single leg 3.
+        fill(0xb1, "BTC", 2, BUY),
+        fill(0xb2, "BTC", 3, BUY),
+        fill(0xb3, "BTC", 2, ASK),
+        // 5..=8: one trade id on two coins is two pairs.
+        fill(0xc1, "BTC", 4, BUY),
+        fill(0xc2, "BTC", 4, ASK),
+        fill(0xc3, "ETH", 4, BUY),
+        fill(0xc4, "ETH", 4, ASK),
+        // 9..=12: four legs of one (coin, trade id) pair none.
+        fill(0xd1, "BTC", 5, BUY),
+        fill(0xd2, "BTC", 5, ASK),
+        fill(0xd3, "BTC", 5, BUY),
+        fill(0xd4, "BTC", 5, ASK),
+        // 13, 14: a liquidated self-trade.
+        liquidated(fill(0xe1, "BTC", 6, BUY), account(0xe1)),
+        liquidated(fill(0xe1, "BTC", 6, ASK), account(0xe1)),
+        // 15: a liquidated leg with no opposite leg.
+        liquidated(fill(0xf1, "BTC", 7, ASK), account(0xf1)),
+        // 16, 17: the liquidated account is neither leg.
+        liquidated(fill(0x01, "BTC", 8, BUY), account(0x99)),
+        liquidated(fill(0x02, "BTC", 8, ASK), account(0x99)),
+        // 18: an empty liquidated account.
+        liquidated(fill(0x03, "BTC", 9, ASK), Bytes::new()),
+    ];
+    let tables = map_one(&block).unwrap();
+    let fills = View::new(&tables, "fills", &EncodeBytes::Hex);
+    let counterparties: Vec<Option<u8>> = (0..fills.len())
+        .map(|row| fills.bytes("counterparty", row).map(|user| user[0]))
+        .collect();
+    assert_eq!(
+        counterparties,
+        [
+            Some(0xa1),
+            Some(0xa1),
+            Some(0xb3),
+            None,
+            Some(0xb1),
+            Some(0xc2),
+            Some(0xc1),
+            Some(0xc4),
+            Some(0xc3),
+            None,
+            None,
+            None,
+            None,
+            Some(0xe1),
+            Some(0xe1),
+            None,
+            Some(0x02),
+            Some(0x01),
+            None,
+        ]
+    );
+    let liquidations = View::new(&tables, "liquidations", &EncodeBytes::Hex);
+    let rows: Vec<_> = (0..liquidations.len())
+        .map(|row| {
+            (
+                liquidations.u32("fill_index", row),
+                liquidations
+                    .bytes("liquidated_user", row)
+                    .map(|user| user[0]),
+                liquidations.bytes("counterparty", row).map(|user| user[0]),
+                liquidations.text("counterparty_direction", row),
+                liquidations.u32("counterparty_fill_index", row),
+            )
+        })
+        .collect();
+    let direction = fills.text("direction", 0);
+    assert!(direction.is_some());
+    assert_eq!(
+        rows,
+        [
+            (Some(13), Some(0xe1), Some(0xe1), direction, Some(14)),
+            (Some(14), Some(0xe1), Some(0xe1), direction, Some(13)),
+            (Some(15), Some(0xf1), None, None, None),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
