@@ -205,8 +205,15 @@ fn origin_block() -> firehose::Response {
 }
 
 /// `fireparq` with `arguments` against `endpoint` (also `--network
-/// hypercore`'s override), bounded to the origin block.
+/// hypercore`'s override), bounded to the origin block unless `arguments` set
+/// `--stop-block`.
 async fn fireparq(cwd: &Path, endpoint: &str, arguments: &[&str]) -> (bool, String) {
+    let stop_block = (ORIGIN + 1).to_string();
+    let bound: &[&str] = if arguments.contains(&"--stop-block") {
+        &[]
+    } else {
+        &["--stop-block", &stop_block]
+    };
     let output = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
@@ -216,7 +223,7 @@ async fn fireparq(cwd: &Path, endpoint: &str, arguments: &[&str]) -> (bool, Stri
             .env("FIREHOSE_ENDPOINT_HYPERCORE", endpoint)
             .arg("build")
             .args(arguments)
-            .args(["--stop-block", &(ORIGIN + 1).to_string()])
+            .args(bound)
             .output(),
     )
     .await
@@ -300,6 +307,29 @@ async fn hypercore_data_origin_is_the_default_start_and_earlier_starts_are_refus
             "{arguments:?}: refused before any Blocks request"
         );
     }
+    // A stop block before the origin is checked against the adjusted start,
+    // and the error says where that start came from.
+    let (ok, logs) = fireparq(
+        cwd,
+        &endpoint,
+        &[
+            "--network",
+            "hypercore",
+            "--dry-run",
+            "--stop-block",
+            "846903300",
+        ],
+    )
+    .await;
+    assert!(!ok, "{logs}");
+    assert!(
+        logs.contains(
+            "--stop-block (846903300) must be greater than the start block (846903317); --stop-block is exclusive (the start block is the data origin of network `hypercore`; --stop-block must be after 846903317)"
+        ),
+        "{logs}"
+    );
+    assert_eq!(take(), [], "refused before any Blocks request");
+
     assert!(
         !root.join("blocks").exists(),
         "a refused build wrote no table"

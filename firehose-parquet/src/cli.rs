@@ -157,7 +157,10 @@ pub struct CommonArgs {
     /// When omitted, an existing output resumes from its authoritative state
     /// under `.fireparq-ingest/` (never from the optional
     /// `_fireparq/cursor.parquet` mirror), and a new output starts from the
-    /// endpoint's first streamable block.
+    /// endpoint's first streamable block, or from the network's data origin
+    /// when that is later (HyperCore: block 846903317, data known from
+    /// 2026-01-01). For a new output, an explicit start before a network's
+    /// data origin is refused.
     #[arg(
         short = 's',
         long,

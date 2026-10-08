@@ -980,7 +980,9 @@ fn infer_ingestion_live_mode(stop_block: Option<u64>) -> bool {
 
 /// The data origin of the streamed network (`NETWORK_DATA_ORIGINS`), by the
 /// EndpointInfo chain name, or by the resolved `--network` alias when
-/// EndpointInfo has no chain name.
+/// EndpointInfo has no chain name. The alias fallback is defensive only:
+/// `build` refuses an EndpointInfo with an empty chain name
+/// (`retry_endpoint_info` in `firehose-parquet/src/grpc.rs`).
 fn resolve_network_data_origin(
     endpoint_info: &Option<EndpointInfo>,
     network: Option<&str>,
@@ -1012,11 +1014,18 @@ fn resolve_ingestion_start_block(
     }
     // A stored cursor resumes the stream: the origin only bounds new starts.
     let data_origin = data_origin.filter(|_| cursor_override || cursor_state.is_none());
+    let first_streamable = endpoint_info
+        .as_ref()
+        .map(|info| info.first_streamable_block_num);
 
     if let Some(start_block) = start_block {
         if let Some(origin) = data_origin.filter(|origin| start_block < origin.first_block) {
+            // The start an omitted --start-block gets: the later of the
+            // origin and the endpoint's first streamable block.
+            let default_start =
+                first_streamable.map_or(origin.first_block, |first| first.max(origin.first_block));
             bail!(
-                "--start-block {start_block} is before the data origin of network `{network}`, block {first}: {reason}. Use --start-block {first} or later, or omit --start-block to start at block {first}",
+                "--start-block {start_block} is before the data origin of network `{network}`, block {first}: {reason}. Use --start-block {first} or later, or omit --start-block to start at block {default_start}",
                 network = origin.chain_name,
                 first = origin.first_block,
                 reason = origin.reason,
@@ -1025,9 +1034,6 @@ fn resolve_ingestion_start_block(
         return Ok(Some(start_block));
     }
 
-    let first_streamable = endpoint_info
-        .as_ref()
-        .map(|info| info.first_streamable_block_num);
     match (first_streamable, data_origin) {
         (first_streamable, Some(origin))
             if first_streamable.is_none_or(|first| first < origin.first_block) =>
@@ -1035,7 +1041,8 @@ fn resolve_ingestion_start_block(
             info!(
                 network = origin.chain_name,
                 data_origin_block = origin.first_block,
-                first_streamable_block_num = ?first_streamable,
+                // Recorded as a plain number, and omitted without EndpointInfo.
+                first_streamable_block_num = first_streamable,
                 reason = origin.reason,
                 "no --start-block: starting at the network's data origin instead of the endpoint's first streamable block"
             );
@@ -1046,6 +1053,31 @@ fn resolve_ingestion_start_block(
             "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
         )),
     }
+}
+
+/// `validate_stop_block_after_start` for the resolved start block. When the
+/// start is a network's data origin rather than an explicit `--start-block`,
+/// the error says so, because the user never passed that block.
+fn validate_stop_block_after_resolved_start(
+    requested_start_block: Option<u64>,
+    start_block: Option<u64>,
+    stop_block: Option<u64>,
+    data_origin: Option<&NetworkDataOrigin>,
+) -> Result<()> {
+    firehose_parquet::cli::validate_stop_block_after_start(start_block, stop_block).map_err(
+        |err| match data_origin {
+            Some(origin)
+                if requested_start_block.is_none() && start_block == Some(origin.first_block) =>
+            {
+                anyhow!(
+                    "{err} (the start block is the data origin of network `{network}`; --stop-block must be after {first})",
+                    network = origin.chain_name,
+                    first = origin.first_block,
+                )
+            }
+            _ => err,
+        },
+    )
 }
 
 fn stream_resume_cursor(
@@ -2752,6 +2784,8 @@ mod tests {
         assert!(!help.contains("--live"));
         assert!(help.contains("authoritative state"));
         assert!(help.contains("first streamable block"));
+        assert!(help.contains("network's data origin"));
+        assert!(help.contains("HyperCore: block 846903317"));
         assert!(help.contains("When omitted, the build runs in live mode"));
         // `build` never probes missing blocks.
         assert!(!help.contains("Missing blocks are skipped automatically"));
@@ -3244,6 +3278,17 @@ mod tests {
                 Some(start_block)
             );
         }
+        // When the endpoint's first streamable block is after the origin, the
+        // refusal names that block as the default start.
+        let later = endpoint_info_at("hypercore", 900_000_000);
+        let err = resolve_ingestion_start_block(Some(846_903_300), None, &later, false, origin)
+            .expect_err("a start before the data origin is refused");
+        assert!(
+            err.to_string().ends_with(
+                "Use --start-block 846903317 or later, or omit --start-block to start at block 900000000"
+            ),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3312,6 +3357,42 @@ mod tests {
         );
         firehose_parquet::cli::validate_stop_block_after_start(start, Some(HYPERCORE_ORIGIN + 1))
             .unwrap();
+    }
+
+    #[test]
+    fn test_stop_block_error_names_the_data_origin_when_it_set_the_start() {
+        let origin = hypercore_origin();
+        let info = endpoint_info_at("hypercore", HYPERCORE_FIRST_STREAMABLE);
+        let start = resolve_ingestion_start_block(None, None, &info, false, origin).unwrap();
+        let err = validate_stop_block_after_resolved_start(None, start, Some(846_903_300), origin)
+            .expect_err("the stop must follow the data origin");
+        assert_eq!(
+            err.to_string(),
+            "--stop-block (846903300) must be greater than the start block (846903317); --stop-block is exclusive (the start block is the data origin of network `hypercore`; --stop-block must be after 846903317)"
+        );
+        validate_stop_block_after_resolved_start(None, start, Some(HYPERCORE_ORIGIN + 1), origin)
+            .unwrap();
+        // An explicit --start-block, or another network: the plain error.
+        let plain = "--stop-block (846903400) must be greater than the start block (846903500); --stop-block is exclusive";
+        for (requested, origin) in [(Some(846_903_500), origin), (None, None)] {
+            let err = validate_stop_block_after_resolved_start(
+                requested,
+                Some(846_903_500),
+                Some(846_903_400),
+                origin,
+            )
+            .expect_err("stop before start");
+            assert_eq!(err.to_string(), plain);
+        }
+        // A start that is not the origin (a later first streamable block).
+        let err = validate_stop_block_after_resolved_start(
+            None,
+            Some(900_000_000),
+            Some(846_903_400),
+            hypercore_origin(),
+        )
+        .expect_err("stop before start");
+        assert!(!err.to_string().contains("data origin"), "{err}");
     }
 
     #[test]

@@ -191,16 +191,20 @@ impl IngestionSetup {
 
         let live = infer_ingestion_live_mode(config.stop_block);
         // Before the stop-block check, which must hold for the adjusted start.
+        let requested_start_block = config.start_block;
+        let data_origin = resolve_network_data_origin(&endpoint_info, network);
         config.start_block = resolve_ingestion_start_block(
             config.start_block,
             existing_cursor_state.as_ref(),
             &endpoint_info,
             args.cursor_override,
-            resolve_network_data_origin(&endpoint_info, network),
+            data_origin,
         )?;
-        firehose_parquet::cli::validate_stop_block_after_start(
+        validate_stop_block_after_resolved_start(
+            requested_start_block,
             config.start_block,
             config.stop_block,
+            data_origin,
         )?;
         debug!(
             requested_start_block = ?args.common.start_block,
