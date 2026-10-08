@@ -4,9 +4,11 @@
 //! through delta-rs), through each table's Delta log.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
-//! and non-final), Solana (list, binary, decimal and enum columns) and
-//! HyperCore (`decimal(38,10)` amounts, a list of decimal structs, decimal
-//! text block ids) datasets. delta-rs first writes a checkpoint of every table, so each
+//! and non-final), Solana (list, binary, decimal and enum columns), HyperCore
+//! (`decimal(38,10)` amounts, a list of decimal structs, decimal text block
+//! ids) and SEC (the real fixture filings: `decimal(38,s)`, data `date`,
+//! `array<struct>`, `array<date>`, `array<integer>` and `binary` columns)
+//! datasets. delta-rs first writes a checkpoint of every table, so each
 //! `_delta_log/` also holds Parquet, next to the Parquet cursor mirror in
 //! `_fireparq/`. Then both engines must read, for **every** table of every
 //! dataset (tables that never get rows included):
@@ -24,8 +26,9 @@
 //!
 //! and, for the listed columns, their Delta types: signed integers (`long`,
 //! `array<short>`) for the mapper's unsigned ones, `decimal(20,0)` for the
-//! chain's decimal columns (an EVM block nonce of `u64::MAX`, exactly), and
-//! `string` for enums, lists and binary columns.
+//! chain's decimal columns (an EVM block nonce of `u64::MAX`, exactly),
+//! `string` for enums, lists and binary columns, and SEC's native types
+//! passed through (`decimal(38,s)`, `date`, `array<struct<…>>`, `binary`).
 //!
 //! `hypercore_documented_sql_runs_over_the_fixture_blocks` builds the 36 real
 //! HyperCore fixture blocks with their true identities and runs the view
@@ -55,6 +58,8 @@ use std::time::Duration;
 use tonic::codegen::{http, BoxFuture, Service};
 
 mod common;
+mod sec_fixture;
+use blocks::sec::proto::sec;
 use common::{number, DuckDb};
 
 const CHAIN: &str = "engine-test";
@@ -328,6 +333,47 @@ fn hypercore_block(number: u64, _id: u8) -> Vec<u8> {
     block.encode_to_vec()
 }
 
+/// A SEC window. Windows 100 and 102, one on each UTC day, hold every real
+/// fixture filing (`tests/fixtures/sec-v013/`) re-homed into the window
+/// (header number and time are the stream's, as the mapper requires), so
+/// every SEC table has rows on both days; 101 and 103 are empty windows. The
+/// first filing also carries `raw_xml` (the `filing_raw_xml.raw_xml` binary
+/// column).
+fn sec_block(number: u64, _id: u8) -> Vec<u8> {
+    let mut filings: Vec<sec::Filing> = Vec::new();
+    if number.is_multiple_of(2) {
+        filings = sec_fixture::blocks()
+            .iter()
+            .flat_map(|block| {
+                <sec::Block as Message>::decode(block.payload.as_slice())
+                    .unwrap()
+                    .filings
+            })
+            .enumerate()
+            .map(|(position, filing)| sec::Filing {
+                ordinal: position as u64,
+                ..filing
+            })
+            .collect();
+        filings[0].raw_xml = b"<edgarSubmission>engine test</edgarSubmission>"
+            .to_vec()
+            .into();
+    }
+    let day = seconds(number).div_euclid(86_400);
+    sec::Block {
+        header: Some(sec::BlockHeader {
+            block_number: number,
+            block_time: Some(prost_types::Timestamp {
+                seconds: seconds(number),
+                nanos: 0,
+            }),
+            feed_date: sec_fixture::iso_date(day as i32),
+        }),
+        filings,
+    }
+    .encode_to_vec()
+}
+
 /// One dataset written by `build`.
 struct Dataset {
     name: &'static str,
@@ -564,6 +610,111 @@ fn datasets() -> Vec<Dataset> {
                 },
             ],
         },
+        Dataset {
+            name: "sec-final",
+            block_type: "sec",
+            final_only: true,
+            millis: 250,
+            events: (100..104).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect(),
+            tables: sec_tables(),
+        },
+    ]
+}
+
+/// The SEC columns whose types no other chain has: `decimal(38,s)` in the
+/// five scale families, data `date` columns next to the `date` partition,
+/// `array<struct<…>>`, `array<date>`, `array<integer>` and `binary`.
+fn sec_tables() -> Vec<Table> {
+    vec![
+        Table {
+            name: "filings",
+            columns: vec![
+                ("filing_index", "BIGINT", "Int64"),
+                ("filing_date", "DATE", "Date32"),
+                (
+                    "acceptance_datetime",
+                    "TIMESTAMP WITH TIME ZONE",
+                    "Timestamp(µs, \"UTC\")",
+                ),
+                ("dissemination_lag_days", "INTEGER", "Int32"),
+                ("body_kind", "VARCHAR", "Utf8"),
+                (
+                    "dissemination_flags",
+                    "VARCHAR[]",
+                    "List(Utf8, field: 'element')",
+                ),
+            ],
+            minimums: vec![("filing_date", "2004-06-21")],
+        },
+        Table {
+            name: "filing_raw_xml",
+            columns: vec![("raw_xml", "BLOB", "Binary")],
+            minimums: vec![],
+        },
+        Table {
+            name: "filing_parties",
+            columns: vec![(
+                "former_names",
+                "STRUCT(\"name\" VARCHAR, date_changed DATE)[]",
+                "List(Struct(\"name\": Utf8, \"date_changed\": Date32), field: 'element')",
+            )],
+            minimums: vec![],
+        },
+        Table {
+            name: "ownership_transactions",
+            columns: vec![
+                ("shares", "DECIMAL(38,6)", "Decimal128(38, 6)"),
+                ("value_usd", "DECIMAL(38,6)", "Decimal128(38, 6)"),
+                ("transaction_date", "DATE", "Date32"),
+            ],
+            minimums: vec![("shares", "86.000000")],
+        },
+        Table {
+            name: "form13f_holdings",
+            columns: vec![
+                ("value", "BIGINT", "Int64"),
+                (
+                    "other_manager_sequence_numbers",
+                    "INTEGER[]",
+                    "List(Int32, field: 'element')",
+                ),
+            ],
+            minimums: vec![],
+        },
+        Table {
+            name: "form144_notices",
+            columns: vec![
+                (
+                    "plan_adoption_dates",
+                    "DATE[]",
+                    "List(Date32, field: 'element')",
+                ),
+                (
+                    "total_aggregate_market_value",
+                    "DECIMAL(38,2)",
+                    "Decimal128(38, 2)",
+                ),
+            ],
+            minimums: vec![],
+        },
+        Table {
+            name: "nport_holdings",
+            columns: vec![
+                ("balance", "DECIMAL(38,10)", "Decimal128(38, 10)"),
+                ("pct_value", "DECIMAL(38,12)", "Decimal128(38, 12)"),
+            ],
+            minimums: vec![("pct_value", "-18.124339407100")],
+        },
+        Table {
+            name: "npx_vote_records",
+            columns: vec![("shares_voted", "DECIMAL(38,16)", "Decimal128(38, 16)")],
+            minimums: vec![],
+        },
+        Table {
+            name: "parse_issues",
+            columns: vec![("issue", "VARCHAR", "Utf8"), ("index_1", "BIGINT", "Int64")],
+            minimums: vec![],
+        },
     ]
 }
 
@@ -572,6 +723,7 @@ impl Dataset {
         let (type_url, block): (&str, fn(u64, u8) -> Vec<u8>) = match self.block_type {
             "evm" => ("type.googleapis.com/sf.ethereum.type.v2.Block", evm_block),
             "hypercore" => (HYPERCORE_TYPE_URL, hypercore_block),
+            "sec" => ("type.googleapis.com/pinax.sec.v1.Block", sec_block),
             _ => ("type.googleapis.com/sf.solana.type.v1.Block", solana_block),
         };
         self.events
@@ -703,7 +855,9 @@ fn check_duckdb(
     let context = format!("duckdb {} {} {}", duckdb.version, dataset.name, table);
     let location = root.join(table);
     let location = location.to_str().unwrap();
-    let scan = format!("delta_scan('{location}', filename = true)");
+    // The file path under a name no table uses (SEC's `filing_documents` has
+    // a `filename` column).
+    let scan = format!("delta_scan('{location}', filename = 'fireparq_data_file')");
     let checked = dataset.checked(table);
     let minimums: String = checked
         .map(|checked| {
@@ -721,15 +875,15 @@ fn check_duckdb(
          SELECT 'stats' AS q, count(*) AS n, \
            epoch_ms(max(timestamp)) % 1000 AS millis, \
            epoch_us(max(timestamp)) % 1000 AS micros, \
-           count(*) FILTER (WHERE NOT (starts_with(filename, '{location}/date=') \
-             AND regexp_matches(filename, '/date=[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}/part-v1-[^/]+[.]parquet$'))) \
+           count(*) FILTER (WHERE NOT (starts_with(fireparq_data_file, '{location}/date=') \
+             AND regexp_matches(fireparq_data_file, '/date=[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}/part-v1-[^/]+[.]parquet$'))) \
              AS foreign_files, \
            count(*) FILTER (WHERE date = DATE '{DAY}') AS on_day, \
            count(DISTINCT date) FILTER (WHERE date = DATE '{DAY}') AS days_on_day, \
-           string_agg(DISTINCT replace(filename, '{location}/', ''), ',' ORDER BY replace(filename, '{location}/', '')) \
+           string_agg(DISTINCT replace(fireparq_data_file, '{location}/', ''), ',' ORDER BY replace(fireparq_data_file, '{location}/', '')) \
              FILTER (WHERE date = DATE '{DAY}') AS files_on_day, \
            count(*) FILTER (WHERE date IS DISTINCT FROM \
-             CAST(regexp_extract(filename, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
+             CAST(regexp_extract(fireparq_data_file, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
              AS partition_mismatches{minimums} \
            FROM {scan}; \
          PRAGMA enable_profiling = 'json'; SET profiling_output = '{}'; \
@@ -1610,6 +1764,71 @@ async fn hypercore_compaction_drops_the_derivation_key_and_resume_still_works() 
     assert_eq!(common::delta_counts(&root, &tables).await, expected);
     if let Some(duckdb) = DuckDb::open(&cwd) {
         assert_eq!(common::duckdb_counts(&duckdb, &root, &tables), expected);
+    }
+}
+
+/// The "Engine compatibility" section of docs/reading-tables.md states what
+/// this test checks: it names every family of [`datasets`], and its type table
+/// has a DuckDB row for every type pinned above and for each list's element
+/// type (`DECIMAL(38,s)` stands for the five SEC scales, `STRUCT(…)` for any
+/// struct, the `T[]` row for every list).
+#[test]
+fn reading_tables_documents_every_checked_family_and_type() {
+    let docs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/reading-tables.md"),
+    )
+    .unwrap();
+    let section = docs
+        .split("\n## Engine compatibility\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("docs/reading-tables.md has an Engine compatibility section");
+    let ci_sentence = section
+        .split("CI builds real ")
+        .nth(1)
+        .and_then(|rest| rest.split(" output").next())
+        .expect("the section says which output CI builds")
+        .replace('\n', " ");
+    for dataset in datasets() {
+        let family = match dataset.block_type {
+            "evm" => "EVM",
+            "solana" => "Solana",
+            "sec" => "SEC",
+            "hypercore" => "HyperCore",
+            other => panic!("name the {other} family here"),
+        };
+        assert!(ci_sentence.contains(family), "{family}: {ci_sentence}");
+    }
+    // The DuckDB column of the type table.
+    let duckdb_cells: Vec<&str> = section
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| line.split(" | ").nth(1))
+        .collect();
+    let documented = |spelling: &str| {
+        duckdb_cells
+            .iter()
+            .any(|cell| cell.contains(&format!("`{spelling}")))
+    };
+    let pinned = datasets().into_iter().flat_map(|dataset| {
+        dataset
+            .tables
+            .into_iter()
+            .flat_map(|table| table.columns.into_iter().map(|(_, duckdb, _)| duckdb))
+    });
+    for duckdb in CANONICAL.iter().map(|(_, duckdb, _)| *duckdb).chain(pinned) {
+        let element = duckdb.trim_end_matches("[]");
+        let element = if element.starts_with("DECIMAL(38,") {
+            "DECIMAL(38,s)"
+        } else if element.starts_with("STRUCT(") {
+            "STRUCT("
+        } else {
+            element
+        };
+        assert!(documented(element), "{duckdb}: no row for {element}");
+        if duckdb.ends_with("[]") {
+            assert!(documented("T[]"), "{duckdb}: no array row");
+        }
     }
 }
 

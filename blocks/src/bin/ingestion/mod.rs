@@ -43,6 +43,27 @@ fn record_committed_flush_sizing(
     );
 }
 
+/// Blocks go to [`runtime::IngestionRuntime::observe`]; a quiet stream
+/// flushes ([`runtime::IngestionRuntime::flush_when_quiet`]).
+struct RuntimeHandler<'a, 'run, 'owner>(&'a mut runtime::IngestionRuntime<'run, 'owner>);
+
+impl firehose_parquet::grpc::StreamHandler for RuntimeHandler<'_, '_, '_> {
+    fn block(
+        &mut self,
+        payload: Vec<u8>,
+        type_url: String,
+        cursor: String,
+        identity: BlockIdentity,
+        step: i32,
+    ) -> Result<()> {
+        self.0.observe(payload, type_url, cursor, identity, step)
+    }
+
+    fn quiet(&mut self) -> Result<()> {
+        self.0.flush_when_quiet()
+    }
+}
+
 pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     init_tracing(
         &args.common.log_level,
@@ -97,7 +118,7 @@ async fn run_owned(
 
     let (mut metrics_registry, pipeline_metrics) = metrics::init();
     let _pipeline_activity = pipeline_metrics.begin_pipeline();
-    setup.configure_metrics(args, &mut metrics_registry, &pipeline_metrics);
+    setup.configure_metrics(&mut metrics_registry, &pipeline_metrics);
     // Spawn the metrics HTTP server if a port was provided.
     let metrics_registry = Arc::new(metrics_registry);
     if let Some(port) = setup.config.metrics_port {
@@ -151,13 +172,13 @@ async fn run_owned(
         shutdown,
     )?;
     let resume_cursor = runtime.resume_cursor();
+    let quiet_after = setup.config.flush_idle_secs.map(Duration::from_secs);
     let stream_result = client
-        .stream_blocks(
+        .stream_blocks_with_quiet(
             resume_cursor,
             shutdown,
-            |payload, type_url, cursor, identity, step| {
-                runtime.observe(payload, type_url, cursor, identity, step)
-            },
+            quiet_after,
+            &mut RuntimeHandler(&mut runtime),
         )
         .await;
     // All synchronous writes have resolved when `finish` returns; the caller

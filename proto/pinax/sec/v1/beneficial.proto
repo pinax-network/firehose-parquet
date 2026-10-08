@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// SC 13D / 13G beneficial-ownership disclosure. Post-2024 filings ("SCHEDULE
+// 13D"/"SCHEDULE 13G") carry a structured primary_doc.xml — parsed in full
+// here. Legacy "SC 13D"/"SC 13G" (pre-2024, HTML body) populate only the
+// metadata fields (subject_company_*, schedule_type).
+message BeneficialOwnershipReport {
+  // Legacy/common metadata (always populated).
+  string subject_company_cik  = 1;
+  string subject_company_name = 2;
+  // First CUSIP (see `cusips`). Empty for legacy SC 13D/G (no XML).
+  string cusip                = 3;
+
+  // Structured fields (post-2024 SCHEDULE 13D/G).
+  string  schedule_type           = 4; // "SCHEDULE 13D" | "SCHEDULE 13G" | "SC 13D" | "SC 13G"
+  string  filer_cik               = 5;
+  string  securities_class_title  = 6;
+  string  event_date              = 7; // dateOfEvent / eventDateRequiresFilingThisStatement
+  Address issuer_address          = 8;
+  repeated string rules_designated = 9; // 13G: Rule 13d-1(b) etc.
+  repeated ReportingPerson reporting_persons = 10;
+
+  // --- Added in 0.13.0 (structured SCHEDULE 13D/G only) ---
+  // issuerInfo/issuerCusips/issuerCusipNumber (repeatable; the 2025+ shape), or the
+  // older single issuerCUSIP / issuerCusip. `cusip` = cusips[0].
+  repeated string cusips                  = 11;
+  string   previous_accession_number      = 12; // headerData/previousAccessionNumber
+  string   amendment_number               = 13; // coverPageHeader/amendmentNo
+  optional bool previously_filed          = 14; // 13D coverPageHeader/previouslyFiledFlag
+  Schedule13dItems items_13d              = 15; // 13D formData/items1To7
+  Schedule13gItems items_13g              = 16; // 13G formData/items
+  repeated BeneficialSignature signatures = 17; // 13D signatureInfo/signaturePerson, 13G signatureInformation
+  string   exhibit_info                   = 18; // 13G formData/exhibitInfo (e.g. joint filing agreement), verbatim
+  string   signature_comments             = 19; // 13G formData/signatureComments / 13D signatureInfo/commentText
+  // 13D coverPageHeader/authorizedPersons/notificationInfo (cover item: person
+  // authorized to receive notices and communications), in document order.
+  repeated BeneficialAuthorizedPerson authorized_persons = 20;
+}
+
+// One 13D authorizedPersons/notificationInfo entry (verbatim).
+message BeneficialAuthorizedPerson {
+  string  name    = 1; // personName
+  string  phone   = 2; // personPhoneNum
+  Address address = 3; // personAddress (stateOrCountry -> state); unset when absent
+}
+
+// SCHEDULE 13D Items 1-7 (free text, verbatim).
+message Schedule13dItems {
+  string security_title             = 1;  // item1/securityTitle
+  string filing_person_name         = 2;  // item2/filingPersonName
+  string principal_business_address = 3;  // item2/principalBusinessAddress (free text)
+  string principal_job              = 4;  // item2/principalJob
+  string has_been_convicted         = 5;  // item2/hasBeenConvicted, raw
+  string conviction_description     = 6;  // item2/convictionDescription
+  string citizenship                = 7;  // item2/citizenship
+  string funds_source               = 8;  // item3/fundsSource
+  string transaction_purpose        = 9;  // item4/transactionPurpose (Item 4: purpose of transaction)
+  string percentage_of_class        = 10; // item5/percentageOfClassSecurities
+  string number_of_shares           = 11; // item5/numberOfShares
+  string transaction_description    = 12; // item5/transactionDesc (Item 5(c) recent transactions)
+  string list_of_shareholders       = 13; // item5/listOfShareholders
+  string date_5_percent_ownership   = 14; // item5/date5PercentOwnership
+  string contract_description       = 15; // item6/contractDescription
+  string filed_exhibits             = 16; // item7/filedExhibits
+  string item1_comment              = 17; // item1/commentText (amendment preamble), verbatim
+  string issuer_name                = 18; // item1/issuerName (restates the cover)
+  Address issuer_principal_address  = 19; // item1/issuerPrincipalAddress (unset when absent)
+}
+
+// SCHEDULE 13G Items 3-10 (verbatim).
+message Schedule13gItems {
+  repeated string type_of_person_filing      = 1;  // item3/typeOfPersonFiling (IA, HC, BD, ...)
+  string other_type_of_person_filing         = 2;  // item3/otherTypeOfPersonFiling
+  string amount_beneficially_owned           = 3;  // item4/amountBeneficiallyOwned
+  string class_percent                       = 4;  // item4/classPercent
+  string sole_voting_power                   = 5;  // item4/numberOfSharesPersonHas/solePowerOrDirectToVote
+  string shared_voting_power                 = 6;  // .../sharedPowerOrDirectToVote
+  string sole_dispositive_power              = 7;  // .../solePowerOrDirectToDispose
+  string shared_dispositive_power            = 8;  // .../sharedPowerOrDirectToDispose
+  optional bool class_ownership_5_percent_or_less = 9; // item5/classOwnership5PercentOrLess (exit below 5%)
+  string ownership_on_behalf_of_another      = 10; // item6/ownershipMoreThan5PercentOnBehalfOfAnotherPerson
+  string subsidiary_identification          = 11; // item7/subsidiaryIdentificationAndClassification
+  string group_members_identification       = 12; // item8/identificationAndClassificationOfGroupMembers
+  string group_dissolution_notice           = 13; // item9/groupDissolutionNotice
+  string certifications                     = 14; // item10/certifications
+  string issuer_name                        = 15; // item1/issuerName
+  string issuer_principal_office_address    = 16; // item1/issuerPrincipalExecutiveOfficeAddress (free text)
+  string filing_person_name                 = 17; // item2/filingPersonName (free text; may list several)
+  string principal_business_office_address  = 18; // item2/principalBusinessOfficeOrResidenceAddress (free text)
+  string citizenship                        = 19; // item2/citizenship
+}
+
+message BeneficialSignature {
+  string reporting_person = 1; // 13D signatureReportingPerson / 13G reportingPersonName
+  string signature        = 2; // signatureDetails/signature
+  string title            = 3; // signatureDetails/title
+  string date             = 4; // signatureDetails/date, raw MM/DD/YYYY
+}
+
+message ReportingPerson {
+  string cik                     = 1;
+  string name                    = 2;
+  string fund_type               = 3; // source of funds (13D fundType); 0.13.0+: first of `fund_types`
+  string citizenship             = 4; // citizenshipOrOrganization
+  string sole_voting_power       = 5;
+  string shared_voting_power     = 6;
+  string sole_dispositive_power  = 7;
+  string shared_dispositive_power = 8;
+  string aggregate_amount_owned  = 9;
+  string percent_of_class        = 10;
+  string type_of_reporting_person = 11; // IN, HC, OO, ...; 0.13.0+: first of `types_of_reporting_person`
+
+  // --- Added in 0.13.0 ---
+  string member_of_group                  = 12; // 13D memberOfGroup / 13G memberGroup, raw ("a" | "b")
+  optional bool no_cik                    = 13; // 13D reportingPersonNoCIK
+  optional bool aggregate_excludes_shares = 14; // 13D isAggregateExcludeShares / 13G aggregateAmountExcludesCertainSharesFlag
+  optional bool legal_proceedings         = 15; // 13D legalProceedings
+  string comment                          = 16; // 13D commentContent / 13G comments
+  repeated string fund_types              = 17; // every 13D fundType, document order
+  repeated string types_of_reporting_person = 18; // every typeOfReportingPerson, document order
+}

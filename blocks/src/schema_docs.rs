@@ -109,6 +109,7 @@ fn chain_title(kind: ChainKind) -> &'static str {
         ChainKind::Cosmos => "Cosmos",
         ChainKind::Tron => "Tron",
         ChainKind::Beacon => "Beacon",
+        ChainKind::Sec => "SEC EDGAR",
         ChainKind::Hypercore => "HyperCore",
     }
 }
@@ -128,6 +129,20 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
         ChainKind::Bitcoin => &[
             "`outputs.value_sats` is a checked `long`, not a `decimal(20,0)`: consensus caps \
              it at 2.1·10^15 satoshis (`MAX_MONEY`).",
+        ],
+        ChainKind::Sec => &[
+            "`block_id` and `parent_id` are decimal 10-minute window numbers (`\"2984687\"`, \
+             `block_num = unix_seconds / 600`), written verbatim, not hashes. A feed day has 144 \
+             windows, empty ones included: every window has a `blocks` row.",
+            "Amounts are typed decimals in five `decimal(38,s)` scale families (M2 = 2, Q6 = 6, \
+             N10 = 10, R12 = 12, S16 = 16), dates are `date`, and XSD integers are `integer` or \
+             `long`. Every source value that a typed column does not reproduce exactly \
+             (unparseable, sentinel, out of range, rounded, dropped time zone, overflow) has one \
+             `parse_issues` row with the verbatim text, and its row has `has_parse_issues`.",
+            "Rows are keyed `(block_num, filing_index[, child positions])`. `accession_number` is \
+             not unique, because EDGAR re-disseminates filings: use the `sec_filings_first` view.",
+            "13F `value` is raw (thousands before 2023-01-03, dollars after, with filer \
+             exceptions): use the `sec_13f_holdings_usd` view.",
         ],
         ChainKind::Hypercore => &[
             "`block_id` and `parent_id` hold the decimal block number as text (ASCII bytes \
@@ -1684,7 +1699,7 @@ fn canonical_description(column: &str) -> Option<&'static str> {
 }
 
 /// A chain's own description of a canonical column, which replaces the
-/// shared one: HyperCore's ids are decimal text, not hashes.
+/// shared one: HyperCore's and SEC's ids are decimal text, not hashes.
 fn chain_canonical_description(kind: ChainKind, column: &str) -> Option<&'static str> {
     match (kind, column) {
         (ChainKind::Hypercore, "block_id") => Some(
@@ -1692,6 +1707,11 @@ fn chain_canonical_description(kind: ChainKind, column: &str) -> Option<&'static
              Firehose block id.",
         ),
         (ChainKind::Hypercore, "parent_id") => Some("Decimal text of `parent_num`."),
+        (ChainKind::Sec, "block_id") => Some(
+            "Decimal 10-minute window number as text: SEC has no block hash, and this is the \
+             Firehose block id.",
+        ),
+        (ChainKind::Sec, "parent_id") => Some("Decimal text of `parent_num`."),
         _ => None,
     }
 }
@@ -1714,18 +1734,35 @@ fn column_description(kind: ChainKind, table: &str, column: &str) -> Option<&'st
     chain_canonical_description(kind, column)
         .or_else(|| canonical_description(column))
         .or_else(|| {
-            COLUMN_DESCRIPTIONS
-                .iter()
+            column_descriptions()
                 .find(|(k, t, c, _)| *k == kind && *t == table && *c == column)
-                .map(|(_, _, _, description)| *description)
+                .map(|(_, _, _, description)| description)
         })
 }
 
 fn table_description(kind: ChainKind, table: &str) -> Option<&'static str> {
-    TABLE_DESCRIPTIONS
-        .iter()
+    table_descriptions()
         .find(|(k, t, _)| *k == kind && *t == table)
-        .map(|(_, _, description)| *description)
+        .map(|(_, _, description)| description)
+}
+
+/// [`TABLE_DESCRIPTIONS`] and the SEC table descriptions, which live beside
+/// their columns in `blocks/src/sec/schema/`.
+fn table_descriptions() -> impl Iterator<Item = (ChainKind, &'static str, &'static str)> {
+    TABLE_DESCRIPTIONS.iter().copied().chain(
+        crate::sec::schema::table_descriptions()
+            .map(|(table, description)| (ChainKind::Sec, table, description)),
+    )
+}
+
+/// [`COLUMN_DESCRIPTIONS`] and the SEC column descriptions (every SEC column
+/// is described in `blocks/src/sec/schema/`).
+fn column_descriptions(
+) -> impl Iterator<Item = (ChainKind, &'static str, &'static str, &'static str)> {
+    COLUMN_DESCRIPTIONS.iter().copied().chain(
+        crate::sec::schema::column_descriptions()
+            .map(|(table, column, description)| (ChainKind::Sec, table, column, description)),
+    )
 }
 
 /// Every description must name a column (or table) that exists, so a renamed or
@@ -1738,15 +1775,15 @@ fn check_descriptions(references: &[ChainReference]) -> Result<()> {
             .flat_map(|reference| &reference.tables)
             .find(|t| t.name == table)
     };
-    for (kind, table, _) in TABLE_DESCRIPTIONS {
+    for (kind, table, _) in table_descriptions() {
         ensure!(
-            has_table(*kind, table).is_some(),
+            has_table(kind, table).is_some(),
             "schema_docs: table description for {kind}.{table} names no table"
         );
     }
-    for (kind, table, column, _) in COLUMN_DESCRIPTIONS {
+    for (kind, table, column, _) in column_descriptions() {
         ensure!(
-            has_table(*kind, table).is_some_and(|t| t.columns.iter().any(|c| c.name == *column)),
+            has_table(kind, table).is_some_and(|t| t.columns.iter().any(|c| c.name == column)),
             "schema_docs: column description for {kind}.{table}.{column} names no column"
         );
     }
@@ -2093,6 +2130,7 @@ fn encoding_fixed_since(kind: ChainKind) -> &'static str {
         | ChainKind::Cosmos
         | ChainKind::Tron
         | ChainKind::Beacon => "in v1.0.0",
+        ChainKind::Sec => "since `--block-type sec` was added",
         ChainKind::Hypercore => "since `--block-type hypercore` was added",
     }
 }
@@ -2236,7 +2274,8 @@ fn render_index(references: &[ChainReference]) -> String {
          `delta_scan('<root>/<table>')` or Polars `scan_delta`, never by globbing its \
          files.\n\
          - Types are Delta Lake types (#643), the types of the data files: `long`, \
-         `integer`, `short`, `decimal(20,0)`, `decimal(38,10)`, `double`, `boolean`, \
+         `integer`, `short`, `decimal(20,0)`, `decimal(38,2)`, `decimal(38,6)`, \
+         `decimal(38,10)`, `decimal(38,12)`, `decimal(38,16)`, `double`, `boolean`, \
          `string`, `binary`, `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has \
          no unsigned, dictionary or millisecond types, so every flush maps the mapper's \
          Arrow types once, with checked casts, before anything is written \
@@ -2246,8 +2285,9 @@ fn render_index(references: &[ChainReference]) -> String {
          check (`ChainProfile::decimal_columns`); `UInt32` and `UInt16` become `long`, \
          `UInt8` becomes `short`, dictionaries become `string`, and millisecond \
          timestamps become `timestamp` (microseconds, UTC) with the same instant; \
-         `Decimal128` columns (HyperCore's exact amounts, `decimal(38,10)`) are already \
-         Delta types and are written unchanged. Each chain file ends with its mapping.\n\
+         `Decimal128` columns (HyperCore's exact amounts, `decimal(38,10)`, and SEC's \
+         parsed amounts in five scales) are already Delta types and are written \
+         unchanged. Each chain file ends with its mapping.\n\
          - Every table starts with the canonical block identity columns `block_num`, \
          `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` and `date`, shared \
          by all chains (`firehose_parquet::traits`). `block_num`, `parent_num` and \
@@ -2345,11 +2385,14 @@ fn render_chain(reference: &ChainReference) -> String {
             encoded_types.push(encoded_type);
         }
     }
-    let _ = writeln!(
-        out,
-        "- Columns typed {} hold binary values written as text in that encoding.",
-        encoded_types.join(" or ")
-    );
+    // A family whose only encoded columns are its text ids (SEC) has none.
+    if !encoded_types.is_empty() {
+        let _ = writeln!(
+            out,
+            "- Columns typed {} hold binary values written as text in that encoding.",
+            encoded_types.join(" or ")
+        );
+    }
     let _ = writeln!(
         out,
         "- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams \
@@ -2565,7 +2608,7 @@ fn render_mapping(reference: &ChainReference, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, solana, tron};
+    use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana, tron};
 
     /// The first line where `committed` and `rendered` differ, for the failure message.
     fn first_difference(committed: &str, rendered: &str) -> String {
@@ -2754,6 +2797,7 @@ mod tests {
             (ChainKind::Hypercore, &hypercore::schema::TABLE_NAMES[..]),
             (ChainKind::Near, &near::schema::TABLE_NAMES[..]),
             (ChainKind::Tron, &tron::schema::TABLE_NAMES[..]),
+            (ChainKind::Sec, &sec::schema::TABLE_NAMES[..]),
         ] {
             assert_eq!(names(kind, all), expect(constants), "{kind}");
             assert_eq!(names(kind, base), expect(constants), "{kind}");

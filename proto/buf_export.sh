@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pulls the latest proto definitions from the Buf Build Registry (https://buf.build)
-# and writes them as flat, single-file protos named after each block type.
-# HyperCore keeps its upstream package path (pinax/hypercore/v1/*.proto) and its
-# imports unchanged, so a refresh is a plain copy.
+# and writes them as flat, single-file protos named after each block type. Three trees keep
+# their upstream import paths instead: Tron's core/*.proto, SEC's pinax/sec/v1/*.proto and
+# HyperCore's pinax/hypercore/v1/*.proto (with its package path and imports unchanged, so a
+# refresh is a plain copy).
 #
 # Prerequisites:
 #   - buf CLI (https://buf.build/docs/installation)
@@ -74,6 +75,13 @@ buf export buf.build/pinax/hypercore -o "$TMP_DIR/hypercore"
 mkdir -p "$PROTO_DIR/pinax/hypercore/v1"
 cp "$TMP_DIR/hypercore/pinax/hypercore/v1/"*.proto "$PROTO_DIR/pinax/hypercore/v1/"
 echo "  ✓ pinax/hypercore/v1/*.proto"
+
+# ── SEC (EDGAR) ───────────────────────────────────────────
+# Ten files in package pinax.sec.v1 that import each other by path: keep the tree.
+buf export buf.build/pinax/firehose-sec:v0.13.0 -o "$TMP_DIR/sec"
+mkdir -p "$PROTO_DIR/pinax/sec/v1"
+cp "$TMP_DIR/sec/pinax/sec/v1/"*.proto "$PROTO_DIR/pinax/sec/v1/"
+echo "  ✓ pinax/sec/v1/*.proto"
 
 echo ""
 echo "Done. All proto files updated in $PROTO_DIR"

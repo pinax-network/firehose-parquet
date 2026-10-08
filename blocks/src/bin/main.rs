@@ -52,6 +52,7 @@ const BLOCK_TYPES: &[&str] = &[
     "cosmos",
     "tron",
     "beacon",
+    "sec",
     "hypercore",
 ];
 const WITHOUT_EXTENDED_WARNING: &str =
@@ -171,6 +172,9 @@ enum MapperFlushTrigger {
     Blocks,
     Rows,
     Interval,
+    /// `--flush-idle-secs`: the stream went quiet, at any pace. Checked
+    /// between messages, not after a block.
+    Idle,
 }
 
 impl MapperFlushTrigger {
@@ -181,6 +185,7 @@ impl MapperFlushTrigger {
             Self::Blocks => "blocks",
             Self::Rows => "rows",
             Self::Interval => "interval",
+            Self::Idle => "idle",
         }
     }
 }
@@ -3540,6 +3545,14 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_block_type_sec() {
+        assert_eq!(
+            detect_block_type("type.googleapis.com/pinax.sec.v1.Block").unwrap(),
+            ChainKind::Sec
+        );
+    }
+
+    #[test]
     fn test_detect_block_type_hypercore() {
         assert_eq!(
             detect_block_type("type.googleapis.com/pinax.hypercore.v1.Block").unwrap(),
@@ -3630,33 +3643,44 @@ mod tests {
             output_block_id_encoding_label(&ChainKind::Beacon.default_bytes_encoding(false)),
             Some("hex_0x")
         );
-        // HyperCore ids are decimal text under every encoding.
-        assert_eq!(
-            ChainKind::Hypercore.default_bytes_encoding(false),
-            EncodeBytes::Hex
-        );
-        for encoding in [
-            EncodeBytes::Binary,
-            EncodeBytes::Hex,
-            EncodeBytes::HexNoPrefix,
-            EncodeBytes::Base58,
-            EncodeBytes::TronBase58,
-        ] {
-            let meta = build_file_metadata(
-                ChainKind::Hypercore,
-                &encoding,
-                "https://hypercore.firehose.pinax.network:443",
-                Compression::Zstd,
-                &None,
+        // HyperCore block numbers and SEC window numbers are decimal text ids
+        // under every encoding; only these two families have text ids.
+        for kind in ChainKind::ALL {
+            assert_eq!(
+                kind.profile().block_id_text,
+                matches!(kind, ChainKind::Sec | ChainKind::Hypercore),
+                "{kind}"
             );
-            assert!(
-                meta.entries
+        }
+        for kind in [ChainKind::Sec, ChainKind::Hypercore] {
+            assert_eq!(kind.default_bytes_encoding(false), EncodeBytes::Hex);
+            for encoding in [
+                EncodeBytes::Binary,
+                EncodeBytes::Hex,
+                EncodeBytes::HexNoPrefix,
+                EncodeBytes::Base58,
+                EncodeBytes::TronBase58,
+            ] {
+                let meta = build_file_metadata(
+                    kind,
+                    &encoding,
+                    "https://example.firehose.pinax.network:443",
+                    Compression::Zstd,
+                    &None,
+                );
+                let labels: Vec<_> = meta
+                    .entries
                     .iter()
-                    .any(|(key, value)| key == "firehose-parquet.block_id_encoding"
-                        && value == DECIMAL_BLOCK_ID_ENCODING),
-                "{encoding:?}: {:?}",
-                meta.entries
-            );
+                    .filter(|(key, _)| key == "firehose-parquet.block_id_encoding")
+                    .map(|(_, value)| value.as_str())
+                    .collect();
+                assert_eq!(
+                    labels,
+                    [DECIMAL_BLOCK_ID_ENCODING],
+                    "{kind} {encoding:?}: {:?}",
+                    meta.entries
+                );
+            }
         }
     }
 
@@ -3712,7 +3736,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, hypercore"
+            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec, hypercore"
         );
     }
 
@@ -3727,8 +3751,9 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"cosmos"));
         assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
+        assert!(BLOCK_TYPES.contains(&"sec"));
         assert!(BLOCK_TYPES.contains(&"hypercore"));
-        assert_eq!(BLOCK_TYPES.len(), 10); // auto + 9 chains
+        assert_eq!(BLOCK_TYPES.len(), 11); // auto + 10 chains
 
         // `--block-type` help and errors list every profile, in profile order.
         assert_eq!(BLOCK_TYPES[0], "auto");
@@ -3815,6 +3840,7 @@ mod tests {
             (ChainKind::Cosmos, false, 3, EncodeBytes::Hex),
             (ChainKind::Tron, false, 2, EncodeBytes::TronBase58),
             (ChainKind::Beacon, false, 3, EncodeBytes::Hex),
+            (ChainKind::Sec, false, 1, EncodeBytes::Hex),
             (ChainKind::Hypercore, false, 3, EncodeBytes::Hex),
             (ChainKind::Evm, true, 2, EncodeBytes::TronBase58),
         ];

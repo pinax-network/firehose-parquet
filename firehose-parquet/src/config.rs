@@ -122,6 +122,10 @@ impl Default for FlushConcurrency {
 pub const DEFAULT_GRPC_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
 /// Default maximum encoded or decompressed gRPC response size (128 MiB).
 pub const DEFAULT_GRPC_MAX_MESSAGE_BYTES: u32 = 128 * 1024 * 1024;
+/// Default `/ready` staleness: seconds without a valid stream message.
+pub const DEFAULT_METRICS_STALE_AFTER_SECS: u64 = 120;
+/// Default stream idle timeout before a reconnect, in seconds.
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
 
 /// Receive-side gRPC controls, shared by ingestion and partition probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +169,8 @@ pub struct Config {
     pub flush_bytes: u64,
     pub flush_memory_bytes: u64,
     pub flush_interval_secs: Option<u64>,
+    /// Flush once the stream has been quiet this long, at any pace.
+    pub flush_idle_secs: Option<u64>,
     /// Bounded encoder/publication work inside each protected flush.
     pub flush_concurrency: FlushConcurrency,
     pub compression: Compression,
@@ -265,6 +271,9 @@ impl std::fmt::Display for Config {
         if let Some(secs) = self.flush_interval_secs {
             writeln!(f, "  flush_interval     {secs}s")?;
         }
+        if let Some(secs) = self.flush_idle_secs {
+            writeln!(f, "  flush_idle         {secs}s")?;
+        }
         writeln!(f, "  final_blocks_only  {}", self.final_blocks_only)?;
         if self.dry_run {
             writeln!(f, "  dry_run            true")?;
@@ -344,6 +353,7 @@ impl Default for Config {
             flush_bytes: DEFAULT_FLUSH_BYTES,
             flush_memory_bytes: DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
+            flush_idle_secs: None,
             flush_concurrency: FlushConcurrency::default(),
             compression: Compression::Zstd,
             final_blocks_only: true,
@@ -356,7 +366,7 @@ impl Default for Config {
             s3_bucket: None,
             cache_control: None,
             metrics_port: None,
-            stream_idle_timeout_secs: Some(120),
+            stream_idle_timeout_secs: Some(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
             reconnect_stall_timeout_secs: Some(900),
         }
     }

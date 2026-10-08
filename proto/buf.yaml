@@ -12,3 +12,4 @@ deps:
   - buf.build/pinax/firehose-antelope
   - buf.build/pinax/firehose-beacon
   - buf.build/pinax/hypercore
+  - buf.build/pinax/firehose-sec

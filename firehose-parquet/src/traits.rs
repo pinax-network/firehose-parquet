@@ -262,9 +262,9 @@ impl PreparedIdentity {
 
     /// Prepare `identity` with text block and parent ids, for chains whose
     /// Firehose block id is not a hash (HyperCore's is the decimal block
-    /// number). The text is written verbatim under every text encoding, never
-    /// re-encoded; under [`EncodeBytes::Binary`] the column holds its UTF-8
-    /// (ASCII) bytes.
+    /// number, SEC's the decimal window number). The text is written verbatim
+    /// under every text encoding, never hex-decoded or re-encoded; under
+    /// [`EncodeBytes::Binary`] the column holds its UTF-8 (ASCII) bytes.
     pub fn with_text_ids(
         identity: &BlockIdentity,
         block_id: &str,
@@ -1231,6 +1231,62 @@ mod tests {
         builder.append_value(1);
         builder.append_null();
         assert_eq!(est_decimal128(&builder), 32);
+    }
+
+    #[test]
+    fn test_prepare_with_text_ids_writes_text_ids_verbatim() {
+        use arrow::array::{Array, StringArray};
+        let identity = BlockIdentity {
+            block_num: 2_984_687,
+            block_id: "2984687".to_string(),
+            parent_num: 2_984_686,
+            parent_id: "2984686".to_string(),
+            lib_num: 2_984_686,
+            timestamp: 1_790_812_200,
+            timestamp_nanos: 0,
+            fork_step: None,
+        };
+        for encoding in all_encodings() {
+            let mut builder = CanonicalBuilder::with_encoding(&encoding);
+            let prepared = builder
+                .prepare_with_text_ids(&identity, &identity.block_id, &identity.parent_id)
+                .unwrap();
+            builder.append(&prepared);
+            let columns = builder.finish();
+            match encoding {
+                EncodeBytes::Binary => {
+                    let ids = columns[1].as_any().downcast_ref::<BinaryArray>().unwrap();
+                    let parents = columns[3].as_any().downcast_ref::<BinaryArray>().unwrap();
+                    assert_eq!(ids.value(0), b"2984687");
+                    assert_eq!(parents.value(0), b"2984686");
+                }
+                _ => {
+                    let ids = columns[1].as_any().downcast_ref::<StringArray>().unwrap();
+                    let parents = columns[3].as_any().downcast_ref::<StringArray>().unwrap();
+                    assert_eq!(ids.value(0), "2984687", "{encoding:?}");
+                    assert_eq!(parents.value(0), "2984686", "{encoding:?}");
+                }
+            }
+            let dates = columns[6].as_any().downcast_ref::<Date32Array>().unwrap();
+            assert_eq!(dates.value(0), 20_726);
+            assert_eq!(columns[0].len(), 1);
+        }
+
+        // Invalid identity times fail exactly like the other prepare paths.
+        let bad_seconds = BlockIdentity {
+            timestamp: i64::MAX,
+            ..identity.clone()
+        };
+        assert!(CanonicalBuilder::new()
+            .prepare_with_text_ids(&bad_seconds, "1", "0")
+            .is_err());
+        let bad_nanos = BlockIdentity {
+            timestamp_nanos: 1_000_000_000,
+            ..identity
+        };
+        assert!(CanonicalBuilder::new()
+            .prepare_with_text_ids(&bad_nanos, "1", "0")
+            .is_err());
     }
 
     #[test]

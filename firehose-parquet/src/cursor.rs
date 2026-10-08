@@ -107,7 +107,7 @@ fn block_type_default_bytes_encoding(
 ) -> Option<EncodeBytes> {
     match block_type {
         "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
-        "evm" | "bitcoin" | "cosmos" | "beacon" | "hypercore" => Some(EncodeBytes::Hex),
+        "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" | "hypercore" => Some(EncodeBytes::Hex),
         // Antelope output has always used unprefixed hex (`ChainProfile`).
         "antelope" => Some(EncodeBytes::HexNoPrefix),
         "solana" | "near" => Some(EncodeBytes::Base58),

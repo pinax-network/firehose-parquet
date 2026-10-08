@@ -151,6 +151,52 @@ pub(super) struct IngestionSetup {
     pub initial_bytes_encoding_label: String,
     pub chain_features: PreStreamChainFeatures,
     pub tron_style_evm_profile: bool,
+    /// `--metrics-stale-after-secs`, else the family's or the generic default.
+    pub metrics_stale_after_secs: u64,
+}
+
+/// Apply the family's `build` defaults ([`ChainProfile::build_defaults`]) to
+/// the settings the operator left unset: neither the flag nor its environment
+/// variable. Returns the `/ready` staleness and the applied defaults.
+pub(super) fn apply_family_build_defaults(
+    config: &mut Config,
+    common: &firehose_parquet::cli::CommonArgs,
+    family: Option<ChainKind>,
+) -> (u64, Vec<String>) {
+    let defaults = family.map_or(blocks::chain::BuildDefaults::GENERIC, |kind| {
+        kind.profile().build_defaults
+    });
+    let mut applied = Vec::new();
+    if let (None, Some(bytes)) = (
+        common.grpc.max_message_bytes,
+        defaults.grpc_max_message_bytes,
+    ) {
+        config.grpc.max_message_bytes = bytes;
+        applied.push(format!("grpc_max_message_bytes={bytes}"));
+    }
+    if let (None, Some(secs)) = (common.flush_idle_secs, defaults.flush_idle_secs) {
+        config.flush_idle_secs = Some(secs).filter(|secs| *secs > 0);
+        applied.push(format!("flush_idle_secs={secs}"));
+    }
+    if let (None, Some(secs)) = (
+        common.stream_idle_timeout_secs,
+        defaults.stream_idle_timeout_secs,
+    ) {
+        config.stream_idle_timeout_secs = Some(secs).filter(|secs| *secs > 0);
+        applied.push(format!("stream_idle_timeout_secs={secs}"));
+    }
+    let stale_after = match (
+        common.metrics_stale_after_secs,
+        defaults.metrics_stale_after_secs,
+    ) {
+        (Some(secs), _) => secs,
+        (None, Some(secs)) => {
+            applied.push(format!("metrics_stale_after_secs={secs}"));
+            secs
+        }
+        (None, None) => firehose_parquet::config::DEFAULT_METRICS_STALE_AFTER_SECS,
+    };
+    (stale_after, applied)
 }
 
 impl IngestionSetup {
@@ -242,6 +288,15 @@ impl IngestionSetup {
         for warning in failed_transactions_warnings {
             warn!("{}", warning);
         }
+        let (metrics_stale_after_secs, family_defaults) =
+            apply_family_build_defaults(&mut config, &args.common, initial_block_type);
+        if !family_defaults.is_empty() {
+            info!(
+                block_type = initial_block_type.map_or("auto", ChainKind::label),
+                defaults = %family_defaults.join(" "),
+                "applied the block family's build defaults to settings left unset"
+            );
+        }
         let initial_bytes_encoding =
             resolve_auto_encode_bytes(initial_block_type, &endpoint_info, tron_style_evm_profile);
         let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
@@ -296,12 +351,12 @@ impl IngestionSetup {
             initial_bytes_encoding_label,
             chain_features,
             tron_style_evm_profile,
+            metrics_stale_after_secs,
         })
     }
 
     pub(super) fn configure_metrics(
         &self,
-        args: &BuildArgs,
         metrics_registry: &mut prometheus_client::registry::Registry,
         pipeline_metrics: &metrics::PipelineMetrics,
     ) {
@@ -312,10 +367,10 @@ impl IngestionSetup {
             extended,
             with_votes,
             endpoint_info,
+            metrics_stale_after_secs,
             ..
         } = self;
-        pipeline_metrics
-            .set_readiness_timeout(Duration::from_secs(args.common.metrics_stale_after_secs));
+        pipeline_metrics.set_readiness_timeout(Duration::from_secs(*metrics_stale_after_secs));
         if let Some(cursor) = existing_cursor_state.as_ref() {
             pipeline_metrics
                 .cursor_last_block_num
@@ -423,6 +478,92 @@ mod native_upload_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod family_defaults_tests {
+    use super::*;
+
+    fn common(flags: &[&str]) -> firehose_parquet::cli::CommonArgs {
+        let mut argv = vec!["fireparq", "build", "--endpoint", "http://localhost:1"];
+        argv.extend_from_slice(flags);
+        match Cli::parse_from(argv).command {
+            Some(Commands::Build(build_args)) => build_args.common,
+            _ => panic!("expected Commands::Build"),
+        }
+    }
+
+    fn resolve(flags: &[&str], family: Option<ChainKind>) -> (Config, u64, Vec<String>) {
+        let common = common(flags);
+        let mut config = build_config(&common).unwrap();
+        let (stale_after, applied) = apply_family_build_defaults(&mut config, &common, family);
+        (config, stale_after, applied)
+    }
+
+    /// Review finding: a SEC build at default settings stopped with
+    /// `OutOfRange` on the 143.9 MB deadline-day window 2977878, held each
+    /// feed day's last rows uncommitted until the next day, and failed
+    /// `/ready` for most of the day.
+    #[test]
+    fn sec_defaults_fill_only_unset_settings() {
+        let (config, stale_after, applied) = resolve(&[], Some(ChainKind::Sec));
+        assert_eq!(config.grpc.max_message_bytes, 512 * 1024 * 1024);
+        assert!(config.grpc.max_message_bytes as u64 > 143_854_065);
+        assert_eq!(config.flush_idle_secs, Some(60));
+        assert_eq!(config.stream_idle_timeout_secs, Some(93_600));
+        assert_eq!(stale_after, 129_600);
+        assert_eq!(
+            applied,
+            [
+                "grpc_max_message_bytes=536870912",
+                "flush_idle_secs=60",
+                "stream_idle_timeout_secs=93600",
+                "metrics_stale_after_secs=129600"
+            ]
+        );
+
+        // An explicit flag always wins, 0 included.
+        let (config, stale_after, applied) = resolve(
+            &[
+                "--grpc-max-message-bytes",
+                "134217728",
+                "--flush-idle-secs",
+                "0",
+                "--stream-idle-timeout-secs",
+                "0",
+                "--metrics-stale-after-secs",
+                "120",
+            ],
+            Some(ChainKind::Sec),
+        );
+        assert_eq!(config.grpc.max_message_bytes, 134_217_728);
+        assert_eq!(config.flush_idle_secs, None);
+        assert_eq!(config.stream_idle_timeout_secs, None);
+        assert_eq!(stale_after, 120);
+        assert!(applied.is_empty(), "{applied:?}");
+    }
+
+    #[test]
+    fn other_families_keep_the_generic_defaults() {
+        for family in ChainKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != ChainKind::Sec)
+            .map(Some)
+            .chain([None])
+        {
+            let (config, stale_after, applied) = resolve(&[], family);
+            assert_eq!(
+                config.grpc.max_message_bytes,
+                firehose_parquet::config::DEFAULT_GRPC_MAX_MESSAGE_BYTES
+            );
+            assert_eq!(config.flush_idle_secs, None);
+            assert_eq!(config.stream_idle_timeout_secs, Some(120));
+            assert_eq!(stale_after, 120);
+            assert!(applied.is_empty(), "{family:?}: {applied:?}");
+        }
+        let (config, _, _) = resolve(&["--flush-idle-secs", "30"], Some(ChainKind::Evm));
+        assert_eq!(config.flush_idle_secs, Some(30));
     }
 }
 

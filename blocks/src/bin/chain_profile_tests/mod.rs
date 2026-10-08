@@ -91,7 +91,8 @@ mod legacy {
                 );
             }
         }
-        if block_type == Some("hypercore") {
+        // post-#526 families with text block ids: sec, hypercore
+        if matches!(block_type, Some("sec" | "hypercore")) {
             meta.add("firehose-parquet.block_id_encoding", "decimal");
         } else if let Some(encoding) = encoding {
             if let Some(block_id_encoding) = output_block_id_encoding_label(encoding) {
@@ -174,6 +175,8 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
+            // post-#526 families: sec, hypercore
+            "sec" => BlockFamily::Sec,
             "hypercore" => BlockFamily::Hypercore,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
@@ -196,7 +199,11 @@ mod legacy {
             Ok("tron".to_string())
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
+        } else if type_url.contains("pinax.sec.") {
+            // post-#526 family: sec
+            Ok("sec".to_string())
         } else if type_url.contains("hypercore") {
+            // post-#526 family: hypercore
             Ok("hypercore".to_string())
         } else {
             Err(anyhow!(
@@ -241,7 +248,8 @@ mod legacy {
                 block_id_encoding: "hex_no_prefix",
                 allow_endpoint_block_id_hint: false,
             }),
-            "hypercore" => Some(OutputEncodingPolicy {
+            // post-#526 families: sec, hypercore
+            "sec" | "hypercore" => Some(OutputEncodingPolicy {
                 bytes_encoding: EncodeBytes::Hex,
                 block_id_encoding: "decimal",
                 allow_endpoint_block_id_hint: false,
@@ -356,6 +364,10 @@ mod legacy {
         for candidate in candidates {
             if candidate.eq_ignore_ascii_case("tron-evm") {
                 return Some("evm");
+            }
+            // post-#526 family: sec (exact name only)
+            if candidate == "sec" {
+                return Some("sec");
             }
             if candidate.contains("beacon") {
                 return Some("beacon");
@@ -616,7 +628,7 @@ mod legacy_inline {
     }
 }
 
-const LABELS: [&str; 9] = [
+const LABELS: [&str; 10] = [
     "evm",
     "bitcoin",
     "solana",
@@ -625,6 +637,7 @@ const LABELS: [&str; 9] = [
     "cosmos",
     "tron",
     "beacon",
+    "sec",
     "hypercore",
 ];
 
@@ -689,6 +702,9 @@ fn endpoint_corpus() -> Vec<Option<EndpointInfo>> {
         ("cosmoshub-4", &[]),
         ("ethereum", &["evm"]),
         ("linear", &[]),
+        ("sec", &[]),
+        ("", &["sec"]),
+        ("secret-4", &["SEC"]),
         ("hypercore", &[]),
         ("", &["hypercore", "hyper-evm"]),
         ("hyper-evm", &[]),

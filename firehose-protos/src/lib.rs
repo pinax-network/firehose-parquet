@@ -81,11 +81,16 @@ pub mod sf {
     }
 }
 
-// Pinax HyperCore (HyperLiquid L1) types
+// Pinax types: HyperCore (HyperLiquid L1) and SEC EDGAR (pinax/firehose-sec)
 pub mod pinax {
     pub mod hypercore {
         pub mod v1 {
             tonic::include_proto!("pinax.hypercore.v1");
+        }
+    }
+    pub mod sec {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/pinax.sec.v1.rs"));
         }
     }
 }
@@ -107,6 +112,7 @@ pub mod protocol {
 // Convenience aliases
 pub use cosmos_sdk::tx::v1beta1 as cosmos_tx;
 pub use pinax::hypercore::v1 as hypercore;
+pub use pinax::sec::v1 as sec;
 pub use sf::antelope::r#type::v1 as antelope;
 pub use sf::beacon::r#type::v1 as beacon;
 pub use sf::bitcoin::r#type::v1 as btc;

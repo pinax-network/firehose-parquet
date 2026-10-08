@@ -13,6 +13,7 @@ Per-chain semantics of the output tables: failed-transaction rules, join keys, o
 | Cosmos | [Cosmos notes](cosmos.md): unknown results, ordered events and transaction metadata | [Cosmos](../schemas/cosmos.md) |
 | Antelope | [Antelope notes](antelope.md): deferred transactions and `onerror`, database-operation joins | [Antelope](../schemas/antelope.md) |
 | NEAR | [NEAR notes](near.md): failed receipts, transactions, receipts, actions and logs, final transaction outcome, state changes | [NEAR](../schemas/near.md) |
+| SEC EDGAR | [SEC notes](sec.md): 10-minute windows, keys and `sec_filings_first` dedup, decimal families and `parse_issues`, 13F units, the shipped views, example queries and code legends | [SEC](../schemas/sec.md) |
 | HyperCore | [HyperCore notes](hypercore.md): the table catalogue by product family, identity, the data origin and the block hole, decimals, fills and liquidations, event routing and the columns of each type, funding and open interest, the derivation rules, refusals, schema changes, views, monitors and cookbook | [HyperCore](../schemas/hypercore.md) |
 
 The identity columns every table shares and the identifier encoding of each
@@ -30,7 +31,7 @@ tables with DuckDB's `delta_scan`:
 - [EVM](../schemas/evm.md), [Solana](../schemas/solana.md),
   [Bitcoin](../schemas/bitcoin.md), [Beacon](../schemas/beacon.md),
   [Tron](../schemas/tron.md), [Cosmos](../schemas/cosmos.md),
-  [Antelope](../schemas/antelope.md), [NEAR](../schemas/near.md),
+  [Antelope](../schemas/antelope.md), [NEAR](../schemas/near.md), [SEC](../schemas/sec.md),
   [HyperCore](../schemas/hypercore.md)
 
 The chain notes keep the semantics that a column list cannot show: failed-transaction

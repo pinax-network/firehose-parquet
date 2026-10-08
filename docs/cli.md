@@ -22,7 +22,7 @@ Non-final output (`--final-blocks-only=false`) is described in [Non-final stream
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
 | Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](output-layout.md#output-directory-layout)); every table is a Delta table at `<table>/`, with its data files in `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
-| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
+| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` / `--flush-idle-secs` (`0` disables rows, interval and idle; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
 
 ## Network aliases
@@ -137,7 +137,7 @@ rather than the default workflow:
 | Flag | Use when |
 |---|---|
 | `--cursor-override` | Read-only `--dry-run` only: ignore legacy cursor defaults or an unreadable cursor. A real `build` rejects it, even at a new root; protected output never rewinds, so use a new empty root for changed semantics |
-| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
+| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120, or 93600 for `--block-type sec`; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
 
 ### Receive transport
@@ -151,7 +151,7 @@ independent of transport compression.
 |---|---|
 | `--grpc-window-bytes` / `GRPC_WINDOW_BYTES` | Initial stream and connection receive window, default `16777216`. `0` restores the underlying library defaults. Larger windows allow more data in flight and can increase buffering. |
 | `--grpc-adaptive-window[=true\|false]` / `GRPC_ADAPTIVE_WINDOW` | Opt into automatic window tuning; default false. When true, it overrides `--grpc-window-bytes`. |
-| `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB). Values must be positive and fit UInt32. Applies to Info and the ingestion stream. |
+| `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB), or `536870912` (512 MiB) for the ingestion stream of `--block-type sec`, whose 13F and N-PX deadline-day windows exceed 128 MiB. Values must be positive and fit UInt32. Applies to Info and the ingestion stream. |
 
 The message limit is a per-response bound, not a cap on total process memory.
 An oversized response fails with an error; increasing the limit permits larger
@@ -310,6 +310,27 @@ with `block_time_ratio`, `blocks_per_sec` and `evidence_secs`. The
 `firehose_parquet_catching_up` gauge is 1 while catching up, and
 `firehose_parquet_flushes_total` counts flushes by `trigger` and `pace`. See
 [the implementation record](audit/659-adaptive-flush.md).
+
+### Flush when the stream goes quiet
+
+The interval and size triggers are checked when a block arrives, so rows
+mapped before a long silence wait for the next block. `--flush-idle-secs <N>`
+/ `FLUSH_IDLE_SECS` commits them once the stream has delivered no message for
+`N` seconds, at any pace (`trigger="idle"`): a stream with nothing to send is
+at the head of what its server has. Use it for feeds that arrive in bursts.
+It is off by default, and 60 for `--block-type sec`, whose feed is one burst
+of 144 windows per EDGAR feed day followed by about a day of silence
+([SEC notes](chains/sec.md)). One quiet period flushes at most once; the next
+message starts a new one.
+
+### Family defaults
+
+`build --block-type sec` (or `auto` resolving to SEC) changes four defaults,
+each only when neither the flag nor its environment variable is set, and logs
+`applied the block family's build defaults to settings left unset` with the
+values: `--grpc-max-message-bytes 536870912`, `--flush-idle-secs 60`,
+`--stream-idle-timeout-secs 93600` (26 hours) and `--metrics-stale-after-secs
+129600` (36 hours). Every other family keeps the generic defaults.
 
 ## Subcommands
 

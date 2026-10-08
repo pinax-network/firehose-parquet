@@ -713,6 +713,28 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         Ok(())
     }
 
+    /// `--flush-idle-secs`: the stream has delivered nothing for that long,
+    /// so commit what is buffered instead of holding it until the next
+    /// message. A feed that arrives in bursts (SEC: one feed day, then about a
+    /// day of silence) is then readable a minute after each burst. The pace
+    /// does not matter: a quiet stream is at the head of what the server has.
+    pub(super) fn flush_when_quiet(&mut self) -> Result<()> {
+        if self.state.mapper.is_none() || !self.has_buffered()? {
+            return Ok(());
+        }
+        let trigger = MapperFlushTrigger::Idle.as_str();
+        let flush = self.prepare_flush(None)?;
+        info!(
+            trigger,
+            pace = self.pace.pace().as_str(),
+            blocks = self.window.blocks,
+            tables = flush.tables,
+            rows = flush.rows,
+            "mapper flush emitted record batches"
+        );
+        self.commit_blocking(flush, trigger)
+    }
+
     fn observe_pace(&mut self, identity: &BlockIdentity) {
         let block_time_millis = (identity.timestamp != 0)
             .then(|| identity.timestamp_millis().ok())

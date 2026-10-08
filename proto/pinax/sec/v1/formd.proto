@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form D — notice of exempt offering of securities (Reg D). Structured XML.
+// Models issuer identity, related persons, and the offering economics.
+message FormDNotice {
+  string schema_version          = 1;
+  string submission_type         = 2; // "D" | "D/A"
+  IssuerD primary_issuer         = 3;
+  repeated RelatedPerson related_persons = 4;
+  OfferingData offering          = 5;
+
+  // --- Added in 0.13.0 ---
+  // offeringData/typeOfFiling/newOrAmendment/previousAccessionNumber (D/A).
+  string previous_accession_number = 6;
+  // issuerList/issuer: co-issuers besides the primary issuer (0.12.x let their
+  // address and year of incorporation overwrite primary_issuer's).
+  repeated IssuerD issuers       = 7;
+  repeated SalesCompensationRecipient sales_compensation_recipients = 8; // salesCompensationList/recipient
+  repeated FormDSignature signatures = 9; // signatureBlock/signature
+  optional bool authorized_representative = 10; // signatureBlock/authorizedRepresentative
+}
+
+message SalesCompensationRecipient {
+  string  name                     = 1; // recipientName
+  string  crd_number               = 2; // recipientCRDNumber, raw ("None" allowed)
+  string  associated_bd_name       = 3; // associatedBDName
+  string  associated_bd_crd_number = 4; // associatedBDCRDNumber
+  Address address                  = 5; // recipientAddress
+  // statesOfSolicitationList: each <state> code, or <value> ("All States").
+  repeated string states_of_solicitation = 6;
+  optional bool foreign_solicitation = 7; // foreignSolicitation
+}
+
+message FormDSignature {
+  string issuer_name     = 1;
+  string signature_name  = 2;
+  string name_of_signer  = 3;
+  string signature_title = 4;
+  string signature_date  = 5; // raw
+}
+
+message IssuerD {
+  string  cik                 = 1;
+  string  entity_name         = 2;
+  Address address             = 3;
+  string  phone               = 4;
+  string  jurisdiction_of_inc = 5;
+  string  entity_type         = 6;
+  string  year_of_inc         = 7;
+  // --- 0.13.0+ ---
+  string  entity_type_other_desc = 8;  // entityTypeOtherDesc
+  // Name of the yearOfInc flag element set to true, verbatim, e.g. "withinFiveYears",
+  // "overFiveYears".
+  string  year_of_inc_status     = 9;
+  repeated string previous_names = 10; // issuerPreviousNameList/previousName
+  repeated string edgar_previous_names = 11; // edgarPreviousNameList/previousName
+}
+
+message RelatedPerson {
+  string  first_name                = 1;
+  string  middle_name               = 2;
+  string  last_name                 = 3;
+  Address address                   = 4;
+  repeated string relationships     = 5;
+  string  relationship_clarification = 6;
+}
+
+message OfferingData {
+  string industry_group               = 1;
+  bool   is_amendment                 = 2;
+  string date_of_first_sale           = 3;
+  bool   more_than_one_year           = 4; // duration of offering
+  bool   is_equity_type               = 5;
+  repeated string federal_exemptions  = 6; // item[]
+  string minimum_investment           = 7;
+  // offeringSalesAmounts/* — direct text in EDGAR: an integer or "Indefinite"
+  // (offering/remaining). Always "" in 0.12.x (bug); raw from 0.13.0.
+  string total_offering_amount        = 8;
+  string total_amount_sold            = 9;
+  string total_remaining              = 10;
+  bool   has_non_accredited_investors = 11;
+  string total_already_invested       = 12; // totalNumberAlreadyInvested: a COUNT of investors, not dollars
+  string sales_commissions            = 13;
+  string finders_fees                 = 14;
+  string gross_proceeds_used          = 15;
+
+  // --- Added in 0.13.0 ---
+  string investment_fund_type            = 16; // industryGroup/investmentFundInfo/investmentFundType (Hedge Fund, Private Equity Fund, ...)
+  optional bool is_40_act                = 17; // investmentFundInfo/is40Act
+  string revenue_range                   = 18; // issuerSize/revenueRange
+  string aggregate_net_asset_value_range = 19; // issuerSize/aggregateNetAssetValueRange
+  optional bool is_business_combination  = 20; // businessCombinationTransaction/isBusinessCombinationTransaction
+  string business_combination_clarification = 21;
+  // typesOfSecuritiesOffered: element names of every flag set to true, document order
+  // (e.g. "isEquityType", "isDebtType", "isPooledInvestmentFundType").
+  repeated string securities_types       = 22;
+  string description_of_other_type       = 23; // typesOfSecuritiesOffered/descriptionOfOtherType
+  optional bool date_of_first_sale_yet_to_occur = 24; // dateOfFirstSale/yetToOccur
+  string number_non_accredited_investors = 25; // investors/numberNonAccreditedInvestors
+  optional bool sales_commissions_is_estimate   = 26;
+  optional bool finders_fees_is_estimate        = 27;
+  optional bool gross_proceeds_used_is_estimate = 28;
+  string offering_sales_amounts_clarification = 29; // offeringSalesAmounts/clarificationOfResponse
+  string sales_commissions_clarification      = 30; // salesCommissionsFindersFees/clarificationOfResponse
+  string use_of_proceeds_clarification        = 31; // useOfProceeds/clarificationOfResponse
+}
