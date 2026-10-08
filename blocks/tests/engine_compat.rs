@@ -32,6 +32,13 @@
 //! pack, monitors, cookbook and reference joins of `docs/chains/hypercore.md`
 //! over them in DuckDB.
 //!
+//! `hypercore_compaction_drops_the_derivation_key_and_resume_still_works`
+//! builds the same blocks as a contiguous stream, compacts the tables with the
+//! maintenance job, and checks that the compacted files lack the HyperCore
+//! derivation version (schema metadata that guards resume only) while
+//! `validate`, a resume and a second compaction still work and the rows are
+//! exactly the mapper's.
+//!
 //! `anonymous_reads_of_a_public_deployment_bucket` is an opt-in check against
 //! a deployment's public-read bucket (RGW), off unless `FIREPARQ_RGW_ENDPOINT`
 //! and `FIREPARQ_RGW_BUCKET` are set; see its docs. Engines: see
@@ -1272,6 +1279,307 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
             &json!("DOUBLE")
         )
     );
+}
+
+/// Serves `responses` from a request's cursor (`event-<ordinal>`), or from
+/// the first when it has none, through the request's (inclusive) stop block.
+#[derive(Clone)]
+struct Resumable {
+    responses: Arc<Vec<firehose::Response>>,
+}
+impl tonic::server::ServerStreamingService<firehose::Request> for Resumable {
+    type Response = firehose::Response;
+    type ResponseStream = std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<Self::Response, tonic::Status>> + Send>,
+    >;
+    type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+    fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
+        let request = request.into_inner();
+        let after: Option<usize> = match request.cursor.as_str() {
+            "" => None,
+            cursor => Some(
+                cursor
+                    .strip_prefix("event-")
+                    .and_then(|ordinal| ordinal.parse().ok())
+                    .unwrap_or_else(|| panic!("unexpected cursor {cursor}")),
+            ),
+        };
+        let responses: Vec<_> = self
+            .responses
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, response)| {
+                after.is_none_or(|after| *ordinal > after)
+                    && response.metadata.as_ref().unwrap().num <= request.stop_block_num
+            })
+            .map(|(_, response)| Ok(response.clone()))
+            .collect();
+        Box::pin(async move {
+            Ok(tonic::Response::new(
+                Box::pin(futures::stream::iter(responses)) as Self::ResponseStream,
+            ))
+        })
+    }
+}
+service!(Resumable, "sf.firehose.v2.Stream", server_streaming);
+
+/// The 36 HyperCore fixtures as contiguous blocks 100..=135, twelve per UTC
+/// day from 2023-11-14, their headers rewritten to that identity; the funding
+/// block is cut to 8 fills and 3 deltas per funding event.
+fn contiguous_hypercore_responses() -> Vec<firehose::Response> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hypercore");
+    let mut payloads: Vec<(u64, Vec<u8>)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name()?.to_str()?.to_string();
+            if let Some(number) = name.strip_suffix(".pb") {
+                Some((number.parse().unwrap(), std::fs::read(&path).unwrap()))
+            } else {
+                let number = name.strip_suffix(".pb.zst")?;
+                let file = std::fs::File::open(&path).unwrap();
+                Some((number.parse().unwrap(), zstd::decode_all(file).unwrap()))
+            }
+        })
+        .collect();
+    payloads.sort_by_key(|(number, _)| *number);
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (_, payload))| {
+            let number = 100 + ordinal as u64;
+            let mut block = hypercore::Block::decode(payload.as_slice()).unwrap();
+            block.fills.truncate(8);
+            for event in &mut block.events {
+                if let Some(hypercore::event_body::Event::Funding(funding)) =
+                    &mut event.events[0].event
+                {
+                    funding.deltas.truncate(3);
+                }
+            }
+            let time = prost_types::Timestamp {
+                seconds: MIDNIGHT - 86_400 + ordinal as i64 * 7_200,
+                nanos: NANOS,
+            };
+            block.block_header = Some(hypercore::BlockHeader {
+                block_number: number,
+                block_time: Some(time),
+            });
+            firehose::Response {
+                block: Some(prost_types::Any {
+                    type_url: HYPERCORE_TYPE_URL.into(),
+                    value: block.encode_to_vec(),
+                }),
+                step: 3,
+                cursor: format!("event-{ordinal}"),
+                metadata: Some(firehose::BlockMetadata {
+                    num: number,
+                    id: number.to_string(),
+                    parent_num: number - 1,
+                    parent_id: (number - 1).to_string(),
+                    lib_num: number - 1,
+                    time: Some(time),
+                }),
+            }
+        })
+        .collect()
+}
+
+/// `build` from block 100 to `stop` (exclusive), resuming from the root's
+/// cursor when it has one.
+async fn build_resumable(
+    responses: &Arc<Vec<firehose::Response>>,
+    stop: u64,
+    cwd: &Path,
+    root: &Path,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let incoming = futures::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(socket, _)| socket), listener))
+    });
+    let stream = Resumable {
+        responses: responses.clone(),
+    };
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(Info)
+            .add_service(stream)
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    let output = tokio::time::timeout(
+        Duration::from_secs(180),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(cwd)
+            .args([
+                "build",
+                "--endpoint",
+                &endpoint,
+                "--block-type",
+                "hypercore",
+            ])
+            .args(["--start-block", "100", "--stop-block", &stop.to_string()])
+            .args(["--flush-blocks", "1", "--stream-idle-timeout-secs", "0"])
+            .arg("--output")
+            .arg(root)
+            .output(),
+    )
+    .await
+    .expect("fireparq timed out")
+    .unwrap();
+    server.abort();
+    assert!(
+        output.status.success(),
+        "build to {stop}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The Arrow schema metadata of a local Parquet file, as a reader sees it
+/// (the footer's Arrow schema with its key-value metadata).
+fn file_schema_metadata(path: &Path) -> std::collections::HashMap<String, String> {
+    let file = std::fs::File::open(path).unwrap();
+    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .schema()
+        .metadata()
+        .clone()
+        .into()
+}
+
+/// `fireparq validate --cross-partition` of a root's `blocks`.
+async fn validate_blocks(cwd: &Path, root: &Path) {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+        .env_clear()
+        .current_dir(cwd)
+        .arg("validate")
+        .arg(root.join("blocks"))
+        .arg("--cross-partition")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "validate: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// D6 (`docs/chains/hypercore.md`, "Derivation rules"): the derivation version
+/// is schema metadata that guards resume only. Every part fireparq writes
+/// carries it; the maintenance job rewrites files from the Delta schema, which
+/// does not. A HyperCore root whose dates were compacted still validates,
+/// resumes, compacts again and reads exactly the rows the mapper maps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hypercore_compaction_drops_the_derivation_key_and_resume_still_works() {
+    const KEY: &str = blocks::hypercore::schema::DERIVATION_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let root = cwd.join("hypercore-compacted");
+    let responses = Arc::new(contiguous_hypercore_responses());
+    let tables: Vec<String> = blocks::hypercore::schema::TABLE_NAMES
+        .iter()
+        .map(|table| table.to_string())
+        .collect();
+    let job = common::maintenance_bin();
+    let compact = || {
+        let env = vec![
+            ("LAKE_ROOT", root.to_str().unwrap().to_string()),
+            ("LAKE_TABLES", tables.join(",")),
+            ("OPTIMIZE_DATES", "all".to_string()),
+            ("VACUUM_RETENTION_HOURS", "0".to_string()),
+        ];
+        let job = job.clone();
+        async move { common::maintenance_job(&job, &env).await }
+    };
+
+    // Two days of blocks, one part per block: every part carries the key.
+    build_resumable(&responses, 124, &cwd, &root).await;
+    for table in &tables {
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
+        for file in &read.files {
+            let metadata = file_schema_metadata(&root.join(table).join(&file.path));
+            assert_eq!(
+                metadata.get(KEY).map(String::as_str),
+                Some("1"),
+                "{table} {}",
+                file.path
+            );
+        }
+    }
+
+    // Compaction rewrites every date of more than one part without the key.
+    let run = compact().await;
+    run.assert_clean();
+    let mut compacted = 0;
+    for table in &tables {
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
+        for file in &read.files {
+            let name = file.path.rsplit('/').next().unwrap();
+            if name.starts_with("part-v1-") {
+                continue;
+            }
+            let metadata = file_schema_metadata(&root.join(table).join(&file.path));
+            assert_eq!(metadata.get(KEY), None, "{table} {name}: {metadata:?}");
+            compacted += 1;
+        }
+    }
+    assert!(
+        compacted >= 12,
+        "every table has a compacted date: {compacted}"
+    );
+    validate_blocks(&cwd, &root).await;
+
+    // The root resumes over the compacted tables, and compacts again.
+    build_resumable(&responses, 136, &cwd, &root).await;
+    validate_blocks(&cwd, &root).await;
+    compact().await.assert_clean();
+    validate_blocks(&cwd, &root).await;
+
+    // Exactly the rows the mapper maps from the same 36 blocks.
+    let mut mapper = blocks::hypercore::mapper::HypercoreBlockMapper::new(
+        false,
+        firehose_parquet::encode::EncodeBytes::Hex,
+    );
+    for response in responses.iter() {
+        let metadata = response.metadata.as_ref().unwrap();
+        let time = metadata.time.as_ref().unwrap();
+        let identity = firehose_parquet::traits::BlockIdentity {
+            block_num: metadata.num,
+            block_id: metadata.id.clone(),
+            parent_num: metadata.parent_num,
+            parent_id: metadata.parent_id.clone(),
+            lib_num: metadata.lib_num,
+            timestamp: time.seconds,
+            timestamp_nanos: time.nanos,
+            fork_step: None,
+        };
+        use firehose_parquet::traits::BlockMapper as _;
+        mapper
+            .map_block(
+                &response.block.as_ref().unwrap().value,
+                &identity,
+                firehose_parquet::traits::StreamEvent::default(),
+            )
+            .unwrap();
+    }
+    use firehose_parquet::traits::BlockMapper as _;
+    let expected: BTreeMap<String, u64> = mapper
+        .flush()
+        .unwrap()
+        .into_iter()
+        .map(|(table, batch)| (table, batch.num_rows() as u64))
+        .collect();
+    assert_eq!(common::delta_counts(&root, &tables).await, expected);
+    if let Some(duckdb) = DuckDb::open(&cwd) {
+        assert_eq!(common::duckdb_counts(&duckdb, &root, &tables), expected);
+    }
 }
 
 /// Opt-in, off in CI: anonymous reads of a deployment's public-read bucket
