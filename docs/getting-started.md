@@ -87,7 +87,6 @@ cargo build --release --workspace
   --output './output/{chain}'
 
 # Stream HyperCore (no built-in --network name; PINAX_API_KEY holds the key).
-# Keep --api-key-envvar: no key is sent to this host without it (Unauthenticated).
 # Roots start at 846903317, past the endpoint's 846903300-846903312 hole
 # (docs/chains/hypercore.md)
 ./target/release/fireparq build \

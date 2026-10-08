@@ -41,13 +41,6 @@ migrating, unset global selectors and rely on the provider-scoped variables
 above, or pass `--api-key-envvar` / `--api-token-envvar` only on the command
 for the intended endpoint.
 
-A Pinax host that is not a built-in network, such as
-`hypercore.firehose.pinax.network`, is a custom endpoint for automatic
-selection: it receives no credential unless one is selected explicitly, so keep
-`--api-key-envvar` there (without it Firehose rejects the stream as
-`Unauthenticated`). Over HTTPS on port 443 it is still a Pinax host, so an
-explicitly selected credential sent to it is not warned about.
-
 Startup logs identify the destination host, provider, and names of credential
 variables selected for transmission (`none` when absent), never their values.
 Surrounding whitespace is trimmed, so a key mounted from a secret file with a
