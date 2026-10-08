@@ -716,8 +716,9 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 }
 
 /// SHA-256 over every family's table inventory and complete Arrow schemas for
-/// all 160 option/encoding combinations of each of the ten families. Update the pinned value only for an
-/// intentional schema change, and record that change.
+/// all 160 option/encoding combinations of each of the ten families. Update
+/// the pinned value only for an intentional schema change, and record that
+/// change.
 #[test]
 fn every_mapper_schema_matches_the_pinned_digest() {
     assert_eq!(
@@ -980,6 +981,54 @@ fn pre_sec_families_reproduce_their_pre_sec_digests() {
     );
 }
 
+/// SEC and HyperCore, the families added after `daf64a9`, each pin their own
+/// mapper and Delta data schema digests over all 160 option/encoding
+/// combinations, so a re-pin of the all-family digests for another family
+/// cannot hide a change to either (#711); `HYPERCORE_SCHEMA_DIGEST` covers
+/// only `hex`. Pinned when #710 was merged into #709: there, the eight older
+/// families with SEC still gave origin/main `ac21a82`'s
+/// `CURRENT_SCHEMA_DIGEST` and `DELTA_DATA_SCHEMA_DIGEST`, and with HyperCore
+/// those of `f8ba317`, so neither family's schemas changed in the merge.
+#[test]
+fn each_later_family_reproduces_its_own_pinned_digests() {
+    for (family, mapper_digest, delta_digest) in [
+        (
+            ChainKind::Sec,
+            SEC_SCHEMA_DIGEST,
+            SEC_DELTA_DATA_SCHEMA_DIGEST,
+        ),
+        (
+            ChainKind::Hypercore,
+            HYPERCORE_ALL_OPTIONS_SCHEMA_DIGEST,
+            HYPERCORE_DELTA_DATA_SCHEMA_DIGEST,
+        ),
+    ] {
+        assert_eq!(
+            schema_digest_where(
+                |kind| kind == family,
+                |_| true,
+                |_, _, schema| Some(schema.clone())
+            ),
+            mapper_digest,
+            "the {family} mapper schema changed"
+        );
+        assert_eq!(
+            schema_digest_where(
+                |kind| kind == family,
+                |_| true,
+                |kind, table, schema| Some(
+                    kind.profile()
+                        .delta_types()
+                        .data_schema(table, schema)
+                        .unwrap()
+                )
+            ),
+            delta_digest,
+            "the {family} Delta data schema changed"
+        );
+    }
+}
+
 const DELTA_DATA_SCHEMA_DIGEST: &str =
     "8f172021f35d62a4d78139a13214320b0c5bc5a96c0166bd734145b9f5d9a7c1";
 
@@ -1003,3 +1052,19 @@ const PRE_SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
 /// The HyperCore schemas (`docs/chains/hypercore.md`), derivation version 1.
 const HYPERCORE_SCHEMA_DIGEST: &str =
     "d648e61190297aa2e10fdcf325c8a4db179d06de433caa1024aef9a3703ab9e2";
+
+/// The SEC mapper schemas (`docs/chains/sec.md`), every option and encoding.
+const SEC_SCHEMA_DIGEST: &str = "b7b21a1fb722b904a5beaf2ccb5e94b1f7224da9b03cfcb81fb1f54dea797c62";
+
+/// The SEC Delta data schemas, every option and encoding.
+const SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
+    "1af12c1327ee58787ab4da6d05ec2ee9d0f5920ecfae13ab80fa03dbb0c2a6ae";
+
+/// The HyperCore mapper schemas, derivation version 1, every option and
+/// encoding (`HYPERCORE_SCHEMA_DIGEST` covers only `hex`).
+const HYPERCORE_ALL_OPTIONS_SCHEMA_DIGEST: &str =
+    "da80db4ec48a13dc1be20a3cb98c15f639070514f504979658446158a0174d55";
+
+/// The HyperCore Delta data schemas, every option and encoding.
+const HYPERCORE_DELTA_DATA_SCHEMA_DIGEST: &str =
+    "0c0e784a31d74b41b1163814b8cb6ae99fcb03816e45c92732119b3550d65740";
