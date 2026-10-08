@@ -112,7 +112,7 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 | Column | Type | Description |
 |---|---|---|
 | `block_num` | long | Block number |
-| `block_id` | string | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)) |
+| `block_id` | string | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)); `sec` writes the decimal 10-minute window number as text |
 | `parent_num` | long | Parent block number |
 | `parent_id` | string | Parent block ID |
 | `lib_num` | long | Last irreversible block number |
@@ -135,6 +135,7 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
 | `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
 | `beacon` | `hex_0x` | `hex` | `hex` | Block roots and other binary identifiers are `0x`-prefixed hex. |
+| `sec` | decimal text (`hex_0x` in the footer) | — | `raw_xml`: `binary` | `block_id` and `parent_id` are the decimal 10-minute window numbers, written verbatim (`"2979867"`), not hashes; the footer's `firehose-parquet.block_id_encoding` still says `hex_0x`. SEC has no hash or address bytes: `filing_raw_xml.raw_xml` is raw `binary` under every encoding. See [SEC notes](chains/sec.md#block-model). |
 | `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
 
 ## Parquet file metadata

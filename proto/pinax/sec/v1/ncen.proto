@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form N-CEN — registered-fund annual census. The full census has hundreds of
+// fields; v1 models the registrant identity, reporting period, and the series
+// covered (the high-value header). Deeper census detail can be added later.
+message NcenReport {
+  string filer_cik               = 1;
+  string investment_company_type = 2; // e.g. N-1A
+  string report_ending_period    = 3; // generalInfo @reportEndingPeriod
+  bool   is_report_period_lt12   = 4;
+  NcenRegistrant registrant      = 5;
+  repeated string series_ids     = 6;
+  // --- 0.13.0+ ---
+  // headerData/accessionNumber: on an N-CEN/A, the accession of the filing it
+  // amends (copied by block.rs into Filing.amended_accession). "" otherwise.
+  string previous_accession_number = 7;
+}
+
+message NcenRegistrant {
+  string  full_name   = 1;
+  string  file_number = 2; // investmentCompFileNo
+  string  cik         = 3;
+  string  lei         = 4;
+  Address address     = 5; // 0.13.0+: registrantcountry -> address.country
+  string  phone       = 6;
+}

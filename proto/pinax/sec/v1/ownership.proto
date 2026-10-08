@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Faithful to the EDGAR ownershipDocument XML (Forms 3/4/5). The
+// nonDerivativeTable / derivativeTable split is preserved as separate fields.
+message OwnershipDocument {
+  string schema_version           = 1;  // e.g. "X0508"
+  string document_type            = 2;  // "3" | "4" | "5"
+  string period_of_report         = 3;  // YYYY-MM-DD
+  bool   not_subject_to_section16 = 4;
+  string remarks                  = 5;
+
+  Issuer issuer                            = 6;
+  repeated ReportingOwner reporting_owners = 7;
+
+  repeated Transaction non_derivative_transactions = 8;
+  repeated Holding     non_derivative_holdings     = 9;
+  repeated Transaction derivative_transactions     = 10;
+  repeated Holding     derivative_holdings         = 11;
+
+  repeated Footnote  footnotes        = 12;
+  repeated Signature owner_signatures = 13;
+
+  // --- Added in 0.13.0. Optional flags are unset when the element is absent. ---
+  // <aff10b5One> (schema X0508+): the filer checked "transaction made pursuant to a
+  // contract, instruction or written plan intended to satisfy Rule 10b5-1(c)".
+  optional bool aff_10b5_one                = 14;
+  optional bool no_securities_owned         = 15; // <noSecuritiesOwned> (Form 3)
+  string        date_of_original_submission = 16; // <dateOfOriginalSubmission> (3/A, 4/A, 5/A), raw
+  optional bool form3_holdings_reported     = 17; // <form3HoldingsReported> (Form 5)
+  optional bool form4_transactions_reported = 18; // <form4TransactionsReported> (Form 5)
+}
+
+message Issuer {
+  string cik            = 1;  // 10-pad
+  string name           = 2;
+  string trading_symbol = 3;
+  string foreign_trading_symbol = 4; // <issuerForeignTradingSymbol> (0.13.0+)
+}
+
+message ReportingOwner {
+  string       cik          = 1;  // 10-pad
+  string       name         = 2;
+  Address      address      = 3;
+  Relationship relationship = 4;
+}
+
+message Address {
+  string street1           = 1;
+  string street2           = 2;
+  string city              = 3;
+  string state             = 4;
+  string zip_code          = 5;
+  string state_description = 6;
+  // 0.13.0+. Country code/name and non-US state or territory, where the source
+  // has them: ownership rptOwnerCountry / rptOwnerNonUSStateTerritory, SGML
+  // header PROVINCE-COUNTRY / NON-US-STATE-TERRITORY, N-PORT
+  // regStateConditional@regCountry or genInfo/regCountry, N-CEN
+  // registrantcountry. Raw.
+  string country                = 7;
+  string non_us_state_territory = 8;
+}
+
+message Relationship {
+  bool   is_director           = 1;
+  bool   is_officer            = 2;
+  bool   is_ten_percent_owner  = 3;
+  bool   is_other              = 4;
+  string officer_title         = 5;
+  string other_text            = 6;
+}
+
+// Used for both tables; derivative-only fields (15-18) empty for non-derivative.
+message Transaction {
+  string security_title         = 1;
+  string transaction_date       = 2;  // YYYY-MM-DD
+  string deemed_execution_date  = 3;
+  string transaction_form_type  = 4;
+  string transaction_code       = 5;  // P,S,A,M,G,F,D,...
+  bool   equity_swap_involved   = 6;
+  string transaction_timeliness = 7;
+  string shares                 = 8;  // raw decimal string
+  string price_per_share        = 9;
+  string acquired_disposed_code = 10; // A | D
+  string shares_owned_following = 11;
+  string value_owned_following  = 12;
+  string direct_or_indirect     = 13; // D | I
+  string nature_of_ownership    = 14;
+  string conversion_or_exercise_price = 15;
+  string exercise_date          = 16;
+  string expiration_date        = 17;
+  UnderlyingSecurity underlying_security = 18;
+  repeated string footnote_ids  = 19;
+  // <transactionAmounts><transactionTotalValue> (reported instead of a share
+  // count for some derivative/fractional rows), raw. 0.13.0+.
+  string total_value            = 20;
+}
+
+message Holding {
+  string security_title      = 1;
+  string shares_owned        = 2;
+  string direct_or_indirect  = 3;
+  string nature_of_ownership = 4;
+  string conversion_or_exercise_price = 5;
+  string exercise_date       = 6;
+  string expiration_date     = 7;
+  UnderlyingSecurity underlying_security = 8;
+  repeated string footnote_ids = 9;
+  string value_owned         = 10; // <postTransactionAmounts><valueOwnedFollowingTransaction>, raw (0.13.0+)
+}
+
+message UnderlyingSecurity {
+  string title  = 1;
+  string shares = 2;
+  string value  = 3;
+}
+
+message Footnote {
+  string id   = 1;  // "F1"
+  string text = 2;
+}
+
+message Signature {
+  string name = 1;
+  string date = 2;
+}

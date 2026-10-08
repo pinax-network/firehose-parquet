@@ -1,0 +1,5 @@
+{
+  "table": "filing_raw_xml",
+  "columns": ["block_num", "block_id", "parent_num", "parent_id", "lib_num", "timestamp", "date", "filing_index", "accession_number", "form_type", "filing_date", "acceptance_datetime", "primary_document", "raw_xml"],
+  "rows": []
+}

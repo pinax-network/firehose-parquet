@@ -172,6 +172,8 @@ mod legacy {
             "cosmos" => BlockFamily::Cosmos,
             "tron" => BlockFamily::Tron,
             "beacon" => BlockFamily::Beacon,
+            // post-#526 family: sec
+            "sec" => BlockFamily::Sec,
             _ => return Err(anyhow!("unsupported resolved mapper family")),
         })
     }
@@ -193,6 +195,9 @@ mod legacy {
             Ok("tron".to_string())
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
+        } else if type_url.contains("pinax.sec.") {
+            // post-#526 family: sec
+            Ok("sec".to_string())
         } else {
             Err(anyhow!(
                 "unable to auto-detect block type from type_url: {type_url}"
@@ -216,7 +221,8 @@ mod legacy {
                 block_id_encoding: "hex_no_prefix",
                 allow_endpoint_block_id_hint: false,
             }),
-            "evm" | "bitcoin" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
+            // post-#526 family: sec
+            "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" => Some(OutputEncodingPolicy {
                 bytes_encoding: EncodeBytes::Hex,
                 block_id_encoding: "hex_0x",
                 allow_endpoint_block_id_hint: false,
@@ -346,6 +352,10 @@ mod legacy {
         for candidate in candidates {
             if candidate.eq_ignore_ascii_case("tron-evm") {
                 return Some("evm");
+            }
+            // post-#526 family: sec (exact name only)
+            if candidate == "sec" {
+                return Some("sec");
             }
             if candidate.contains("beacon") {
                 return Some("beacon");
@@ -603,8 +613,8 @@ mod legacy_inline {
     }
 }
 
-const LABELS: [&str; 8] = [
-    "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+const LABELS: [&str; 9] = [
+    "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon", "sec",
 ];
 
 fn requested_types() -> Vec<(&'static str, Option<ChainKind>)> {
@@ -668,6 +678,9 @@ fn endpoint_corpus() -> Vec<Option<EndpointInfo>> {
         ("cosmoshub-4", &[]),
         ("ethereum", &["evm"]),
         ("linear", &[]),
+        ("sec", &[]),
+        ("", &["sec"]),
+        ("secret-4", &["SEC"]),
     ];
     for (index, (name, aliases)) in special.iter().enumerate() {
         for extended in [false, true] {

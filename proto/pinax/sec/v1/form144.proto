@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form 144 — notice of PROPOSED sale of restricted/control securities
+// (complements Form 4, which reports executed insider trades). Structured XML
+// since 2022-09-23, electronic filing mandatory since 2023-04-13. Faithful to
+// primary_doc.xml; dates kept as raw strings.
+message Form144Notice {
+  string filer_cik                            = 1;
+  Issuer144 issuer                            = 2;
+  // First <securitiesInformation> block (0.12.x merged several blocks field by
+  // field; 0.13.0+ keeps the first block intact). All blocks: securities_information_entries.
+  SecuritiesInformation securities_information = 3;
+  repeated SecuritiesToBeSold securities_to_be_sold = 4;
+  bool nothing_sold_past_3_months             = 5;
+  repeated SecuritiesSoldPast3Months securities_sold_past_3_months = 6;
+  string remarks                              = 7;
+  NoticeSignature signature                   = 8;
+
+  // --- Added in 0.13.0 ---
+  // Every <securitiesInformation> block in document order (multi-class / multi-broker notices).
+  repeated SecuritiesInformation securities_information_entries = 9;
+  string previous_accession_number            = 10; // headerData/previousAccessionNumber (144/A)
+}
+
+message Issuer144 {
+  string  issuer_cik              = 1;
+  string  issuer_name             = 2;
+  string  sec_file_number         = 3;
+  Address issuer_address          = 4;
+  string  issuer_contact_phone    = 5;
+  string  person_for_whose_account = 6; // nameOfPersonForWhoseAccount...
+  repeated string relationships_to_issuer = 7; // Director / Officer / 10% owner ...
+}
+
+message SecuritiesInformation {
+  string     securities_class_title  = 1;
+  BrokerInfo broker                  = 2;
+  string     units_sold              = 3; // noOfUnitsSold
+  string     aggregate_market_value  = 4;
+  string     units_outstanding       = 5; // noOfUnitsOutstanding
+  string     approx_sale_date        = 6; // MM/DD/YYYY (raw)
+  string     securities_exchange_name = 7;
+}
+
+message BrokerInfo {
+  string  name    = 1;
+  Address address = 2;
+}
+
+message SecuritiesToBeSold {
+  string securities_class_title    = 1;
+  string acquired_date             = 2; // MM/DD/YYYY (raw)
+  string nature_of_acquisition     = 3;
+  string acquired_from             = 4; // nameOfPersonfromWhomAcquired
+  bool   is_gift                   = 5;
+  string amount_acquired           = 6;
+  string payment_date              = 7;
+  string nature_of_payment         = 8;
+  string donor_acquired_date       = 9; // donarAcquiredDate [sic], gifts: when the donor acquired (0.13.0+)
+}
+
+message SecuritiesSoldPast3Months {
+  string  seller_name           = 1;
+  Address seller_address        = 2;
+  string  securities_class_title = 3;
+  string  sale_date             = 4; // MM/DD/YYYY (raw)
+  string  amount_sold           = 5;
+  string  gross_proceeds        = 6;
+}
+
+message NoticeSignature {
+  string notice_date = 1; // MM/DD/YYYY (raw)
+  string signature   = 2;
+  // noticeSignature/planAdoptionDates/planAdoptionDate: Rule 10b5-1 plan adoption
+  // date(s), raw MM/DD/YYYY (0.13.0+).
+  repeated string plan_adoption_dates = 3;
+}

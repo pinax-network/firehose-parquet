@@ -573,6 +573,7 @@ fn expected_config(descriptor: &StreamDescriptor) -> BTreeMap<String, String> {
         BlockFamily::Cosmos => "cosmos",
         BlockFamily::Tron => "tron",
         BlockFamily::Beacon => "beacon",
+        BlockFamily::Sec => "sec",
     };
     let partition = match descriptor.partition {
         PartitionPolicy::Date => "date",

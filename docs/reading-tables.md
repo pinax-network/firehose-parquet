@@ -140,7 +140,7 @@ WHERE date = DATE '2026-09-25';
 ## Engine compatibility
 
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
-non-final) and Solana output with a mock Firehose, writes a checkpoint of
+non-final), Solana and SEC output with a mock Firehose, writes a checkpoint of
 every table, and reads every table through its Delta log
 (`blocks/tests/engine_compat.rs`) with the DuckDB 1.5.5 CLI and its `delta`
 extension `45c4087` (both checksum-verified), and with delta-rs itself
@@ -148,19 +148,27 @@ extension `45c4087` (both checksum-verified), and with delta-rs itself
 pruning, then the rows of those files). Polars' `scan_delta` reads through
 delta-rs the same way, so the delta-rs reads cover it; CI installs no Python,
 and the Polars column below was last checked
-in CI with Polars 1.44.2 and `deltalake` 1.6.6 (v1.0.1).
+in CI with Polars 1.44.2 and `deltalake` 1.6.6 (v1.0.1). The SEC rows
+(`integer`, `boolean`, `decimal(38,s)`, data `date` columns and the arrays of
+`integer`, `date` and `struct`) were checked by hand with the same Polars and
+`deltalake` versions on the replayed SEC sample days, not in CI.
 `blocks/tests/delta_maintenance.rs` reads the tables again after the
 maintenance job compacted and vacuumed them beside a running `build`.
 
 | Delta type written | DuckDB | Polars | Notes |
 |---|---|---|---|
 | `long` | `BIGINT` | `Int64` | The mapper's `UInt64` (checked: a value above `i64::MAX` refuses the flush), `UInt32` and `UInt16` |
+| `integer` | `INTEGER` | `Int32` | The mapper's `Int32`, for example Tron's `contract_type_id` and SEC years, counts and sequence numbers |
 | `short` | `SMALLINT` | `Int16` | The mapper's `UInt8` |
+| `boolean` | `BOOLEAN` | `Boolean` | |
 | `decimal(20,0)` | `DECIMAL(20,0)` | `Decimal(precision=20, scale=0)` | Currency amounts and unchecked 64-bit values, exact up to `u64::MAX` |
+| `decimal(38,s)` | `DECIMAL(38,s)` | `Decimal(precision=38, scale=s)` | SEC parsed amounts in five scale families, `s` = 2, 6, 10, 12 or 16 ([SEC notes](chains/sec.md)) |
 | `timestamp` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='us', time_zone='UTC')` | Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)` holding whole milliseconds |
 | `date` (partition column) | `DATE` | `Date` | Filters on `date` read only that day's files |
+| `date` (data column) | `DATE` | `Date` | SEC parsed dates such as `filing_date`; stored in the data files, unlike the partition `date` |
 | `string` enum labels | `VARCHAR` | `String` | Pages still dictionary-encoded |
-| `array<T>` | `T[]`, for example `SMALLINT[]` | `List(T)`, for example `List(Int16)` | |
+| `array<T>` | `T[]`, for example `VARCHAR[]`, `SMALLINT[]`, `INTEGER[]`, `DATE[]` | `List(T)`, for example `List(String)`, `List(Int16)`, `List(Int32)`, `List(Date)` | |
+| `array<struct<…>>` | `STRUCT(…)[]`, for example `STRUCT("name" VARCHAR, date_changed DATE)[]` | `List(Struct(…))`, for example `List(Struct({'name': String, 'date_changed': Date}))` | SEC `filing_parties.former_names` |
 | `binary` | `BLOB` | `Binary` | |
 
 - Both engines read `date` from the Delta log (`delta_scan`, `scan_delta`); the

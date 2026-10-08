@@ -39,19 +39,24 @@ pub struct GrpcArgs {
         help_heading = "Connection")]
     pub window_bytes: u32,
 
-    /// Maximum encoded or decompressed gRPC response bytes (128 MiB by default)
+    /// Maximum encoded or decompressed gRPC response bytes (default 128 MiB; 512 MiB for
+    /// `build --block-type sec`, whose deadline-day windows exceed 128 MiB)
     #[arg(long = "grpc-max-message-bytes", env = "GRPC_MAX_MESSAGE_BYTES",
-        default_value_t = DEFAULT_GRPC_MAX_MESSAGE_BYTES, value_parser = clap::value_parser!(u32).range(1..),
+        value_parser = clap::value_parser!(u32).range(1..),
         hide_env_values = true, help_heading = "Connection")]
-    pub max_message_bytes: u32,
+    pub max_message_bytes: Option<u32>,
 }
 
 impl GrpcArgs {
+    /// The transport settings, with the generic default for an unset limit;
+    /// `build` may then apply its block family's default (`ChainProfile`).
     pub fn config(&self) -> crate::config::GrpcConfig {
         crate::config::GrpcConfig {
             adaptive_window: self.adaptive_window,
             initial_window_bytes: (self.window_bytes != 0).then_some(self.window_bytes),
-            max_message_bytes: self.max_message_bytes,
+            max_message_bytes: self
+                .max_message_bytes
+                .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_BYTES),
         }
     }
 }
@@ -296,6 +301,17 @@ pub struct CommonArgs {
     )]
     pub flush_interval_secs: Option<u64>,
 
+    /// Flush mapper state and write Parquet once the stream has delivered no message for N
+    /// seconds, at any pace: a feed that arrives in bursts commits each burst instead of
+    /// holding it until the next one (0 disables; off by default, 60 for `build --block-type sec`)
+    #[arg(
+        long,
+        env = "FLUSH_IDLE_SECS",
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_idle_secs: Option<u64>,
+
     /// Parquet encoders running at once within one flush (1-64; each also holds
     /// its table's encoder working memory)
     #[arg(
@@ -354,15 +370,16 @@ pub struct CommonArgs {
     #[arg(long, env = "METRICS_PORT", hide_env_values = true)]
     pub metrics_port: Option<u16>,
 
-    /// Return /ready 503 after N seconds without a valid stream message
-    #[arg(long, env = "METRICS_STALE_AFTER_SECS", default_value = "120", value_parser = clap::value_parser!(u64).range(1..), hide_env_values = true)]
-    pub metrics_stale_after_secs: u64,
+    /// Return /ready 503 after N seconds without a valid stream message (default 120;
+    /// 129600, 36 hours, for `build --block-type sec`, a daily feed)
+    #[arg(long, env = "METRICS_STALE_AFTER_SECS", value_parser = clap::value_parser!(u64).range(1..), hide_env_values = true)]
+    pub metrics_stale_after_secs: Option<u64>,
 
-    /// Force a reconnect if no stream message is received for N seconds (0 disables)
+    /// Force a reconnect if no stream message is received for N seconds (0 disables; default
+    /// 120; 93600, 26 hours, for `build --block-type sec`, a daily feed)
     #[arg(
         long,
         env = "STREAM_IDLE_TIMEOUT_SECS",
-        default_value = "120",
         hide_env_values = true,
         help_heading = "Connection"
     )]
@@ -476,7 +493,7 @@ pub struct BuildArgs {
 
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
-    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon
+    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec
     #[arg(
         long,
         env = "BLOCK_TYPE",

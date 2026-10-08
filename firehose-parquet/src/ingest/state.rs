@@ -136,6 +136,7 @@ pub enum BlockFamily {
     Cosmos,
     Tron,
     Beacon,
+    Sec,
 }
 
 /// The recorded output layout. Every table is partitioned by

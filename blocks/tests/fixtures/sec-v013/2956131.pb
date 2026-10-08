@@ -1,0 +1,24 @@
+
+ã¶´ˆààÍ
+2026-03-16„0000897423-26-000035N-PX"
+0001056907*GENRE PARTNERS L P2
+2026-03-16:
+2024-06-30B¹äàÍJprimary_doc.xmlb 20260316.gz!0000897423-26-000035rÎ
+FILER
+0001056907GENRE PARTNERS L P2	752701027:TXRN-PXZ34b	028-07038j26755517r4
+201 MAIN STREET
+SUITE 3100
+FORT WORTH"TX*76102z
+8173908400‚4
+201 MAIN STREET
+SUITE 3100
+FORT WORTH"TX*76102zFILER‚
+1N-PXprimary_doc.xmlÚü
+
+0001056907í
+YEAR2024GENRE PARTNERS L P"4
+201 MAIN STREET
+SUITE 3100
+FORT WORTH"TX*76102*#INSTITUTIONAL MANAGER NOTICE REPORT2	028-07038ZNb(REPORTING PERSON DID NOT EXERCISE VOTINGjYr£(1) A power of attorney authorizing Thomas R. Hegi to act on behalf of Robert M. Bass, general partner of GenRe Partners, L.P., has been filed with the Commission.Â817-390-8400Úz
+GENRE PARTNERS L PThomas R. HegiThomas R. Hegi"8Attorney-in-Fact for Robert M. Bass, General Partner (1)*
+03/16/2026âIM

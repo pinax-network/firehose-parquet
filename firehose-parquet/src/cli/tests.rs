@@ -180,7 +180,7 @@ fn grpc_transport_flags_validate_limits_and_apply_to_build() {
     let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "4096");
     let parsed = parse(&["test-cli"]);
     assert!(!parsed.common.grpc.adaptive_window);
-    assert_eq!(parsed.common.grpc.max_message_bytes, 4096);
+    assert_eq!(parsed.common.grpc.max_message_bytes, Some(4096));
     let parsed = parse(&[
         "test-cli",
         "--grpc-adaptive-window",
@@ -188,7 +188,7 @@ fn grpc_transport_flags_validate_limits_and_apply_to_build() {
         "8192",
     ]);
     assert!(parsed.common.grpc.adaptive_window);
-    assert_eq!(parsed.common.grpc.max_message_bytes, 8192);
+    assert_eq!(parsed.common.grpc.max_message_bytes, Some(8192));
 }
 
 #[test]
@@ -422,7 +422,12 @@ fn test_defaults() {
     assert!(cli.common.aws.aws_region.is_none());
     assert!(cli.common.aws.aws_endpoint_url.is_none());
     assert!(cli.common.s3_bucket.is_none());
-    assert_eq!(cli.common.stream_idle_timeout_secs, Some(120));
+    // Unset, so `build` can tell an explicit value from its family default;
+    // build_config applies the generic defaults (120 s, 128 MiB).
+    assert_eq!(cli.common.stream_idle_timeout_secs, None);
+    assert_eq!(cli.common.metrics_stale_after_secs, None);
+    assert_eq!(cli.common.grpc.max_message_bytes, None);
+    assert_eq!(cli.common.flush_idle_secs, None);
     assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(900));
 }
 
@@ -453,6 +458,10 @@ fn test_all_flags() {
         "1000000",
         "--flush-interval-secs",
         "60",
+        "--flush-idle-secs",
+        "30",
+        "--metrics-stale-after-secs",
+        "600",
         "--stream-idle-timeout-secs",
         "45",
         "--reconnect-stall-timeout-secs",
@@ -481,6 +490,8 @@ fn test_all_flags() {
     assert_eq!(cli.common.flush_blocks, Some(250));
     assert_eq!(cli.common.flush_bytes, 1000000);
     assert_eq!(cli.common.flush_interval_secs, Some(60));
+    assert_eq!(cli.common.flush_idle_secs, Some(30));
+    assert_eq!(cli.common.metrics_stale_after_secs, Some(600));
     assert_eq!(cli.common.stream_idle_timeout_secs, Some(45));
     assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(120));
     assert_eq!(cli.common.compression, "snappy");
@@ -562,6 +573,11 @@ fn test_build_config() {
     assert!(config.flush_blocks.is_none());
     assert!(config.final_blocks_only);
     assert_eq!(config.stream_idle_timeout_secs, Some(120));
+    assert_eq!(config.flush_idle_secs, None);
+    assert_eq!(
+        config.grpc.max_message_bytes,
+        crate::config::DEFAULT_GRPC_MAX_MESSAGE_BYTES
+    );
     assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
     // cursor defaults to the mirror in the dataset's `_fireparq/` directory
     assert_eq!(

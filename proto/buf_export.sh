@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pulls the latest proto definitions from the Buf Build Registry (https://buf.build)
-# and writes them as flat, single-file protos named after each block type.
+# and writes them as flat, single-file protos named after each block type. Two trees keep
+# their upstream import paths instead: Tron's core/*.proto and SEC's pinax/sec/v1/*.proto.
 #
 # Prerequisites:
 #   - buf CLI (https://buf.build/docs/installation)
@@ -66,6 +67,13 @@ echo "  ✓ tron.proto (+ core/)"
 buf export buf.build/pinax/firehose-beacon -o "$TMP_DIR/beacon"
 cp "$TMP_DIR/beacon/sf/beacon/type/v1/type.proto" "$PROTO_DIR/beacon.proto"
 echo "  ✓ beacon.proto"
+
+# ── SEC (EDGAR) ───────────────────────────────────────────
+# Ten files in package pinax.sec.v1 that import each other by path: keep the tree.
+buf export buf.build/pinax/firehose-sec:v0.13.0 -o "$TMP_DIR/sec"
+mkdir -p "$PROTO_DIR/pinax/sec/v1"
+cp "$TMP_DIR/sec/pinax/sec/v1/"*.proto "$PROTO_DIR/pinax/sec/v1/"
+echo "  ✓ pinax/sec/v1/*.proto"
 
 echo ""
 echo "Done. All proto files updated in $PROTO_DIR"

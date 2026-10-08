@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form N-PX — proxy-voting record (mandatory structured XML since 2024).
+// Two documents: primary_doc.xml (cover) + a separate vote-table XML
+// (proxyVoteTable). Voting reports can be very large (one proxyTable per
+// proposal voted) — notice reports carry no votes.
+message NpxReport {
+  string filer_cik             = 1;
+  NpxCoverPage cover_page       = 2;
+  // Rows of every "PROXY VOTING RECORD" document, in submission order (0.12.x
+  // read only the first vote-table XML).
+  repeated ProxyVote votes      = 3;
+}
+
+message NpxCoverPage {
+  string  year_or_quarter          = 1;
+  string  report_calendar_year     = 2;
+  string  reporting_person_name    = 3;
+  Address reporting_person_address  = 4;
+  string  report_type              = 5; // NOTICE / VOTING / COMBINATION REPORT
+  string  file_number              = 6;
+  string  reporting_crd_number     = 7;
+
+  // --- Added in 0.13.0 ---
+  string investment_company_type    = 8;  // headerData/filerInfo/investmentCompanyType
+  string reporting_sec_file_number  = 9;  // reportingSecFileNumber
+  string lei_number                 = 10; // leiNumber
+  string confidential_treatment     = 11; // reportInfo/confidentialTreatment, raw
+  string notice_explanation         = 12; // reportInfo/noticeExplanation
+  string explanatory_choice         = 13; // explanatoryInformation/explanatoryChoice, raw
+  string explanatory_notes          = 14; // explanatoryInformation/explanatoryNotes
+  repeated NpxSeriesReport series_reports = 15; // seriesPage/seriesDetails/seriesReports
+  repeated NpxManager other_managers = 16;     // coverPage/otherManagersInfo/otherManager
+  repeated NpxManager summary_managers = 17;   // summaryPage/otherManagers2/investmentManagers
+  string other_included_managers_count = 18;   // summaryPage/otherIncludedManagersCount, raw
+  string series_count               = 19;     // seriesPage/seriesCount, raw
+  // coverPage/amendmentInfo (N-PX/A).
+  optional bool is_amendment        = 20; // amendmentInfo/isAmendment
+  string amendment_number           = 21; // amendmentInfo/amendmentNo, raw
+  string amendment_type             = 22; // amendmentInfo/amendmentType (RESTATEMENT | NEW HOLDINGS ...)
+  optional bool conf_denied_expired = 23; // amendmentInfo/confDeniedExpired
+  string reporting_person_phone     = 24; // coverPage/reportingPerson/phoneNumber
+  string agent_for_service_name     = 25; // coverPage/agentForService/name
+  Address agent_for_service_address = 26; // coverPage/agentForService/address (unset when absent)
+  // formData/signaturePage first, then each signaturePage/secondaryRecords/secondaryRecord.
+  repeated NpxSignature signatures  = 27;
+  // headerData/filerInfo/registrantType, raw: "RMIC" (registered management
+  // investment company) | "IM" (institutional manager, say-on-pay votes).
+  string registrant_type            = 28;
+}
+
+message NpxSignature {
+  string reporting_person  = 1; // signaturePage/reportingPerson (main signature only)
+  string signature         = 2; // txSignature
+  string printed_signature = 3; // txPrintedSignature / printedSign
+  string title             = 4; // txTitle
+  string date              = 5; // txAsOfDate, raw MM/DD/YYYY
+}
+
+message NpxSeriesReport {
+  string series_id = 1; // idOfSeries
+  string name      = 2; // nameOfSeries
+  string lei       = 3; // leiOfSeries
+}
+
+message NpxManager {
+  string serial_number       = 1; // serialNo (summary) / position key used by voteManager
+  string name                = 2; // managerName / name
+  string form13f_file_number = 3; // icaOr13FFileNumber / form13FFileNumber
+  string crd_number          = 4;
+  string sec_file_number     = 5; // otherFileNumber / secFileNumber
+  string lei                 = 6; // leiNumberOM
+}
+
+message ProxyVote {
+  string issuer_name            = 1;
+  string cusip                  = 2;
+  string isin                   = 3;
+  string figi                   = 4;
+  string meeting_date           = 5;
+  string vote_description       = 6;
+  repeated string vote_categories = 7; // categoryType
+  string vote_source            = 8;
+  string shares_voted           = 9;
+  string shares_on_loan         = 10;
+  repeated VoteRecord records    = 11;
+
+  // --- Added in 0.13.0 ---
+  string vote_series            = 12; // voteSeries: the fund series (S000...) that cast the vote
+  string other_vote_description = 13; // otherVoteDescription
+  repeated string vote_other_managers = 14; // voteManager/otherManagers/otherManager (serial numbers)
+  string vote_other_info        = 15; // voteOtherInfo: free-text note on the vote
+}
+
+message VoteRecord {
+  string how_voted                 = 1; // FOR / AGAINST / ABSTAIN / WITHHELD
+  string shares_voted              = 2;
+  string management_recommendation = 3;
+}

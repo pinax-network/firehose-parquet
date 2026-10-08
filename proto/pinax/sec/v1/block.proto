@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "google/protobuf/timestamp.proto";
+import "pinax/sec/v1/ownership.proto";
+import "pinax/sec/v1/form13f.proto";
+import "pinax/sec/v1/form144.proto";
+import "pinax/sec/v1/nport.proto";
+import "pinax/sec/v1/formd.proto";
+import "pinax/sec/v1/npx.proto";
+import "pinax/sec/v1/ncen.proto";
+import "pinax/sec/v1/formc.proto";
+import "pinax/sec/v1/beneficial.proto";
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// One 10-minute window of an EDGAR feed-day. block_number = epoch window
+// (unix_seconds / 600); one daily dump spans 144 consecutive blocks
+// [day*144, day*144+143]. A filing lands in the window of its acceptance time,
+// clamped into the band of the dump that disseminated it. Quiet windows and
+// no-feed days (weekends/holidays) are emitted as empty blocks for contiguity.
+message Block {
+  BlockHeader header = 1;
+  repeated Filing filings = 2; // ordered by acceptance_datetime, then accession
+}
+
+message BlockHeader {
+  uint64 block_number = 1;                   // epoch 10-minute window (unix_seconds / 600)
+  google.protobuf.Timestamp block_time = 2;  // start of the window, UTC
+  string feed_date = 3;                      // YYYY-MM-DD of the daily dump that carried the filings
+}
+
+// Common envelope; the parsed body is one of `body`.
+message Filing {
+  uint64 ordinal              = 1;  // deterministic position within the block
+  string accession_number     = 2;
+  string form_type            = 3;  // "4", "4/A", "SC 13D", "13F-HR", ...
+  // 10-pad CIK of the first SGML header ISSUER / SUBJECT-COMPANY party, else of the
+  // first FILER / FILED-BY / REPORTING-OWNER party. So it is the issuer for
+  // 3/4/5, 144 and SC/SCHEDULE 13D/G, and the filer for 13F, N-PORT, N-PX,
+  // N-CEN, D and C. `cik_role` names the party; `parties` lists them all.
+  string cik                  = 4;
+  string company_name         = 5;  // CONFORMED-NAME of the same party as `cik`
+  string filing_date          = 6;  // YYYY-MM-DD
+  string period_of_report     = 7;  // may be empty
+  google.protobuf.Timestamp acceptance_datetime = 8; // EDGAR acceptance time, per-second
+  string primary_document     = 9;
+  bool   is_amendment         = 10;
+  // Accession of the filing this one amends, when EDGAR states it in the body
+  // XML (`previousAccessionNumber`: Form D/A, SCHEDULE 13D/G amendments, 144/A;
+  // N-CEN/A `headerData/accessionNumber`). Copied from the body's
+  // `previous_accession_number`, and only onto an amendment (`is_amendment`):
+  // an original SCHEDULE 13G that states a previous accession keeps it in its
+  // body only. "" when not stated (it was always "" before 0.13.0).
+  string amended_accession    = 11;
+  string source_path          = 12; // "<archive>!<accession>", e.g. "20260102.gz!0000024545-26-000001"
+  bytes  raw_xml              = 13; // original primary-doc XML; populated only with --include-raw
+
+  // --- Added in 0.13.0 (SGML submission header). Empty on blocks from older readers. ---
+
+  // Every party block of the SGML header, in header order: <FILER>, <FILED-BY>,
+  // <SUBJECT-COMPANY>, <ISSUER>, <REPORTING-OWNER> (a block may repeat, e.g.
+  // co-registrants or joint reporting owners).
+  repeated FilingParty parties = 14;
+  // Role of the party `cik` / `company_name` were taken from: "ISSUER" |
+  // "SUBJECT-COMPANY" | "FILER" | "FILED-BY" | "REPORTING-OWNER"; "" when the
+  // header has no party.
+  string cik_role = 15;
+  // Every <DOCUMENT> of the submission (metadata only, in submission order),
+  // including non-XML exhibits. Bodies are not carried.
+  repeated SubmissionDocument documents = 16;
+  // Header <GROUP-MEMBERS> lines (legacy SC 13D/G group filings), verbatim.
+  repeated string group_members = 17;
+  // Header <SERIES-AND-CLASSES-CONTRACTS-DATA> series (funds: N-PORT, N-PX,
+  // N-CEN), with their share classes and tickers.
+  repeated FundSeries series = 18;
+
+  oneof body {
+    OwnershipDocument         ownership  = 20; // Forms 3/4/5
+    Form13fReport             form13f    = 21; // 13F-HR / 13F-NT
+    BeneficialOwnershipReport beneficial = 22; // SC 13D / 13G
+    RawFiling                 raw        = 23; // legacy-HTML / unsupported / parse error
+    Form144Notice             form144    = 24; // Form 144 (proposed sale)
+    NportReport               nport      = 25; // N-PORT (fund portfolio holdings)
+    FormDNotice               form_d     = 26; // Form D (exempt offering)
+    NpxReport                 npx        = 27; // N-PX (proxy voting record)
+    NcenReport                ncen       = 28; // N-CEN (fund annual census)
+    FormCNotice               form_c     = 29; // Form C (crowdfunding)
+  }
+
+  // --- Added in 0.13.0 (SGML header dissemination flags) ---
+
+  // The flag tags at the top of the SGML submission header, verbatim, in header
+  // order: "CORRECTION", "DELETION", "PAPER", "CONFIRMING-COPY",
+  // "PRIVATE-TO-PUBLIC". Empty for an ordinary filing. A "DELETION" is EDGAR's
+  // notice that the filing `accession_number` (disseminated earlier, usually
+  // in an earlier feed-day) was deleted: its header restates the deleted
+  // filing's type, dates and parties, it has no document text, and its body is
+  // `RawFiling{reason: "deletion"}`. A "CORRECTION" without "DELETION" is a
+  // corrected re-dissemination and is parsed like any filing.
+  repeated string dissemination_flags = 30;
+  // Header <TIMESTAMP> that accompanies a CORRECTION / PRIVATE-TO-PUBLIC
+  // dissemination, raw "YYYYMMDD:HHMMSS" (US-Eastern). "" when absent.
+  string dissemination_timestamp = 31;
+}
+
+// Fallback for unparsed / legacy forms. The original bytes (when wanted) live
+// on Filing.raw_xml (--include-raw), so this just records why parsing was skipped.
+//
+// reason:
+//   "legacy_html"      the form's .xml document holds HTML (pre-XML era)
+//   "no_xml"           a target form whose submission has no .xml document at all
+//                      (pre-XML era, e.g. text N-PX before 2024, paper 144);
+//                      0.13.0+, before that these were "parse_error"
+//   "parse_error"      the XML is malformed (0.13.0+: any XML error anywhere in the
+//                      document, including truncation or a document with no root
+//                      element; never a partial body)
+//   "deletion"         0.13.0+: an EDGAR deletion notice (`Filing.dissemination_flags`
+//                      has "DELETION"); the deleted filing has no body to parse
+//   "unsupported_form" not a target form (unreachable: the feed filters them)
+message RawFiling {
+  string reason = 1;
+  // Human-readable cause for "parse_error" (parser error message, e.g. the
+  // quick-xml error and byte position). Deterministic for a given archive. 0.13.0+.
+  string detail = 2;
+}
+
+// One party block of the SGML submission header (<FILER>, <FILED-BY>,
+// <SUBJECT-COMPANY>, <ISSUER>, <REPORTING-OWNER>). Values are verbatim except
+// `cik` (10-pad) and dates (YYYYMMDD -> YYYY-MM-DD).
+message FilingParty {
+  string  role                   = 1;  // SGML block name, e.g. "FILER", "REPORTING-OWNER"
+  string  cik                    = 2;  // <CIK>, 10-pad
+  string  name                   = 3;  // <CONFORMED-NAME>
+  string  assigned_sic           = 4;  // <ASSIGNED-SIC>, raw 4 digits ("0000" = none assigned)
+  string  organization_name      = 5;  // <ORGANIZATION-NAME> (SEC review office), raw
+  string  irs_number             = 6;  // <IRS-NUMBER>, raw
+  string  state_of_incorporation = 7;  // <STATE-OF-INCORPORATION>, EDGAR state/country code
+  string  fiscal_year_end        = 8;  // <FISCAL-YEAR-END>, raw MMDD
+  string  lei                    = 9;  // <LEGAL-ENTITY-IDENTIFIER>
+  string  form_type              = 10; // first <FILING-VALUES><FORM-TYPE>
+  string  act                    = 11; // first <FILING-VALUES><ACT>
+  string  file_number            = 12; // first <FILING-VALUES><FILE-NUMBER>
+  string  film_number            = 13; // first <FILING-VALUES><FILM-NUMBER>
+  // <BUSINESS-ADDRESS>: STREET1/2, CITY, STATE, ZIP; PROVINCE-COUNTRY -> country,
+  // NON-US-STATE-TERRITORY -> non_us_state_territory.
+  Address business_address       = 14;
+  string  business_phone         = 15; // <BUSINESS-ADDRESS><PHONE>
+  Address mail_address           = 16; // <MAIL-ADDRESS>, same mapping
+  repeated FormerName former_names = 17; // <FORMER-COMPANY> / <FORMER-NAME>, header order
+}
+
+message FormerName {
+  string name         = 1; // <FORMER-CONFORMED-NAME>
+  string date_changed = 2; // <DATE-CHANGED>, YYYY-MM-DD
+}
+
+// One <DOCUMENT> of the submission (metadata only).
+message SubmissionDocument {
+  string sequence    = 1; // <SEQUENCE>
+  string type        = 2; // <TYPE>, e.g. "4", "INFORMATION TABLE", "EX-99.1", "GRAPHIC"
+  string filename    = 3; // <FILENAME>
+  string description = 4; // <DESCRIPTION>
+}
+
+// A fund series from the SGML header <SERIES-AND-CLASSES-CONTRACTS-DATA>.
+message FundSeries {
+  string owner_cik   = 1; // <OWNER-CIK>, 10-pad
+  string series_id   = 2; // <SERIES-ID>, e.g. "S000012345"
+  string series_name = 3; // <SERIES-NAME>
+  repeated FundClass classes = 4;
+  // Name of the enclosing header block, verbatim, e.g.
+  // "EXISTING-SERIES-AND-CLASSES-CONTRACTS".
+  string status      = 5;
+}
+
+message FundClass {
+  string class_id      = 1; // <CLASS-CONTRACT-ID>, e.g. "C000034567"
+  string class_name    = 2; // <CLASS-CONTRACT-NAME>
+  string ticker_symbol = 3; // <CLASS-CONTRACT-TICKER-SYMBOL>
+}

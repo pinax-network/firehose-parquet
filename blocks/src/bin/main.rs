@@ -41,7 +41,7 @@ use ingestion::run_ingestion;
 
 /// Supported block types.
 const BLOCK_TYPES: &[&str] = &[
-    "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+    "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon", "sec",
 ];
 const WITHOUT_EXTENDED_WARNING: &str =
     "--without-extended had no effect because extended output is not supported for this chain";
@@ -160,6 +160,9 @@ enum MapperFlushTrigger {
     Blocks,
     Rows,
     Interval,
+    /// `--flush-idle-secs`: the stream went quiet, at any pace. Checked
+    /// between messages, not after a block.
+    Idle,
 }
 
 impl MapperFlushTrigger {
@@ -170,6 +173,7 @@ impl MapperFlushTrigger {
             Self::Blocks => "blocks",
             Self::Rows => "rows",
             Self::Interval => "interval",
+            Self::Idle => "idle",
         }
     }
 }
@@ -3185,6 +3189,14 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_block_type_sec() {
+        assert_eq!(
+            detect_block_type("type.googleapis.com/pinax.sec.v1.Block").unwrap(),
+            ChainKind::Sec
+        );
+    }
+
+    #[test]
     fn test_detect_block_type_unknown() {
         assert!(detect_block_type("type.googleapis.com/sf.unknown.type.v1.Block").is_err());
     }
@@ -3321,7 +3333,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon"
+            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec"
         );
     }
 
@@ -3336,7 +3348,8 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"cosmos"));
         assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
-        assert_eq!(BLOCK_TYPES.len(), 9); // auto + 8 chains
+        assert!(BLOCK_TYPES.contains(&"sec"));
+        assert_eq!(BLOCK_TYPES.len(), 10); // auto + 9 chains
 
         // `--block-type` help and errors list every profile, in profile order.
         assert_eq!(BLOCK_TYPES[0], "auto");
@@ -3423,6 +3436,7 @@ mod tests {
             (ChainKind::Cosmos, false, 3, EncodeBytes::Hex),
             (ChainKind::Tron, false, 2, EncodeBytes::TronBase58),
             (ChainKind::Beacon, false, 3, EncodeBytes::Hex),
+            (ChainKind::Sec, false, 1, EncodeBytes::Hex),
             (ChainKind::Evm, true, 2, EncodeBytes::TronBase58),
         ];
 

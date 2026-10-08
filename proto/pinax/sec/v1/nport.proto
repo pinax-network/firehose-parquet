@@ -1,0 +1,282 @@
+syntax = "proto3";
+
+package pinax.sec.v1;
+
+import "pinax/sec/v1/ownership.proto"; // for Address
+
+option go_package = "github.com/pinax-network/firehose-sec/pb/pinax/sec/v1;secpb";
+
+// Form N-PORT (NPORT-P) — monthly portfolio holdings of registered funds
+// (the fund-world analogue of 13F). Structured XML primary_doc.xml. This models
+// the core: registrant/series identity, fund-level totals, and per-security
+// holdings. Deep derivative/return analytics are omitted in v1.
+message NportReport {
+  string filer_cik                  = 1;
+  GeneralInfo general_info          = 2;
+  FundInfo fund_info                = 3;
+  repeated PortfolioHolding holdings = 4;
+  // --- 0.13.0+ ---
+  // formData/explntrNotes/explntrNote (Part E explanatory notes), document order.
+  repeated NportExplanatoryNote explanatory_notes = 5;
+  NportSignature signature          = 6; // formData/signature; unset when absent
+}
+
+// formData/explntrNotes/explntrNote (attributes, raw).
+message NportExplanatoryNote {
+  string note_item = 1; // @noteItem: the form item explained, e.g. "A.2.a"
+  string note      = 2; // @note, verbatim
+}
+
+// formData/signature (raw).
+message NportSignature {
+  string date_signed       = 1; // dateSigned
+  string name_of_applicant = 2; // nameOfApplicant
+  string signature         = 3; // signature
+  string signer_name       = 4; // signerName
+  string title             = 5; // title
+}
+
+message GeneralInfo {
+  string reg_name         = 1;
+  string reg_file_number  = 2;
+  string reg_cik          = 3;
+  string reg_lei          = 4;
+  string series_name      = 5;
+  string series_id        = 6;
+  string series_lei       = 7;
+  string rep_period_end   = 8; // repPdEnd: the fund's FISCAL YEAR END (not the as-of date)
+  string rep_period_date  = 9; // repPdDate: as-of date of the holdings
+  bool   is_final_filing  = 10;
+  // --- 0.13.0+ ---
+  // regStreet1/2, regCity, regStateConditional@regState -> state,
+  // regStateConditional@regCountry or a plain regCountry (registrants with no
+  // state, e.g. Puerto Rico) -> country, regZipOrPostalCode -> zip_code.
+  Address reg_address     = 11;
+  string  reg_phone       = 12; // regPhone
+}
+
+message FundInfo {
+  string total_assets      = 1; // totAssets
+  string total_liabilities = 2; // totLiabs
+  string net_assets        = 3; // netAssets
+  repeated MonthlyReturn monthly_total_returns = 4; // per share-class, 3 months
+  // --- 0.13.0+ ---
+  string assets_invested        = 5; // assetsInvested
+  string misc_securities_assets = 6; // assetsAttrMiscSec
+  string cash_not_reported      = 7; // cshNotRptdInCorD
+  // Months 1..3 of the reporting quarter: monNFlow@sales/@reinvestment/@redemption
+  // and othMonN@netRealizedGain/@netUnrealizedAppr.
+  repeated MonthlyFundActivity monthly_activity = 8;
+}
+
+message MonthlyFundActivity {
+  uint32 month                       = 1; // 1, 2 or 3 (N in monNFlow / othMonN)
+  string sales                       = 2;
+  string reinvestment                = 3;
+  string redemption                  = 4;
+  string net_realized_gain           = 5;
+  string net_unrealized_appreciation = 6;
+}
+
+// Per-class monthly total returns (monthlyTotReturn attrs rtn1/rtn2/rtn3).
+message MonthlyReturn {
+  string class_id      = 1;
+  string return_month1 = 2;
+  string return_month2 = 3;
+  string return_month3 = 4;
+}
+
+message PortfolioHolding {
+  string name              = 1;
+  string lei               = 2;
+  string title             = 3;
+  string cusip             = 4;
+  // identifiers/isin@value, identifiers/ticker@value. 0.13.0+: attribute
+  // values are entity-unescaped like element text ("M&amp;M" -> "M&M"); 0.12.x
+  // kept the escaped bytes.
+  string isin              = 5;
+  string ticker            = 6;
+  string other_identifier  = 7;  // 0.13.0+: value of the first identifiers/other (see other_identifiers)
+  string balance           = 8; // raw
+  string units             = 9;
+  string currency          = 10; // curCd, or currencyConditional@curCd (non-USD, 0.13.0+)
+  string value_usd         = 11; // valUSD (raw)
+  string pct_value         = 12; // pctVal
+  string payoff_profile    = 13;
+  string asset_category    = 14; // assetCat, or assetConditional@assetCat (0.13.0+)
+  string issuer_category   = 15; // issuerCat, or issuerConditional@issuerCat (0.13.0+)
+  string investment_country = 16; // invCountry
+  string fair_value_level  = 17;
+  bool   is_restricted     = 18; // isRestrictedSec
+  Derivative derivative    = 19; // present for derivative positions
+  SecurityLending security_lending = 20;
+
+  // --- Added in 0.13.0 ---
+  repeated OtherIdentifier other_identifiers = 21; // identifiers/other@otherDesc,@value (all)
+  string exchange_rate               = 22; // currencyConditional@exchangeRt (non-USD holdings)
+  string asset_category_description  = 23; // assetConditional@desc (assetCat "OTHER")
+  string issuer_category_description = 24; // issuerConditional@desc (issuerCat "OTHER")
+  string units_description           = 25; // descOthUnits (units "OU")
+  DebtSecurity debt_security         = 26; // debtSec (present for debt holdings)
+}
+
+message OtherIdentifier {
+  string description = 1; // @otherDesc
+  string value       = 2; // @value
+}
+
+// debtSec. Flags are unset when absent.
+message DebtSecurity {
+  string maturity_date   = 1; // maturityDt
+  string coupon_kind     = 2; // couponKind: Fixed | Floating | Variable | None
+  string annualized_rate = 3; // annualizedRt
+  optional bool is_default                  = 4; // isDefault
+  optional bool are_interest_payments_in_arrears = 5; // areIntrstPmntsInArrs
+  optional bool is_paid_in_kind             = 6; // isPaidKind
+  optional bool is_mandatory_convertible    = 7; // isMandatoryConvrtbl
+  optional bool is_contingent_convertible   = 8; // isContngtConvrtbl
+  // dbtSecRefInstruments/dbtSecRefInstrument: what a convertible converts into
+  // (0.12.x leaked its ticker and currency onto the holding).
+  repeated DebtReferenceInstrument reference_instruments = 9;
+  repeated ConversionCurrency conversion_currencies = 10; // currencyInfos/currencyInfo
+  string delta = 11; // debtSec/delta, raw ("XXXX" when redacted)
+}
+
+message DebtReferenceInstrument {
+  string name     = 1; // name
+  string title    = 2; // title
+  string currency = 3; // curCd
+  string cusip    = 4; // identifiers/cusip@value
+  string isin     = 5; // identifiers/isin@value
+  string ticker   = 6; // identifiers/ticker@value
+  repeated OtherIdentifier other_identifiers = 7; // identifiers/other
+}
+
+message ConversionCurrency {
+  string currency         = 1; // @curCd
+  string conversion_ratio = 2; // @convRatio
+}
+
+// A derivative position (option/forward/future/swap/...). Common fields across
+// subtypes; `category` is the derivCat attr (OPT/FWD/FUT/SWP/SWO/OTH).
+message Derivative {
+  string category                = 1;
+  string counterparty_name       = 2;
+  string counterparty_lei        = 3;
+  string put_or_call             = 4;
+  string written_or_purchased    = 5;
+  string ref_instrument_name     = 6; // referenced issuerName
+  string ref_instrument_title    = 7; // referenced issueTitle
+  // The reference instrument's descRefInstrmnt/otherRefInst/identifiers
+  // isin / ticker @value (entity-unescaped, 0.13.0+). When the reference is a
+  // nested derivative (nestedDerivInfo), its own identifiers from its
+  // derivAddlInfo (`nested.additional_info`), as 0.12.x emitted them. Never an
+  // index basket component's (see `ref_index_components`), never a nested
+  // derivative's own reference's (that is `nested.ref_*`).
+  string ref_isin                = 8;
+  string ref_ticker              = 9;
+  string share_no                = 10; // shareNo / # contracts
+  string notional_amount         = 11; // notionalAmt (forwards/swaps)
+  string exercise_price          = 12;
+  string exercise_currency       = 13;
+  string expiration_date         = 14; // expDt (options), expDate (futures, 0.13.0+)
+  string delta                   = 15; // raw; "XXXX" when redacted (all public filings observed)
+  string unrealized_appreciation = 16; // unrealizedAppr
+
+  // --- Added in 0.13.0 ---
+  // nestedDerivInfo/*Deriv: the derivative an option/swaption/warrant is on
+  // (0.12.x let it overwrite the outer derivative).
+  Derivative nested               = 17;
+  string currency                 = 18; // curCd (futures, swaps)
+  string payoff_profile           = 19; // payOffProf (futures: Long | Short)
+  string termination_date         = 20; // terminationDt (swaps)
+  string amount_currency_sold     = 21; // amtCurSold (forwards)
+  string currency_sold            = 22; // curSold
+  string amount_currency_purchased = 23; // amtCurPur
+  string currency_purchased       = 24; // curPur
+  string settlement_date          = 25; // settlementDt (forwards)
+  string upfront_payment          = 26; // upfrontPmnt (swaps)
+  string upfront_receipt          = 27; // upfrontRcpt
+  string payment_currency         = 28; // pmntCurCd
+  string receipt_currency         = 29; // rcptCurCd
+  string swap_flag                = 30; // swapFlag, raw
+  repeated SwapLeg legs           = 31; // fixed/floating/other Pmnt/Rec descriptions (swaps)
+  string ref_index_name           = 32; // descRefInstrmnt/indexBasketInfo/indexName
+  string ref_index_identifier     = 33; // descRefInstrmnt/indexBasketInfo/indexIdentifier
+  string other_description        = 34; // othDeriv@othDesc (e.g. "rights")
+  // principalAmt: the size of an option/swaption/warrant reported as a
+  // principal amount instead of shareNo (e.g. CDS swaptions).
+  string principal_amount         = 35;
+  string ref_index_description    = 36; // descRefInstrmnt/indexBasketInfo/narrativeDesc, verbatim
+  // descRefInstrmnt/indexBasketInfo/components/component (custom baskets), in order.
+  repeated IndexBasketComponent ref_index_components = 37;
+  string ref_cusip                = 38; // descRefInstrmnt/otherRefInst/identifiers/cusip@value
+  repeated OtherIdentifier ref_other_identifiers = 39; // .../otherRefInst/identifiers/other
+  // derivAddlInfo: a nested derivative's own identity, in the holding's
+  // shape (unset when absent; EDGAR writes it on nested derivatives only).
+  DerivativeAdditionalInfo additional_info = 40;
+}
+
+// One indexBasketInfo/components/component (raw).
+message IndexBasketComponent {
+  string name            = 1; // othIndName
+  string cusip           = 2; // identifiers/cusip@value
+  string isin            = 3; // identifiers/isin@value
+  string ticker          = 4; // identifiers/ticker@value
+  repeated OtherIdentifier other_identifiers = 5; // identifiers/other
+  string notional_amount = 6; // othIndNotAmt
+  string currency        = 7; // othIndCurCd
+  string value           = 8; // othIndValue
+  string issue_currency  = 9; // othIndIssCurCd
+}
+
+// derivAddlInfo (raw), the same elements as a holding's identity.
+message DerivativeAdditionalInfo {
+  string name                        = 1;  // name
+  string lei                         = 2;  // lei
+  string title                       = 3;  // title
+  string cusip                       = 4;  // cusip
+  string isin                        = 5;  // identifiers/isin@value
+  string ticker                      = 6;  // identifiers/ticker@value
+  repeated OtherIdentifier other_identifiers = 7; // identifiers/other
+  string balance                     = 8;  // balance
+  string units                       = 9;  // units
+  string units_description           = 10; // descOthUnits
+  string currency                    = 11; // curCd, or currencyConditional@curCd
+  string exchange_rate               = 12; // currencyConditional@exchangeRt
+  string value_usd                   = 13; // valUSD
+  string pct_value                   = 14; // pctVal
+  string asset_category              = 15; // assetCat, or assetConditional@assetCat
+  string asset_category_description  = 16; // assetConditional@desc
+  string issuer_category             = 17; // issuerCat, or issuerConditional@issuerCat
+  string issuer_category_description = 18; // issuerConditional@desc
+  string investment_country          = 19; // invCountry
+  string other_investment_country    = 20; // invOthCountry
+}
+
+// One swap leg description element (attributes, raw).
+message SwapLeg {
+  // Element name: "fixedPmntDesc" | "fixedRecDesc" | "floatingPmntDesc" |
+  // "floatingRecDesc" | "otherPmntDesc" | "otherRecDesc".
+  string kind                 = 1;
+  string fixed_or_floating    = 2; // @fixedOrFloating
+  string currency             = 3; // @curCd
+  string amount               = 4; // @amount
+  string fixed_rate           = 5; // @fixedRt
+  string floating_rate_index  = 6; // @floatingRtIndex
+  string floating_rate_spread = 7; // @floatingRtSpread
+  string payment_amount       = 8; // @pmntAmt
+  string description          = 9; // element text, e.g. "sell protection" (otherPmntDesc / otherRecDesc)
+}
+
+// securityLending. EDGAR writes "N" as a child element (<isLoanByFund>N</...>) and
+// "Y" as an attribute-only condition element (<loanByFundCondition isLoanByFund="Y"
+// loanVal=".."/>, <cashCollateralCondition isCashCollateral="Y" cashCollateralVal=".."/>).
+// 0.12.x read only the child form, so every flag was false; 0.13.0+ reads both.
+message SecurityLending {
+  bool   is_cash_collateral     = 1;
+  bool   is_non_cash_collateral = 2;
+  bool   is_loan_by_fund        = 3;
+  string loan_value             = 4; // loanByFundCondition@loanVal
+  string cash_collateral_value = 5; // cashCollateralCondition@cashCollateralVal (0.13.0+)
+}

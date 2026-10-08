@@ -7,6 +7,7 @@ pub mod evm;
 pub mod near;
 #[doc(hidden)]
 pub mod schema_docs;
+pub mod sec;
 pub mod solana;
 pub mod tron;
 

@@ -38,6 +38,13 @@ catch-up runs at 4.8× the chain rate or more. See the
 [benchmark record](audit/658-live-flush-benchmark.md) and the
 [adaptive flush record](audit/659-adaptive-flush.md).
 
+Some block families change defaults that this table leaves unset. A SEC
+writer (`--block-type sec`) gets a 512 MiB gRPC message limit, an idle flush,
+and readiness and reconnect timeouts sized for one burst per EDGAR feed day,
+and needs at least 3 GiB of memory; leave `GRPC_MAX_MESSAGE_BYTES`,
+`FLUSH_IDLE_SECS`, `STREAM_IDLE_TIMEOUT_SECS` and `METRICS_STALE_AFTER_SECS`
+unset there ([SEC notes](chains/sec.md), [family defaults](cli.md#family-defaults)).
+
 On Kubernetes, give the writer an `emptyDir` at `/tmp` when its root
 filesystem is read-only (the S3 upload spool), point readiness at `/ready` and
 liveness at `/health` on `METRICS_PORT`, and run one replica: a second writer on

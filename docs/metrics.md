@@ -9,7 +9,8 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `/ready` | `200 OK` after a valid stream message while connected and within the freshness threshold; otherwise `503` |
 
 `--metrics-stale-after-secs` / `METRICS_STALE_AFTER_SECS` sets the readiness
-threshold (default 120 seconds; must be positive). It uses monotonic time since
+threshold (default 120 seconds, or 129600 for `build --block-type sec`, a daily
+feed; must be positive). It uses monotonic time since
 the last valid message, so historical backfills can be ready even when block
 timestamps are old. Disconnects and stream completion make readiness false.
 Liveness stays true through final file publication and cursor persistence.

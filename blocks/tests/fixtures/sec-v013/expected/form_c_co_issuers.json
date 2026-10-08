@@ -1,0 +1,7 @@
+{
+  "table": "form_c_co_issuers",
+  "columns": ["block_num", "block_id", "parent_num", "parent_id", "lib_num", "timestamp", "date", "filing_index", "accession_number", "form_type", "filing_date", "acceptance_datetime", "filer_cik", "co_issuer_index", "co_issuer_name", "legal_status_form", "legal_status_other_desc", "jurisdiction", "date_incorporation", "co_issuer_street1", "co_issuer_street2", "co_issuer_city", "co_issuer_state", "co_issuer_zip_code", "co_issuer_state_description", "co_issuer_country", "co_issuer_non_us_state_territory", "website", "has_parse_issues"],
+  "rows": [
+    {"block_num":2977781,"block_id":"2977781","parent_num":2977780,"parent_id":"2977780","lib_num":2977780,"timestamp":"2026-08-14 00:50:00","date":"2026-08-14","filing_index":0,"accession_number":"0001720779-26-000005","form_type":"C","filing_date":"2026-08-14","acceptance_datetime":"2026-08-14 00:53:31","filer_cik":"0001720779","co_issuer_index":0,"co_issuer_name":"ROVR Products IV, a series of Wefunder SPV, LLC","legal_status_form":"Limited Liability Company","legal_status_other_desc":null,"jurisdiction":"DE","date_incorporation":"2026-08-13","co_issuer_street1":"1887 Whitney Mesa Dr","co_issuer_street2":"NUM 8885","co_issuer_city":"Henderson","co_issuer_state":"NV","co_issuer_zip_code":"89014","co_issuer_state_description":null,"co_issuer_country":null,"co_issuer_non_us_state_territory":null,"website":"https://wefunder.com/","has_parse_issues":false}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "table": "nport_debt_conversion_currencies",
+  "columns": ["block_num", "block_id", "parent_num", "parent_id", "lib_num", "timestamp", "date", "filing_index", "accession_number", "form_type", "filing_date", "acceptance_datetime", "series_id", "as_of_date", "holding_index", "conversion_index", "currency", "conversion_ratio", "has_parse_issues"],
+  "rows": [
+    {"block_num":2979883,"block_id":"2979883","parent_num":2979882,"parent_id":"2979882","lib_num":2979882,"timestamp":"2026-08-28 15:10:00","date":"2026-08-28","filing_index":0,"accession_number":"0000910472-26-013496","form_type":"NPORT-P","filing_date":"2026-08-28","acceptance_datetime":"2026-08-28 15:17:58","series_id":"S000045921","as_of_date":"2026-06-30","holding_index":0,"conversion_index":0,"currency":"USD","conversion_ratio":"63.333200000000","has_parse_issues":false}
+  ]
+}
