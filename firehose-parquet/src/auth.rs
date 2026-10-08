@@ -164,6 +164,8 @@ mod tests {
 
     const PINAX: &str = "https://eth.firehose.pinax.network:443";
     const STREAMINGFAST: &str = "https://mainnet.tron.streamingfast.io:443";
+    /// A built-in alias from the internal `PINAX_NETWORKS` list, not the registry.
+    const HYPERCORE: &str = "https://hypercore.firehose.pinax.network:443";
 
     fn read(name: &str) -> Option<String> {
         match name {
@@ -202,9 +204,15 @@ mod tests {
                 Some(" \n".into())
             }
         };
-        let pinax = resolve_with(PINAX, None, None, legacy).unwrap();
-        assert_eq!(pinax.api_key.as_deref(), Some("legacy-key"));
-        assert_eq!(pinax.jwt_token.as_deref(), Some("legacy-token"));
+        for endpoint in [PINAX, HYPERCORE] {
+            let pinax = resolve_with(endpoint, None, None, legacy).unwrap();
+            assert_eq!(pinax.api_key.as_deref(), Some("legacy-key"), "{endpoint}");
+            assert_eq!(
+                pinax.jwt_token.as_deref(),
+                Some("legacy-token"),
+                "{endpoint}"
+            );
+        }
         let other = resolve_with(STREAMINGFAST, None, None, legacy).unwrap();
         assert_eq!(other.api_key, None);
         assert_eq!(other.jwt_token, None);
@@ -408,10 +416,19 @@ mod tests {
             (PINAX, Some("SUBSTREAMS_API_KEY")),
             (PINAX, None),
             (STREAMINGFAST, None),
+            (HYPERCORE, Some("PINAX_API_KEY")),
+            (HYPERCORE, None),
         ] {
             let (_, log) = capture(endpoint, key, None);
             assert!(!log.contains("WARN"), "{endpoint}: {log}");
         }
+
+        // The internal HyperCore alias is a built-in Pinax host: the ambient
+        // Pinax key is selected without a selector.
+        let (credentials, log) = capture(HYPERCORE, None, None);
+        assert_eq!(credentials.api_key.as_deref(), Some("pinax-key"));
+        assert!(log.contains("provider=\"pinax\""), "{log}");
+        assert!(log.contains("api_key_envvar=\"PINAX_API_KEY\""), "{log}");
     }
 
     #[test]

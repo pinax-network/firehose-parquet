@@ -23,7 +23,7 @@ Related docs:
 - `docs/audit/README.md`: issue-by-issue implementation and validation records of the September 2026 audit (#463).
 - `docs/design/delta-lake.md`: the Delta Lake output design for the v1.0.0 launch (#643), implemented in lanes L1–L5 and L7–L10 (L6, `verify`, is #666): dependency spike (removed in L8/L9; its checks and what now covers them are in §1.1–1.11) and pinned versions, protocol and table properties, the commit mapping onto the #468 transaction, crash matrix and VACUUM rule, ownership (#636), type mapping, removals, resume cost (#655), the maintenance CronJob, reader examples and the PR-sized implementation lanes.
 - `docs/partition-vocabulary.md`: the single `date=YYYY-MM-DD` output key and the CLI terms that refer to it.
-- `docs/network-registry-integration.md`: how built-in `--network` aliases are generated, the provider policy, and the endpoint check.
+- `docs/network-registry-integration.md`: how built-in `--network` aliases are generated from the registry and the internal list of Pinax-served networks it lacks (`PINAX_NETWORKS`), the provider policy, and the endpoint check.
 
 ## Workspace Layout
 
@@ -162,7 +162,7 @@ Related docs:
   - `firehose-parquet/src/grpc.rs` and `firehose-parquet/src/auth.rs`.
 - Change built-in `--network` aliases or endpoint override behavior:
   - `firehose-parquet/src/networks.rs` (resolution and `FIREHOSE_ENDPOINT_*` overrides).
-  - `scripts/generate_networks.rs` (provider policy); regenerate `firehose-parquet/src/networks_generated.rs` instead of editing it, following `docs/network-registry-integration.md`.
+  - `scripts/generate_networks.rs` (provider policy and the internal `PINAX_NETWORKS` list); regenerate `firehose-parquet/src/networks_generated.rs` instead of editing it, following `docs/network-registry-integration.md`.
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`, plus the metrics table in `docs/metrics.md`.
 - Change protobuf definitions:

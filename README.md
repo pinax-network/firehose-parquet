@@ -159,7 +159,7 @@ the maintenance CronJobs.
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
 | | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |
 | | [Prometheus metrics](docs/metrics.md) | Metrics, `/health` and `/ready` |
-| | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases, provider policy, endpoint check |
+| | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases (registry and internal Pinax list), provider policy, endpoint check |
 | Design and audit | [Delta Lake design](docs/design/delta-lake.md) | The v1.0.0 Delta Lake output design (#643) |
 | | [Audit records](docs/audit/README.md) | Implementation and validation records of the September 2026 audit (#463) |
 | Development | [Development](docs/development.md) | Build and test, repository structure, CLI architecture |

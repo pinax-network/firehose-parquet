@@ -35,10 +35,11 @@ Examples:
 - `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
 - `tron` → `https://mainnet.tron.streamingfast.io:443`
 - `tron-evm` → `https://mainnet-evm.tron.streamingfast.io:443`
+- `hypercore` → `https://hypercore.firehose.pinax.network:443`
 
 Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
 
-Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See [`docs/network-registry-integration.md`](network-registry-integration.md) for the provider policy and the weekly endpoint check.
+Aliases come from two sources: The Graph networks registry, and a short reviewed list of Pinax-served networks the registry does not list yet (`PINAX_NETWORKS`, currently `hypercore`; an entry is dropped once the registry lists the network). Registry aliases use the Pinax endpoint the registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See [`docs/network-registry-integration.md`](network-registry-integration.md) for the provider policy, the internal list and the weekly endpoint check.
 
 Resolution precedence:
 

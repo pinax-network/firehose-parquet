@@ -226,6 +226,47 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_resolve_network_endpoint_internal_hypercore_alias_and_override() {
+        // `hypercore` is not in the registry: it comes from the generator's
+        // internal PINAX_NETWORKS list and resolves like any other alias.
+        unsafe {
+            std::env::remove_var("FIREHOSE_ENDPOINT_HYPERCORE");
+        }
+        assert!(KNOWN_NETWORK_NAMES.contains(&"hypercore"));
+        let resolved = resolve_network_endpoint(" HyperCore ").expect("hypercore should resolve");
+        assert_eq!(resolved.requested, "hypercore");
+        assert_eq!(resolved.chain_name, "hypercore");
+        assert_eq!(
+            resolved.endpoint,
+            "https://hypercore.firehose.pinax.network:443"
+        );
+        assert_eq!(resolved.source, EndpointSource::Builtin);
+
+        unsafe {
+            std::env::set_var(
+                "FIREHOSE_ENDPOINT_HYPERCORE",
+                "https://hypercore.internal.example.com:443",
+            );
+        }
+        let resolved =
+            resolve_network_endpoint("hypercore").expect("hypercore override should resolve");
+        assert_eq!(
+            resolved.endpoint,
+            "https://hypercore.internal.example.com:443"
+        );
+        assert_eq!(
+            resolved.source,
+            EndpointSource::EnvOverride {
+                env_var: "FIREHOSE_ENDPOINT_HYPERCORE".to_string()
+            }
+        );
+        unsafe {
+            std::env::remove_var("FIREHOSE_ENDPOINT_HYPERCORE");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_resolve_network_endpoint_name_normalizes_for_env() {
         unsafe {
             std::env::set_var(
