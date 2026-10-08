@@ -82,7 +82,7 @@ One row per fill: each participant's side of a match, in execution order, for ev
 | `crossed` | `boolean` | no | True when this leg crossed the spread: the taker. Exactly one leg of a normal match is crossed; single outcome fills (split, merge, negate) are crossed. |
 | `fee` | `decimal(38,10)` | no | Total fee in `fee_token`, including `builder_fee` and, by observation, `deployer_fee`. Negative = maker rebate. |
 | `transaction_id` | `long` | no | HyperLiquid trade id `tid` (proto name kept), not a transaction id: a 50-bit hash of the buyer and seller order ids, shared by both legs. 0 on daily dust-conversion fills. Not globally unique; HyperLiquid identifies a trade by time, coin and tid. |
-| `fee_token` | `string` | no | Token `fee` is paid in: `USDC`, a HIP-3 dex collateral (`USDT0`, `USDH`, `USDE`), the received asset on spot taker buys, or `+<n>` for outcome coin `#<n>`. |
+| `fee_token` | `string` | no | Token `fee` is paid in: `USDC`, a HIP-3 dex collateral (`USDT0`, `USDH`, `USDE`), the received asset on spot taker buys, or `+<n>` on May 2026 `BUY` legs of outcome coin `#<n>` (other outcome legs pay `USDC`). |
 | `twap_id` | `long` | yes | TWAP order id, set only on the TWAP slice leg (the crossed one). NULL when the fill is not a TWAP slice. |
 | `client_order_id` | `string` (hex) | yes | Client order id (cloid, 16 bytes). NULL when the order had none. Not a taker marker. |
 | `liquidated_user` | `string` (hex) | yes | Liquidated account, on both legs of a liquidation fill; the liquidated side is the row where `user = liquidated_user`. NULL when the fill is not a liquidation (or, never observed, the account was not reported). |
@@ -94,7 +94,7 @@ One row per fill: each participant's side of a match, in execution order, for ev
 | `priority_gas` | `decimal(38,10)` | yes | IOC priority fee paid in HYPE, on the taker leg only. NULL when none; the feature launched around 2026-04-20. |
 | `market_type` | `string` | yes | Derived from `coin` (rule R-D1): `perp` (core and HIP-3 perps), `spot` (`@<n>` and `PURR/USDC`) or `outcome` (HIP-4 `#<n>`). NULL when the coin has a form this version does not know. |
 | `dex` | `string` | yes | Derived from `coin` (rule R-D1), perps only: `''` for the default (core) perp dex, HyperLiquid's own name for it and the `source_dex` value of a `send`; otherwise the HIP-3 dex name, the text before `:`. NULL for spot, outcomes and unknown coin forms. HIP-3 is `market_type = 'perp' AND dex <> ''`. |
-| `counterparty` | `string` (hex) | yes | Derived (rule R-D2): the `user` of the other fill of the block with the same `coin` and `transaction_id`, when exactly two fills share them and their sides differ. NULL otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4 fills (mint, burn, split, merge, negate). The zero address on delisted-perp `SETTLEMENT` fills. |
+| `counterparty` | `string` (hex) | yes | Derived (rule R-D2): the `user` of the other fill of the block with the same `coin` and `transaction_id`, when exactly two fills share them and their sides differ. NULL otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4 fills (mint, burn, split, merge, negate, merge-question). The zero address on delisted-perp `SETTLEMENT` fills. |
 | `extra_json` | `string` | yes | Reserved for fields that upstream adds after this schema version: a JSON object of values that have no typed column (rules in the HyperCore chain notes). NULL in every row written by this version. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
@@ -127,7 +127,7 @@ Derived: one row per HIP-4 outcome fill (`fills.market_type = 'outcome'`, coin `
 | `order_id` | `long` | no | `fills.order_id`. |
 | `crossed` | `boolean` | no | `fills.crossed`: the taker leg, and every single split, merge and negate fill. |
 | `fee` | `decimal(38,10)` | no | `fills.fee`, in `fee_token`: outcome fills do pay fees. |
-| `fee_token` | `string` | no | `fills.fee_token`: `+<n>` (the outcome token) in May 2026, `USDC` later. |
+| `fee_token` | `string` | no | `fills.fee_token`: in May 2026 `+<n>`, the leg's own outcome token, on `BUY` legs and `USDC` on `ASK` legs; `USDC` on every leg by October 2026. |
 | `transaction_id` | `long` | no | `fills.transaction_id`, the HyperLiquid trade id. |
 | `twap_id` | `long` | yes | `fills.twap_id`. |
 | `client_order_id` | `string` (hex) | yes | `fills.client_order_id`. |
@@ -135,7 +135,7 @@ Derived: one row per HIP-4 outcome fill (`fills.market_type = 'outcome'`, coin `
 | `builder` | `string` | yes | `fills.builder`. |
 | `builder_fee` | `decimal(38,10)` | yes | `fills.builder_fee`. |
 | `priority_gas` | `decimal(38,10)` | yes | `fills.priority_gas`. |
-| `counterparty` | `string` (hex) | yes | `fills.counterparty`: set on direct trades and settlements (a `0x3200…` system account), NULL on mint, burn, split, merge and negate legs. |
+| `counterparty` | `string` (hex) | yes | `fills.counterparty`: set on direct trades and settlements (a `0x3200…` system account), NULL on mint, burn, split, merge, negate and merge-question legs. |
 | `extra_json` | `string` | yes | The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream adds later reaches this table without a rebuild. NULL in every row written by this version. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
@@ -156,7 +156,7 @@ Derived: one row per liquidated leg, a fill with a liquidation whose `user` is t
 | `fill_index` | `long` | no | Position of the liquidated fill in the block: joins `fills` on `(block_num, fill_index)`. |
 | `liquidated_user` | `string` (hex) | no | The liquidated account (`fills.user`, equal to `fills.liquidated_user`). |
 | `coin` | `string` | no | `fills.coin`. |
-| `market_type` | `string` | yes | `fills.market_type`: `perp`. |
+| `market_type` | `string` | yes | `fills.market_type`: `perp`; `spot` only if a borrow liquidation ever carries a liquidation object (never observed). |
 | `dex` | `string` | yes | `fills.dex`: `''` for the default (core) perp dex, else the HIP-3 dex name. |
 | `side` | `string` | no | The liquidated side, `BUY` or `ASK` (`fills.side`). |
 | `direction` | `string` | no | `fills.direction`: `market` liquidations use the ordinary `CLOSE_*` and `*_TO_*` labels, `backstop` ones `LIQUIDATED_*`. |
@@ -364,7 +364,7 @@ One row per event of every other type: funding and validator-reward headers (the
 
 ## `funding_deltas`
 
-One row per `FundingDelta`: the hourly funding settlement per account and perp coin, which also snapshots every open perp position. All rows of one hour arrive in one block.
+One row per `FundingDelta`: the hourly funding settlement per account and perp coin, which also snapshots every open perp position in coins with a non-zero rate that hour (zero-rate coin-hours appear to be omitted upstream). All rows of one hour arrive in one block.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -388,7 +388,7 @@ One row per `FundingDelta`: the hourly funding settlement per account and perp c
 
 ## `funding_rates`
 
-Derived: one row per funding event and coin with at least one `funding_deltas` row, in event order, then in the order each coin first appears: the hourly settled funding rate, the open-interest census and the funding flows, summed exactly from the event's deltas. A coin-hour without a row is unknown, not zero: HyperLiquid appears to omit coins whose rate is 0.
+Derived: one row per funding event and coin with at least one `funding_deltas` row, in event order, then in the order each coin first appears: the hourly settled funding rate, the open-interest census and the funding flows, summed exactly from the event's deltas. HyperLiquid appears to omit coins whose rate is 0, so a coin-hour without a row most likely had a rate of 0 (inferred, not confirmed), while its open interest and positions are unknown, not zero.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -410,8 +410,8 @@ Derived: one row per funding event and coin with at least one `funding_deltas` r
 | `open_interest` | `decimal(38,10)` | yes | Σ\|`szi`\| in coin units: HyperLiquid's `openInterest`, which counts both sides. NULL only if the sum does not fit `decimal(38,10)`. |
 | `long_size` | `decimal(38,10)` | yes | Σ`szi` over `szi > 0`. NULL only if the sum does not fit `decimal(38,10)`. |
 | `short_size` | `decimal(38,10)` | yes | −Σ`szi` over `szi < 0`, positive; equal to `long_size` up to `f64` noise. NULL only if the sum does not fit `decimal(38,10)`. |
-| `positive_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts above 0 (received), in the dex collateral. NULL only if the sum does not fit `decimal(38,10)`. |
-| `negative_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts below 0 (paid), kept negative. NULL only if the sum does not fit `decimal(38,10)`. |
+| `positive_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts above 0 (received), in the dex collateral; the same name and sign as the Pinax API's `/markets/oi`. NULL only if the sum does not fit `decimal(38,10)`. |
+| `negative_funding` | `decimal(38,10)` | yes | Σ`funding_amount` over amounts below 0 (paid), kept negative; the same name and sign as the Pinax API's `/markets/oi`. NULL only if the sum does not fit `decimal(38,10)`. |
 | `extra_json` | `string` | yes | Reserved: NULL in every row. A field upstream adds to `Funding` or `FundingDelta` goes to `other_events.extra_json` or `funding_deltas.extra_json`. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

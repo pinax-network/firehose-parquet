@@ -167,7 +167,8 @@ pub fn fills_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
             // fills. Not globally unique; HyperLiquid identifies a trade by time, coin and tid.
             Field::new("transaction_id", DataType::UInt64, false),
             // Token `fee` is paid in: `USDC`, a HIP-3 dex collateral (`USDT0`, `USDH`, `USDE`),
-            // the received asset on spot taker buys, or `+<n>` for outcome coin `#<n>`.
+            // the received asset on spot taker buys, or `+<n>` on May 2026 `BUY` legs of outcome
+            // coin `#<n>` (other outcome legs pay `USDC`).
             Field::new("fee_token", DataType::Utf8, false),
             // TWAP order id, set only on the TWAP slice leg (the crossed one). NULL when the fill
             // is not a TWAP slice.
@@ -211,8 +212,8 @@ pub fn fills_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
             // Derived (rule R-D2): the `user` of the other fill of the block with the same `coin`
             // and `transaction_id`, when exactly two fills share them and their sides differ.
             // NULL otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4
-            // fills (mint, burn, split, merge, negate). The zero address on delisted-perp
-            // `SETTLEMENT` fills.
+            // fills (mint, burn, split, merge, negate, merge-question). The zero address on
+            // delisted-perp `SETTLEMENT` fills.
             Field::new("counterparty", bd.clone(), true),
             // EXTRA_JSON_DESCRIPTION (the same in every table).
             Field::new("extra_json", DataType::Utf8, true),
@@ -261,7 +262,8 @@ pub fn outcome_fills_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
             Field::new("crossed", DataType::Boolean, false),
             // `fills.fee`, in `fee_token`: outcome fills do pay fees.
             Field::new("fee", decimal_type(), false),
-            // `fills.fee_token`: `+<n>` (the outcome token) in May 2026, `USDC` later.
+            // `fills.fee_token`: in May 2026 `+<n>`, the leg's own outcome token, on `BUY` legs
+            // and `USDC` on `ASK` legs; `USDC` on every leg by October 2026.
             Field::new("fee_token", DataType::Utf8, false),
             // `fills.transaction_id`, the HyperLiquid trade id.
             Field::new("transaction_id", DataType::UInt64, false),
@@ -278,7 +280,7 @@ pub fn outcome_fills_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
             // `fills.priority_gas`.
             Field::new("priority_gas", decimal_type(), true),
             // `fills.counterparty`: set on direct trades and settlements (a `0x3200…` system
-            // account), NULL on mint, burn, split, merge and negate legs.
+            // account), NULL on mint, burn, split, merge, negate and merge-question legs.
             Field::new("counterparty", bd.clone(), true),
             // The `extra_json` of the `fills` row, copied verbatim, so that a fill field upstream
             // adds later reaches this table without a rebuild. NULL in every row written by this
@@ -305,7 +307,8 @@ pub fn liquidations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
             Field::new("liquidated_user", bd.clone(), false),
             // `fills.coin`.
             Field::new("coin", DataType::Utf8, false),
-            // `fills.market_type`: `perp`.
+            // `fills.market_type`: `perp`; `spot` only if a borrow liquidation ever carries a
+            // liquidation object (never observed).
             Field::new("market_type", enum_data_type(), true),
             // `fills.dex`: `''` for the default (core) perp dex, else the HIP-3 dex name.
             Field::new("dex", DataType::Utf8, true),
@@ -629,7 +632,8 @@ pub fn other_events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 }
 
 /// `funding_deltas`: One row per `FundingDelta`: the hourly funding settlement per account and
-/// perp coin, which also snapshots every open perp position. All rows of one hour arrive in one
+/// perp coin, which also snapshots every open perp position in coins with a non-zero rate that
+/// hour (zero-rate coin-hours appear to be omitted upstream). All rows of one hour arrive in one
 /// block.
 pub fn funding_deltas_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
@@ -663,7 +667,9 @@ pub fn funding_deltas_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
 /// `funding_rates`: One row per funding event and coin with at least one `funding_deltas` row, in
 /// event order, then in the order each coin first appears: the hourly settled funding rate, the
 /// open-interest census and the funding flows, summed exactly from the event's deltas (rule
-/// R-D5). A coin-hour without a row is unknown, not zero.
+/// R-D5). HyperLiquid appears to omit coins whose rate is 0, so a coin-hour without a row most
+/// likely had a rate of 0 (inferred, not confirmed), while its open interest and positions are
+/// unknown, not zero.
 pub fn funding_rates_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     table_schema(
         vec![
@@ -696,11 +702,13 @@ pub fn funding_rates_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
             // −Σ`szi` over `szi < 0`, positive; equal to `long_size` up to `f64` noise. NULL only
             // if the sum does not fit `decimal(38,10)`.
             Field::new("short_size", decimal_type(), true),
-            // Σ`funding_amount` over amounts above 0 (received), in the dex collateral. NULL only
-            // if the sum does not fit `decimal(38,10)`.
+            // Σ`funding_amount` over amounts above 0 (received), in the dex collateral; the same
+            // name and sign as the Pinax API's `/markets/oi`. NULL only if the sum does not fit
+            // `decimal(38,10)`.
             Field::new("positive_funding", decimal_type(), true),
-            // Σ`funding_amount` over amounts below 0 (paid), kept negative. NULL only if the sum
-            // does not fit `decimal(38,10)`.
+            // Σ`funding_amount` over amounts below 0 (paid), kept negative; the same name and sign
+            // as the Pinax API's `/markets/oi`. NULL only if the sum does not fit
+            // `decimal(38,10)`.
             Field::new("negative_funding", decimal_type(), true),
             // Reserved: NULL in every row. A field upstream adds to `Funding` or `FundingDelta`
             // goes to `other_events.extra_json` or `funding_deltas.extra_json`.

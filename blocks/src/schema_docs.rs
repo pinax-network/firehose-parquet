@@ -320,8 +320,9 @@ const TABLE_DESCRIPTIONS: &[(ChainKind, &str, &str)] = &[
         ChainKind::Hypercore,
         "funding_deltas",
         "One row per `FundingDelta`: the hourly funding settlement per account and perp coin, \
-         which also snapshots every open perp position. All rows of one hour arrive in one \
-         block.",
+         which also snapshots every open perp position in coins with a non-zero rate that \
+         hour (zero-rate coin-hours appear to be omitted upstream). All rows of one hour \
+         arrive in one block.",
     ),
     (
         ChainKind::Hypercore,
@@ -329,8 +330,9 @@ const TABLE_DESCRIPTIONS: &[(ChainKind, &str, &str)] = &[
         "Derived: one row per funding event and coin with at least one `funding_deltas` row, \
          in event order, then in the order each coin first appears: the hourly settled \
          funding rate, the open-interest census and the funding flows, summed exactly from \
-         the event's deltas. A coin-hour without a row is unknown, not zero: HyperLiquid \
-         appears to omit coins whose rate is 0.",
+         the event's deltas. HyperLiquid appears to omit coins whose rate is 0, so a \
+         coin-hour without a row most likely had a rate of 0 (inferred, not confirmed), \
+         while its open interest and positions are unknown, not zero.",
     ),
     (
         ChainKind::Hypercore,
@@ -773,7 +775,8 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         "fills",
         "fee_token",
         "Token `fee` is paid in: `USDC`, a HIP-3 dex collateral (`USDT0`, `USDH`, `USDE`), \
-         the received asset on spot taker buys, or `+<n>` for outcome coin `#<n>`.",
+         the received asset on spot taker buys, or `+<n>` on May 2026 `BUY` legs of outcome \
+         coin `#<n>` (other outcome legs pay `USDC`).",
     ),
     (
         ChainKind::Hypercore,
@@ -865,8 +868,8 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         "Derived (rule R-D2): the `user` of the other fill of the block with the same `coin` \
          and `transaction_id`, when exactly two fills share them and their sides differ. NULL \
          otherwise: `transaction_id` 0 (daily dust conversion) and single-leg HIP-4 fills \
-         (mint, burn, split, merge, negate). The zero address on delisted-perp `SETTLEMENT` \
-         fills.",
+         (mint, burn, split, merge, negate, merge-question). The zero address on delisted-perp \
+         `SETTLEMENT` fills.",
     ),
     (
         ChainKind::Hypercore,
@@ -970,7 +973,8 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "outcome_fills",
         "fee_token",
-        "`fills.fee_token`: `+<n>` (the outcome token) in May 2026, `USDC` later.",
+        "`fills.fee_token`: in May 2026 `+<n>`, the leg's own outcome token, on `BUY` legs \
+         and `USDC` on `ASK` legs; `USDC` on every leg by October 2026.",
     ),
     (
         ChainKind::Hypercore,
@@ -1019,7 +1023,7 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         "outcome_fills",
         "counterparty",
         "`fills.counterparty`: set on direct trades and settlements (a `0x3200…` system \
-         account), NULL on mint, burn, split, merge and negate legs.",
+         account), NULL on mint, burn, split, merge, negate and merge-question legs.",
     ),
     (
         ChainKind::Hypercore,
@@ -1052,7 +1056,8 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "liquidations",
         "market_type",
-        "`fills.market_type`: `perp`.",
+        "`fills.market_type`: `perp`; `spot` only if a borrow liquidation ever carries a \
+         liquidation object (never observed).",
     ),
     (
         ChainKind::Hypercore,
@@ -1597,15 +1602,17 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         ChainKind::Hypercore,
         "funding_rates",
         "positive_funding",
-        "Σ`funding_amount` over amounts above 0 (received), in the dex collateral. NULL only \
-         if the sum does not fit `decimal(38,10)`.",
+        "Σ`funding_amount` over amounts above 0 (received), in the dex collateral; the same \
+         name and sign as the Pinax API's `/markets/oi`. NULL only if the sum does not fit \
+         `decimal(38,10)`.",
     ),
     (
         ChainKind::Hypercore,
         "funding_rates",
         "negative_funding",
-        "Σ`funding_amount` over amounts below 0 (paid), kept negative. NULL only if the sum \
-         does not fit `decimal(38,10)`.",
+        "Σ`funding_amount` over amounts below 0 (paid), kept negative; the same name and sign \
+         as the Pinax API's `/markets/oi`. NULL only if the sum does not fit \
+         `decimal(38,10)`.",
     ),
     (
         ChainKind::Hypercore,
