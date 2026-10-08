@@ -86,14 +86,11 @@ cargo build --release --workspace
   --stop-block 1001000 \
   --output './output/{chain}'
 
-# Stream HyperCore (no built-in --network name; PINAX_API_KEY holds the key).
-# Roots start at 846903317, past the endpoint's 846903300-846903312 hole
-# (docs/chains/hypercore.md)
+# Stream HyperCore (PINAX_API_KEY holds the key). Its data is known from
+# 2026-01-01: without --start-block a new root starts at block 846903317, and
+# an earlier start is refused (docs/chains/hypercore.md)
 ./target/release/fireparq build \
-  --block-type hypercore \
-  --endpoint https://hypercore.firehose.pinax.network:443 \
-  --api-key-envvar PINAX_API_KEY \
-  --start-block 846903317 \
+  --network hypercore \
   --stop-block 846904317 \
   --output './output/{chain}'
 

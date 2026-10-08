@@ -6,15 +6,20 @@ lists. Five tables: `blocks`, `fills`, `events`, `funding_deltas` and
 `validator_rewards`. This is **schema epoch 1** (see
 [`extra_json` and schema epochs](#extra_json-and-schema-epochs)).
 
-The registry has no HyperCore network, so `--network` has no alias for it and
-the Pinax credential must be named explicitly. The endpoint's `chainName`
-(`hypercore`) resolves the block type, so `--block-type hypercore` is optional:
+`--network hypercore` streams Pinax's `hypercore.firehose.pinax.network:443`.
+The Graph networks registry does not list HyperCore: the alias comes from
+fireparq's reviewed list of Pinax-served networks the registry lacks
+([internal Pinax networks](../network-registry-integration.md#internal-pinax-networks)).
+It is a built-in Pinax host, so the ambient `PINAX_API_KEY` (or the legacy
+`SUBSTREAMS_API_KEY`) is sent without a selector
+([Authentication](../authentication.md)), and `FIREHOSE_ENDPOINT_HYPERCORE`
+overrides the endpoint. The endpoint's `chainName` (`hypercore`) resolves the
+block type. HyperCore data is known from 2026-01-01, so a new root starts at
+block 846903317 by default and an earlier `--start-block` is refused
+([data origin](#identity-and-coverage)):
 
 ```bash
-fireparq build --block-type hypercore \
-  --endpoint https://hypercore.firehose.pinax.network:443 \
-  --api-key-envvar PINAX_API_KEY \
-  --start-block 846903317 --output s3://hypercore-mainnet
+fireparq build --network hypercore --output s3://hypercore-mainnet
 ```
 
 Do not set `--flush-rows` below about 1M (one funding block alone has about
@@ -36,38 +41,35 @@ Do not set `--flush-rows` below about 1M (one funding block alone has about
 - About 14 blocks per second: block intervals are 67 ms at the median and
   124–162 ms at p99; the longest seen was 73 s (2026-05-07). Block times strictly
   increase.
+- **Data origin: 2026-01-01, block 846903317.** HyperCore data is known from
+  2026-01-01; earlier blocks are not supported. 846903317
+  (2026-01-01T00:00:00.063Z) is the first block of that day, with hourly
+  funding, the daily dust conversion and validator rewards. The endpoint
+  advertises `firstStreamableBlockNum` 846000000, so fireparq bounds new roots
+  itself, by the EndpointInfo chain name `hypercore` (with `--network` or
+  `--endpoint`, and in dry runs):
+  - without `--start-block`, a new root starts at 846903317, and startup logs
+    that the network's data origin was used;
+  - an explicit `--start-block` below 846903317 is refused before streaming:
+    use 846903317 or later;
+  - resuming a root from its output authority is unaffected.
 - **The hole.** Blocks 846903300–846903312 do not exist on the endpoint, but
-  846903313 still names 846903312 as its parent.
-  - fireparq cannot stream across it. A stream delivers blocks up to
-    846903299. After that, every attempt logs `WARN stream error, will
-    reconnect` with `rpc error: code = Internal desc = unexpected stream
-    termination`, because resuming from the cursor of 846903299 returns no
-    block. `Internal` is retried with back-off of up to 60 s, so the build
-    keeps retrying until `--reconnect-stall-timeout-secs` passes (default
-    900 s, about 15 minutes; see [connection errors](../cli.md#connection-errors)).
-    It then exits 1 with `reconnect stalled: no stream message for … after N
-    failed attempts; last error: … unexpected stream termination`. Blocks
-    buffered since the last flush are discarded; earlier committed flushes are
-    kept and stay readable.
-  - A root whose start is before 846903300 can never pass 846903299: running
-    it again resumes from its cursor and fails the same way, and a different
-    `--start-block` is refused with `explicit start differs from the stream's
-    original start; use a new output root …`. Build into a new output root.
-  - Start a root at **846903317**, the first block of 2026-01-01 (hourly
-    funding, the daily dust conversion and validator rewards), unless upstream
-    has re-extracted the hole. 846903313 also works but leaves a partial
-    2025-12-31 partition (4 blocks). A `--start-block` inside the hole
-    silently starts at 846903313, without a warning.
-  - No root can hold blocks on both sides of the hole, so `fireparq validate`
-    never reports it and `--allow-gaps` is not needed for it.
-  - Upstream runs its readers with `--reader-node-skip-missing-blocks`, so
-    other holes are possible. No full contiguity scan of the endpoint exists.
-    A build that reaches one fails as above, and every restart resumes from
-    the same cursor and stops there again. Ask upstream to re-extract the
-    missing blocks; the same root then resumes from its cursor. Otherwise
-    build a new output root whose `--start-block` is after the hole,
-    preferably the first block of the next UTC day so that no partition is
-    partial.
+  846903313 still names 846903312 as its parent. A stream cannot cross it: it
+  delivers blocks up to 846903299, then retries `unexpected stream termination`
+  until `--reconnect-stall-timeout-secs` passes (default 900 s; see
+  [connection errors](../cli.md#connection-errors)) and exits 1 with
+  `reconnect stalled`. The endpoint serves a start inside it from 846903313,
+  without a warning. The data origin is past it, so no root reaches it,
+  `fireparq validate` never reports it and `--allow-gaps` is not needed for it.
+- **Other holes.** Upstream runs its readers with
+  `--reader-node-skip-missing-blocks`, so other holes are possible; no full
+  contiguity scan of the endpoint exists. A build that reaches one stops as at
+  the hole above: blocks buffered since the last flush are discarded, committed
+  flushes stay readable, and every restart resumes from the same cursor and
+  stops there again. Ask upstream to re-extract the missing blocks (the same
+  root then resumes), or build a new output root whose `--start-block` is after
+  the hole, preferably the first block of the next UTC day so that no partition
+  is partial.
 - **Not captured before the 2026-04-13 reader cutover.** NULL there means "not
   captured", not zero:
   - `fills.deployer_fee` before block 957002477;

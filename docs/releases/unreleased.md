@@ -31,10 +31,14 @@ empty when the release is cut.
     (rules R1–R11). Such a stop needs a release with refreshed protos;
     `extra_json`, NULL in this epoch, lets most additions ship without a new
     output root.
-  - There is no built-in `--network` name: use
-    `--endpoint https://hypercore.firehose.pinax.network:443 --api-key-envvar PINAX_API_KEY`
-    and start at block 846903317. The endpoint lacks blocks
-    846903300–846903312 and cannot be streamed across them.
+  - `--network hypercore` streams it with the ambient `PINAX_API_KEY` (or
+    `SUBSTREAMS_API_KEY`), like any Pinax alias; see the internal Pinax
+    networks below.
+  - HyperCore data is known from 2026-01-01: a new root starts at block
+    846903317 (2026-01-01T00:00:00.063Z) by default, and an explicit
+    `--start-block` before it is refused. The endpoint advertises
+    846000000 but lacks blocks 846903300–846903312, which a stream cannot
+    cross; see the data origins below.
   - `docs/chains/hypercore.md` adds a DuckDB view pack (a view per ledger
     type and body), 17 data-quality monitors and a cookbook, which
     `engine_compat` runs over a build of 36 real fixture blocks.
@@ -44,6 +48,24 @@ empty when the release is cut.
   - New roots only: the family is part of the protected stream identity, so
     existing roots are unaffected and an older binary refuses a HyperCore
     root. `MAPPER_EPOCH` is unchanged.
+- **Built-in aliases for Pinax networks the registry does not list yet**:
+  `PINAX_NETWORKS` in `scripts/generate_networks.rs` is a reviewed list of
+  Pinax-served Firehose networks outside The Graph networks registry, appended
+  to the registry's aliases, starting with `hypercore` →
+  `hypercore.firehose.pinax.network:443`. Their hosts are built-in Pinax hosts
+  for credential selection, `FIREHOSE_ENDPOINT_*` overrides them, and the
+  endpoint check covers them. Once the registry lists such a network, the
+  registry entry wins and the generator warns until the entry is dropped. The
+  registry snapshot is unchanged (v0.8.4)
+  ([network registry integration](../network-registry-integration.md#internal-pinax-networks)).
+- **Per-network data origin**: `NETWORK_DATA_ORIGINS`
+  (`firehose-parquet/src/networks.rs`) records where a network's known data
+  starts when its endpoint advertises earlier blocks; HyperCore's is block
+  846903317. Matched by the EndpointInfo chain name (or the `--network` alias
+  when Info has none), a new stream without `--start-block` starts there with
+  an info line, and an earlier `--start-block` is refused before streaming,
+  in dry runs too. Resuming from output authority and other networks are
+  unaffected ([start and stop blocks](../cursor-and-resume.md#start-and-stop-blocks)).
 
 ## Fixes
 

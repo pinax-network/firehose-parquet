@@ -9,6 +9,13 @@ Credentials are selected from the **resolved endpoint host**, including any
 | Built-in StreamingFast host over HTTPS on port 443 | `STREAMINGFAST_API_KEY` | `STREAMINGFAST_API_TOKEN` |
 | Other host, port, or plaintext connection | No automatic credentials | No automatic credentials |
 
+A built-in host is the endpoint host of a built-in `--network` alias: the
+registry's aliases and the reviewed Pinax networks the registry does not list
+yet ([internal Pinax networks](network-registry-integration.md#internal-pinax-networks)),
+such as `hypercore` (`hypercore.firehose.pinax.network`). HyperCore therefore
+receives `PINAX_API_KEY` (or `SUBSTREAMS_API_KEY`) without a selector, also
+through `--endpoint https://hypercore.firehose.pinax.network:443`.
+
 ```bash
 export PINAX_API_KEY=your-pinax-api-key
 # For near-mainnet, near-testnet, tron, or tron-evm:

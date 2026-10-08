@@ -18,7 +18,7 @@ Non-final output (`--final-blocks-only=false`) is described in [Non-final stream
 | Area | Common flags |
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
-| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
+| Range | `--start-block <START_BLOCK>` (default: the endpoint's first streamable block, or the network's data origin when later, such as HyperCore's 846903317; [start and stop blocks](cursor-and-resume.md#start-and-stop-blocks)), `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
 | Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](output-layout.md#output-directory-layout)); every table is a Delta table at `<table>/`, with its data files in `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |

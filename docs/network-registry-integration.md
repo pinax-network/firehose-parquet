@@ -92,6 +92,8 @@ Current internal networks:
 |---|---|---|
 | `hypercore` | `hypercore.firehose.pinax.network:443` | HyperLiquid L1 (HyperCore); not in The Graph networks registry |
 
+A network whose known data starts later than its endpoint's first streamable block also has an entry in `NETWORK_DATA_ORIGINS` (`firehose-parquet/src/networks.rs`, hand-written, not generated), which sets the default start of a new stream and refuses an earlier `--start-block` ([start and stop blocks](cursor-and-resume.md#start-and-stop-blocks)). HyperCore's origin is block 846903317 (2026-01-01).
+
 ## Staleness check
 
 `scripts/check_network_endpoints.sh` sends an unauthenticated Firehose `EndpointInfo/Info` gRPC call to every generated endpoint with `curl`. That covers DNS, TLS (certificate and hostname), HTTP/2, and a gRPC answer. `grpc-status: 16` (Unauthenticated) counts as served, so the check needs no credentials. It exits non-zero and lists the failing aliases when any endpoint does not answer.

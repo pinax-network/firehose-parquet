@@ -438,11 +438,9 @@ Examples:
     --endpoint https://eos.firehose.pinax.network:443 \\
     --start-block 1000000 --stop-block 1001000
 
-  # Stream HyperCore (no built-in --network name); start at 846903317,
-  # past the endpoint's 846903300-846903312 hole
-  fireparq build --block-type hypercore \\
-    --endpoint https://hypercore.firehose.pinax.network:443 \\
-    --api-key-envvar PINAX_API_KEY --start-block 846903317
+  # Stream HyperCore: its data is known from 2026-01-01, so a new root
+  # starts at block 846903317 and an earlier --start-block is refused
+  fireparq build --network hypercore
 
   # Resume: rerun the same command. Progress comes from the output's
   # .fireparq-ingest/ state; _fireparq/cursor.parquet is only an optional mirror
