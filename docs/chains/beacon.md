@@ -21,22 +21,15 @@ Each Beacon table gets rows from the fork that introduced its data. Blocks from 
 | `consolidation_requests` | Electra | `execution_requests.consolidations` (EIP-7251) |
 
 `execution_payload.base_fee_per_gas` is an exact unsigned decimal string in wei
-per gas. It is independent of the selected byte encoding; use a checked numeric cast for
-arithmetic (the full uint256 range needs up to 78 decimal digits).
-`blob_sidecars.blob` is always `binary`; hashes, roots, commitments, and proofs
-retain the selected byte encoding. `blocks.spec` is a `string` of generated enum
-names, with `UNKNOWN` for unrecognized numeric values.
+per gas, not hex; use a checked numeric cast for arithmetic (the full uint256
+range needs up to 78 decimal digits). `blob_sidecars.blob` is raw `binary`;
+hashes, roots, commitments and proofs are hex. `blocks.spec` is a `string` of
+generated enum names, with `UNKNOWN` for unrecognized numeric values.
 Missing nested messages produce null descendants, while present zero values
 and empty byte/list values remain present. Absent bodies or execution payloads
-produce no child rows.
+produce no child rows. See [the producer evidence](../audit/505-beacon-values.md).
 
-These schema changes require a fresh output root or a verified conversion of
-existing files. Old fee bytes have different byte orders by payload type:
-Bellatrix/Capella are fixed little-endian, Deneb and later are big-endian.
-Historical fake zeros for missing messages cannot be repaired without source
-replay. See [the producer evidence and migration procedure](../audit/505-beacon-values.md).
-
-Amounts (`amount`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.withdrawal_index` is the chain-wide withdrawal index; `change_index` and `request_index` are positions within the block.
+Amounts (`amount`, `decimal(20,0)`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.withdrawal_index` is the chain-wide withdrawal index; `change_index` and `request_index` are positions within the block.
 
 - **Attestations after Electra.** EIP-7549 moved the committee out of the signed data: `committee_index` is always `0`, and `committee_bits` (8 bytes, a 64-bit bitvector) says which committees an aggregate covers. Bit `i` is bit `i % 8` of byte `i / 8`. `aggregation_bits` then spans those committees in index order. `committee_bits` is null before Electra.
 - **Deposits after Electra.** New deposits reach the chain as `deposit_requests`, whose `deposit_index` is the deposit contract index (the `index` of EIP-6110). `deposits` only holds deposits from the Eth1 bridge, which stop once its backlog is processed. `deposits.deposit_index` is the position within the block.
@@ -49,4 +42,4 @@ Amounts (`amount`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.w
   FROM delta_scan('output/mainnet-cl/attester_slashings');
   ```
 
-- **Graffiti.** `blocks.graffiti` is the proposer's raw 32 bytes, usually zero-padded text. It is null only for a block without a body.
+- **Graffiti.** `blocks.graffiti` is the proposer's 32 bytes in hex, usually zero-padded text. It is null only for a block without a body.

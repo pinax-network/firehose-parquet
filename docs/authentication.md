@@ -27,13 +27,32 @@ fallbacks. If you previously used `SUBSTREAMS_API_TOKEN` with StreamingFast,
 move that token to `STREAMINGFAST_API_TOKEN` or explicitly select it with
 `--api-token-envvar SUBSTREAMS_API_TOKEN` for that endpoint.
 
-For a custom endpoint, explicitly select the credential names with
-`--api-key-envvar` / `--api-token-envvar` (or `API_KEY_ENVVAR` /
-`API_TOKEN_ENVVAR`). An explicit selector authorizes that credential for the
-chosen destination and overrides automatic selection for that header. If the
-selected variable is unset or blank, that header is omitted; it does not fall
-back to another variable. The other header still follows its own selection
-rules. Only explicitly select a credential for a destination you intend it to reach.
+Startup logs identify the destination host, provider, and names of credential
+variables selected for transmission (`none` when absent), never their values.
+Surrounding whitespace is trimmed, so a key mounted from a secret file with a
+trailing newline works. A selected credential that still contains characters a
+gRPC header cannot carry (control characters or line breaks inside the value)
+fails at startup with an error.
+
+## Explicit selectors
+
+For a custom endpoint, or a secret under another name, explicitly select the
+credential names with `--api-key-envvar` / `--api-token-envvar` (or
+`API_KEY_ENVVAR` / `API_TOKEN_ENVVAR`). An explicit selector authorizes that
+credential for the chosen destination and overrides automatic selection for
+that header. If the selected variable is unset or blank, that header is
+omitted; it does not fall back to another variable. The other header still
+follows its own selection rules. Only explicitly select a credential for a
+destination you intend it to reach.
+
+```bash
+fireparq build \
+  --network mainnet \
+  --api-key-envvar INTERNAL_FIREHOSE_API_KEY \
+  --start-block 20000000 \
+  --stop-block 20001000 \
+  --output ./output
+```
 
 An explicit selector is **not provider-scoped**. If `API_KEY_ENVVAR` or
 `API_TOKEN_ENVVAR` is set globally, for example to the legacy
@@ -47,28 +66,3 @@ StreamingFast host is its normal destination and is not warned about. When
 migrating, unset global selectors and rely on the provider-scoped variables
 above, or pass `--api-key-envvar` / `--api-token-envvar` only on the command
 for the intended endpoint.
-
-Startup logs identify the destination host, provider, and names of credential
-variables selected for transmission (`none` when absent), never their values.
-Surrounding whitespace is trimmed, so a key mounted from a secret file with a
-trailing newline works. A selected credential that still contains characters a
-gRPC header cannot carry (control characters or line breaks inside the value)
-fails at startup with an error.
-
-## Advanced authentication
-
-Most deployments should use the provider-scoped variables in [Authentication](#authentication).
-For custom endpoints or different secret names, explicitly authorize a credential
-for the destination with:
-
-- `--api-key-envvar <API_KEY_ENVVAR>`
-- `--api-token-envvar <API_TOKEN_ENVVAR>`
-
-```bash
-fireparq build \
-  --network mainnet \
-  --api-key-envvar INTERNAL_FIREHOSE_API_KEY \
-  --start-block 20000000 \
-  --stop-block 20001000 \
-  --output ./output
-```

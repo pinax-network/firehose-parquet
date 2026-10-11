@@ -8,8 +8,9 @@ How to build and test the workspace, how it is organized, and how the CLI is put
 # Build
 cargo build --workspace
 
-# Test
-cargo test --workspace
+# Test (as CI runs it, with the golden-refresh examples' tests)
+cargo test --workspace --locked
+cargo test -p blocks --example refresh_evm_golden --example refresh_sec_golden --locked
 
 # Build release (`fireparq`, the maintenance job included)
 cargo build --release -p blocks
@@ -18,30 +19,33 @@ cargo build --release -p blocks
 cargo install --path blocks
 ```
 
-All code is Rust; building and testing need no Python, and nothing links
-DataFusion (a CI step checks it). The DuckDB tests use the DuckDB CLI when it is
-installed (`FIREPARQ_DUCKDB`, required in CI by `FIREPARQ_REQUIRE_DUCKDB`), and
-the Delta maintenance tests run `fireparq maintenance` of the binary under
-test.
+The build needs the Rust toolchain of `rust-toolchain.toml` (1.98) and `protoc`
+on `PATH`. All code is Rust; building and testing need no Python, and nothing
+links DataFusion (CI checks both). The DuckDB tests use the DuckDB CLI when it
+is installed (`FIREPARQ_DUCKDB`, else `duckdb` on `PATH`, 1.5 or later; required
+in CI by `FIREPARQ_REQUIRE_DUCKDB`), and the Delta maintenance tests run
+`fireparq maintenance` of the binary under test.
+[Repository navigation](repo-navigation.md#build-run-and-ci-anchors) lists the
+CI pins and the focused test commands.
 
 ## Repository structure
-
-A summary of the workspace; [docs/repo-navigation.md](repo-navigation.md)
-maps every module and where to edit for common tasks.
 
 ```
 firehose-parquet/
 ├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks, maintenance)
+├── rust-toolchain.toml                     # the pinned Rust toolchain
 ├── Dockerfile                              # multi-stage Docker build of `fireparq`
 ├── .env.example                            # environment variables template (drift-tested against the CLI)
 ├── .github/workflows/                      # ci, advisories, docker-publish, release, network-endpoints
-├── proto/                                  # chain and Firehose .proto files, plus proto/core/ dependencies
-├── firehose-protos/                        # compiles proto/*.proto (build.rs) and exposes the modules
+├── proto/                                  # chain and Firehose .proto files, proto/core/ dependencies,
+│                                           #   and the SEC and HyperCore proto/pinax/ packages
+├── firehose-protos/                        # compiles the .proto files (build.rs) and exposes the modules
 ├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
 ├── maintenance/                            # `fireparq maintenance`: the Delta maintenance job (row-order
 │                                           #   compaction, delta-rs VACUUM, checkpoints, log cleanup)
-├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJob)
-├── docs/                                   # user guides, chain notes, design, schema reference, release notes, audit records
+├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJobs)
+├── docs/                                   # user guides, chain notes, design, schema reference (generated),
+│                                           #   release notes, audit records
 ├── firehose-parquet/                       # core library
 │   └── src/
 │       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
@@ -66,15 +70,17 @@ firehose-parquet/
 │   │   ├── bin/main.rs                     # `fireparq` entrypoint and command dispatch
 │   │   ├── bin/ingestion/                  # `build`: mod.rs, setup.rs (endpoint/resume), runtime.rs
 │   │   ├── chain.rs                        # ChainKind / ChainProfile per chain family
+│   │   ├── schema_docs.rs                  # renders docs/schemas/ (examples/dump_schemas.rs writes it)
 │   │   └── evm/, solana/, bitcoin/, beacon/, tron/, cosmos/, antelope/, near/, sec/, hypercore/
 │   │                                       # per chain: proto.rs, schema.rs, mapper.rs
+│   ├── examples/                           # replay, benchmark and golden-refresh tools
 │   └── tests/                              # integration tests, including `fireparq` runs against a mock Firehose
 └── target/                                 # build output
 ```
 
 ## CLI architecture
 
-The binary is built with [`clap`](https://docs.rs/clap) v4 using derive macros, chosen for its idiomatic Rust approach, excellent documentation, built-in shell completion support, and widespread community adoption.
+The binary is built with [`clap`](https://docs.rs/clap) v4 derive macros.
 
 ### Key crates
 
@@ -88,6 +94,7 @@ The binary is built with [`clap`](https://docs.rs/clap) v4 using derive macros, 
 | `tokio` | Async runtime for gRPC streaming |
 | `prometheus-client` | Prometheus metrics exposition |
 | `object_store` | S3-compatible object storage (data + cursor) |
+| `deltalake-core` | Delta logs: table creation and commits, snapshots, and the maintenance job's VACUUM and checkpoints (pinned `=1.0.0`, no DataFusion) |
 
 ### Shared CLI module
 
@@ -101,7 +108,7 @@ use firehose_parquet::cli::{build_config, init_tracing, Commands};
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>, // Build(BuildArgs), Validate, Inspect, Recovery, Completions
+    command: Option<Commands>, // Build(BuildArgs), Maintenance, Validate, Inspect, Recovery, Completions
 
     #[command(flatten)]
     global: GlobalArgs, // --log-level, --verbose, --env-file
@@ -112,4 +119,6 @@ struct Cli {
 flags) and adds the chain flags (`--network`, `--block-type`,
 `--without-extended`, `--without-votes`, the failed-transaction flags and
 `--cursor-override`). `Commands::Build` runs `ingestion::run_ingestion` in
-`blocks/src/bin/ingestion/`.
+`blocks/src/bin/ingestion/`. `Commands::Maintenance` has no flags of its own:
+it runs `fireparq_maintenance::run` (`maintenance/`), which reads its settings
+from the environment ([Delta maintenance](delta-maintenance.md)).

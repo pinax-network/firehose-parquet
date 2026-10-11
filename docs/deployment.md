@@ -8,8 +8,9 @@ deployment.
 
 ```bash
 # One continuous writer per network, at its bucket root, following finalized
-# blocks. The first run starts at the endpoint's first streamable block (or
-# pass --start-block); every later run resumes from the output authority.
+# blocks. The first run starts at the endpoint's first streamable block or the
+# network's data origin (or pass --start-block); every later run resumes from
+# the output authority.
 OUTPUT=s3://ethereum-mainnet \
 FLUSH_INTERVAL_SECS=60 \
 FLUSH_BYTES=33554432 \
@@ -27,7 +28,7 @@ fireparq build --network mainnet
 | `--flush-bytes` | 32 MiB (the default) | The compressed size target of the largest table's file while catching up |
 | `--flush-memory-bytes` | 256 MiB (the default); 1 GiB on fast chains | The summed mapper estimate that forces a flush. On Robinhood (10 blocks/s) the default fires about every 27 s, before a 60 s interval. 1 GiB makes catch-up 2.5–3.5× faster and writes 4× fewer objects per block, at about 2.8 GiB peak RSS instead of 1.0 GiB |
 | Memory limit | Headroom above the peak RSS | For example 2 GiB with the default memory trigger and 4 GiB with 1 GiB, plus temporary disk for the S3 upload spool ([S3-aware cursor](cursor-and-resume.md#s3-aware-cursor)) |
-| Maintenance | Hourly (`17 * * * *`) and a weekly full VACUUM | [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml), with its own S3 user ([Delta maintenance](delta-maintenance.md)) |
+| Maintenance | Hourly (`17 * * * *`) and a weekly full VACUUM | [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml), with its own S3 user ([Delta maintenance](delta-maintenance.md)). With a `VACUUM_RETENTION_HOURS` below 7 days, set `VACUUM=0` on the frequent runs and VACUUM once a day ([schedule](delta-maintenance.md#vacuum-retention-and-schedule)) |
 | Alerts | `firehose_parquet_delta_log_tail_commits`, a writer down for more than a day, `/ready` | The maintenance job stopped checkpointing; a committed transaction must not stay pending past the VACUUM retention; the stream stalled ([metrics](metrics.md)) |
 
 These numbers come from the #658 benchmark on Robinhood and Arbitrum One blocks
@@ -39,11 +40,15 @@ catch-up runs at 4.8× the chain rate or more. See the
 [adaptive flush record](audit/659-adaptive-flush.md).
 
 Some block families change defaults that this table leaves unset. A SEC
-writer (`--block-type sec`) gets a 512 MiB gRPC message limit, an idle flush,
-and readiness and reconnect timeouts sized for one burst per EDGAR feed day,
-and needs at least 3 GiB of memory; leave `GRPC_MAX_MESSAGE_BYTES`,
-`FLUSH_IDLE_SECS`, `STREAM_IDLE_TIMEOUT_SECS` and `METRICS_STALE_AFTER_SECS`
-unset there ([SEC notes](chains/sec.md), [family defaults](cli.md#family-defaults)).
+writer (`--block-type sec`) gets a 512 MiB gRPC message limit, a 60 s idle
+flush, and readiness and stream-idle timeouts sized for one burst per EDGAR
+feed day; leave `GRPC_MAX_MESSAGE_BYTES`, `FLUSH_IDLE_SECS`,
+`STREAM_IDLE_TIMEOUT_SECS` and `METRICS_STALE_AFTER_SECS` unset there
+([family defaults](cli.md#family-defaults)). Size its memory from the heaviest
+deadline days, at about 10× the largest window plus 0.5 GB: at least 3 GiB,
+more when `--flush-memory-bytes` is above its default, such as the 1 GiB of a
+fast chain. Until #711 is fixed, a quiet day can stop it with `reconnect
+stalled` ([SEC notes](chains/sec.md)).
 
 On Kubernetes, give the writer an `emptyDir` at `/tmp` when its root
 filesystem is read-only (the S3 upload spool), point readiness at `/ready` and

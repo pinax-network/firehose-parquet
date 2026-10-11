@@ -99,7 +99,7 @@ A network whose known data starts later than its endpoint's first streamable blo
 
 ## Staleness check
 
-`scripts/check_network_endpoints.sh` sends an unauthenticated Firehose `EndpointInfo/Info` gRPC call to every generated endpoint with `curl`. That covers DNS, TLS (certificate and hostname), HTTP/2, and a gRPC answer. `grpc-status: 16` (Unauthenticated) counts as served, so the check needs no credentials. It exits non-zero and lists the failing aliases when any endpoint does not answer.
+`scripts/check_network_endpoints.sh` sends an unauthenticated Firehose `EndpointInfo/Info` gRPC call to every generated endpoint with `curl`. That covers DNS, TLS (certificate and hostname), HTTP/2, and a gRPC answer. `grpc-status: 16` (Unauthenticated) counts as served, so the check needs no credentials. It exits non-zero and lists the failing aliases when any endpoint does not answer. It is separate from generation, which needs only the registry snapshot and `PINAX_NETWORKS` and stays offline, so a temporarily unavailable endpoint cannot break a refresh.
 
 The `Network endpoints` workflow (`.github/workflows/network-endpoints.yml`) runs the script weekly, on demand, and on pull requests that touch the generated registry or the script. It is separate from `ci.yml`, so `cargo test` never depends on the network.
 
@@ -111,9 +111,3 @@ When the check fails: refresh the registry snapshot and regenerate. If the regis
 - No silent endpoint drift caused by external registry changes
 - No automatic provider selection beyond the explicit fallback list
 - No alias outside the registry except the reviewed `PINAX_NETWORKS` entries
-
-## Endpoint metadata
-
-For alias generation, the registry snapshot and `PINAX_NETWORKS` are enough.
-
-Querying each endpoint for `EndpointInfo/Info` is a separate validation step (the staleness check above), not part of generation. Generation stays offline because network calls slow refreshes and can fail for temporary endpoint availability reasons.

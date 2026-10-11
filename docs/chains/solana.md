@@ -20,51 +20,39 @@ account keys, and unknown or malformed payloads keep their ordinary transaction,
 message, instruction, balance, lookup and reward rows, subject to the usual
 failed-transaction filter. This classification checks structure and recognized
 payloads; it does not verify signatures cryptographically or prove execution
-validity. Recognized votes retain the existing compact output policy: their
-transaction row goes to `vote_transactions` and their detail rows are omitted.
-
-Earlier versions classified any transaction mentioning the Vote account as a
-vote. Their output can therefore omit administrative activity. This fix changes
-row counts without changing schemas. Rebuild affected ranges into a separate
-output root to recover missing rows; appending a corrected replay to old results
-does not remove existing rows or guarantee deduplication.
+validity. A recognized vote writes only its transaction row, to
+`vote_transactions`; it has no message, instruction, balance, lookup or reward
+rows.
 
 ## Transaction outcome context
 
-Solana `messages`, `instructions`, `token_balances`, and `account_lookups` append
-a non-null `boolean` `transaction_success`. It describes the parent transaction:
+`messages`, `instructions`, `token_balances` and `account_lookups` carry a
+non-null `boolean` `transaction_success`. It describes the parent transaction:
 `false` means its source metadata contains nonempty error bytes; absent or empty
-error bytes mean `true`. Transactions without metadata remain omitted. The
-existing failed-transaction and vote filters still select exactly the same rows.
+error bytes mean `true`. Transactions without metadata are not written.
 
 `rewards.transaction_success` is nullable: transaction rewards carry their
 parent's outcome; block rewards have `NULL` because they have no parent
-transaction. This does not change reward indices or amounts.
+transaction.
 
 This is outcome context, not an instruction result or a `reverted` flag.
 Submitted top-level instructions can include instructions that never executed;
-recorded inner calls do not establish each call's success. Token balances remain
-literal pre/post snapshots, and transaction fees and lamport balances remain
-unchanged. A failed transaction can still pay fees or advance a durable nonce;
-do not discard its balance observations merely because `transaction_success`
-is false. This addition does not provide a canonical view of reversible events.
-
-Start a fresh output root and replay when adopting these schemas. Old files lack
-the context; a missing column is not `false`. Protected output bindings refuse
-mixed old/new schemas. An explicit conversion must write
-a separate dataset and preserve unknown historical context. See the
-[source evidence, migration and offline comparison](../audit/550-solana-execution-context.md).
+recorded inner calls do not establish each call's success. Token balances are
+literal pre/post snapshots. A failed transaction can still pay fees or advance a
+durable nonce; do not discard its balance observations merely because
+`transaction_success` is false. See the
+[source evidence and offline comparison](../audit/550-solana-execution-context.md).
 
 ## Payloads and account indices
 
 Opaque `instructions.data`, `transactions.err` / `return_data` and
-`vote_transactions.err` / `return_data` are `binary`, independently of the
-identifier encoding. Signatures, hashes, keys and `return_data_program_id` retain
-the selected identifier format (base58 by default). Missing return data is null;
-a present empty payload stays empty. Absent or empty errors remain null.
+`vote_transactions.err` / `return_data` are `binary`. Signatures, hashes, keys
+and `return_data_program_id` are base58 text, like the other identifiers.
+Missing return data is null; a present empty payload stays empty. Absent or
+empty errors are null.
 
 `instructions.accounts`, `account_lookups.writable_indexes` and
-`account_lookups.readonly_indexes` are `array<non-null short>`, never null. They retain
+`account_lookups.readonly_indexes` are `array<non-null short>`, never null. They keep
 source order, duplicates and empty lists. These are indices, not resolved keys.
 
 ```sql
@@ -81,10 +69,7 @@ SELECT block_num, block_id, transaction_index, instruction_index,
 FROM delta_scan('output/solana-mainnet-beta/instructions');
 ```
 
-This changes older output schemas, including the index columns of the
-`binary` byte encoding. Start a new output root and rebuild, or explicitly
-convert into a separate dataset; do not append these types into an old
-dataset. See the [migration and measured validation](../audit/503-solana-binary-payloads.md).
+See the [measured validation](../audit/503-solana-binary-payloads.md).
 
 ## Instruction order
 
@@ -96,10 +81,10 @@ instruction's inner set with two nullable `long` columns:
 | `parent_instruction_index` | `NULL` | Zero-based index of the top-level instruction that owns the inner set |
 | `inner_instruction_index` | `NULL` | Zero-based position within that parent's inner set |
 
-The existing `instruction_index` still numbers all top-level instructions first,
-then all inner instructions in upstream group order. It is a row index, not call
-order. The existing `inner_index` still contains the top-level parent's index;
-it has the same value as `parent_instruction_index`.
+`instruction_index` numbers all top-level instructions first, then all inner
+instructions in upstream group order. It is a row index, not call order.
+`inner_index` holds the top-level parent's index, the same value as
+`parent_instruction_index`.
 
 For one transaction in one block event, order its instructions as follows:
 
@@ -121,11 +106,6 @@ include instructions that did not execute. Apply fork semantics first when
 querying reversible output; the ordering fields do not identify event delivery
 order or remove replay duplicates.
 
-Older files lack both new columns. Readers that union schemas by name can read
-them as null, but nulls alone cannot distinguish old inner rows from top-level
-rows. Check `is_inner` and rebuild old ranges into a separate output root before
-depending on these fields.
-
 ## Reward indices
 
 `rewards.reward_index` is a zero-based index within one block envelope. Rewards
@@ -139,7 +119,3 @@ For finalized output, use `(block_id, reward_index)` as the reward key. Include
 the chain/network when combining datasets. With reversible output, NEW and UNDO
 rows are separate events that can share this key; apply fork semantics before
 using it as a unique key. Changing transaction filters can change indices.
-
-Older output may contain colliding indices within a block and indices offset by
-earlier buffered blocks. Rebuild affected ranges into a separate output root
-before relying on the corrected key; appending new output does not repair old rows.

@@ -70,7 +70,8 @@ const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
     after_long_help = "\
 Primary workflow:
   Use `fireparq build` to run the ingestion pipeline.
-  Utility workflows live under subcommands such as `inspect`, `validate`, and `recovery`.
+  Run `fireparq maintenance` beside it to compact and vacuum the tables; `inspect`,
+  `validate` and `recovery` are the utility subcommands.
   Read the tables with DuckDB (`delta_scan`) or Polars (`scan_delta`).
 
 Examples:

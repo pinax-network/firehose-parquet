@@ -309,10 +309,8 @@ running `build` and never takes the owner (#636):
   only to the tables whose logs lack it, and never reads a part a log already
   holds, so a compacted and vacuumed part cannot stop a restart;
 - a lite VACUUM (the job's default) never deletes a part no log references
-  yet. A full VACUUM with a retention shorter than an outage can; the next
-  start then stops with a message naming the part and keeps the journal, and
-  the dataset is rebuilt into a new root. Run full VACUUM at most weekly with
-  the enforced 7-day retention.
+  yet. A full VACUUM can, after an outage longer than its retention, which
+  the job refuses below 168 hours ([crash recovery](#crash-recovery)).
 
 Give the job its own S3 user: List on the bucket; Get, Put and Delete on each
 table prefix (`<table>/*`, data files and `_delta_log/`); nothing on

@@ -74,9 +74,9 @@ One row per 10-minute window. The only table with a row for empty windows; commi
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
-| `feed_date` | `date` | yes | `Block.header.feed_date`: date (§4.2). The producer's feed day; equal to the `date` partition by construction. |
+| `feed_date` | `date` | yes | `Block.header.feed_date`: date ([dates](../chains/sec.md#dates)). The producer's feed day; equal to the `date` partition by construction. |
 | `filing_count` | `long` | no | Derived from `Block.filings[]`: length of the list. 0 for ~39% of windows. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -93,7 +93,7 @@ One row per filing: the envelope, resolved parties and dissemination flags. Ever
 | `lib_num` | `long` | no | Last irreversible block number reported with the block. |
 | `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
 | `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
-| `filing_index` | `long` | no | `Filing.ordinal`: u32::try_from (overflow = structural error, §4.7). With `block_num`, the filing key. |
+| `filing_index` | `long` | no | `Filing.ordinal`: u32::try_from (overflow = structural error). With `block_num`, the filing key. |
 | `accession_number` | `string` | no | `Filing.accession_number`: verbatim. EDGAR id; NOT unique across blocks (re-dissemination). |
 | `form_type` | `string` | no | `Filing.form_type`: verbatim (always present). `4`, `13F-HR/A`, `SCHEDULE 13G`, … (26 values in the sample). |
 | `base_form_type` | `string` | no | Derived from `Filing.form_type`: form_type with one trailing `/A` removed. Groups originals with their amendments. |
@@ -102,12 +102,12 @@ One row per filing: the envelope, resolved parties and dissemination flags. Ever
 | `cik` | `string` | yes | `Filing.cik`. Header party CIK (10-pad); its party is named by `cik_role`. |
 | `cik_role` | `string` | yes | `Filing.cik_role`. `ISSUER` (3/4/5), `SUBJECT-COMPANY` (13D/G, 144), `FILER` (13F, N-PORT, N-PX, N-CEN, D, C). |
 | `company_name` | `string` | yes | `Filing.company_name`. Conformed name of the `cik` party. |
-| `issuer_cik` | `string` | yes | Derived from `Filing.parties[]`: party rule (§4.5). Company the filing is about; NULL for 13F/N-PORT/N-PX/N-CEN. |
-| `issuer_name` | `string` | yes | Derived from `Filing.parties[]`: party rule (§4.5). |
-| `filer_cik` | `string` | yes | Derived from `Filing.parties[]`: party rule (§4.5). First REPORTING-OWNER / FILED-BY / FILER party (header order). |
-| `filer_name` | `string` | yes | Derived from `Filing.parties[]`: party rule (§4.5). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: date (§4.2). Legal filing date; can be years before `date` (re-dissemination). |
-| `period_of_report` | `date` | yes | `Filing.period_of_report`: date (§4.2). Absent on 144, D, C, 13D/G. |
+| `issuer_cik` | `string` | yes | Derived from `Filing.parties[]`: [party rule](../chains/sec.md#other-derived-columns). Company the filing is about; NULL for 13F/N-PORT/N-PX/N-CEN. |
+| `issuer_name` | `string` | yes | Derived from `Filing.parties[]`: [party rule](../chains/sec.md#other-derived-columns). |
+| `filer_cik` | `string` | yes | Derived from `Filing.parties[]`: [party rule](../chains/sec.md#other-derived-columns). First REPORTING-OWNER / FILED-BY / FILER party (header order). |
+| `filer_name` | `string` | yes | Derived from `Filing.parties[]`: [party rule](../chains/sec.md#other-derived-columns). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: date ([dates](../chains/sec.md#dates)). Legal filing date; can be years before `date` (re-dissemination). |
+| `period_of_report` | `date` | yes | `Filing.period_of_report`: date ([dates](../chains/sec.md#dates)). Absent on 144, D, C, 13D/G. |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: protobuf Timestamp → ms (checked; out of range = structural error). EDGAR acceptance (UTC, whole seconds); may fall outside the block window. |
 | `acceptance_in_block_window` | `boolean` | yes | Derived from `Filing.acceptance_datetime`: `timestamp ≤ acceptance_datetime < timestamp + 10 min`; NULL if acceptance NULL. False for the ~5% clamped into window 0 or 143. |
 | `dissemination_lag_days` | `integer` | yes | Derived from `Filing.filing_date`: `date − filing_date` in days; NULL if filing_date NULL. 0–4 normally; years for re-disseminated filings. |
@@ -115,7 +115,7 @@ One row per filing: the envelope, resolved parties and dissemination flags. Ever
 | `amended_accession` | `string` | yes | `Filing.amended_accession`. Accession this amendment amends (Form D/A, 13D/G/A, 144/A, N-CEN/A); NULL otherwise. |
 | `source_path` | `string` | yes | `Filing.source_path`. `<feed>.gz!<accession>`. |
 | `dissemination_flags` | `array<string>` | no | `Filing.dissemination_flags[]`: verbatim items in document order; [] when empty. `CORRECTION`, `DELETION`, `PAPER`, `CONFIRMING-COPY`, `PRIVATE-TO-PUBLIC`. |
-| `dissemination_timestamp` | `string` | yes | `Filing.dissemination_timestamp`. Raw `YYYYMMDD:HHMMSS`, US-Eastern; not typed (§4.2). |
+| `dissemination_timestamp` | `string` | yes | `Filing.dissemination_timestamp`. Raw `YYYYMMDD:HHMMSS`, US-Eastern; not typed ([dates](../chains/sec.md#dates)). |
 | `is_deletion_notice` | `boolean` | no | Derived from `Filing.dissemination_flags[]`: `DELETION` ∈ dissemination_flags. EDGAR notice that `accession_number` was deleted; body is `raw` with reason `deletion`. |
 | `group_members` | `array<string>` | no | `Filing.group_members[]`: verbatim items in document order; [] when empty. Legacy SC 13D/G `<GROUP-MEMBERS>` lines. |
 | `party_count` | `long` | no | Derived from `Filing.parties[]`: length of the list. |
@@ -125,7 +125,7 @@ One row per filing: the envelope, resolved parties and dissemination flags. Ever
 | `raw_detail` | `string` | yes | `Filing.body.raw.detail`. Parser message for `parse_error`. |
 | `has_raw_xml` | `boolean` | no | Derived from `Filing.raw_xml`: `raw_xml` non-empty. The filing has a `filing_raw_xml` row. |
 | `raw_xml_size` | `long` | no | Derived from `Filing.raw_xml`: byte length of `raw_xml` (0 without `--include-raw`). |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -145,7 +145,7 @@ Original primary-document XML. Gets rows only when the producer runs with `--inc
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `primary_document` | `string` | yes | Copy of `filings.primary_document`. The file the bytes came from. |
 | `raw_xml` | `binary` | no | `Filing.raw_xml`: bytes verbatim (zero-copy `Bytes`). 13F: `primary_doc.xml`, not the information table. |
@@ -168,7 +168,7 @@ Every party of the SGML submission header (0.13.0+): filer, filed-by, subject co
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `party_index` | `long` | no | Derived: position in `parties`. |
 | `role` | `string` | yes | `Filing.parties[].role`. `FILER`, `FILED-BY`, `SUBJECT-COMPANY`, `ISSUER`, `REPORTING-OWNER`. |
@@ -201,8 +201,8 @@ Every party of the SGML submission header (0.13.0+): filer, filed-by, subject co
 | `mail_state_description` | `string` | yes | `Filing.parties[].mail_address.state_description`. Filled only by Forms 3/4/5 and D. |
 | `mail_country` | `string` | yes | `Filing.parties[].mail_address.country`. |
 | `mail_non_us_state_territory` | `string` | yes | `Filing.parties[].mail_address.non_us_state_territory`. |
-| `former_names` | `array<struct<name: string, date_changed: date>>` | no | `Filing.parties[].former_names[]`: one struct per element {name ← .name ('' → NULL), date_changed ← .date_changed, date (§4.2)}; [] when empty. Header order; issues use `former_names.date_changed`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `former_names` | `array<struct<name: string, date_changed: date>>` | no | `Filing.parties[].former_names[]`: one struct per element {name ← .name ('' → NULL), date_changed ← .date_changed, date ([dates](../chains/sec.md#dates))}; [] when empty. Header order; issues use `former_names.date_changed`. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -222,7 +222,7 @@ Every document of the submission, including non-XML exhibits (bodies are not car
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `document_index` | `long` | no | Derived: position in `documents`. |
 | `sequence` | `string` | yes | `Filing.documents[].sequence`. SGML `<SEQUENCE>`, text. |
@@ -248,7 +248,7 @@ Fund series named in the header of N-PORT, N-PX and N-CEN filings: the series-id
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_index` | `long` | no | Derived: position in `series`. |
 | `owner_cik` | `string` | yes | `Filing.series[].owner_cik`. 10-pad. |
@@ -275,7 +275,7 @@ Share classes and their tickers: the ticker → class → series bridge to N-POR
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_index` | `long` | no | Derived: position of the parent series. |
 | `class_index` | `long` | no | Derived: position in `classes`. |
@@ -302,19 +302,19 @@ Every signature block of every form in one table (Form 144's notice signature st
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
-| `signature_index` | `long` | no | Derived: 0-based position over the filing's signature messages, in the source order of §3.8. |
-| `signature_source` | `string` | no | Derived: which proto message the row came from (§3.8). `ownership`, `form13f`, `beneficial`, `nport`, `form_d`, `npx`, `form_c_issuer`, `form_c_person`. |
-| `signed_for` | `string` | yes | Per signature source (§3.8). The entity or person the signature is given for. |
-| `signer_name` | `string` | yes | Per signature source (§3.8). Printed name of the signer. |
-| `signature_text` | `string` | yes | Per signature source (§3.8). The signature as filed (`/s/ …`); not named `signature` (Bloom name). |
-| `title` | `string` | yes | Per signature source (§3.8). |
+| `signature_index` | `long` | no | Derived: 0-based position over the filing's signature messages, in source order. |
+| `signature_source` | `string` | no | Derived: which proto message the row came from. `ownership`, `form13f`, `beneficial`, `nport`, `form_d`, `npx`, `form_c_issuer`, `form_c_person`. |
+| `signed_for` | `string` | yes | Per signature source. The entity or person the signature is given for. |
+| `signer_name` | `string` | yes | Per signature source. Printed name of the signer. |
+| `signature_text` | `string` | yes | Per signature source. The signature as filed (`/s/ …`); not named `signature` (Bloom name). |
+| `title` | `string` | yes | Per signature source. |
 | `phone` | `string` | yes | `Filing.body.form13f.signature.phone`. 13F only. |
 | `city` | `string` | yes | `Filing.body.form13f.signature.city`. 13F only. |
 | `state` | `string` | yes | `Filing.body.form13f.signature.state`. 13F only; EDGAR code. |
-| `signature_date` | `date` | yes | Per signature source (§3.8): date (§4.2). Formats differ by form; all parse. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `signature_date` | `date` | yes | Per signature source: date ([dates](../chains/sec.md#dates)). Formats differ by form; all parse. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -334,7 +334,7 @@ Form 3/4/5 header: issuer, 10b5-1 flag and counts.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | `Filing.body.ownership.issuer.cik`. 10-pad; = filings.cik. |
 | `issuer_name` | `string` | yes | `Filing.body.ownership.issuer.name`. |
@@ -342,13 +342,13 @@ Form 3/4/5 header: issuer, 10b5-1 flag and counts.
 | `issuer_foreign_trading_symbol` | `string` | yes | `Filing.body.ownership.issuer.foreign_trading_symbol`. |
 | `schema_version` | `string` | yes | `Filing.body.ownership.schema_version`. `X0508`, `X0609`… |
 | `document_type` | `string` | yes | `Filing.body.ownership.document_type`. `3`/`4`/`5` (+`/A`). |
-| `period_of_report` | `date` | yes | `Filing.body.ownership.period_of_report`: date (§4.2). |
+| `period_of_report` | `date` | yes | `Filing.body.ownership.period_of_report`: date ([dates](../chains/sec.md#dates)). |
 | `not_subject_to_section16` | `boolean` | no | `Filing.body.ownership.not_subject_to_section16`: proto bool (false = false or absent). |
 | `aff_10b5_one` | `boolean` | yes | `Filing.body.ownership.aff_10b5_one`: optional bool: NULL when unset. Rule 10b5-1(c) plan box (schema X0508+); NULL = element absent. |
 | `no_securities_owned` | `boolean` | yes | `Filing.body.ownership.no_securities_owned`: optional bool: NULL when unset. Form 3. |
 | `form3_holdings_reported` | `boolean` | yes | `Filing.body.ownership.form3_holdings_reported`: optional bool: NULL when unset. Form 5. |
 | `form4_transactions_reported` | `boolean` | yes | `Filing.body.ownership.form4_transactions_reported`: optional bool: NULL when unset. Form 5. |
-| `date_of_original_submission` | `date` | yes | `Filing.body.ownership.date_of_original_submission`: date (§4.2). 3/A, 4/A, 5/A. |
+| `date_of_original_submission` | `date` | yes | `Filing.body.ownership.date_of_original_submission`: date ([dates](../chains/sec.md#dates)). 3/A, 4/A, 5/A. |
 | `remarks` | `string` | yes | `Filing.body.ownership.remarks`. |
 | `reporting_owner_count` | `long` | no | Derived from `Filing.body.ownership.reporting_owners[]`: length of the list. >1 = joint filing. |
 | `non_derivative_transaction_count` | `long` | no | Derived from `Filing.body.ownership.non_derivative_transactions[]`: length of the list. |
@@ -357,7 +357,7 @@ Form 3/4/5 header: issuer, 10b5-1 flag and counts.
 | `derivative_holding_count` | `long` | no | Derived from `Filing.body.ownership.derivative_holdings[]`: length of the list. |
 | `footnote_count` | `long` | no | Derived from `Filing.body.ownership.footnotes[]`: length of the list. |
 | `owner_signature_count` | `long` | no | Derived from `Filing.body.ownership.owner_signatures[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -377,7 +377,7 @@ Insiders of each Form 3/4/5, with their roles.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `ownership_documents.issuer_cik`. |
 | `issuer_trading_symbol` | `string` | yes | Copy of `ownership_documents.issuer_trading_symbol`. |
@@ -417,7 +417,7 @@ Insider transactions (Table I non-derivative + Table II derivative) with typed a
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `ownership_documents.issuer_cik`. |
 | `issuer_name` | `string` | yes | Copy of `ownership_documents.issuer_name`. |
@@ -434,32 +434,32 @@ Insider transactions (Table I non-derivative + Table II derivative) with typed a
 | `transaction_index` | `long` | no | Derived: 0-based over non-derivative rows (document order) then derivative rows (document order). |
 | `is_derivative` | `boolean` | no | Derived: true for rows from `derivative_transactions`. Table II (options, RSUs, warrants…). |
 | `security_title` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].security_title`. |
-| `transaction_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_date`: date (§4.2). |
-| `deemed_execution_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].deemed_execution_date`: date (§4.2). |
+| `transaction_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_date`: date ([dates](../chains/sec.md#dates)). |
+| `deemed_execution_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].deemed_execution_date`: date ([dates](../chains/sec.md#dates)). |
 | `transaction_form_type` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_form_type`. `4`/`5`. |
 | `transaction_code` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_code`. P, S, A, M, F, G, … (legend in docs/chains/sec.md). |
 | `equity_swap_involved` | `boolean` | no | `Filing.body.ownership.{non_derivative,derivative}_transactions[].equity_swap_involved`: proto bool (false = false or absent). |
 | `transaction_timeliness` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].transaction_timeliness`. `E` early, `L` late, NULL on time. |
-| `shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].shares`: decimal s=6 (§4.3, Q6). Derivative rows count derivative units. |
-| `price_per_share` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].price_per_share`: decimal s=6 (§4.3, Q6). NULL when footnote-only (~5%); never 0. |
-| `total_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].total_value`: decimal s=6 (§4.3, Q6). `transactionTotalValue` (reported instead of shares on some rows). |
+| `shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].shares`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Derivative rows count derivative units. |
+| `price_per_share` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].price_per_share`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). NULL when footnote-only (~5%); never 0. |
+| `total_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].total_value`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). `transactionTotalValue` (reported instead of shares on some rows). |
 | `acquired_disposed_code` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].acquired_disposed_code`. `A` / `D`. |
-| `shares_owned_following` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].shares_owned_following`: decimal s=6 (§4.3, Q6). |
-| `value_owned_following` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].value_owned_following`: decimal s=6 (§4.3, Q6). Fractional-interest securities. |
+| `shares_owned_following` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].shares_owned_following`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
+| `value_owned_following` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].value_owned_following`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Fractional-interest securities. |
 | `direct_or_indirect` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].direct_or_indirect`. `D` / `I`. |
 | `nature_of_ownership` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].nature_of_ownership`. |
-| `conversion_or_exercise_price` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].conversion_or_exercise_price`: decimal s=6 (§4.3, Q6). Derivative rows. |
-| `exercise_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].exercise_date`: date (§4.2). |
-| `expiration_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].expiration_date`: date (§4.2). |
+| `conversion_or_exercise_price` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].conversion_or_exercise_price`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Derivative rows. |
+| `exercise_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].exercise_date`: date ([dates](../chains/sec.md#dates)). |
+| `expiration_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].expiration_date`: date ([dates](../chains/sec.md#dates)). |
 | `underlying_security_title` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.title`. |
-| `underlying_security_shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.shares`: decimal s=6 (§4.3, Q6). Exposure in underlying shares. |
-| `underlying_security_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.value`: decimal s=6 (§4.3, Q6). |
+| `underlying_security_shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.shares`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Exposure in underlying shares. |
+| `underlying_security_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_transactions[].underlying_security.value`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
 | `footnote_ids` | `array<string>` | no | `Filing.body.ownership.{non_derivative,derivative}_transactions[].footnote_ids[]`: verbatim items in document order; [] when empty. Join `ownership_footnotes` on (block_num, filing_index, footnote_id). |
 | `signed_shares` | `decimal(38,6)` | yes | Derived from `shares, acquired_disposed_code`: `shares` × (+1 for A, −1 for D); NULL otherwise. Net buying without CASE. |
 | `value_usd` | `decimal(38,6)` | yes | Derived from `shares, price_per_share`: `shares × price_per_share` exact in i128, rounded half away from zero to s=6; NULL if either is NULL. Trade value; NULL (never 0) for footnote-only prices. |
 | `is_open_market` | `boolean` | no | Derived: `NOT is_derivative AND transaction_code IN (P, S)`. The standard insider buy/sell filter; per the SEC code legend `S` is "open market **or private** sale". |
 | `filing_lag_days` | `integer` | yes | Derived: `filing_date − transaction_date` in days. Form 4 is due within 2 business days. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -479,7 +479,7 @@ Insider holdings reported without a transaction (Form 3 baselines, Form 4/5 indi
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `ownership_documents.issuer_cik`. |
 | `issuer_name` | `string` | yes | Copy of `ownership_documents.issuer_name`. |
@@ -495,18 +495,18 @@ Insider holdings reported without a transaction (Form 3 baselines, Form 4/5 indi
 | `holding_index` | `long` | no | Derived: 0-based over non-derivative rows then derivative rows, document order. |
 | `is_derivative` | `boolean` | no | Derived: true for rows from `derivative_holdings`. |
 | `security_title` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].security_title`. |
-| `shares_owned` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].shares_owned`: decimal s=6 (§4.3, Q6). |
-| `value_owned` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].value_owned`: decimal s=6 (§4.3, Q6). `valueOwnedFollowingTransaction` (0.13.0+). |
+| `shares_owned` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].shares_owned`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
+| `value_owned` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].value_owned`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). `valueOwnedFollowingTransaction` (0.13.0+). |
 | `direct_or_indirect` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].direct_or_indirect`. |
 | `nature_of_ownership` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].nature_of_ownership`. |
-| `conversion_or_exercise_price` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].conversion_or_exercise_price`: decimal s=6 (§4.3, Q6). |
-| `exercise_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].exercise_date`: date (§4.2). |
-| `expiration_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].expiration_date`: date (§4.2). |
+| `conversion_or_exercise_price` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].conversion_or_exercise_price`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
+| `exercise_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].exercise_date`: date ([dates](../chains/sec.md#dates)). |
+| `expiration_date` | `date` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].expiration_date`: date ([dates](../chains/sec.md#dates)). |
 | `underlying_security_title` | `string` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.title`. |
-| `underlying_security_shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.shares`: decimal s=6 (§4.3, Q6). |
-| `underlying_security_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.value`: decimal s=6 (§4.3, Q6). |
+| `underlying_security_shares` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.shares`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
+| `underlying_security_value` | `decimal(38,6)` | yes | `Filing.body.ownership.{non_derivative,derivative}_holdings[].underlying_security.value`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
 | `footnote_ids` | `array<string>` | no | `Filing.body.ownership.{non_derivative,derivative}_holdings[].footnote_ids[]`: verbatim items in document order; [] when empty. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -526,7 +526,7 @@ Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `ownership_documents.issuer_cik`. |
 | `footnote_index` | `long` | no | Derived: position in `footnotes`. |
@@ -551,7 +551,7 @@ Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `has_cover_page` | `boolean` | no | Derived from `Filing.body.form13f.cover_page`: `cover_page` present. False for pre-2013 paper-era bodies. |
 | `manager_cik` | `string` | yes | `Filing.body.form13f.cover_page.filing_manager.cik`. = filings.cik when present. |
@@ -568,24 +568,24 @@ Footnote texts (weighted-average price ranges, 10b5-1 plan details, …).
 | `form13f_file_number` | `string` | yes | `Filing.body.form13f.cover_page.form13f_file_number`. The manager's own `028-` number. |
 | `crd_number` | `string` | yes | `Filing.body.form13f.cover_page.crd_number`. Text (leading zeros). |
 | `sec_file_number` | `string` | yes | `Filing.body.form13f.cover_page.sec_file_number`. |
-| `period_of_report` | `date` | yes | `Filing.body.form13f.cover_page.period_of_report`: date (§4.2). Quarter end. |
+| `period_of_report` | `date` | yes | `Filing.body.form13f.cover_page.period_of_report`: date ([dates](../chains/sec.md#dates)). Quarter end. |
 | `cover_is_amendment` | `boolean` | yes | `Filing.body.form13f.cover_page.is_amendment`: proto bool; NULL when `cover_page` is absent. |
 | `amendment_type` | `string` | yes | `Filing.body.form13f.cover_page.amendment_type`. `RESTATEMENT` replaces, `NEW HOLDINGS` adds. |
-| `amendment_number` | `integer` | yes | `Filing.body.form13f.cover_page.amendment_number`: integer (§4.3), Int32. |
-| `provide_info_for_instruction5` | `boolean` | yes | `Filing.body.form13f.cover_page.provide_info_for_instruction5`: Y/N text → bool (§4.1). |
+| `amendment_number` | `integer` | yes | `Filing.body.form13f.cover_page.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. |
+| `provide_info_for_instruction5` | `boolean` | yes | `Filing.body.form13f.cover_page.provide_info_for_instruction5`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)). |
 | `additional_information` | `string` | yes | `Filing.body.form13f.cover_page.additional_information`. Free text. |
 | `has_summary_page` | `boolean` | no | Derived from `Filing.body.form13f.summary_page`: `summary_page` present. False on 13F-NT. |
 | `other_included_managers_count` | `long` | yes | `Filing.body.form13f.summary_page.other_included_managers_count`: proto uint32; NULL when `summary_page` is absent. |
 | `table_entry_total` | `long` | yes | `Filing.body.form13f.summary_page.table_entry_total`: proto uint32; NULL when `summary_page` is absent. Declared number of holdings. |
-| `table_value_total` | `long` | yes | `Filing.body.form13f.summary_page.table_value_total`: integer (§4.3), Int64. RAW units like `form13f_holdings.value`. |
+| `table_value_total` | `long` | yes | `Filing.body.form13f.summary_page.table_value_total`: integer ([decimals](../chains/sec.md#decimals)), Int64. RAW units like `form13f_holdings.value`. |
 | `is_confidential_omitted` | `boolean` | yes | `Filing.body.form13f.summary_page.is_confidential_omitted`: optional bool: NULL when unset. |
-| `value_multiplier_rule` | `integer` | no | Derived from `Filing.filing_date`: 1000 if `filing_date < 2023-01-03` (else the `date` partition when filing_date is NULL), else 1. SEC cutover rule only; USD with the override is the `sec_13f_units` view (§7.0). |
+| `value_multiplier_rule` | `integer` | no | Derived from `Filing.filing_date`: 1000 if `filing_date < 2023-01-03` (else the `date` partition when filing_date is NULL), else 1. SEC cutover rule only; USD with the override is the [`sec_13f_units`](../chains/sec.md#shipped-views) view. |
 | `holdings_count` | `long` | no | Derived from `Filing.body.form13f.holdings[]`: length of the list. |
 | `holdings_value_sum` | `long` | yes | Derived from `Filing.body.form13f.holdings[].value`: Σ typed `value`, checked `i64`; NULL when there are no holdings (not 0), when any `value` is NULL, or on overflow (+ `overflow` issue). RAW units; QA against `table_value_total`. |
 | `holdings_complete` | `boolean` | yes | Derived: `holdings_count = table_entry_total`; NULL without summary page. QA: 13F-HR filings whose information table is short. |
 | `cover_other_manager_count` | `long` | no | Derived from `Filing.body.form13f.cover_page.other_managers[]`: length of the list. |
 | `summary_other_manager_count` | `long` | no | Derived from `Filing.body.form13f.summary_page.other_managers[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -605,19 +605,19 @@ Other managers listed by a 13F, with the real EDGAR sequence number (0.13.0+).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `manager_cik` | `string` | yes | Copy of `form13f_reports.manager_cik`. |
 | `period_of_report` | `date` | yes | Copy of `form13f_reports.period_of_report`. |
 | `other_manager_index` | `long` | no | Derived: 0-based over cover-page managers then summary-page managers. |
 | `list_kind` | `string` | no | Derived: `cover` (coverPage/otherManagersInfo) or `summary` (summaryPage/otherManagers2Info). Cover = managers reporting for this filer (13F-NT/combination); summary = included managers. |
-| `sequence_number` | `integer` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].sequence_number`: integer (§4.3), Int32. Summary page only (empty on cover); the key `other_manager_sequence_numbers` refer to. |
+| `sequence_number` | `integer` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].sequence_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. Summary page only (empty on cover); the key `other_manager_sequence_numbers` refer to. |
 | `other_manager_cik` | `string` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].cik`. |
 | `other_manager_name` | `string` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].name`. |
 | `form13f_file_number` | `string` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].form13f_file_number`. |
 | `crd_number` | `string` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].crd_number`. |
 | `sec_file_number` | `string` | yes | `Filing.body.form13f.{cover_page,summary_page}.other_managers[].sec_file_number`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -637,7 +637,7 @@ Other managers listed by a 13F, with the real EDGAR sequence number (0.13.0+).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `manager_cik` | `string` | yes | Copy of `form13f_reports.manager_cik`. |
 | `manager_name` | `string` | yes | Copy of `form13f_reports.manager_name`. |
@@ -649,20 +649,20 @@ Other managers listed by a 13F, with the real EDGAR sequence number (0.13.0+).
 | `issuer_name` | `string` | yes | `Filing.body.form13f.holdings[].name_of_issuer`. Proto `name_of_issuer` (renamed to match N-PORT and N-PX). |
 | `title_of_class` | `string` | yes | `Filing.body.form13f.holdings[].title_of_class`. |
 | `cusip` | `string` | yes | `Filing.body.form13f.holdings[].cusip`. As filed (case varies). |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.form13f.holdings[].cusip`: §4.4 `cusip_norm`. Cross-form join key. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.form13f.holdings[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). Cross-form join key. |
 | `figi` | `string` | yes | `Filing.body.form13f.holdings[].figi`. |
-| `value` | `long` | yes | `Filing.body.form13f.holdings[].value`: integer (§4.3), Int64. RAW: thousands before 2023-01-03, dollars after; USD via `sec_13f_holdings_usd`. |
-| `shares_or_principal_amount` | `long` | yes | `Filing.body.form13f.holdings[].shares_or_principal.amount`: integer (§4.3), Int64. `sshPrnamt`. |
+| `value` | `long` | yes | `Filing.body.form13f.holdings[].value`: integer ([decimals](../chains/sec.md#decimals)), Int64. RAW: thousands before 2023-01-03, dollars after; USD via `sec_13f_holdings_usd`. |
+| `shares_or_principal_amount` | `long` | yes | `Filing.body.form13f.holdings[].shares_or_principal.amount`: integer ([decimals](../chains/sec.md#decimals)), Int64. `sshPrnamt`. |
 | `shares_or_principal_type` | `string` | yes | `Filing.body.form13f.holdings[].shares_or_principal.type`. `SH` / `PRN`. |
 | `put_call` | `string` | yes | `Filing.body.form13f.holdings[].put_call`. As filed: `Put` / `Call`. |
 | `put_call_norm` | `string` | yes | Derived from `Filing.body.form13f.holdings[].put_call`: upper(trim) ∈ {PUT, CALL}, else NULL. NULL = the position itself. |
 | `investment_discretion` | `string` | yes | `Filing.body.form13f.holdings[].investment_discretion`. `SOLE` / `DFND` / `OTR`. |
 | `other_manager_ids` | `array<string>` | no | `Filing.body.form13f.holdings[].other_manager_ids[]`: verbatim items in document order; [] when empty. As filed: `1,5,6`, `01`, `NONE`. |
-| `other_manager_sequence_numbers` | `array<integer>` | no | Derived from `Filing.body.form13f.holdings[].other_manager_ids[]`: §4.4 tokenizer. Join `form13f_other_managers.sequence_number` (list_kind = summary). |
-| `voting_authority_sole` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.sole`: integer (§4.3), Int64. |
-| `voting_authority_shared` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.shared`: integer (§4.3), Int64. |
-| `voting_authority_none` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.none`: integer (§4.3), Int64. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `other_manager_sequence_numbers` | `array<integer>` | no | Derived from `Filing.body.form13f.holdings[].other_manager_ids[]`: [tokenizer](../chains/sec.md#other-derived-columns). Join `form13f_other_managers.sequence_number` (list_kind = summary). |
+| `voting_authority_sole` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.sole`: integer ([decimals](../chains/sec.md#decimals)), Int64. |
+| `voting_authority_shared` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.shared`: integer ([decimals](../chains/sec.md#decimals)), Int64. |
+| `voting_authority_none` | `long` | yes | `Filing.body.form13f.holdings[].voting_authority.none`: integer ([decimals](../chains/sec.md#decimals)), Int64. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -682,18 +682,18 @@ Beneficial-ownership (13D/13G) filings with the structured items; legacy SC 13D/
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `subject_company_cik` | `string` | yes | `Filing.body.beneficial.subject_company_cik`. Issuer of the class. |
 | `subject_company_name` | `string` | yes | `Filing.body.beneficial.subject_company_name`. |
 | `cusip` | `string` | yes | `Filing.body.beneficial.cusip`. = cusips[0]. |
 | `cusips` | `array<string>` | no | `Filing.body.beneficial.cusips[]`: verbatim items in document order; [] when empty. Every issuer CUSIP (2025+ repeatable shape). |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.beneficial.cusip`: §4.4 `cusip_norm`. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.beneficial.cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `schedule_type` | `string` | yes | `Filing.body.beneficial.schedule_type`. `SCHEDULE 13G/A`, legacy `SC 13D`… |
 | `schedule_kind` | `string` | yes | Derived from `Filing.body.beneficial.schedule_type`: `13D` if schedule_type (else form_type) contains 13D; `13G` if 13G. 13D = active intent, 13G = passive. |
 | `filer_cik` | `string` | yes | `Filing.body.beneficial.filer_cik`. NULL on legacy SC 13D/G. |
 | `securities_class_title` | `string` | yes | `Filing.body.beneficial.securities_class_title`. |
-| `event_date` | `date` | yes | `Filing.body.beneficial.event_date`: date (§4.2). |
+| `event_date` | `date` | yes | `Filing.body.beneficial.event_date`: date ([dates](../chains/sec.md#dates)). |
 | `issuer_street1` | `string` | yes | `Filing.body.beneficial.issuer_address.street1`. |
 | `issuer_street2` | `string` | yes | `Filing.body.beneficial.issuer_address.street2`. |
 | `issuer_city` | `string` | yes | `Filing.body.beneficial.issuer_address.city`. |
@@ -704,7 +704,7 @@ Beneficial-ownership (13D/13G) filings with the structured items; legacy SC 13D/
 | `issuer_non_us_state_territory` | `string` | yes | `Filing.body.beneficial.issuer_address.non_us_state_territory`. |
 | `rules_designated` | `array<string>` | no | `Filing.body.beneficial.rules_designated[]`: verbatim items in document order; [] when empty. `Rule 13d-1(b)` QII / `(c)` passive / `(d)` exempt. |
 | `previous_accession_number` | `string` | yes | `Filing.body.beneficial.previous_accession_number`. Kept on originals too (envelope copies it only onto amendments). |
-| `amendment_number` | `integer` | yes | `Filing.body.beneficial.amendment_number`: integer (§4.3), Int32. |
+| `amendment_number` | `integer` | yes | `Filing.body.beneficial.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. |
 | `previously_filed` | `boolean` | yes | `Filing.body.beneficial.previously_filed`: optional bool: NULL when unset. 13D. |
 | `item13d_security_title` | `string` | yes | `Filing.body.beneficial.items_13d.security_title`. |
 | `item13d_issuer_name` | `string` | yes | `Filing.body.beneficial.items_13d.issuer_name`. |
@@ -758,7 +758,7 @@ Beneficial-ownership (13D/13G) filings with the structured items; legacy SC 13D/
 | `max_aggregate_amount_owned` | `decimal(38,6)` | yes | Derived from `Filing.body.beneficial.reporting_persons[].aggregate_amount_owned`: max over the persons' non-NULL typed values; NULL when there are none. The stake; never SUM persons (group members repeat the same shares). |
 | `max_percent_of_class` | `decimal(38,12)` | yes | Derived from `Filing.body.beneficial.reporting_persons[].percent_of_class`: max over the persons' non-NULL typed values; NULL when there are none. Percent units. |
 | `signature_count` | `long` | no | Derived from `Filing.body.beneficial.signatures[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -778,7 +778,7 @@ Cover-page rows of a 13D/G: one per reporting person, with typed share counts an
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `subject_company_cik` | `string` | yes | Copy of `beneficial_reports.subject_company_cik`. |
 | `subject_company_name` | `string` | yes | Copy of `beneficial_reports.subject_company_name`. |
@@ -793,18 +793,18 @@ Cover-page rows of a 13D/G: one per reporting person, with typed share counts an
 | `fund_type` | `string` | yes | `Filing.body.beneficial.reporting_persons[].fund_type`. = fund_types[0]. |
 | `fund_types` | `array<string>` | no | `Filing.body.beneficial.reporting_persons[].fund_types[]`: verbatim items in document order; [] when empty. 13D source of funds: WC, PF, AF, BK, SC, OO. |
 | `citizenship` | `string` | yes | `Filing.body.beneficial.reporting_persons[].citizenship`. EDGAR code. |
-| `sole_voting_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].sole_voting_power`: decimal s=6 (§4.3, Q6). Shares. |
-| `shared_voting_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].shared_voting_power`: decimal s=6 (§4.3, Q6). Shares. |
-| `sole_dispositive_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].sole_dispositive_power`: decimal s=6 (§4.3, Q6). Shares. |
-| `shared_dispositive_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].shared_dispositive_power`: decimal s=6 (§4.3, Q6). Shares. |
-| `aggregate_amount_owned` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].aggregate_amount_owned`: decimal s=6 (§4.3, Q6). Shares. |
+| `sole_voting_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].sole_voting_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `shared_voting_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].shared_voting_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `sole_dispositive_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].sole_dispositive_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `shared_dispositive_power` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].shared_dispositive_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `aggregate_amount_owned` | `decimal(38,6)` | yes | `Filing.body.beneficial.reporting_persons[].aggregate_amount_owned`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
 | `aggregate_excludes_shares` | `boolean` | yes | `Filing.body.beneficial.reporting_persons[].aggregate_excludes_shares`: optional bool: NULL when unset. |
-| `percent_of_class` | `decimal(38,12)` | yes | `Filing.body.beneficial.reporting_persons[].percent_of_class`: decimal s=12 (§4.3, R12). Percent units (7.7 = 7.7%). |
+| `percent_of_class` | `decimal(38,12)` | yes | `Filing.body.beneficial.reporting_persons[].percent_of_class`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent units (7.7 = 7.7%). |
 | `type_of_reporting_person` | `string` | yes | `Filing.body.beneficial.reporting_persons[].type_of_reporting_person`. = types_of_reporting_person[0]. |
 | `types_of_reporting_person` | `array<string>` | no | `Filing.body.beneficial.reporting_persons[].types_of_reporting_person[]`: verbatim items in document order; [] when empty. IN, IA, PN, OO, HC, CO, … |
 | `legal_proceedings` | `boolean` | yes | `Filing.body.beneficial.reporting_persons[].legal_proceedings`: optional bool: NULL when unset. 13D. |
 | `comment` | `string` | yes | `Filing.body.beneficial.reporting_persons[].comment`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -824,7 +824,7 @@ Form 144 notices of proposed sale.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | `Filing.body.form144.filer_cik`. The seller (≠ filings.cik). |
 | `issuer_cik` | `string` | yes | `Filing.body.form144.issuer.issuer_cik`. |
@@ -844,15 +844,15 @@ Form 144 notices of proposed sale.
 | `nothing_sold_past_3_months` | `boolean` | no | `Filing.body.form144.nothing_sold_past_3_months`: proto bool (false = false or absent). |
 | `remarks` | `string` | yes | `Filing.body.form144.remarks`. |
 | `previous_accession_number` | `string` | yes | `Filing.body.form144.previous_accession_number`. 144/A. |
-| `notice_date` | `date` | yes | `Filing.body.form144.signature.notice_date`: date (§4.2). |
+| `notice_date` | `date` | yes | `Filing.body.form144.signature.notice_date`: date ([dates](../chains/sec.md#dates)). |
 | `signature_text` | `string` | yes | `Filing.body.form144.signature.signature`. Proto `signature` (renamed: Bloom name). |
-| `plan_adoption_dates` | `array<date>` | no | `Filing.body.form144.signature.plan_adoption_dates[]`: each item: date (§4.2); [] when empty. Rule 10b5-1 plan adoption date(s). |
-| `securities_information_count` | `long` | no | Derived from `Filing.body.form144.securities_information_entries[]`: rows written to `form144_securities_information` (§3.20). |
+| `plan_adoption_dates` | `array<date>` | no | `Filing.body.form144.signature.plan_adoption_dates[]`: each item: date ([dates](../chains/sec.md#dates)); [] when empty. Rule 10b5-1 plan adoption date(s). |
+| `securities_information_count` | `long` | no | Derived from `Filing.body.form144.securities_information_entries[]`: rows written to `form144_securities_information`. |
 | `total_units_sold` | `decimal(38,6)` | yes | Derived: Σ `form144_securities_information.units_sold`, checked; NULL when there is no entry, when any is NULL, or on overflow (+ `overflow` issue). Shares to be sold. |
 | `total_aggregate_market_value` | `decimal(38,2)` | yes | Derived: Σ `aggregate_market_value`, checked; NULL when there is no entry, when any is NULL, or on overflow (+ `overflow` issue). USD. |
 | `securities_to_be_sold_count` | `long` | no | Derived from `Filing.body.form144.securities_to_be_sold[]`: length of the list. |
 | `sales_past_3_months_count` | `long` | no | Derived from `Filing.body.form144.securities_sold_past_3_months[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -872,11 +872,11 @@ The planned sale(s) of a Form 144: one row per class/broker block.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form144_notices.issuer_cik`. |
 | `filer_cik` | `string` | yes | Copy of `form144_notices.filer_cik`. |
-| `entry_index` | `long` | no | Derived: position in `securities_information_entries` (or 0 for the singular fallback, §3.20). |
+| `entry_index` | `long` | no | Derived: position in `securities_information_entries` (or 0 for the singular fallback). |
 | `securities_class_title` | `string` | yes | `Filing.body.form144.securities_information_entries[].securities_class_title`. |
 | `broker_name` | `string` | yes | `Filing.body.form144.securities_information_entries[].broker.name`. |
 | `broker_street1` | `string` | yes | `Filing.body.form144.securities_information_entries[].broker.address.street1`. |
@@ -887,12 +887,12 @@ The planned sale(s) of a Form 144: one row per class/broker block.
 | `broker_state_description` | `string` | yes | `Filing.body.form144.securities_information_entries[].broker.address.state_description`. Filled only by Forms 3/4/5 and D. |
 | `broker_country` | `string` | yes | `Filing.body.form144.securities_information_entries[].broker.address.country`. |
 | `broker_non_us_state_territory` | `string` | yes | `Filing.body.form144.securities_information_entries[].broker.address.non_us_state_territory`. |
-| `units_sold` | `decimal(38,6)` | yes | `Filing.body.form144.securities_information_entries[].units_sold`: decimal s=6 (§4.3, Q6). Shares TO BE sold. |
-| `aggregate_market_value` | `decimal(38,2)` | yes | `Filing.body.form144.securities_information_entries[].aggregate_market_value`: decimal s=2 (§4.3, M2). USD. |
-| `units_outstanding` | `decimal(38,6)` | yes | `Filing.body.form144.securities_information_entries[].units_outstanding`: decimal s=6 (§4.3, Q6). Issuer shares outstanding. |
-| `approx_sale_date` | `date` | yes | `Filing.body.form144.securities_information_entries[].approx_sale_date`: date (§4.2). |
+| `units_sold` | `decimal(38,6)` | yes | `Filing.body.form144.securities_information_entries[].units_sold`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares TO BE sold. |
+| `aggregate_market_value` | `decimal(38,2)` | yes | `Filing.body.form144.securities_information_entries[].aggregate_market_value`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `units_outstanding` | `decimal(38,6)` | yes | `Filing.body.form144.securities_information_entries[].units_outstanding`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Issuer shares outstanding. |
+| `approx_sale_date` | `date` | yes | `Filing.body.form144.securities_information_entries[].approx_sale_date`: date ([dates](../chains/sec.md#dates)). |
 | `securities_exchange_name` | `string` | yes | `Filing.body.form144.securities_information_entries[].securities_exchange_name`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -912,21 +912,21 @@ How the seller acquired the securities to be sold.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form144_notices.issuer_cik`. |
 | `filer_cik` | `string` | yes | Copy of `form144_notices.filer_cik`. |
 | `lot_index` | `long` | no | Derived: position in `securities_to_be_sold`. |
 | `securities_class_title` | `string` | yes | `Filing.body.form144.securities_to_be_sold[].securities_class_title`. |
-| `acquired_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].acquired_date`: date (§4.2). |
+| `acquired_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].acquired_date`: date ([dates](../chains/sec.md#dates)). |
 | `nature_of_acquisition` | `string` | yes | `Filing.body.form144.securities_to_be_sold[].nature_of_acquisition`. |
 | `acquired_from` | `string` | yes | `Filing.body.form144.securities_to_be_sold[].acquired_from`. |
 | `is_gift` | `boolean` | no | `Filing.body.form144.securities_to_be_sold[].is_gift`: proto bool (false = false or absent). |
-| `donor_acquired_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].donor_acquired_date`: date (§4.2). Gifts: when the donor acquired. |
-| `amount_acquired` | `decimal(38,6)` | yes | `Filing.body.form144.securities_to_be_sold[].amount_acquired`: decimal s=6 (§4.3, Q6). Shares. |
-| `payment_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].payment_date`: date (§4.2). |
+| `donor_acquired_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].donor_acquired_date`: date ([dates](../chains/sec.md#dates)). Gifts: when the donor acquired. |
+| `amount_acquired` | `decimal(38,6)` | yes | `Filing.body.form144.securities_to_be_sold[].amount_acquired`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `payment_date` | `date` | yes | `Filing.body.form144.securities_to_be_sold[].payment_date`: date ([dates](../chains/sec.md#dates)). |
 | `nature_of_payment` | `string` | yes | `Filing.body.form144.securities_to_be_sold[].nature_of_payment`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -946,7 +946,7 @@ Recent sales disclosed on a Form 144 (repeat across notices: never sum across fi
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form144_notices.issuer_cik`. |
 | `filer_cik` | `string` | yes | Copy of `form144_notices.filer_cik`. |
@@ -961,10 +961,10 @@ Recent sales disclosed on a Form 144 (repeat across notices: never sum across fi
 | `seller_country` | `string` | yes | `Filing.body.form144.securities_sold_past_3_months[].seller_address.country`. |
 | `seller_non_us_state_territory` | `string` | yes | `Filing.body.form144.securities_sold_past_3_months[].seller_address.non_us_state_territory`. |
 | `securities_class_title` | `string` | yes | `Filing.body.form144.securities_sold_past_3_months[].securities_class_title`. |
-| `sale_date` | `date` | yes | `Filing.body.form144.securities_sold_past_3_months[].sale_date`: date (§4.2). |
-| `amount_sold` | `decimal(38,6)` | yes | `Filing.body.form144.securities_sold_past_3_months[].amount_sold`: decimal s=6 (§4.3, Q6). Shares. |
-| `gross_proceeds` | `decimal(38,2)` | yes | `Filing.body.form144.securities_sold_past_3_months[].gross_proceeds`: decimal s=2 (§4.3, M2). USD. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `sale_date` | `date` | yes | `Filing.body.form144.securities_sold_past_3_months[].sale_date`: date ([dates](../chains/sec.md#dates)). |
+| `amount_sold` | `decimal(38,6)` | yes | `Filing.body.form144.securities_sold_past_3_months[].amount_sold`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares. |
+| `gross_proceeds` | `decimal(38,2)` | yes | `Filing.body.form144.securities_sold_past_3_months[].gross_proceeds`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -984,7 +984,7 @@ N-PORT fund header: registrant, series, as-of date and fund totals. The signatur
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | `Filing.body.nport.filer_cik`. Registrant. |
 | `registrant_name` | `string` | yes | `Filing.body.nport.general_info.reg_name`. |
@@ -1003,21 +1003,21 @@ N-PORT fund header: registrant, series, as-of date and fund totals. The signatur
 | `series_name` | `string` | yes | `Filing.body.nport.general_info.series_name`. |
 | `series_id` | `string` | yes | `Filing.body.nport.general_info.series_id`. `S000…`; NULL on ~9%. |
 | `series_lei` | `string` | yes | `Filing.body.nport.general_info.series_lei`. `N/A` common. |
-| `fiscal_year_end` | `date` | yes | `Filing.body.nport.general_info.rep_period_end`: date (§4.2). Proto `rep_period_end` (repPdEnd) is the FISCAL YEAR END: renamed. |
-| `as_of_date` | `date` | yes | `Filing.body.nport.general_info.rep_period_date`: date (§4.2). Proto `rep_period_date` (repPdDate): the holdings as-of date. |
+| `fiscal_year_end` | `date` | yes | `Filing.body.nport.general_info.rep_period_end`: date ([dates](../chains/sec.md#dates)). Proto `rep_period_end` (repPdEnd) is the FISCAL YEAR END: renamed. |
+| `as_of_date` | `date` | yes | `Filing.body.nport.general_info.rep_period_date`: date ([dates](../chains/sec.md#dates)). Proto `rep_period_date` (repPdDate): the holdings as-of date. |
 | `is_final_filing` | `boolean` | yes | `Filing.body.nport.general_info.is_final_filing`: proto bool; NULL when `general_info` is absent. |
-| `total_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.total_assets`: decimal s=10 (§4.3, N10). USD. |
-| `total_liabilities` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.total_liabilities`: decimal s=10 (§4.3, N10). USD. |
-| `net_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.net_assets`: decimal s=10 (§4.3, N10). USD (fund AUM). |
-| `assets_invested` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.assets_invested`: decimal s=10 (§4.3, N10). USD. |
-| `misc_securities_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.misc_securities_assets`: decimal s=10 (§4.3, N10). USD. |
-| `cash_not_reported` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.cash_not_reported`: decimal s=10 (§4.3, N10). USD. |
+| `total_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.total_assets`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `total_liabilities` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.total_liabilities`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `net_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.net_assets`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD (fund AUM). |
+| `assets_invested` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.assets_invested`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `misc_securities_assets` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.misc_securities_assets`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `cash_not_reported` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.cash_not_reported`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
 | `explanatory_notes` | `array<struct<note_item: string, note: string>>` | no | `Filing.body.nport.explanatory_notes[]`: one struct per element {note_item ← .note_item, note ← .note}, verbatim ('' → NULL); [] when empty. Part E notes, e.g. item `B.5.a`. |
 | `holdings_count` | `long` | no | Derived from `Filing.body.nport.holdings[]`: length of the list. Named like `form13f_reports.holdings_count`. |
 | `derivative_holding_count` | `long` | no | Derived from `Filing.body.nport.holdings[].derivative`: holdings with `derivative` set. |
 | `debt_holding_count` | `long` | no | Derived from `Filing.body.nport.holdings[].debt_security`: holdings with `debt_security` set. |
 | `monthly_return_class_count` | `long` | no | Derived from `Filing.body.nport.fund_info.monthly_total_returns[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1037,19 +1037,19 @@ Monthly total returns per share class, with the month-end each return belongs to
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
 | `return_index` | `long` | no | Derived: position in `monthly_total_returns`. |
 | `class_id` | `string` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].class_id`. `C000…` (placeholders `C000000000`). |
-| `return_month1` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month1`: decimal s=12 (§4.3, R12). Percent; first month of the quarter. |
-| `return_month2` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month2`: decimal s=12 (§4.3, R12). Percent. |
-| `return_month3` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month3`: decimal s=12 (§4.3, R12). Percent; the as-of month. |
+| `return_month1` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month1`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent; first month of the quarter. |
+| `return_month2` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month2`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent. |
+| `return_month3` | `decimal(38,12)` | yes | `Filing.body.nport.fund_info.monthly_total_returns[].return_month3`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent; the as-of month. |
 | `month1_end` | `date` | yes | Derived from `as_of_date`: last day of the month two months before `as_of_date`. |
 | `month2_end` | `date` | yes | Derived from `as_of_date`: last day of the month before `as_of_date`. |
 | `month3_end` | `date` | yes | Derived from `as_of_date`: last day of `as_of_date`'s month. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1069,19 +1069,19 @@ Monthly sales, reinvestments, redemptions and gains of a fund.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
 | `activity_index` | `long` | no | Derived: position in `monthly_activity`. |
 | `month` | `long` | no | `Filing.body.nport.fund_info.monthly_activity[].month`: proto uint32. 1, 2 or 3 (N in `monNFlow`). |
 | `month_end` | `date` | yes | Derived from `month, as_of_date`: last day of the month `3 − month` months before `as_of_date`'s month; NULL when `month` ∉ {1, 2, 3} (proto3 `0` = unset) or `as_of_date` is NULL. Months 1..3 only on the samples. |
-| `sales` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].sales`: decimal s=10 (§4.3, N10). USD. |
-| `reinvestment` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].reinvestment`: decimal s=10 (§4.3, N10). USD. |
-| `redemption` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].redemption`: decimal s=10 (§4.3, N10). USD. |
-| `net_realized_gain` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].net_realized_gain`: decimal s=10 (§4.3, N10). USD. |
-| `net_unrealized_appreciation` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].net_unrealized_appreciation`: decimal s=10 (§4.3, N10). USD. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `sales` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].sales`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `reinvestment` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].reinvestment`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `redemption` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].redemption`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `net_realized_gain` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].net_realized_gain`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `net_unrealized_appreciation` | `decimal(38,10)` | yes | `Filing.body.nport.fund_info.monthly_activity[].net_unrealized_appreciation`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1101,7 +1101,7 @@ Fund positions with identifiers, value, debt terms and securities lending; deriv
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `registrant_name` | `string` | yes | Copy of `nport_reports.registrant_name`. |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
@@ -1110,21 +1110,21 @@ Fund positions with identifiers, value, debt terms and securities lending; deriv
 | `holding_index` | `long` | no | Derived: position in `holdings`. |
 | `issuer_name` | `string` | yes | `Filing.body.nport.holdings[].name`. Proto `name`. |
 | `issuer_lei` | `string` | yes | `Filing.body.nport.holdings[].lei`. `N/A` on ~32%. |
-| `issuer_lei_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].lei`: §4.4 `lei_norm`. |
+| `issuer_lei_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].lei`: [`lei_norm`](../chains/sec.md#other-derived-columns). |
 | `issue_title` | `string` | yes | `Filing.body.nport.holdings[].title`. Proto `title`. |
 | `cusip` | `string` | yes | `Filing.body.nport.holdings[].cusip`. Placeholders `000000000`, `N/A`, `999999999`. |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].cusip`: §4.4 `cusip_norm`. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `isin` | `string` | yes | `Filing.body.nport.holdings[].isin`. Best identifier (~87%). |
 | `ticker` | `string` | yes | `Filing.body.nport.holdings[].ticker`. ~13% present; junk such as `USD`. |
 | `other_identifier` | `string` | yes | `Filing.body.nport.holdings[].other_identifier`. = other_identifiers[0].value. |
 | `other_identifiers` | `array<struct<description: string, value: string>>` | no | `Filing.body.nport.holdings[].other_identifiers[]`: one struct per element {description ← .description, value ← .value}, verbatim ('' → NULL); [] when empty. SEDOL, internal ids, … |
-| `balance` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].balance`: decimal s=10 (§4.3, N10). Quantity in `units`. |
+| `balance` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].balance`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). Quantity in `units`. |
 | `units` | `string` | yes | `Filing.body.nport.holdings[].units`. `NS` shares, `PA` principal, `NC` contracts, `OU` other. |
 | `units_description` | `string` | yes | `Filing.body.nport.holdings[].units_description`. Units `OU`. |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].currency`. ISO 4217. |
-| `exchange_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].exchange_rate`: decimal s=12 (§4.3, R12). Non-USD holdings. |
-| `value_usd` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].value_usd`: decimal s=10 (§4.3, N10). Fair value, USD. |
-| `pct_value` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].pct_value`: decimal s=12 (§4.3, R12). PERCENT of net assets (2.33 = 2.33%); negative for shorts. |
+| `exchange_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].exchange_rate`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Non-USD holdings. |
+| `value_usd` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].value_usd`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). Fair value, USD. |
+| `pct_value` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].pct_value`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). PERCENT of net assets (2.33 = 2.33%); negative for shorts. |
 | `payoff_profile` | `string` | yes | `Filing.body.nport.holdings[].payoff_profile`. `Long` / `Short` / `N/A`. |
 | `asset_category` | `string` | yes | `Filing.body.nport.holdings[].asset_category`. `EC`, `DBT`, `ABS-MBS`, … |
 | `asset_category_description` | `string` | yes | `Filing.body.nport.holdings[].asset_category_description`. Asset_category `OTHER`. |
@@ -1134,9 +1134,9 @@ Fund positions with identifiers, value, debt terms and securities lending; deriv
 | `fair_value_level` | `string` | yes | `Filing.body.nport.holdings[].fair_value_level`. Code `1`/`2`/`3`/`N/A`: kept as text. |
 | `is_restricted` | `boolean` | no | `Filing.body.nport.holdings[].is_restricted`: proto bool (false = false or absent). |
 | `has_debt_security` | `boolean` | no | Derived from `Filing.body.nport.holdings[].debt_security`: `debt_security` present. |
-| `debt_maturity_date` | `date` | yes | `Filing.body.nport.holdings[].debt_security.maturity_date`: date (§4.2). `9999-12-31` placeholders kept. |
+| `debt_maturity_date` | `date` | yes | `Filing.body.nport.holdings[].debt_security.maturity_date`: date ([dates](../chains/sec.md#dates)). `9999-12-31` placeholders kept. |
 | `debt_coupon_kind` | `string` | yes | `Filing.body.nport.holdings[].debt_security.coupon_kind`. `Fixed`/`Floating`/`Variable`/`None`. |
-| `debt_annualized_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].debt_security.annualized_rate`: decimal s=12 (§4.3, R12). Percent. |
+| `debt_annualized_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].debt_security.annualized_rate`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent. |
 | `debt_is_default` | `boolean` | yes | `Filing.body.nport.holdings[].debt_security.is_default`: optional bool: NULL when unset. |
 | `debt_are_interest_payments_in_arrears` | `boolean` | yes | `Filing.body.nport.holdings[].debt_security.are_interest_payments_in_arrears`: optional bool: NULL when unset. |
 | `debt_is_paid_in_kind` | `boolean` | yes | `Filing.body.nport.holdings[].debt_security.is_paid_in_kind`: optional bool: NULL when unset. |
@@ -1151,9 +1151,9 @@ Fund positions with identifiers, value, debt terms and securities lending; deriv
 | `lending_is_cash_collateral` | `boolean` | yes | `Filing.body.nport.holdings[].security_lending.is_cash_collateral`: proto bool; NULL when `security_lending` is absent. |
 | `lending_is_non_cash_collateral` | `boolean` | yes | `Filing.body.nport.holdings[].security_lending.is_non_cash_collateral`: proto bool; NULL when `security_lending` is absent. |
 | `lending_is_loan_by_fund` | `boolean` | yes | `Filing.body.nport.holdings[].security_lending.is_loan_by_fund`: proto bool; NULL when `security_lending` is absent. |
-| `lending_loan_value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].security_lending.loan_value`: decimal s=10 (§4.3, N10). USD. |
-| `lending_cash_collateral_value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].security_lending.cash_collateral_value`: decimal s=10 (§4.3, N10). USD. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `lending_loan_value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].security_lending.loan_value`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `lending_cash_collateral_value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].security_lending.cash_collateral_value`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1173,7 +1173,7 @@ Reference instruments of convertible bonds (what they convert into).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
@@ -1183,7 +1183,7 @@ Reference instruments of convertible bonds (what they convert into).
 | `reference_title` | `string` | yes | `Filing.body.nport.holdings[].debt_security.reference_instruments[].title`. |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].debt_security.reference_instruments[].currency`. |
 | `cusip` | `string` | yes | `Filing.body.nport.holdings[].debt_security.reference_instruments[].cusip`. |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].debt_security.reference_instruments[].cusip`: §4.4 `cusip_norm`. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].debt_security.reference_instruments[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `isin` | `string` | yes | `Filing.body.nport.holdings[].debt_security.reference_instruments[].isin`. |
 | `ticker` | `string` | yes | `Filing.body.nport.holdings[].debt_security.reference_instruments[].ticker`. The reference equity's ticker. |
 | `other_identifiers` | `array<struct<description: string, value: string>>` | no | `Filing.body.nport.holdings[].debt_security.reference_instruments[].other_identifiers[]`: one struct per element {description ← .description, value ← .value}, verbatim ('' → NULL); [] when empty. |
@@ -1206,15 +1206,15 @@ Conversion terms of convertible bonds.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
 | `holding_index` | `long` | no | Derived: position of the parent holding. |
 | `conversion_index` | `long` | no | Derived: position in `conversion_currencies`. |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].debt_security.conversion_currencies[].currency`. |
-| `conversion_ratio` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].debt_security.conversion_currencies[].conversion_ratio`: decimal s=12 (§4.3, R12). Shares per unit of principal. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `conversion_ratio` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].debt_security.conversion_currencies[].conversion_ratio`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Shares per unit of principal. |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1234,7 +1234,7 @@ Derivative terms of N-PORT positions; a nested derivative (the future under an o
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
@@ -1249,7 +1249,7 @@ Derivative terms of N-PORT positions; a nested derivative (the future under an o
 | `ref_instrument_name` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_instrument_name`. |
 | `ref_instrument_title` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_instrument_title`. |
 | `ref_cusip` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_cusip`. |
-| `ref_cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.ref_cusip`: §4.4 `cusip_norm`. |
+| `ref_cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.ref_cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `ref_isin` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_isin`. |
 | `ref_ticker` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_ticker`. |
 | `ref_other_identifiers` | `array<struct<description: string, value: string>>` | no | `Filing.body.nport.holdings[].derivative(.nested)*.ref_other_identifiers[]`: one struct per element {description ← .description, value ← .value}, verbatim ('' → NULL); [] when empty. |
@@ -1257,26 +1257,26 @@ Derivative terms of N-PORT positions; a nested derivative (the future under an o
 | `ref_index_identifier` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_identifier`. |
 | `ref_index_description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_description`. |
 | `other_description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.other_description`. OthDeriv@othDesc, e.g. `rights`. |
-| `share_no` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.share_no`: decimal s=10 (§4.3, N10). Shares / contracts. |
-| `principal_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.principal_amount`: decimal s=10 (§4.3, N10). |
-| `notional_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.notional_amount`: decimal s=10 (§4.3, N10). |
-| `exercise_price` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.exercise_price`: decimal s=10 (§4.3, N10). In `exercise_currency`. |
+| `share_no` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.share_no`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). Shares / contracts. |
+| `principal_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.principal_amount`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
+| `notional_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.notional_amount`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
+| `exercise_price` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.exercise_price`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). In `exercise_currency`. |
 | `exercise_currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.exercise_currency`. |
-| `expiration_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.expiration_date`: date (§4.2). `2099-12-31` placeholders kept. |
+| `expiration_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.expiration_date`: date ([dates](../chains/sec.md#dates)). `2099-12-31` placeholders kept. |
 | `delta` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.delta`. `XXXX` (redacted) in public filings: text. |
-| `unrealized_appreciation` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.unrealized_appreciation`: decimal s=10 (§4.3, N10). USD. |
+| `unrealized_appreciation` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.unrealized_appreciation`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). USD. |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.currency`. Futures, swaps. |
-| `termination_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.termination_date`: date (§4.2). Swaps. |
-| `amount_currency_sold` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.amount_currency_sold`: decimal s=10 (§4.3, N10). Forwards. |
+| `termination_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.termination_date`: date ([dates](../chains/sec.md#dates)). Swaps. |
+| `amount_currency_sold` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.amount_currency_sold`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). Forwards. |
 | `currency_sold` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.currency_sold`. |
-| `amount_currency_purchased` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.amount_currency_purchased`: decimal s=10 (§4.3, N10). |
+| `amount_currency_purchased` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.amount_currency_purchased`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `currency_purchased` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.currency_purchased`. |
-| `settlement_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.settlement_date`: date (§4.2). Forwards. |
-| `upfront_payment` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.upfront_payment`: decimal s=10 (§4.3, N10). Swaps. |
-| `upfront_receipt` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.upfront_receipt`: decimal s=10 (§4.3, N10). |
+| `settlement_date` | `date` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.settlement_date`: date ([dates](../chains/sec.md#dates)). Forwards. |
+| `upfront_payment` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.upfront_payment`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). Swaps. |
+| `upfront_receipt` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.upfront_receipt`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `payment_currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.payment_currency`. |
 | `receipt_currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.receipt_currency`. |
-| `swap_flag` | `boolean` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.swap_flag`: Y/N text → bool (§4.1). |
+| `swap_flag` | `boolean` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.swap_flag`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)). |
 | `swap_leg_count` | `long` | no | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.legs[]`: length of the list. |
 | `index_component_count` | `long` | no | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[]`: length of the list. |
 | `has_nested` | `boolean` | no | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.nested`: `nested` present (a row with nesting_level + 1 exists). |
@@ -1288,20 +1288,20 @@ Derivative terms of N-PORT positions; a nested derivative (the future under an o
 | `addl_isin` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.isin`. |
 | `addl_ticker` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.ticker`. |
 | `addl_other_identifiers` | `array<struct<description: string, value: string>>` | no | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.other_identifiers[]`: one struct per element {description ← .description, value ← .value}, verbatim ('' → NULL); [] when empty. |
-| `addl_balance` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.balance`: decimal s=10 (§4.3, N10). |
+| `addl_balance` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.balance`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `addl_units` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.units`. |
 | `addl_units_description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.units_description`. |
 | `addl_currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.currency`. |
-| `addl_exchange_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.exchange_rate`: decimal s=12 (§4.3, R12). |
-| `addl_value_usd` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.value_usd`: decimal s=10 (§4.3, N10). |
-| `addl_pct_value` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.pct_value`: decimal s=12 (§4.3, R12). |
+| `addl_exchange_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.exchange_rate`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). |
+| `addl_value_usd` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.value_usd`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
+| `addl_pct_value` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.pct_value`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). |
 | `addl_asset_category` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.asset_category`. |
 | `addl_asset_category_description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.asset_category_description`. |
 | `addl_issuer_category` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.issuer_category`. |
 | `addl_issuer_category_description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.issuer_category_description`. |
 | `addl_investment_country` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.investment_country`. |
 | `addl_other_investment_country` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.additional_info.other_investment_country`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1321,7 +1321,7 @@ Pay and receive legs of swaps.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
@@ -1331,13 +1331,13 @@ Pay and receive legs of swaps.
 | `leg_kind` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].kind`. Element name: `fixedPmntDesc`, `floatingRecDesc`, … |
 | `fixed_or_floating` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].fixed_or_floating`. |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].currency`. |
-| `amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].amount`: decimal s=10 (§4.3, N10). |
-| `fixed_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].fixed_rate`: decimal s=12 (§4.3, R12). Percent. |
+| `amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].amount`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
+| `fixed_rate` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].fixed_rate`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent. |
 | `floating_rate_index` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].floating_rate_index`. |
-| `floating_rate_spread` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].floating_rate_spread`: decimal s=12 (§4.3, R12). |
-| `payment_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].payment_amount`: decimal s=10 (§4.3, N10). |
+| `floating_rate_spread` | `decimal(38,12)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].floating_rate_spread`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). |
+| `payment_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].payment_amount`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `description` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.legs[].description`. `otherPmntDesc`/`otherRecDesc` text. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1357,7 +1357,7 @@ Custom-basket components (one swap can list 30k+).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `series_id` | `string` | yes | Copy of `nport_reports.series_id`. |
 | `as_of_date` | `date` | yes | Copy of `nport_reports.as_of_date`. |
@@ -1366,15 +1366,15 @@ Custom-basket components (one swap can list 30k+).
 | `component_index` | `long` | no | Derived: position in `ref_index_components`. |
 | `component_name` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].name`. |
 | `cusip` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].cusip`. |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].cusip`: §4.4 `cusip_norm`. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `isin` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].isin`. |
 | `ticker` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].ticker`. |
 | `other_identifiers` | `array<struct<description: string, value: string>>` | no | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].other_identifiers[]`: one struct per element {description ← .description, value ← .value}, verbatim ('' → NULL); [] when empty. |
-| `notional_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].notional_amount`: decimal s=10 (§4.3, N10). |
+| `notional_amount` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].notional_amount`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].currency`. |
-| `value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].value`: decimal s=10 (§4.3, N10). |
+| `value` | `decimal(38,10)` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].value`: decimal s=10 ([decimals](../chains/sec.md#decimals), N10). |
 | `issue_currency` | `string` | yes | `Filing.body.nport.holdings[].derivative(.nested)*.ref_index_components[].issue_currency`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1394,7 +1394,7 @@ Form D exempt offerings: primary issuer, offering terms and amounts. Signatures 
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `schema_version` | `string` | yes | `Filing.body.form_d.schema_version`. |
 | `submission_type` | `string` | yes | `Filing.body.form_d.submission_type`. `D` / `D/A`. |
@@ -1413,7 +1413,7 @@ Form D exempt offerings: primary issuer, offering terms and amounts. Signatures 
 | `jurisdiction_of_inc` | `string` | yes | `Filing.body.form_d.primary_issuer.jurisdiction_of_inc`. `DELAWARE`, … |
 | `entity_type` | `string` | yes | `Filing.body.form_d.primary_issuer.entity_type`. |
 | `entity_type_other_desc` | `string` | yes | `Filing.body.form_d.primary_issuer.entity_type_other_desc`. |
-| `year_of_inc` | `integer` | yes | `Filing.body.form_d.primary_issuer.year_of_inc`: integer (§4.3), Int32. NULL when incorporated >5 years ago or yet to be formed. |
+| `year_of_inc` | `integer` | yes | `Filing.body.form_d.primary_issuer.year_of_inc`: integer ([decimals](../chains/sec.md#decimals)), Int32. NULL when incorporated >5 years ago or yet to be formed. |
 | `year_of_inc_status` | `string` | yes | `Filing.body.form_d.primary_issuer.year_of_inc_status`. `withinFiveYears`, `overFiveYears`, … |
 | `issuer_previous_names` | `array<string>` | no | `Filing.body.form_d.primary_issuer.previous_names[]`: verbatim items in document order; [] when empty. |
 | `issuer_edgar_previous_names` | `array<string>` | no | `Filing.body.form_d.primary_issuer.edgar_previous_names[]`: verbatim items in document order; [] when empty. |
@@ -1423,7 +1423,7 @@ Form D exempt offerings: primary issuer, offering terms and amounts. Signatures 
 | `revenue_range` | `string` | yes | `Filing.body.form_d.offering.revenue_range`. |
 | `aggregate_net_asset_value_range` | `string` | yes | `Filing.body.form_d.offering.aggregate_net_asset_value_range`. |
 | `offering_is_amendment` | `boolean` | yes | `Filing.body.form_d.offering.is_amendment`: proto bool; NULL when `offering` is absent. |
-| `date_of_first_sale` | `date` | yes | `Filing.body.form_d.offering.date_of_first_sale`: date (§4.2). |
+| `date_of_first_sale` | `date` | yes | `Filing.body.form_d.offering.date_of_first_sale`: date ([dates](../chains/sec.md#dates)). |
 | `date_of_first_sale_yet_to_occur` | `boolean` | yes | `Filing.body.form_d.offering.date_of_first_sale_yet_to_occur`: optional bool: NULL when unset. |
 | `more_than_one_year` | `boolean` | yes | `Filing.body.form_d.offering.more_than_one_year`: proto bool; NULL when `offering` is absent. |
 | `is_equity_type` | `boolean` | yes | `Filing.body.form_d.offering.is_equity_type`: proto bool; NULL when `offering` is absent. |
@@ -1432,29 +1432,29 @@ Form D exempt offerings: primary issuer, offering terms and amounts. Signatures 
 | `is_business_combination` | `boolean` | yes | `Filing.body.form_d.offering.is_business_combination`: optional bool: NULL when unset. |
 | `business_combination_clarification` | `string` | yes | `Filing.body.form_d.offering.business_combination_clarification`. |
 | `federal_exemptions` | `array<string>` | no | `Filing.body.form_d.offering.federal_exemptions[]`: verbatim items in document order; [] when empty. `06b` 506(b), `06c` 506(c), `04` 504, `3C.1`, `3C.7`… |
-| `minimum_investment` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.minimum_investment`: decimal s=2 (§4.3, M2). USD. |
-| `total_offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_offering_amount`: decimal s=2 (§4.3, M2). USD; NULL when `Indefinite`. |
+| `minimum_investment` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.minimum_investment`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `total_offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_offering_amount`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD; NULL when `Indefinite`. |
 | `total_offering_amount_is_indefinite` | `boolean` | no | Derived from `Filing.body.form_d.offering.total_offering_amount`: raw = `Indefinite` (case-insensitive). Removes the "Indefinite = 0" footgun. |
-| `total_amount_sold` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_amount_sold`: decimal s=2 (§4.3, M2). USD, cumulative. |
-| `total_remaining` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_remaining`: decimal s=2 (§4.3, M2). USD; NULL when `Indefinite`. |
+| `total_amount_sold` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_amount_sold`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD, cumulative. |
+| `total_remaining` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.total_remaining`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD; NULL when `Indefinite`. |
 | `total_remaining_is_indefinite` | `boolean` | no | Derived from `Filing.body.form_d.offering.total_remaining`: raw = `Indefinite`. |
 | `offering_sales_amounts_clarification` | `string` | yes | `Filing.body.form_d.offering.offering_sales_amounts_clarification`. |
 | `has_non_accredited_investors` | `boolean` | yes | `Filing.body.form_d.offering.has_non_accredited_investors`: proto bool; NULL when `offering` is absent. |
-| `number_non_accredited_investors` | `long` | yes | `Filing.body.form_d.offering.number_non_accredited_investors`: integer (§4.3), Int64. |
-| `total_number_already_invested` | `long` | yes | `Filing.body.form_d.offering.total_already_invested`: integer (§4.3), Int64. A COUNT of investors (renamed from `total_already_invested`). |
-| `sales_commissions` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.sales_commissions`: decimal s=2 (§4.3, M2). USD. |
+| `number_non_accredited_investors` | `long` | yes | `Filing.body.form_d.offering.number_non_accredited_investors`: integer ([decimals](../chains/sec.md#decimals)), Int64. |
+| `total_number_already_invested` | `long` | yes | `Filing.body.form_d.offering.total_already_invested`: integer ([decimals](../chains/sec.md#decimals)), Int64. A COUNT of investors (renamed from `total_already_invested`). |
+| `sales_commissions` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.sales_commissions`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
 | `sales_commissions_is_estimate` | `boolean` | yes | `Filing.body.form_d.offering.sales_commissions_is_estimate`: optional bool: NULL when unset. |
-| `finders_fees` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.finders_fees`: decimal s=2 (§4.3, M2). USD. |
+| `finders_fees` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.finders_fees`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
 | `finders_fees_is_estimate` | `boolean` | yes | `Filing.body.form_d.offering.finders_fees_is_estimate`: optional bool: NULL when unset. |
 | `sales_commissions_clarification` | `string` | yes | `Filing.body.form_d.offering.sales_commissions_clarification`. |
-| `gross_proceeds_used` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.gross_proceeds_used`: decimal s=2 (§4.3, M2). USD paid to related persons. |
+| `gross_proceeds_used` | `decimal(38,2)` | yes | `Filing.body.form_d.offering.gross_proceeds_used`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD paid to related persons. |
 | `gross_proceeds_used_is_estimate` | `boolean` | yes | `Filing.body.form_d.offering.gross_proceeds_used_is_estimate`: optional bool: NULL when unset. |
 | `use_of_proceeds_clarification` | `string` | yes | `Filing.body.form_d.offering.use_of_proceeds_clarification`. |
 | `authorized_representative` | `boolean` | yes | `Filing.body.form_d.authorized_representative`: optional bool: NULL when unset. |
 | `co_issuer_count` | `long` | no | Derived from `Filing.body.form_d.issuers[]`: length of the list. |
 | `related_person_count` | `long` | no | Derived from `Filing.body.form_d.related_persons[]`: length of the list. |
 | `sales_recipient_count` | `long` | no | Derived from `Filing.body.form_d.sales_compensation_recipients[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1474,7 +1474,7 @@ Co-issuers of a Form D.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form_d_notices.issuer_cik`. The primary issuer. |
 | `co_issuer_index` | `long` | no | Derived: position in `issuers`. |
@@ -1492,11 +1492,11 @@ Co-issuers of a Form D.
 | `jurisdiction_of_inc` | `string` | yes | `Filing.body.form_d.issuers[].jurisdiction_of_inc`. |
 | `entity_type` | `string` | yes | `Filing.body.form_d.issuers[].entity_type`. |
 | `entity_type_other_desc` | `string` | yes | `Filing.body.form_d.issuers[].entity_type_other_desc`. |
-| `year_of_inc` | `integer` | yes | `Filing.body.form_d.issuers[].year_of_inc`: integer (§4.3), Int32. |
+| `year_of_inc` | `integer` | yes | `Filing.body.form_d.issuers[].year_of_inc`: integer ([decimals](../chains/sec.md#decimals)), Int32. |
 | `year_of_inc_status` | `string` | yes | `Filing.body.form_d.issuers[].year_of_inc_status`. |
 | `previous_names` | `array<string>` | no | `Filing.body.form_d.issuers[].previous_names[]`: verbatim items in document order; [] when empty. |
 | `edgar_previous_names` | `array<string>` | no | `Filing.body.form_d.issuers[].edgar_previous_names[]`: verbatim items in document order; [] when empty. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1516,7 +1516,7 @@ People related to a Form D issuer.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form_d_notices.issuer_cik`. |
 | `person_index` | `long` | no | Derived: position in `related_persons`. |
@@ -1552,7 +1552,7 @@ Placement agents and brokers paid on a Form D offering.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `issuer_cik` | `string` | yes | Copy of `form_d_notices.issuer_cik`. |
 | `recipient_index` | `long` | no | Derived: position in `sales_compensation_recipients`. |
@@ -1589,14 +1589,14 @@ N-PX cover page. Signatures are in `filing_signatures`, other managers in `npx_o
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | `Filing.body.npx.filer_cik`. Fund registrant or institutional manager. |
 | `has_cover_page` | `boolean` | no | Derived from `Filing.body.npx.cover_page`: `cover_page` present. |
 | `registrant_type` | `string` | yes | `Filing.body.npx.cover_page.registrant_type`. `RMIC` fund / `IM` institutional manager. |
 | `investment_company_type` | `string` | yes | `Filing.body.npx.cover_page.investment_company_type`. `N-1A`, `N-2`. |
 | `year_or_quarter` | `string` | yes | `Filing.body.npx.cover_page.year_or_quarter`. |
-| `report_calendar_year` | `integer` | yes | `Filing.body.npx.cover_page.report_calendar_year`: integer (§4.3), Int32. Proxy year (July–June). |
+| `report_calendar_year` | `integer` | yes | `Filing.body.npx.cover_page.report_calendar_year`: integer ([decimals](../chains/sec.md#decimals)), Int32. Proxy year (July–June). |
 | `report_type` | `string` | yes | `Filing.body.npx.cover_page.report_type`. `FUND VOTING REPORT`, `INSTITUTIONAL MANAGER NOTICE REPORT`, … |
 | `reporting_person_name` | `string` | yes | `Filing.body.npx.cover_page.reporting_person_name`. |
 | `reporting_person_street1` | `string` | yes | `Filing.body.npx.cover_page.reporting_person_address.street1`. |
@@ -1612,12 +1612,12 @@ N-PX cover page. Signatures are in `filing_signatures`, other managers in `npx_o
 | `reporting_crd_number` | `string` | yes | `Filing.body.npx.cover_page.reporting_crd_number`. |
 | `reporting_sec_file_number` | `string` | yes | `Filing.body.npx.cover_page.reporting_sec_file_number`. |
 | `lei_number` | `string` | yes | `Filing.body.npx.cover_page.lei_number`. |
-| `confidential_treatment` | `boolean` | yes | `Filing.body.npx.cover_page.confidential_treatment`: Y/N text → bool (§4.1). |
+| `confidential_treatment` | `boolean` | yes | `Filing.body.npx.cover_page.confidential_treatment`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)). |
 | `notice_explanation` | `string` | yes | `Filing.body.npx.cover_page.notice_explanation`. |
-| `explanatory_choice` | `boolean` | yes | `Filing.body.npx.cover_page.explanatory_choice`: Y/N text → bool (§4.1). |
+| `explanatory_choice` | `boolean` | yes | `Filing.body.npx.cover_page.explanatory_choice`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)). |
 | `explanatory_notes` | `string` | yes | `Filing.body.npx.cover_page.explanatory_notes`. |
 | `cover_is_amendment` | `boolean` | yes | `Filing.body.npx.cover_page.is_amendment`: optional bool: NULL when unset. |
-| `amendment_number` | `integer` | yes | `Filing.body.npx.cover_page.amendment_number`: integer (§4.3), Int32. |
+| `amendment_number` | `integer` | yes | `Filing.body.npx.cover_page.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. |
 | `amendment_type` | `string` | yes | `Filing.body.npx.cover_page.amendment_type`. `RESTATEMENT` / `NEW PROXY`. |
 | `conf_denied_expired` | `boolean` | yes | `Filing.body.npx.cover_page.conf_denied_expired`: optional bool: NULL when unset. |
 | `agent_for_service_name` | `string` | yes | `Filing.body.npx.cover_page.agent_for_service_name`. |
@@ -1630,12 +1630,12 @@ N-PX cover page. Signatures are in `filing_signatures`, other managers in `npx_o
 | `agent_for_service_country` | `string` | yes | `Filing.body.npx.cover_page.agent_for_service_address.country`. |
 | `agent_for_service_non_us_state_territory` | `string` | yes | `Filing.body.npx.cover_page.agent_for_service_address.non_us_state_territory`. |
 | `series_reports` | `array<struct<series_id: string, series_name: string, series_lei: string>>` | no | `Filing.body.npx.cover_page.series_reports[]`: one struct per element {series_id ← .series_id, series_name ← .name, series_lei ← .lei} ('' → NULL); [] when empty. Series covered by a fund report. |
-| `other_included_managers_count` | `integer` | yes | `Filing.body.npx.cover_page.other_included_managers_count`: integer (§4.3), Int32. |
-| `declared_series_count` | `integer` | yes | `Filing.body.npx.cover_page.series_count`: integer (§4.3), Int32. Declared `seriesPage/seriesCount` (renamed: `series_count` is a list length on `filings`/`ncen_reports`). |
+| `other_included_managers_count` | `integer` | yes | `Filing.body.npx.cover_page.other_included_managers_count`: integer ([decimals](../chains/sec.md#decimals)), Int32. |
+| `declared_series_count` | `integer` | yes | `Filing.body.npx.cover_page.series_count`: integer ([decimals](../chains/sec.md#decimals)), Int32. Declared `seriesPage/seriesCount` (renamed: `series_count` is a list length on `filings`/`ncen_reports`). |
 | `vote_count` | `long` | no | Derived from `Filing.body.npx.votes[]`: length of the list. Up to ~200k. |
 | `vote_record_count` | `long` | no | Derived from `Filing.body.npx.votes[].records[]`: Σ len(records). |
 | `other_manager_count` | `long` | no | Derived: rows written to `npx_other_managers`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1655,7 +1655,7 @@ N-PX proposals voted, with identifiers and categories.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | Copy of `npx_reports.filer_cik`. |
 | `registrant_type` | `string` | yes | Copy of `npx_reports.registrant_type`. |
@@ -1663,21 +1663,21 @@ N-PX proposals voted, with identifiers and categories.
 | `vote_index` | `long` | no | Derived: position in `votes`. |
 | `issuer_name` | `string` | yes | `Filing.body.npx.votes[].issuer_name`. |
 | `cusip` | `string` | yes | `Filing.body.npx.votes[].cusip`. |
-| `cusip_norm` | `string` | yes | Derived from `Filing.body.npx.votes[].cusip`: §4.4 `cusip_norm`. |
+| `cusip_norm` | `string` | yes | Derived from `Filing.body.npx.votes[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). |
 | `isin` | `string` | yes | `Filing.body.npx.votes[].isin`. |
 | `figi` | `string` | yes | `Filing.body.npx.votes[].figi`. Rare; junk `-`. |
-| `meeting_date` | `date` | yes | `Filing.body.npx.votes[].meeting_date`: date (§4.2). |
+| `meeting_date` | `date` | yes | `Filing.body.npx.votes[].meeting_date`: date ([dates](../chains/sec.md#dates)). |
 | `vote_description` | `string` | yes | `Filing.body.npx.votes[].vote_description`. Proposal text, up to ~4.8k chars. |
 | `other_vote_description` | `string` | yes | `Filing.body.npx.votes[].other_vote_description`. |
 | `vote_categories` | `array<string>` | no | `Filing.body.npx.votes[].vote_categories[]`: verbatim items in document order; [] when empty. `DIRECTOR ELECTIONS`, `SECTION 14A SAY-ON-PAY VOTES`, … |
 | `vote_source` | `string` | yes | `Filing.body.npx.votes[].vote_source`. `ISSUER` (management) / `SECURITY HOLDER` (shareholder proposal). |
 | `vote_series` | `string` | yes | `Filing.body.npx.votes[].vote_series`. Fund series (`S000…`) that cast the vote. |
-| `shares_voted` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].shares_voted`: decimal s=16 (§4.3, S16). |
-| `shares_on_loan` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].shares_on_loan`: decimal s=16 (§4.3, S16). |
-| `vote_other_managers` | `array<integer>` | no | `Filing.body.npx.votes[].vote_other_managers[]`: each item: integer (§4.3), Int32; [] when empty. Serial numbers → `npx_other_managers.serial_number`. |
+| `shares_voted` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].shares_voted`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16). |
+| `shares_on_loan` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].shares_on_loan`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16). |
+| `vote_other_managers` | `array<integer>` | no | `Filing.body.npx.votes[].vote_other_managers[]`: each item: integer ([decimals](../chains/sec.md#decimals)), Int32; [] when empty. Serial numbers → `npx_other_managers.serial_number`. |
 | `vote_other_info` | `string` | yes | `Filing.body.npx.votes[].vote_other_info`. |
 | `record_count` | `long` | no | Derived from `Filing.body.npx.votes[].records[]`: length of the list. >1 = split vote. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1697,7 +1697,7 @@ How each block of shares was voted; filter columns are copied from the vote so m
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | Copy of `npx_reports.filer_cik`. |
 | `registrant_type` | `string` | yes | Copy of `npx_reports.registrant_type`. |
@@ -1709,10 +1709,10 @@ How each block of shares was voted; filter columns are copied from the vote so m
 | `vote_source` | `string` | yes | Copy of `npx_votes.vote_source`. |
 | `vote_categories` | `array<string>` | no | Copy of `npx_votes.vote_categories`. |
 | `record_index` | `long` | no | Derived: position in `records`. |
-| `how_voted` | `string` | yes | `Filing.body.npx.votes[].records[].how_voted`. 73 spellings: normalize with `sec_how_voted_norm` (§7.0). |
-| `shares_voted` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].records[].shares_voted`: decimal s=16 (§4.3, S16). |
+| `how_voted` | `string` | yes | `Filing.body.npx.votes[].records[].how_voted`. 73 spellings: normalize with [`sec_how_voted_norm`](../chains/sec.md#shipped-views). |
+| `shares_voted` | `decimal(38,16)` | yes | `Filing.body.npx.votes[].records[].shares_voted`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16). |
 | `management_recommendation` | `string` | yes | `Filing.body.npx.votes[].records[].management_recommendation`. `FOR` / `AGAINST` / `NONE`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1732,18 +1732,18 @@ Other managers of an N-PX (joined from votes by serial number).
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | Copy of `npx_reports.filer_cik`. |
 | `other_manager_index` | `long` | no | Derived: 0-based over cover-page managers then summary managers. |
 | `list_kind` | `string` | no | Derived: `cover` (other_managers) or `summary` (summary_managers). |
-| `serial_number` | `integer` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].serial_number`: integer (§4.3), Int32. Summary: the key `npx_votes.vote_other_managers` refers to. |
+| `serial_number` | `integer` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].serial_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. Summary: the key `npx_votes.vote_other_managers` refers to. |
 | `other_manager_name` | `string` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].name`. Named like `form13f_other_managers.other_manager_name`. |
 | `form13f_file_number` | `string` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].form13f_file_number`. |
 | `crd_number` | `string` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].crd_number`. |
 | `sec_file_number` | `string` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].sec_file_number`. |
 | `lei` | `string` | yes | `Filing.body.npx.cover_page.{other_managers,summary_managers}[].lei`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1763,11 +1763,11 @@ N-CEN registrant census header.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | `Filing.body.ncen.filer_cik`. |
 | `investment_company_type` | `string` | yes | `Filing.body.ncen.investment_company_type`. `N-1A`, `N-2`, `N-3/4/6`, `S-6`. |
-| `report_ending_period` | `date` | yes | `Filing.body.ncen.report_ending_period`: date (§4.2). Fiscal year end. |
+| `report_ending_period` | `date` | yes | `Filing.body.ncen.report_ending_period`: date ([dates](../chains/sec.md#dates)). Fiscal year end. |
 | `is_report_period_lt12` | `boolean` | no | `Filing.body.ncen.is_report_period_lt12`: proto bool (false = false or absent). |
 | `previous_accession_number` | `string` | yes | `Filing.body.ncen.previous_accession_number`. N-CEN/A. |
 | `registrant_name` | `string` | yes | `Filing.body.ncen.registrant.full_name`. |
@@ -1785,7 +1785,7 @@ N-CEN registrant census header.
 | `registrant_phone` | `string` | yes | `Filing.body.ncen.registrant.phone`. |
 | `series_ids` | `array<string>` | no | `Filing.body.ncen.series_ids[]`: verbatim items in document order; [] when empty. Join `nport_reports.series_id` via unnest. |
 | `series_count` | `long` | no | Derived from `Filing.body.ncen.series_ids[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1805,14 +1805,14 @@ Regulation Crowdfunding filings: issuer, portal, offering terms and financials. 
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | `Filing.body.form_c.filer_cik`. The issuer. |
 | `issuer_name` | `string` | yes | `Filing.body.form_c.issuer.name`. |
 | `issuer_legal_status_form` | `string` | yes | `Filing.body.form_c.issuer.legal_status_form`. |
 | `issuer_legal_status_other_desc` | `string` | yes | `Filing.body.form_c.issuer.legal_status_other_desc`. |
 | `issuer_jurisdiction` | `string` | yes | `Filing.body.form_c.issuer.jurisdiction`. |
-| `issuer_date_incorporation` | `date` | yes | `Filing.body.form_c.issuer.date_incorporation`: date (§4.2). |
+| `issuer_date_incorporation` | `date` | yes | `Filing.body.form_c.issuer.date_incorporation`: date ([dates](../chains/sec.md#dates)). |
 | `issuer_street1` | `string` | yes | `Filing.body.form_c.issuer.address.street1`. |
 | `issuer_street2` | `string` | yes | `Filing.body.form_c.issuer.address.street2`. |
 | `issuer_city` | `string` | yes | `Filing.body.form_c.issuer.address.city`. |
@@ -1830,43 +1830,43 @@ Regulation Crowdfunding filings: issuer, portal, offering terms and financials. 
 | `nature_of_amendment` | `string` | yes | `Filing.body.form_c.nature_of_amendment`. |
 | `progress_update` | `string` | yes | `Filing.body.form_c.progress_update`. C-U. |
 | `is_co_issuer` | `boolean` | yes | `Filing.body.form_c.is_co_issuer`: optional bool: NULL when unset. |
-| `period` | `date` | yes | `Filing.body.form_c.period`: date (§4.2). C-AR fiscal period end. |
+| `period` | `date` | yes | `Filing.body.form_c.period`: date ([dates](../chains/sec.md#dates)). C-AR fiscal period end. |
 | `security_type` | `string` | yes | `Filing.body.form_c.offering.security_type`. |
 | `security_offered_other_desc` | `string` | yes | `Filing.body.form_c.offering.security_offered_other_desc`. E.g. `SAFE`. |
-| `num_securities_offered` | `decimal(38,6)` | yes | `Filing.body.form_c.offering.num_securities_offered`: decimal s=6 (§4.3, Q6). |
-| `price` | `decimal(38,6)` | yes | `Filing.body.form_c.offering.price`: decimal s=6 (§4.3, Q6). USD per security. |
+| `num_securities_offered` | `decimal(38,6)` | yes | `Filing.body.form_c.offering.num_securities_offered`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). |
+| `price` | `decimal(38,6)` | yes | `Filing.body.form_c.offering.price`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). USD per security. |
 | `price_determination_method` | `string` | yes | `Filing.body.form_c.offering.price_determination_method`. |
-| `offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_c.offering.offering_amount`: decimal s=2 (§4.3, M2). TARGET raise, USD. |
-| `maximum_offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_c.offering.maximum_offering_amount`: decimal s=2 (§4.3, M2). Cap if oversubscribed, USD. |
+| `offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_c.offering.offering_amount`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). TARGET raise, USD. |
+| `maximum_offering_amount` | `decimal(38,2)` | yes | `Filing.body.form_c.offering.maximum_offering_amount`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). Cap if oversubscribed, USD. |
 | `over_subscription_accepted` | `boolean` | yes | `Filing.body.form_c.offering.over_subscription_accepted`: proto bool; NULL when `offering` is absent. |
 | `over_subscription_allocation_type` | `string` | yes | `Filing.body.form_c.offering.over_subscription_allocation_type`. |
 | `desc_over_subscription` | `string` | yes | `Filing.body.form_c.offering.desc_over_subscription`. |
-| `deadline_date` | `date` | yes | `Filing.body.form_c.offering.deadline_date`: date (§4.2). |
+| `deadline_date` | `date` | yes | `Filing.body.form_c.offering.deadline_date`: date ([dates](../chains/sec.md#dates)). |
 | `compensation_amount` | `string` | yes | `Filing.body.form_c.offering.compensation_amount`. FREE TEXT, not a number. |
 | `financial_interest` | `string` | yes | `Filing.body.form_c.offering.financial_interest`. |
 | `offering_jurisdictions` | `array<string>` | no | `Filing.body.form_c.offering_jurisdictions[]`: verbatim items in document order; [] when empty. |
 | `has_financials` | `boolean` | no | Derived from `Filing.body.form_c.financials`: `financials` present. |
-| `current_employees` | `long` | yes | `Filing.body.form_c.financials.current_employees`: integer (§4.3), Int64. Count. |
-| `total_assets_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.total_assets_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `total_assets_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.total_assets_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `cash_equivalents_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cash_equivalents_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `cash_equivalents_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cash_equivalents_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `accounts_receivable_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.accounts_receivable_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `accounts_receivable_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.accounts_receivable_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `short_term_debt_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.short_term_debt_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `short_term_debt_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.short_term_debt_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `long_term_debt_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.long_term_debt_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `long_term_debt_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.long_term_debt_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `revenue_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.revenue_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `revenue_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.revenue_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `cost_goods_sold_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cost_goods_sold_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `cost_goods_sold_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cost_goods_sold_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `tax_paid_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.tax_paid_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `tax_paid_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.tax_paid_prior_fy`: decimal s=2 (§4.3, M2). USD. |
-| `net_income_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.net_income_most_recent_fy`: decimal s=2 (§4.3, M2). USD. |
-| `net_income_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.net_income_prior_fy`: decimal s=2 (§4.3, M2). USD. |
+| `current_employees` | `long` | yes | `Filing.body.form_c.financials.current_employees`: integer ([decimals](../chains/sec.md#decimals)), Int64. Count. |
+| `total_assets_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.total_assets_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `total_assets_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.total_assets_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `cash_equivalents_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cash_equivalents_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `cash_equivalents_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cash_equivalents_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `accounts_receivable_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.accounts_receivable_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `accounts_receivable_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.accounts_receivable_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `short_term_debt_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.short_term_debt_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `short_term_debt_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.short_term_debt_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `long_term_debt_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.long_term_debt_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `long_term_debt_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.long_term_debt_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `revenue_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.revenue_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `revenue_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.revenue_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `cost_goods_sold_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cost_goods_sold_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `cost_goods_sold_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.cost_goods_sold_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `tax_paid_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.tax_paid_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `tax_paid_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.tax_paid_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `net_income_most_recent_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.net_income_most_recent_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
+| `net_income_prior_fy` | `decimal(38,2)` | yes | `Filing.body.form_c.financials.net_income_prior_fy`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD. |
 | `co_issuer_count` | `long` | no | Derived from `Filing.body.form_c.co_issuers[]`: length of the list. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1886,7 +1886,7 @@ Co-issuers (e.g. crowdfunding SPVs) of a Form C.
 | `filing_index` | `long` | no | `Filing.ordinal`: the filing's 0-based position in the block; with `block_num`, the filing key of `filings`. |
 | `accession_number` | `string` | no | `Filing.accession_number`: the EDGAR accession, verbatim. Not unique across blocks (re-dissemination): use the `sec_filings_first` view. |
 | `form_type` | `string` | no | `Filing.form_type`: the EDGAR form type, verbatim (`4/A`). |
-| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2). |
+| `filing_date` | `date` | yes | `Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)). |
 | `acceptance_datetime` | `timestamp` | yes | `Filing.acceptance_datetime`: a copy of `filings.acceptance_datetime` (UTC). |
 | `filer_cik` | `string` | yes | Copy of `form_c_notices.filer_cik`. The primary issuer (like `form_d_co_issuers.issuer_cik`). |
 | `co_issuer_index` | `long` | no | Derived: position in `co_issuers`. |
@@ -1894,7 +1894,7 @@ Co-issuers (e.g. crowdfunding SPVs) of a Form C.
 | `legal_status_form` | `string` | yes | `Filing.body.form_c.co_issuers[].legal_status_form`. |
 | `legal_status_other_desc` | `string` | yes | `Filing.body.form_c.co_issuers[].legal_status_other_desc`. |
 | `jurisdiction` | `string` | yes | `Filing.body.form_c.co_issuers[].jurisdiction`. |
-| `date_incorporation` | `date` | yes | `Filing.body.form_c.co_issuers[].date_incorporation`: date (§4.2). |
+| `date_incorporation` | `date` | yes | `Filing.body.form_c.co_issuers[].date_incorporation`: date ([dates](../chains/sec.md#dates)). |
 | `co_issuer_street1` | `string` | yes | `Filing.body.form_c.co_issuers[].address.street1`. |
 | `co_issuer_street2` | `string` | yes | `Filing.body.form_c.co_issuers[].address.street2`. |
 | `co_issuer_city` | `string` | yes | `Filing.body.form_c.co_issuers[].address.city`. |
@@ -1904,7 +1904,7 @@ Co-issuers (e.g. crowdfunding SPVs) of a Form C.
 | `co_issuer_country` | `string` | yes | `Filing.body.form_c.co_issuers[].address.country`. |
 | `co_issuer_non_us_state_territory` | `string` | yes | `Filing.body.form_c.co_issuers[].address.non_us_state_territory`. |
 | `website` | `string` | yes | `Filing.body.form_c.co_issuers[].website`. |
-| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6). |
+| `has_parse_issues` | `boolean` | no | Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -1925,11 +1925,11 @@ Every source value that did not convert exactly (or was rounded), with enough ke
 | `accession_number` | `string` | yes | `Filing.accession_number`: verbatim; NULL for block-level fields. |
 | `table_name` | `string` | no | Derived: table of the typed column. |
 | `column_name` | `string` | no | Derived: typed column; `list.member` for a List<Struct> member (`former_names.date_changed`). |
-| `index_1` | `long` | yes | Derived: first key position after `filing_index` (§4.6). |
+| `index_1` | `long` | yes | Derived: first key position after `filing_index` ([parse issues](../chains/sec.md#parse-issues)). |
 | `index_2` | `long` | yes | Derived: second key position. |
 | `index_3` | `long` | yes | Derived: third key position. |
-| `raw_value` | `string` | no | The source string: verbatim; for `overflow`, the operands joined with ` * ` / ` + ` (§4.6). |
-| `issue` | `string` | no | Derived: `unparseable`, `sentinel`, `out_of_range`, `rounded`, `tz_dropped`, `overflow` (§4.6). |
+| `raw_value` | `string` | no | The source string: verbatim; for `overflow`, the operands joined with ` * ` / ` + ` ([parse issues](../chains/sec.md#parse-issues)). |
+| `issue` | `string` | no | Derived: `unparseable`, `sentinel`, `out_of_range`, `rounded`, `tz_dropped`, `overflow` ([parse issues](../chains/sec.md#parse-issues)). |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 

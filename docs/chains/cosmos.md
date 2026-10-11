@@ -13,8 +13,9 @@ transactions across the full source block, including filtered failed rows.
 
 Events retain `event_index` and nullable `long` `attribute_index`. An event without
 attributes has one row with null attribute index/key/value. Empty source strings
-are present values. Block events have null `tx_index` and `tx_hash`; transaction
-events and messages use the same source index as `transactions.index`.
+are present values. `events.source` is `block` or `transaction`. Block events have
+null `tx_index` and `tx_hash`; transaction events and messages use the same source
+index as `transactions.index`.
 
 Memo, timeout height, fee gas limit/payer/granter, ordered fee coins, signer infos
 and signatures live on `transactions`. Coin amounts are exact strings. Missing
@@ -22,7 +23,8 @@ body/auth/fee is null; a present empty value or list remains empty. Public keys
 are optional, and signer/signature arrays keep their independent source order
 and lengths. Signer `mode_info` retains the opaque embedded protobuf payload
 (concatenated in source order if repeated); it is not semantically validated.
-All raw payloads are `binary` regardless of identifier encoding.
+Raw payloads (`raw_tx`, `messages.value`, public keys, `mode_info` and
+signatures) are `binary`, not hex.
 
 ```sql
 SELECT m.block_num, m.tx_index, m.message_index, m.type_url,
@@ -34,6 +36,4 @@ JOIN delta_scan('output/cosmos/transactions') t
 WHERE t.code = 0;
 ```
 
-These Cosmos schema changes require rebuilding into a new root or explicit
-conversion into a separate dataset. Old fabricated zeros and omitted rows need
-source replay to recover their meaning. See the [migration and live RPC comparison](../audit/510-cosmos-values.md).
+See the [live RPC comparison](../audit/510-cosmos-values.md).

@@ -141,11 +141,11 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 
 ## Parquet file metadata
 
-Every Parquet file `build` writes embeds key-value metadata in the file footer under the `firehose-parquet.*` namespace. This allows consumers to identify the source pipeline, encoding, and chain without external sidecar files. The files that the [maintenance job](delta-maintenance.md)'s OPTIMIZE writes do not carry it: a table's identity is in its Delta table properties (`fireparq.descriptor`, `fireparq.chain`, `fireparq.blockType`), which every `build` start checks.
+Every Parquet file `build` writes embeds key-value metadata in the file footer under the `firehose-parquet.*` namespace. This allows consumers to identify the source pipeline, encoding, and chain without external sidecar files. A table's identity is also in its Delta table properties (`fireparq.descriptor`, `fireparq.chain`, `fireparq.blockType`), which every `build` start checks. The files that the [maintenance job](delta-maintenance.md)'s OPTIMIZE writes keep each `firehose-parquet.*` key with one value among the day's files (a key whose values differ, such as `firehose-parquet.version` on a day that spans a writer upgrade, is left out) and add `fireparq.row_order = writer`.
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `1.0.2` |
+| `firehose-parquet.version` | `1.2.0` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
@@ -164,7 +164,10 @@ Every Parquet file `build` writes embeds key-value metadata in the file footer u
 Table files carry the pipeline, chain, encoding and compression keys.
 `partition` (always `date`) is written to `_fireparq/cursor.parquet`, which also
 records `extended`, `final_blocks_only` and `include_failed_transactions`. `with_votes` appears on Solana output, and the
-`synthetic_*` keys only when synthetic routing is used.
+`synthetic_*` keys only when synthetic routing is used. Each part `build`
+writes also carries its `fireparq.ingest.*` provenance (stream, transaction,
+entry index, first and last ordinal, schema digest), which publication and
+recovery verify; compacted files leave it out.
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
 
@@ -177,21 +180,14 @@ Endpoint `block_id_encoding` remains a fallback only when the chain does not res
 
 ### Reading metadata
 
-```python
-import pyarrow.parquet as pq
-
-meta = pq.read_metadata("output/mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet")
-for i in range(meta.metadata.count()):
-    key = meta.metadata.keys()[i]
-    if key.startswith("firehose-parquet."):
-        print(f"{key} = {meta.metadata.values()[i]}")
-```
+`fireparq inspect <file>` prints a file's key-value metadata. In DuckDB, whose
+`parquet_kv_metadata` returns keys and values as `BLOB`:
 
 ```sql
--- DuckDB: one data file, named by the table's log (never a glob)
-SELECT key, value
+-- One data file, named by the table's log (never a glob)
+SELECT decode(key) AS key, decode(value) AS value
 FROM parquet_kv_metadata('output/mainnet/blocks/date=2026-01-15/part-v1-<...>.parquet')
-WHERE key LIKE 'firehose-parquet.%';
+WHERE decode(key) LIKE 'firehose-parquet.%';
 ```
 
 ## Parquet lookup metadata
@@ -220,10 +216,9 @@ lookups; readers without Bloom pruning may only see the storage overhead.
 Complete ingestion parts declare ascending `block_num` only when every observed
 height proves that order. Ingestion neither sorts nor reconstructs
 reversible-chain history. The maintenance job's compacted files keep the parts'
-row order ([Row order](delta-maintenance.md#row-order)), but neither the
-Bloom filters nor the sort metadata unless its `WriterProperties` enable them;
-the `add.stats` of every file (`block_num` and `timestamp` bounds) still prune
-reads.
+row order ([Row order](delta-maintenance.md#row-order)) but not their Bloom
+filters or sort metadata; the `add.stats` of every file (`block_num` and
+`timestamp` bounds) still prune reads.
 
 Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
 `zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default

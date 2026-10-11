@@ -152,4 +152,4 @@ The base58 columns hold bytes in the identifier encoding. Columns that do not ap
 
 **The table is empty with the StreamingFast NEAR producer.** Every published version of `near-firehose-indexer` (checked from 2021-08 to 2026-07) writes an empty `Block.state_changes`, and the Firehose protobuf has no per-shard state-change field. The columns above are mapped and tested, including on a projection of real NEAR state changes, so they fill in if a producer supplies the list ([#625](https://github.com/pinax-network/firehose-parquet/issues/625)).
 
-These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](../audit/506-near-public-qualification.md) and the [#507 status and state-change record](../audit/507-near-status-state-changes.md).
+See the [bounded public-source comparison and its coverage limits](../audit/506-near-public-qualification.md) and the [#507 status and state-change record](../audit/507-near-status-state-changes.md).

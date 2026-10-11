@@ -224,9 +224,9 @@ mod tests {
     }
 
     /// `value` with every object's keys in sorted order: the order of
-    /// serde_json's default map, which the streamed JSON keeps. A build that
-    /// also compiles DataFusion (`cargo test --workspace` with
-    /// `fireparq-maintenance`) turns on serde_json's `preserve_order`.
+    /// serde_json's default map, which the streamed JSON keeps. Sorting keeps the
+    /// comparison independent of serde_json's `preserve_order` feature, which
+    /// any dependency in the build could turn on.
     fn sorted(value: Value) -> Value {
         match value {
             Value::Object(map) => {

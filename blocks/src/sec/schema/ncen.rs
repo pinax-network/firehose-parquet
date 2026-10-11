@@ -27,7 +27,7 @@ pub(crate) const NCEN_REPORTS: TableSpec = TableSpec {
             "report_ending_period",
             Ty::Date32,
             true,
-            "`Filing.body.ncen.report_ending_period`: date (§4.2). Fiscal year end.",
+            "`Filing.body.ncen.report_ending_period`: date ([dates](../chains/sec.md#dates)). Fiscal year end.",
         ),
         Col::new(
             "is_report_period_lt12",
@@ -135,7 +135,7 @@ pub(crate) const NCEN_REPORTS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };

@@ -1,15 +1,12 @@
 # CLI reference
 
-The primary ingestion workflow is `fireparq build`. Utility workflows stay
-under the subcommands `inspect`, `validate`, `recovery` and `completions`;
-engines read the tables ([Reading the tables](reading-tables.md)). The global flags
+`fireparq build` streams Firehose blocks into the Delta tables. The other
+[subcommands](#subcommands) are `maintenance`, `validate`, `inspect`,
+`recovery` and `completions`; DuckDB and Polars read the tables
+([Reading the tables](reading-tables.md)). The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
-
-For full CLI help, run `fireparq --help` for the top-level command surface or
-`fireparq build --help` for ingestion-specific flags. The summary below keeps
-the main operator path up front and leaves the less-common deployment and
-recovery knobs to dedicated advanced sections.
+`fireparq --help` and `fireparq <command> --help` print the full help.
 
 Non-final output (`--final-blocks-only=false`) is described in [Non-final streams and reorgs](non-final-streams.md), and Firehose credentials in [Authentication](authentication.md).
 
@@ -18,12 +15,12 @@ Non-final output (`--final-blocks-only=false`) is described in [Non-final stream
 | Area | Common flags |
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
-| Range | `--start-block <START_BLOCK>` (default: the endpoint's first streamable block, or the network's data origin when later, such as HyperCore's 846903317; [start and stop blocks](cursor-and-resume.md#start-and-stop-blocks)), `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
+| Range | `--start-block <START_BLOCK>` (default: the endpoint's first streamable block, or the network's data origin when later, such as HyperCore's 846903317; [start and stop blocks](cursor-and-resume.md#start-and-stop-blocks)), `--stop-block <STOP_BLOCK>` (exclusive; omit it for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror (`--cursor`, default `_fireparq/cursor.parquet` in the dataset root, or `none`) |
 | Output | `--output <OUTPUT>` (`OUTPUT`, default `.`; an explicit `s3://bucket/prefix` for S3): the dataset root, used exactly as given, with an opt-in `{chain}` placeholder for the endpoint's chain name, for example `--output 's3://datasets/{chain}'` ([dataset layout](output-layout.md#output-directory-layout)); every table is a Delta table at `<table>/`, with its data files in `<table>/date=YYYY-MM-DD/`; `--compression <COMPRESSION>` (default `zstd`) |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
-| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` / `--flush-idle-secs` (`0` disables rows, interval and idle; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
-| Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#advanced-s3--deployment-knobs)) |
+| Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--dry-run` (decode and map without writing), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` / `--flush-idle-secs` (`0` disables rows, interval and idle; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
+| Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#flush-concurrency)) |
 
 ## Network aliases
 
@@ -39,7 +36,7 @@ Examples:
 
 Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
 
-Aliases come from two sources: The Graph networks registry, and a short reviewed list of Pinax-served networks the registry does not list yet (`PINAX_NETWORKS`, currently `hypercore`; an entry is dropped once the registry gives the network an alias). Registry aliases use the Pinax endpoint the registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See [`docs/network-registry-integration.md`](network-registry-integration.md) for the provider policy, the internal list and the weekly endpoint check.
+Aliases come from two sources: The Graph networks registry, and a short reviewed list of Pinax-served networks the registry does not list yet (`PINAX_NETWORKS`, currently `hypercore`; an entry is dropped once the registry gives the network an alias). Registry aliases use the Pinax endpoint the registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See [Network registry integration](network-registry-integration.md) for the provider policy, the internal list and the weekly endpoint check.
 
 Resolution precedence:
 
@@ -49,9 +46,9 @@ Resolution precedence:
 
 Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
 
-Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
+A name outside the built-in list is rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
 
-`build` requires EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](audit/467-endpoint-info.md) for retry limits and validation.
+`build` requires EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or a server without the Info RPC stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
@@ -68,8 +65,11 @@ fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-bloc
 
 ## Environment variables
 
-CLI flags can also be set via environment variables. Copy `.env.example` to `.env`
-in the directory you run `fireparq` from. Since #617:
+Every `build` flag can also be set with the environment variable that
+`fireparq build --help` names. [`.env.example`](../.env.example) lists them
+all (a test keeps it in sync with the CLI); copy it to `.env` in the directory
+you run `fireparq` from. `fireparq maintenance` takes its own
+variables instead ([Delta maintenance](delta-maintenance.md)). Since #617:
 
 - `fireparq` loads `.env` from the **current working directory only**. Parent
   directories are never searched, so a run started in a subdirectory or a git
@@ -79,55 +79,8 @@ in the directory you run `fireparq` from. Since #617:
 - Process environment variables and CLI flags win over the file.
 - Startup names the loaded file and the variables it supplied, never their
   values: an INFO `loaded env file` log line for `build`, and one stderr line
-  for other commands. A malformed file is an error that never echoes the offending line.
-
-```bash
-# Authentication — use credentials scoped to the destination provider
-PINAX_API_KEY=your-pinax-api-key-here
-# PINAX_API_TOKEN=your-pinax-jwt-token-here
-# STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token-here
-
-# Prometheus metrics (optional)
-# METRICS_PORT=9090
-
-# Failed transaction filtering (optional)
-# EXCLUDE_FAILED_TRANSACTIONS=true   # drop failed txs (EVM includes them by default)
-# INCLUDE_FAILED_TRANSACTIONS=true   # include failed txs on non-EVM chains
-
-# AWS S3 output (optional): an explicit URI plus both keys
-# OUTPUT=s3://ethereum-mainnet
-# AWS_ACCESS_KEY_ID=...
-# AWS_SECRET_ACCESS_KEY=...
-# AWS_REGION=us-east-1
-```
-
-See `.env.example` for the full list of supported environment variables.
-
-### Migrating Kubernetes deployments (#617)
-
-Deployments that set `S3_BUCKET` plus a relative `OUTPUT` (or no `OUTPUT`) must
-switch to an explicit S3 URI; otherwise `build` now exits
-with an error before writing anything. Kubernetes expands `$(VAR)` references to
-variables defined earlier in the same container's `env` list:
-
-```yaml
-env:
-  - name: BUCKET_NAME
-    valueFrom:
-      configMapKeyRef: { name: fireparq, key: bucket }
-  # Before: S3_BUCKET=$(BUCKET_NAME) and OUTPUT=v1, implicitly
-  # s3://<bucket>/v1/<chain_name>. /{chain} keeps that directory.
-  - name: OUTPUT
-    value: s3://$(BUCKET_NAME)/v1/{chain}
-```
-
-`--output` is now used exactly as given, so a v0.7 `OUTPUT` keeps its layout only
-with `/{chain}` added; a bucket per network can use `s3://$(BUCKET_NAME)` for a
-bucket-root dataset instead ([single-network buckets](output-layout.md#single-network-buckets)).
-Keep `S3_BUCKET` only if you want its bucket consistency check (it must then match
-the `OUTPUT` bucket) or read-only shorthand keys; it no longer selects the output.
-Relative cursor paths still land under the resolved dataset root. Check the
-`resolved write destinations` log line after rollout.
+  for the other commands except `completions`. A malformed file is an error
+  that never echoes the offending line.
 
 ## Advanced recovery / override behavior
 
@@ -142,10 +95,10 @@ rather than the default workflow:
 
 ### Receive transport
 
-`build` uses 16 MiB HTTP/2 stream and connection
-receive windows and accepts plain, gzip, or zstd replies. The server selects the
-response encoding; requests remain uncompressed. Parquet `--compression` is
-independent of transport compression.
+`build` uses 16 MiB HTTP/2 stream and connection receive windows and accepts
+plain, gzip, or zstd replies. The server selects the response encoding;
+requests remain uncompressed. Parquet `--compression` is independent of
+transport compression.
 
 | Flag / environment | Behavior |
 |---|---|
@@ -153,14 +106,11 @@ independent of transport compression.
 | `--grpc-adaptive-window[=true\|false]` / `GRPC_ADAPTIVE_WINDOW` | Opt into automatic window tuning; default false. When true, it overrides `--grpc-window-bytes`. |
 | `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB), or `536870912` (512 MiB) for the ingestion stream of `--block-type sec`, whose 13F and N-PX deadline-day windows exceed 128 MiB. Values must be positive and fit UInt32. Applies to Info and the ingestion stream. |
 
-The message limit is a per-response bound, not a cap on total process memory.
-An oversized response fails with an error; increasing the limit permits larger
-allocations. To restore the previous windows explicitly, use
-`--grpc-window-bytes 0 --grpc-adaptive-window=false`.
-The selected 16 MiB default improved a bounded local transport benchmark at both
-zero added latency and 50 ms simulated round-trip latency; this is not an
-end-to-end ingestion or provider performance guarantee. See the
-[measurements and tradeoffs](audit/517-grpc-transport.md).
+The message limit bounds one response, not process memory: an oversized
+response fails with an error, and a higher limit permits larger allocations.
+The 16 MiB window default improved a local transport benchmark at zero and
+50 ms of added round-trip latency; it is not an end-to-end ingestion guarantee
+([measurements and tradeoffs](audit/517-grpc-transport.md)).
 
 ### Connection errors
 
@@ -188,86 +138,99 @@ end-to-end ingestion or provider performance guarantee. See the
 Most operators point `--output` at a local path or an explicit
 `s3://bucket/prefix`. S3 output or an S3 cursor for `build` requires both an
 access key ID and a secret access key, from the flags or `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY`. `build` never
-falls back to profile or instance-metadata credentials. The remaining flags are
-only needed for custom deployment environments:
+`AWS_SECRET_ACCESS_KEY`; `build` never falls back to profile or
+instance-metadata credentials. The remaining flags are only needed for custom
+deployment environments:
 
 | Flag (environment) | Purpose |
 |---|---|
 | `--s3-bucket` (`S3_BUCKET`) | Optional check that an explicit `s3://` output uses this bucket; a relative output is then rejected, never expanded |
 | `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`) | S3 credentials and region |
-| `--aws-endpoint-url` (`AWS_ENDPOINT_URL_S3`) | Target S3-compatible object stores |
+| `--aws-endpoint-url` (`AWS_ENDPOINT_URL_S3`) | Target S3-compatible object stores; `build` output needs an HTTPS endpoint ([S3-aware cursor](cursor-and-resume.md#s3-aware-cursor)) |
 | `--cache-control` (`CACHE_CONTROL`) | Cache-Control header for S3 uploads, default `public, max-age=31536000, immutable`; an empty string sends no header |
-| `--metrics-port` (`METRICS_PORT`) | Expose Prometheus and health endpoints for monitored deployments |
+| `--metrics-port` (`METRICS_PORT`), `--metrics-stale-after-secs` (`METRICS_STALE_AFTER_SECS`) | Serve `/metrics`, `/health` and `/ready`; `/ready` returns 503 after N seconds without a stream message, default 120 ([metrics](metrics.md)) |
 
-Each `build` mapper flush commits its nonempty tables together before advancing
-output authority and the cursor mirror. `--flush-bytes` is a **target compressed
-size for the largest table's file**, defaulting to 32 MiB in Config and
-`build`. Build starts with a conservative
-calibration flush, then learns the compressed-to-mapper-size ratio from actual
-committed file sizes. This prediction resets on restart; dry runs keep the
-conservative estimate because they produce no file receipts. Files can overshoot by
-one mapped block, and smaller tables naturally produce smaller files.
+### S3 output in Kubernetes
 
-Build separately flushes when the **sum of all mapper table estimates** reaches
+Kubernetes expands `$(VAR)` references to variables defined earlier in the same
+container's `env` list, so a bucket per network
+([single-network buckets](output-layout.md#single-network-buckets)) can take
+its output from a ConfigMap:
+
+```yaml
+env:
+  - name: BUCKET_NAME
+    valueFrom:
+      configMapKeyRef: { name: fireparq, key: bucket }
+  - name: OUTPUT
+    value: s3://$(BUCKET_NAME)
+```
+
+Use `s3://$(BUCKET_NAME)/{chain}` to share one bucket between networks. A
+relative `OUTPUT` with `S3_BUCKET` set exits with an error before writing
+anything. Check the `resolved write destinations` log line after a rollout.
+Deployments from v0.7 follow the
+[v1.0.0 upgrade guide](releases/v1.0.0.md#upgrade-guide-read-first).
+
+## Flushes
+
+### Flush size and memory
+
+Each `build` flush commits its nonempty tables together before output
+authority and the cursor mirror advance. `--flush-bytes` is a **target
+compressed size for the largest table's file**, default 32 MiB. `build` starts
+with a conservative calibration flush, then learns the compressed-to-mapper-size
+ratio from the committed file sizes. The ratio resets on restart; dry runs,
+which commit no files, keep the conservative estimate. A file can overshoot by
+one mapped block, and smaller tables produce smaller files.
+
+`build` also flushes when the **sum of all mapper table estimates** reaches
 `--flush-memory-bytes` (default 256 MiB, positive). This remains active with
 `--flush-bytes 0`, which disables only the compressed-size target. The estimate
 counts populated mapper values, **not process RSS**: decoder and bootstrap
 payloads, reserved allocator capacity, materialized Arrow batches, and the active
 Parquet encoder/output need additional memory. A single block can exceed the
-threshold before the next check. Compared with the former 32 MiB largest-table
-trigger, adaptive windows may use substantially more memory; lower this separate
-threshold to constrain estimated accumulation.
+threshold before the next check. Lower it to bound memory;
+[Recommended deployment](deployment.md) raises it on fast chains.
 
 `--flush-rows`, `--flush-blocks`, `--flush-interval-secs` (at the chain head
-only, see below), UTC day changes, the
-memory threshold and clean end of input can all force files below the size
-target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
-like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
-threshold; increasing the file target does not bypass that threshold.
+only, see below), UTC day changes, the memory threshold and clean end of input
+can all force files below the size target. `--flush-rows 0` and
+`--flush-interval-secs 0` disable those triggers, like `--flush-bytes 0`;
+`--flush-blocks` and `--flush-memory-bytes` must be positive. Highly
+compressible data may never reach 32 MiB before the memory threshold;
+increasing the file target does not bypass that threshold.
+
+On graceful shutdown or failure, unflushed mapper data is not written and
+authority does not advance; the next run replays it
+([graceful shutdown](cursor-and-resume.md#graceful-shutdown)).
+
+### Flush concurrency
 
 Within one flush, tables are encoded and published concurrently but under
 explicit bounds. `--flush-encode-concurrency` (default 2, 1-64) caps Parquet
 encoders running at once; `--flush-publish-concurrency` (default 4, 1-64) caps
 part publications, and for local output also the threads that stage, publish and
 verify files. `--flush-inflight-bytes` (default 256 MiB) caps encoded parts that
-are encoding, staged or publishing: memory for local and generic S3 output,
-private disk spool for native S3 (whose readback verification can hold one more
-copy per publication). An encoder is admitted only when its initial reservation
-fits and grows it while writing; if the budget cannot grow it, the part is encoded
-again alone later. One part larger than the whole budget runs alone and logs an
+are encoding, staged or publishing: memory for local output, private disk spool
+for S3 output (whose readback verification can hold one more copy per
+publication). An encoder is admitted only when its initial reservation fits and
+grows it while writing; if the budget cannot grow it, the part is encoded again
+alone later. One part larger than the whole budget runs alone and logs an
 overshoot warning. Each active encoder additionally holds its table's encoder
 working memory, and mapper batches stay allocated until the flush commits.
 
-The transaction contract is unchanged: one Writing journal at a time, receipts
-journaled one at a time with each part's exact receipt durable before that part
-publishes, and authority and the mirror advance only after every part has
-published and every final verified. The first error stops new work, waits for
-work already started, and leaves the journal for recovery. Output bytes and part
-names do not depend on these settings. `1`/`1` still lets the next table encode
-while the previous one publishes; `--flush-inflight-bytes 1` makes table work
-strictly one part at a time. The committed-flush log reports `commit_ms` and the
-observed `peak_encoders`, `peak_publications` and `peak_inflight_bytes`. See
+Concurrency does not change the transaction contract: one Writing journal at a
+time, receipts journaled one at a time with each part's exact receipt durable
+before that part publishes, and authority and the mirror advance only after
+every part has published and every final verified. The first error stops new
+work, waits for work already started, and leaves the journal for recovery.
+Output bytes and part names do not depend on these settings. `1`/`1` still lets
+the next table encode while the previous one publishes; `--flush-inflight-bytes 1`
+makes table work strictly one part at a time. The committed-flush log reports
+`commit_ms` and the observed `peak_encoders`, `peak_publications` and
+`peak_inflight_bytes`. See
 [the qualification and benchmark](audit/516-bounded-flush-concurrency.md).
-
-Runtime logs distinguish mapper batches from successfully materialized Parquet
-output. On graceful shutdown or failure, remaining mapper data is not written
-and authority is not advanced. An interrupted transaction is reconciled before
-replay; a storage error stops ingestion and retains recovery evidence.
-
-When a block starts a new UTC day (a new `date` partition), the mapper flush of
-the previous day is committed first, with the same writer outcome logs, so a
-part never spans two days.
-
-When the first streamable block is missing timestamp metadata, fireparq now
-automatically preserves those leading bootstrap blocks in output and
-synthesizes their timestamps from the first later block that includes timestamp
-metadata.
-
-For Solana, a missing `block_time` keeps canonical `timestamp` null, and the
-row's `date` is its routing day. Routing uses the last known timestamp only,
-seeded from the Solana first-streamable anchor (`2020-03-16 14:29:00 UTC`) for
-the initial span and updated whenever a real block timestamp is observed.
 
 ### Flush interval and catch-up
 
@@ -277,8 +240,8 @@ restart after an outage, or a `--stop-block` backfill far behind the head),
 nobody is waiting for those rows, so the interval is suspended. The size
 triggers (`--flush-bytes`, `--flush-memory-bytes`), `--flush-rows`,
 `--flush-blocks`, day boundaries and the end of the stream still flush, and
-files reach the 32 MiB target instead of holding an interval's worth of
-historical blocks. No flag controls this: `build` measures its pace from the
+files reach the `--flush-bytes` target instead of holding an interval's worth
+of historical blocks. No flag controls this: `build` measures its pace from the
 stream, for final-only and non-final streams and any block time.
 
 - **Catching up**: three samples in a row, covering at least 30 seconds, in
@@ -321,16 +284,36 @@ at the head of what its server has. Use it for feeds that arrive in bursts.
 It is off by default, and 60 for `--block-type sec`, whose feed is one burst
 of 144 windows per EDGAR feed day followed by about a day of silence
 ([SEC notes](chains/sec.md)). One quiet period flushes at most once; the next
-message starts a new one.
+message starts a new one. It is not attempted while `build` reconnects: it
+waits for the new stream and then flushes at once if the stream has been quiet
+long enough.
 
-### Family defaults
+### Day boundaries and missing timestamps
 
-`build --block-type sec` (or `auto` resolving to SEC) changes four defaults,
-each only when neither the flag nor its environment variable is set, and logs
-`applied the block family's build defaults to settings left unset` with the
-values: `--grpc-max-message-bytes 536870912`, `--flush-idle-secs 60`,
-`--stream-idle-timeout-secs 93600` (26 hours) and `--metrics-stale-after-secs
-129600` (36 hours). Every other family keeps the generic defaults.
+When a block starts a new UTC day (a new `date` partition), the mapper flush of
+the previous day is committed first, with the same writer outcome logs, so a
+part never spans two days.
+
+When the first streamable blocks are missing timestamp metadata, fireparq keeps
+those leading bootstrap blocks and synthesizes their timestamps from the first
+later block that has one.
+
+For Solana, a missing `block_time` keeps canonical `timestamp` null, and the
+row's `date` is its routing day. Routing uses the last known timestamp only,
+seeded from the Solana first-streamable anchor (`2020-03-16 14:29:00 UTC`) for
+the initial span and updated whenever a real block timestamp is observed.
+
+## Family defaults
+
+`build --block-type sec` (or `auto` when the endpoint's EndpointInfo names the
+chain `sec`) changes four defaults, each only when neither the flag nor its
+environment variable is set, and logs `applied the block family's build
+defaults to settings left unset` with the values:
+`--grpc-max-message-bytes 536870912`, `--flush-idle-secs 60`,
+`--stream-idle-timeout-secs 93600` (26 hours) and
+`--metrics-stale-after-secs 129600` (36 hours). They follow the family known
+before streaming: an `auto` build that recognizes SEC only from the first
+block's type URL keeps the generic defaults, as does every other family.
 
 ## Subcommands
 
@@ -338,9 +321,27 @@ values: `--grpc-max-message-bytes 536870912`, `--flush-idle-secs 60`,
 table's files, rows, bytes and days come from its Delta log (see
 [Reading the tables](reading-tables.md)).
 
+### `maintenance` — compact, VACUUM and checkpoint
+
+The Delta maintenance job, run on a schedule beside `build`: for each table it
+compacts closed dates in the writer's row order, runs VACUUM, checkpoints and
+cleans up the log. It takes only the global flags; its settings are
+environment variables, listed by `fireparq maintenance --help` (`LAKE_ROOT` or
+`LAKE_BUCKET`, `LAKE_TABLES`, `VACUUM`, `FULL_VACUUM`, ...). It reads the S3
+endpoint from `S3_ENDPOINT`, not `AWS_ENDPOINT_URL_S3`. It prints one JSON
+object per line and exits 0 when every table was maintained or skipped, 1 when
+a table failed, and 2 for a configuration error.
+
+```bash
+DRY_RUN=1 LAKE_ROOT=./output/mainnet LAKE_TABLES=blocks,transactions fireparq maintenance
+```
+
+[Delta maintenance](delta-maintenance.md) has every setting, the schedule and
+the example CronJobs.
+
 ### `inspect` — display file metadata
 
-Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). It reads one file, such as a table's data file, a Delta checkpoint or the cursor mirror, and refuses a directory. Supports local paths, shorthand S3 keys via `S3_BUCKET`, and explicit S3 URIs.
+Displays the metadata of a single Parquet file, such as a table's data file, a Delta checkpoint or the cursor mirror; it refuses a directory. It takes a local path, a shorthand S3 key via `S3_BUCKET`, or an explicit S3 URI.
 
 ```bash
 # Inspect a data file of a local table
@@ -361,7 +362,7 @@ fireparq inspect s3://ethereum-mainnet/_fireparq/cursor.parquet --schema-only --
 
 Lookup order: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
-**Output includes:**
+The output has these sections (`--schema-only` keeps only the schema, `--json` emits JSON):
 
 | Section | Details |
 |---|---|
@@ -411,7 +412,7 @@ fireparq recovery status ./output/mainnet
 fireparq recovery recover ./output/mainnet
 
 # Release one exact S3 owner after provider-confirmed request quiescence
-fireparq recovery release s3://my-bucket/v1/mainnet \
+fireparq recovery release s3://ethereum-mainnet \
   --expected-owner <owner-uuid-from-status> \
   --expected-generation <generation-from-status> \
   --stopped-writer-evidence <reference> \
@@ -427,9 +428,9 @@ fireparq recovery release s3://my-bucket/v1/mainnet \
 Local ownership is an OS directory lock that is released when the owning process
 exits; it cannot be forcibly released. Stopping a process or waiting does not
 make a delayed remote PUT or DELETE safe, so release an S3 owner only with
-provider evidence. Like the other commands, `recovery` reads its S3-compatible
-endpoint from `--aws-endpoint-url` / `AWS_ENDPOINT_URL_S3`, and also accepts
-`AWS_ENDPOINT_URL` as a fallback. See the
+provider evidence. Like `build`, `validate` and `inspect`, `recovery` reads its
+S3-compatible endpoint from `--aws-endpoint-url` / `AWS_ENDPOINT_URL_S3`, and
+falls back to `AWS_ENDPOINT_URL` when that is unset. See the
 [ownership and recovery runbook](audit/468-stage1-ownership.md).
 
 ### Shell completions

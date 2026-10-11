@@ -10,14 +10,43 @@ snapshots (§7.2), is deferred to #666, after the launch.
 Since L8 CI reads every table with DuckDB 1.5.5 and Polars through the log,
 and L9 added the maintenance job (`scripts/delta_maintenance.py`) with its CI
 test beside a real `build`
-([record](../audit/643-l8-l9-engines-maintenance.md)). From v1.0.2 the
-repository is Rust-only ([record](../audit/rust-only.md)): the job is the
-`fireparq-maintenance` binary (§9; from v1.1.0, `fireparq maintenance`), and CI reads with DuckDB and delta-rs
-instead of Polars, which reads through delta-rs. The spike crate
+([record](../audit/643-l8-l9-engines-maintenance.md)). The spike crate
 (`spikes/delta-lake/`) and its `delta-spike` CI job were removed in L8/L9
 once those tests covered it (§1.11); its files are in git history at
 `d79ce49`, and the paths below that name it refer to that commit. Refs #643,
 #636, #653, #655, #658, #659; part of #463.
+
+## Status since v1.0.0
+
+This record keeps the design as written, with dated updates in place. What
+changed after the launch, up to v1.2.0 (2026-10-08):
+
+- **Maintenance job (§9).** From v1.0.2 the repository is Rust-only
+  ([record](../audit/rust-only.md)): the job is the Rust binary
+  `fireparq-maintenance`, and CI reads with DuckDB and delta-rs instead of
+  Polars, which reads through delta-rs. Up to v1.0.5 the job ran delta-rs's
+  OPTIMIZE, which needs DataFusion; v1.0.5 made compacted files keep
+  fireparq's footer metadata. From v1.0.6 the job compacts with its own
+  planner, which keeps the writer's row order
+  ([#690](../audit/690-compaction-row-order.md)), so §1.10 item 14 describes
+  delta-rs's OPTIMIZE, not the job's. From v1.1.0 (#696) the job is
+  `fireparq maintenance` in the writer's image, and nothing links DataFusion.
+- **VACUUM (§4.1).** Since v1.1.2 `VACUUM=0` skips VACUUM in the frequent
+  runs, and a daily run vacuums ([#702](../audit/702-daily-vacuum.md)).
+- **`verify` (§7.2)** is still not back: L6 is #666, open.
+- **Iceberg** (#644, phase 2) runs outside this repository: Apache XTable and
+  Gravitino in k8s-parquet. In fireparq, only the full VACUUM knows about it:
+  since v1.0.3 it keeps each table's `metadata/` directory
+  (`ICEBERG_METADATA_DIR` in `maintenance/src/lib.rs`).
+- **Chains (§6).** v1.2.0 adds HyperCore (#709) and SEC (#710), after the
+  per-chain table was written. Neither has a `decimal(20,0)` column
+  (`blocks/src/chain.rs`), and the mapper epoch is still
+  `fireparq-mapping-v3`.
+- **Pins (§1.1)** are unchanged at v1.2.0: `deltalake-core =1.0.0` with its
+  Arrow/Parquet 59.3.0, object_store 0.13.2 and `buoyant_kernel` 0.28.1,
+  beside the workspace's Arrow/Parquet 60.0.0 and object_store 0.12.5; Rust
+  1.98; CI's DuckDB 1.5.5 with the `delta` extension `45c4087`. #632 is open,
+  so the quick-xml advisories stay ignored (§12).
 
 ## Decisions this design follows (2026-09-27)
 
@@ -35,8 +64,8 @@ once those tests covered it (§1.11); its files are in git history at
   batches while backfilling (#659).
 - Maintenance is an off-the-shelf scheduled job, not fireparq logic. A k8s
   CronJob runs the `deltalake` Python package beside the writer (since the
-  Rust-only change, the same delta-rs operations in `fireparq-maintenance`,
-  §9). fireparq's
+  Rust-only change, the same delta-rs operations in `fireparq-maintenance`;
+  since v1.0.6 the job compacts with its own planner, §9). fireparq's
   `merge` is removed, and its ownership stops blocking other writers to the
   Delta tables (#636).
 - `partitions.parquet` and the `partitions` subcommands are removed by #653
@@ -68,7 +97,7 @@ once those tests covered it (§1.11); its files are in git history at
 | Arrow / Parquet inside delta-rs | 59.3.0 | The workspace stays on 60.0.0. Parquet 59.3.0 still lacks the #10979 Thrift list bound ([#11186](https://github.com/apache/arrow-rs/issues/11186) open), so a workspace downgrade is ruled out. |
 | `object_store` inside delta-rs | 0.13.2 | Pulls `quick-xml` 0.39.4, still under RUSTSEC-2026-0194/0195. The fix needs object_store 0.14.2 (`quick-xml` ^0.41), which no delta-rs release uses yet (#632). |
 | Spike toolchain | Rust 1.98.1 | `spikes/delta-lake/rust-toolchain.toml` (channel `1.98`). |
-| Python `deltalake` | 1.6.6 | Maintenance job and Polars' Delta support, until the Rust-only change: the job is now `deltalake-core` 1.0.0 with its `datafusion` feature (DataFusion 55) in `maintenance/`, and CI installs no Python. |
+| Python `deltalake` | 1.6.6 | Maintenance job and Polars' Delta support, until the Rust-only change: the job is now `deltalake-core` 1.0.0 in `maintenance/` (with its `datafusion` feature, DataFusion 55, up to v1.0.5; without it since v1.0.6), and CI installs no Python. |
 | Polars | 1.44.2 | Pinned in `blocks/tests/engines/requirements.txt` until the Rust-only change removed it; `scan_delta` also needs `deltalake`. CI's delta-rs reads cover it now. |
 | DuckDB CLI | 1.1.1 (delta v0.2.1), 1.5.5 (delta `45c4087`) | 1.5.5 is the CI pin since L8 (it was 1.1.1). Linux amd64 SHA-256: `7f3f1a26…118ae` (1.1.1), `08c0ca11…643d05` (1.5.5); the 1.5.5 `delta` extension build (`linux_amd64`, `45c4087`) is `c8ce674c…af90e9`. |
 | moto (loopback S3) | 5.2.3 (`moto[s3]`) | Honors `If-None-Match: *` (412), checked at startup by `py/loopback_s3.py`. |
@@ -201,7 +230,8 @@ What fireparq must supply for each `add`:
 - `stats`, as JSON: `numRecords` plus `minValues`, `maxValues` and `nullCount`
   for the statistics columns. delta-rs's `create_add` and
   `stats_from_parquet_metadata` are `pub(crate)`, so fireparq computes stats
-  from the batch it just encoded (`part.rs::stats_json`). Timestamp statistics
+  from the batch it just encoded (the spike's `part.rs::stats_json`, now
+  `firehose-parquet/src/delta/stats.rs`). Timestamp statistics
   are ISO-8601 strings with millisecond precision. fireparq's times are whole
   milliseconds, so the bounds are exact.
 
@@ -650,8 +680,9 @@ What the fireparq owner still guards:
 The record keeps its protocol: persistent, conditional, with no expiry or
 takeover, and with the uncertainty latch for data PUTs. With `partitions build`
 gone (#653) and `merge` and `truncate` removed (L5a), only `build` and
-`recovery recover` take it. `verify`, removed for the launch (L5a) and back
-in #666, stays ownerless and writes its registry conditionally (#621).
+`recovery recover` take it. `verify`, removed for the launch (L5a) until
+#666 brings it back, stays ownerless and writes its registry conditionally
+(#621).
 
 What it no longer implies: exclusive control of the Delta tables. Any
 Delta-aware writer, in practice the maintenance CronJob, commits through each
@@ -766,7 +797,7 @@ Consequences:
 | Plain-Parquet output: the unprotected `OutputWriter` in `writer.rs`, Hive-directory discovery as the way to read a table, the `date` column inside data files | Delta tables, read through the log |
 | `merge`, `merge/engine.rs`, `merge/read.rs`, `merge_journal.rs` (`_fireparq_merge.json`), the merge-journal checks in `ingest/maintenance.rs` and at startup | the CronJob's OPTIMIZE |
 | `truncate` and `date_partition::is_date_value_pattern` | Nothing. There is no safe Delta equivalent, because deleting committed rows contradicts fireparq's authority and `appendOnly` refuses it. A bad dataset is rebuilt into a new root. An operator can still clear `appendOnly` and run a `deltalake` DELETE, outside fireparq's guarantees. |
-| `maintenance/compaction.rs` (the merge encoder and receipt stripping) | — |
+| `firehose-parquet/src/maintenance/compaction.rs` (the merge encoder and receipt stripping; not the later `maintenance/` crate) | — |
 | Finer partition code | Already gone in #652, leaving only `date=`. |
 | `partitions.parquet` and `partitions` | #653 (PR #662, merged) |
 | `verify`, its registry `_fireparq/merkle_roots.parquet` and reports `_fireparq/verify_runs/` (decision of 2026-09-27) | #666, after the launch (§7.2) |
@@ -847,7 +878,8 @@ on S3) skips `_delta_log/`, while the ownership symlink check and eligibility
 must still see logs. A test runs `validate` after a simulated OPTIMIZE and
 after a real `deltalake` OPTIMIZE and checkpoint, with the same result. See
 [the L5b/L7 record](../audit/643-l5b-l7-readers.md). Since the Rust-only
-change the real OPTIMIZE and checkpoint are delta-rs's, and the test computes
+change the real OPTIMIZE and checkpoint are the maintenance job's (delta-rs's
+OPTIMIZE up to v1.0.5, its own compaction since v1.0.6), and the test computes
 the table summary of [Reading the tables](../reading-tables.md) through
 delta-rs; its Python program is kept for users but no longer run.
 
@@ -1003,7 +1035,8 @@ Notes:
   `compact` targets `delta.targetFileSize`.
 - **Schedule:**
   - hourly, for example `17 * * * *`, with `concurrencyPolicy: Forbid` and
-    `activeDeadlineSeconds: 3000`;
+    `activeDeadlineSeconds: 3000` (the example has 10800 since v1.0.7: a
+    day's row-order repair takes longer);
   - a second weekly CronJob (`FULL_VACUUM=1`) at a quiet hour;
   - the image is the writer's, `fireparq` with `args: ["maintenance"]`, as
     user 65534 (up to v1.0.7 a separate image of the `fireparq-maintenance`
@@ -1014,7 +1047,8 @@ Notes:
   the weekly full VACUUM after 7 days. The writer is never affected.
 - **Bloom filters and sort metadata:** fireparq writes both. OPTIMIZE output
   keeps neither unless its Parquet writer properties enable Bloom filters (the
-  job sets only ZSTD compression and its level). Choose the columns with the
+  job sets ZSTD compression and its level and, since v1.0.5, carries
+  fireparq's footer metadata). Choose the columns with the
   #658 numbers. That tuning is platform-side too.
 
 ## 10. Reader examples (anonymous, public-read RGW)
@@ -1061,7 +1095,7 @@ its own entry in `docs/releases/v1.0.0.md`.
 | **L2** types | `firehose-parquet/src/delta/types.rs` (checked flush-boundary mapping), the `ChainProfile` Decimal(20,0) lists, parts without the `date` column and with µs timestamps, mapper epoch bump, regenerated `docs/schemas/`, schema contract assertions, `verify` accepting Int64 `block_num` | schema contract (every table, encoding and `fork_step` setting), overflow refusal, golden fixtures re-pinned | L | L1 | #655, #659 |
 | **L3** commit layer (done: PR #671, [record](../audit/643-l3-delta-commits.md); the §4 rows it leaves to L4 are listed there) | `delta/{mod,store,stats,commit}.rs`: object_store 0.13 log store from `AwsConfig` with a single attempt (since v1.0.2, #680: a single attempt per write, and up to 3 per idempotent read, [record](../audit/680-delta-read-retries.md)); the `s3://` factory; table creation and validation after authority init (`fireparq.*` properties, §2); per-table commits with `txn` after Committed, `blocks` last; receipts that carry stats and `modificationTime`; new stage hooks | the spike's tests ported: byte-for-byte parts, `txn` read-back, concurrent writers, same-`appId` conflict, on local, in-memory and loopback S3 | L | L1, L2 | #655, #659 |
 | **L4** recovery and ownership (done: PR #675, [record](../audit/643-l4-delta-recovery.md), [#636 record](../audit/636-delta-ownership.md)) | Committed roll-forward gated by `txn`; no part verification when authority equals the target; "log ahead" refusal; ensure-tables at startup; the log-commit uncertainty decision (§3.5); owner semantics and RGW policy docs (#636) | real-binary crash test for each §4 row (`ingestion_transactions.rs`), an external OPTIMIZE and VACUUM between crash and restart, `txn` and exact rows | L | L3 | #659; rebase with #655 (`session.rs`, `ingest/maintenance.rs`) |
-| **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #672, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
+| **L5** removals | **L5a** (no dependency, PR #670, [record](../audit/643-l5a-removals.md)): `merge` and its journal and intent record, `truncate`, `verify` with its registry, reports and docs, `firehose-parquet/src/maintenance/compaction.rs`, merge-journal startup checks, their CLI flags, README sections, `maintenance_crash_hooks.rs`; **L5b** (done with L7: PR #672, [record](../audit/643-l5b-l7-readers.md)): the plain-Parquet `OutputWriter` and readers | the remaining suite stays green; CLI help tests | M (mostly deletions) | L5b: L3 | #655 (shared `ingest/maintenance.rs`); #653 already merged |
 | **L6** verify (deferred to #666, after the launch) | pinned-snapshot file sets, `merkle_v3` canonical order, open dates from `blocks`, identity from table properties; `docs/verifiability-hash-strategy.md`, the report contract (removed in L5a, restored from git history) | golden roots unchanged by OPTIMIZE (same root before and after compaction), refusal on a vacuumed pinned file, registry tests | L | L3 | L4, L5, L7 |
 | **L7** validate, scan, inspect (done with L5b: PR #672, [record](../audit/643-l5b-l7-readers.md); `scan` removed) | snapshot-based `validate`, log-based `scan` (or its removal), `_delta_log/` skipped by walkers | CLI tests over Delta tables | M | L3 | L4–L6 |
 | **L8** engine CI (done: PR #673, [record](../audit/643-l8-l9-engines-maintenance.md)) | `blocks/tests/engine_compat.rs` on `delta_scan` and `scan_delta` for every chain's tables (final and non-final); DuckDB pin → 1.5.5; add `deltalake` to `blocks/tests/engines/requirements.txt`; anonymous-read checks against the deployment's RGW (opt-in) | engine test required in CI | M | L3 | L4–L7 |

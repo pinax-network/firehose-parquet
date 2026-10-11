@@ -39,7 +39,7 @@ pub(crate) const BENEFICIAL_REPORTS: TableSpec = TableSpec {
             "cusip_norm",
             Ty::Utf8,
             true,
-            "Derived from `Filing.body.beneficial.cusip`: §4.4 `cusip_norm`.",
+            "Derived from `Filing.body.beneficial.cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns).",
         ),
         Col::new(
             "schedule_type",
@@ -69,7 +69,7 @@ pub(crate) const BENEFICIAL_REPORTS: TableSpec = TableSpec {
             "event_date",
             Ty::Date32,
             true,
-            "`Filing.body.beneficial.event_date`: date (§4.2).",
+            "`Filing.body.beneficial.event_date`: date ([dates](../chains/sec.md#dates)).",
         ),
         Col::new(
             "issuer_street1",
@@ -135,7 +135,7 @@ pub(crate) const BENEFICIAL_REPORTS: TableSpec = TableSpec {
             "amendment_number",
             Ty::Int32,
             true,
-            "`Filing.body.beneficial.amendment_number`: integer (§4.3), Int32.",
+            "`Filing.body.beneficial.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32.",
         ),
         Col::new(
             "previously_filed",
@@ -459,7 +459,7 @@ pub(crate) const BENEFICIAL_REPORTS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -552,31 +552,31 @@ pub(crate) const BENEFICIAL_REPORTING_PERSONS: TableSpec = TableSpec {
             "sole_voting_power",
             Ty::Decimal(Family::Q6),
             true,
-            "`Filing.body.beneficial.reporting_persons[].sole_voting_power`: decimal s=6 (§4.3, Q6). Shares.",
+            "`Filing.body.beneficial.reporting_persons[].sole_voting_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares.",
         ),
         Col::new(
             "shared_voting_power",
             Ty::Decimal(Family::Q6),
             true,
-            "`Filing.body.beneficial.reporting_persons[].shared_voting_power`: decimal s=6 (§4.3, Q6). Shares.",
+            "`Filing.body.beneficial.reporting_persons[].shared_voting_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares.",
         ),
         Col::new(
             "sole_dispositive_power",
             Ty::Decimal(Family::Q6),
             true,
-            "`Filing.body.beneficial.reporting_persons[].sole_dispositive_power`: decimal s=6 (§4.3, Q6). Shares.",
+            "`Filing.body.beneficial.reporting_persons[].sole_dispositive_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares.",
         ),
         Col::new(
             "shared_dispositive_power",
             Ty::Decimal(Family::Q6),
             true,
-            "`Filing.body.beneficial.reporting_persons[].shared_dispositive_power`: decimal s=6 (§4.3, Q6). Shares.",
+            "`Filing.body.beneficial.reporting_persons[].shared_dispositive_power`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares.",
         ),
         Col::new(
             "aggregate_amount_owned",
             Ty::Decimal(Family::Q6),
             true,
-            "`Filing.body.beneficial.reporting_persons[].aggregate_amount_owned`: decimal s=6 (§4.3, Q6). Shares.",
+            "`Filing.body.beneficial.reporting_persons[].aggregate_amount_owned`: decimal s=6 ([decimals](../chains/sec.md#decimals), Q6). Shares.",
         ),
         Col::new(
             "aggregate_excludes_shares",
@@ -588,7 +588,7 @@ pub(crate) const BENEFICIAL_REPORTING_PERSONS: TableSpec = TableSpec {
             "percent_of_class",
             Ty::Decimal(Family::R12),
             true,
-            "`Filing.body.beneficial.reporting_persons[].percent_of_class`: decimal s=12 (§4.3, R12). Percent units (7.7 = 7.7%).",
+            "`Filing.body.beneficial.reporting_persons[].percent_of_class`: decimal s=12 ([decimals](../chains/sec.md#decimals), R12). Percent units (7.7 = 7.7%).",
         ),
         Col::new(
             "type_of_reporting_person",
@@ -618,7 +618,7 @@ pub(crate) const BENEFICIAL_REPORTING_PERSONS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
