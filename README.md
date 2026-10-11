@@ -25,7 +25,7 @@ vacuums and checkpoints them beside the writer.
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
 | `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
 | `sec` | no built-in name; `--endpoint` of a firesec ≥ 0.13.0 Firehose (SEC EDGAR filings, one block per 10-minute window) | [SEC schema](docs/schemas/sec.md) | [SEC notes](docs/chains/sec.md): shipped views, `parse_issues`, 13F units |
-| `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from 2026-01-01, block 846903317: the default start, earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): twelve tables by product family (fills with market class and counterparty, liquidations, funding rates and open interest, HIP-4 outcomes, transfers, bridge, vaults, staking), `decimal(38,10)` amounts, decimal block ids, the data origin and the endpoint's block hole, views, monitors and cookbook |
+| `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from block 846903317 (2026-01-01), the default start; earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): twelve tables by product family, `decimal(38,10)` amounts, decimal block ids, the data origin, views and cookbook |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -42,7 +42,7 @@ tables.
 - **Exactly-once crash recovery**: all-table transactions and an output authority under `.fireparq-ingest/` ([cursor and resume](docs/cursor-and-resume.md)).
 - **One consistent schema across chains**: canonical identity columns on every table, checked Delta types and per-chain encodings ([output layout](docs/output-layout.md)).
 - **Finalized output by default**; non-final streams write an append-only event history with a documented live view ([non-final streams](docs/non-final-streams.md)).
-- **Failed transactions modeled explicitly** on every chain ([failed transaction filtering](docs/chains/failed-transactions.md)).
+- **Failed transactions modeled explicitly** on every chain that has them ([failed transaction filtering](docs/chains/failed-transactions.md)).
 - **Adaptive flushing**: an interval at the chain head, full-size files while catching up ([flush interval and catch-up](docs/cli.md#flush-interval-and-catch-up)).
 - **Operations**: Prometheus metrics with `/health` and `/ready` ([metrics](docs/metrics.md)), and the maintenance job with example CronJobs ([Delta maintenance](docs/delta-maintenance.md)).
 
@@ -65,9 +65,9 @@ to GitHub Container Registry, with `fireparq` as its entrypoint
 `1.2`, `1` and `latest`. The writer runs it as `fireparq build`, the
 [Delta maintenance](docs/delta-maintenance.md) job as `fireparq maintenance`.
 
-To build from source, run `cargo install --path blocks` (and
-`cargo install --path maintenance` for the maintenance job). See
-[Getting started](docs/getting-started.md) for every archive and more examples.
+To build from source, run `cargo install --path blocks`; the one binary
+includes `fireparq maintenance`. See [Getting started](docs/getting-started.md)
+for every archive and more examples.
 
 ## Quick start
 
@@ -146,13 +146,13 @@ the maintenance CronJobs.
 |---|---|---|
 | Using fireparq | [Getting started](docs/getting-started.md) | Install, `build` examples, Docker |
 | | [Authentication](docs/authentication.md) | Provider-scoped Firehose credentials and explicit selectors |
-| | [CLI reference](docs/cli.md) | Flags, network aliases, environment variables, flush sizing, `inspect`, `validate`, `recovery`, completions |
+| | [CLI reference](docs/cli.md) | Flags, network aliases, environment variables, flush sizing, the `inspect`, `validate`, `recovery`, `maintenance` and `completions` subcommands |
 | | [Non-final streams and reorgs](docs/non-final-streams.md) | `--final-blocks-only=false`, `fork_step`, `stream_ordinal`, the canonical live view |
 | | [Features](docs/features.md) | The full feature list |
 | Output and schemas | [Output layout](docs/output-layout.md) | Dataset root and `{chain}`, directory tree, single-network buckets, identity columns, encodings, file metadata |
 | | [Reading the tables](docs/reading-tables.md) | DuckDB and Polars reads, the frontier rule, engine compatibility |
 | | [Schema reference](docs/schemas/README.md) | Every table, column, Delta type and nullability (generated) |
-| | [Partition vocabulary](docs/partition-vocabulary.md) | The `date=YYYY-MM-DD` key and the CLI terms for it |
+| | [Partition vocabulary](docs/partition-vocabulary.md) | The `date=YYYY-MM-DD` key, and the layouts and commands it replaced |
 | Chain-specific notes | [Chain notes](docs/chains/README.md) | Index of the chain pages |
 | | [Failed transaction filtering](docs/chains/failed-transactions.md) | Flags, failure conditions and outcome columns per chain |
 | | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |

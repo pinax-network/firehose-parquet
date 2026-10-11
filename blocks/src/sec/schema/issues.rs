@@ -39,7 +39,7 @@ pub(crate) const PARSE_ISSUES: TableSpec = TableSpec {
             "index_1",
             Ty::UInt32,
             true,
-            "Derived: first key position after `filing_index` (§4.6).",
+            "Derived: first key position after `filing_index` ([parse issues](../chains/sec.md#parse-issues)).",
         ),
         Col::new(
             "index_2",
@@ -57,13 +57,13 @@ pub(crate) const PARSE_ISSUES: TableSpec = TableSpec {
             "raw_value",
             Ty::Utf8,
             false,
-            "The source string: verbatim; for `overflow`, the operands joined with ` * ` / ` + ` (§4.6).",
+            "The source string: verbatim; for `overflow`, the operands joined with ` * ` / ` + ` ([parse issues](../chains/sec.md#parse-issues)).",
         ),
         Col::new(
             "issue",
             Ty::Dictionary,
             false,
-            "Derived: `unparseable`, `sentinel`, `out_of_range`, `rounded`, `tz_dropped`, `overflow` (§4.6).",
+            "Derived: `unparseable`, `sentinel`, `out_of_range`, `rounded`, `tz_dropped`, `overflow` ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };

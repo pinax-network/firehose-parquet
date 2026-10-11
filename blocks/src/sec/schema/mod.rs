@@ -180,7 +180,7 @@ pub(crate) const FC_COLUMNS: [Col; 5] = [
         "filing_date",
         Ty::Date32,
         true,
-        "`Filing.filing_date`: a copy of `filings.filing_date` (date, §4.2).",
+        "`Filing.filing_date`: a copy of `filings.filing_date` (date, [dates](../chains/sec.md#dates)).",
     ),
     Col::new(
         "acceptance_datetime",

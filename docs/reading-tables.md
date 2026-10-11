@@ -51,17 +51,16 @@ remote = pl.scan_delta(
 ```
 
 Use DuckDB 1.5 or later for S3: DuckDB 1.1's `delta` extension fails
-anonymous reads once a table has a checkpoint, which the maintenance job
-writes every hour.
+anonymous reads once a table has a checkpoint, which every maintenance run
+writes.
 
-The Python examples here are for Polars users; no repository code needs Python,
-and CI does not run them. CI reads the same tables with DuckDB and through
-delta-rs, which Polars' `scan_delta` uses
+CI does not run the Python examples; it reads the same tables with DuckDB and
+through delta-rs, which Polars' `scan_delta` uses
 ([engine compatibility](#engine-compatibility)).
 
 A table's files, rows (each file's `numRecords`), bytes and days come from
-its log alone, without reading any data file. This is what `fireparq scan`
-reported before v1.0.0:
+its log alone, without reading any data file (what `fireparq scan` reported
+before v1.0.0):
 
 ```python
 # Table summary from the Delta log
@@ -80,8 +79,9 @@ summary = files.select(
 print(f"version {table.version()}", summary)
 ```
 
-`fireparq validate <root>/blocks` checks block continuity over the same
-snapshot of the log, and `fireparq inspect` reads the footer of one file.
+`fireparq validate <root>/blocks` checks block continuity over the active
+files of the table's latest snapshot, and `fireparq inspect` reads the footer
+of one file.
 
 ## Consistent reads across tables
 

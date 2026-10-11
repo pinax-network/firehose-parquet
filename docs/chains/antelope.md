@@ -14,7 +14,7 @@ Receipt statuses other than `EXECUTED` come from deferred (scheduled) transactio
 | `HARDFAIL` | the deferred transaction failed and its `onerror` handler failed or none ran; nothing persisted | no |
 | `EXPIRED` | the deferred transaction expired unexecuted | no |
 
-`transactions.transaction_success` and the `transaction_success` of `actions` and `db_ops` say whether the trace's effects persisted. `actions` and `db_ops` also carry the parent receipt status as `transaction_status` (`string`, the labels of `transactions.status`). Before #550 only `EXECUTED` traces were selected by default, which dropped successful `onerror` handlers and scheduled transactions.
+`transactions.transaction_success` and the `transaction_success` of `actions` and `db_ops` say whether the trace's effects persisted. `actions` and `db_ops` also carry the parent receipt status as `transaction_status` (`string`, the labels of `transactions.status`).
 
 ## Database-operation joins
 
@@ -32,14 +32,8 @@ JOIN delta_scan('output/eos/transactions') t
  AND d.tx_index = t."index";
 ```
 
-`actions` and `db_ops` end with the parent `transaction_status` and
-`transaction_success` (see [deferred transactions and onerror](#deferred-transactions-and-onerror)).
-
 The action fields `transaction_id`, `trace_block_num`, `producer_block_id`, and
 `block_time` are deprecated for ordinary joins and routing; prefer `tx_hash` and
 canonical block identity/time. They remain verbatim action metadata, which can
-be missing or differ from canonical values. No removal is scheduled. Existing
-action JSON, nulls and enum labels remain unchanged.
-
-Use a new dataset or rebuild older ranges to populate the added columns. Schema
-union makes them null in old files. See [the implementation and live comparison](../audit/508-antelope-db-joins.md).
+be missing or differ from canonical values. No removal is scheduled. See
+[the implementation and live comparison](../audit/508-antelope-db-joins.md).

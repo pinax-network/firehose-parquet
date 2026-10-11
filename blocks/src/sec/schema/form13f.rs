@@ -105,7 +105,7 @@ pub(crate) const FORM13F_REPORTS: TableSpec = TableSpec {
             "period_of_report",
             Ty::Date32,
             true,
-            "`Filing.body.form13f.cover_page.period_of_report`: date (§4.2). Quarter end.",
+            "`Filing.body.form13f.cover_page.period_of_report`: date ([dates](../chains/sec.md#dates)). Quarter end.",
         ),
         Col::new(
             "cover_is_amendment",
@@ -123,13 +123,13 @@ pub(crate) const FORM13F_REPORTS: TableSpec = TableSpec {
             "amendment_number",
             Ty::Int32,
             true,
-            "`Filing.body.form13f.cover_page.amendment_number`: integer (§4.3), Int32.",
+            "`Filing.body.form13f.cover_page.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32.",
         ),
         Col::new(
             "provide_info_for_instruction5",
             Ty::Boolean,
             true,
-            "`Filing.body.form13f.cover_page.provide_info_for_instruction5`: Y/N text → bool (§4.1).",
+            "`Filing.body.form13f.cover_page.provide_info_for_instruction5`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)).",
         ),
         Col::new(
             "additional_information",
@@ -159,7 +159,7 @@ pub(crate) const FORM13F_REPORTS: TableSpec = TableSpec {
             "table_value_total",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.summary_page.table_value_total`: integer (§4.3), Int64. RAW units like `form13f_holdings.value`.",
+            "`Filing.body.form13f.summary_page.table_value_total`: integer ([decimals](../chains/sec.md#decimals)), Int64. RAW units like `form13f_holdings.value`.",
         ),
         Col::new(
             "is_confidential_omitted",
@@ -171,7 +171,7 @@ pub(crate) const FORM13F_REPORTS: TableSpec = TableSpec {
             "value_multiplier_rule",
             Ty::Int32,
             false,
-            "Derived from `Filing.filing_date`: 1000 if `filing_date < 2023-01-03` (else the `date` partition when filing_date is NULL), else 1. SEC cutover rule only; USD with the override is the `sec_13f_units` view (§7.0).",
+            "Derived from `Filing.filing_date`: 1000 if `filing_date < 2023-01-03` (else the `date` partition when filing_date is NULL), else 1. SEC cutover rule only; USD with the override is the [`sec_13f_units`](../chains/sec.md#shipped-views) view.",
         ),
         Col::new(
             "holdings_count",
@@ -207,7 +207,7 @@ pub(crate) const FORM13F_REPORTS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -246,7 +246,7 @@ pub(crate) const FORM13F_OTHER_MANAGERS: TableSpec = TableSpec {
             "sequence_number",
             Ty::Int32,
             true,
-            "`Filing.body.form13f.{cover_page,summary_page}.other_managers[].sequence_number`: integer (§4.3), Int32. Summary page only (empty on cover); the key `other_manager_sequence_numbers` refer to.",
+            "`Filing.body.form13f.{cover_page,summary_page}.other_managers[].sequence_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. Summary page only (empty on cover); the key `other_manager_sequence_numbers` refer to.",
         ),
         Col::new(
             "other_manager_cik",
@@ -282,7 +282,7 @@ pub(crate) const FORM13F_OTHER_MANAGERS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -357,7 +357,7 @@ pub(crate) const FORM13F_HOLDINGS: TableSpec = TableSpec {
             "cusip_norm",
             Ty::Utf8,
             true,
-            "Derived from `Filing.body.form13f.holdings[].cusip`: §4.4 `cusip_norm`. Cross-form join key.",
+            "Derived from `Filing.body.form13f.holdings[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns). Cross-form join key.",
         ),
         Col::new(
             "figi",
@@ -369,13 +369,13 @@ pub(crate) const FORM13F_HOLDINGS: TableSpec = TableSpec {
             "value",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.holdings[].value`: integer (§4.3), Int64. RAW: thousands before 2023-01-03, dollars after; USD via `sec_13f_holdings_usd`.",
+            "`Filing.body.form13f.holdings[].value`: integer ([decimals](../chains/sec.md#decimals)), Int64. RAW: thousands before 2023-01-03, dollars after; USD via `sec_13f_holdings_usd`.",
         ),
         Col::new(
             "shares_or_principal_amount",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.holdings[].shares_or_principal.amount`: integer (§4.3), Int64. `sshPrnamt`.",
+            "`Filing.body.form13f.holdings[].shares_or_principal.amount`: integer ([decimals](../chains/sec.md#decimals)), Int64. `sshPrnamt`.",
         ),
         Col::new(
             "shares_or_principal_type",
@@ -411,31 +411,31 @@ pub(crate) const FORM13F_HOLDINGS: TableSpec = TableSpec {
             "other_manager_sequence_numbers",
             Ty::ListInt32,
             false,
-            "Derived from `Filing.body.form13f.holdings[].other_manager_ids[]`: §4.4 tokenizer. Join `form13f_other_managers.sequence_number` (list_kind = summary).",
+            "Derived from `Filing.body.form13f.holdings[].other_manager_ids[]`: [tokenizer](../chains/sec.md#other-derived-columns). Join `form13f_other_managers.sequence_number` (list_kind = summary).",
         ),
         Col::new(
             "voting_authority_sole",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.holdings[].voting_authority.sole`: integer (§4.3), Int64.",
+            "`Filing.body.form13f.holdings[].voting_authority.sole`: integer ([decimals](../chains/sec.md#decimals)), Int64.",
         ),
         Col::new(
             "voting_authority_shared",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.holdings[].voting_authority.shared`: integer (§4.3), Int64.",
+            "`Filing.body.form13f.holdings[].voting_authority.shared`: integer ([decimals](../chains/sec.md#decimals)), Int64.",
         ),
         Col::new(
             "voting_authority_none",
             Ty::Int64,
             true,
-            "`Filing.body.form13f.holdings[].voting_authority.none`: integer (§4.3), Int64.",
+            "`Filing.body.form13f.holdings[].voting_authority.none`: integer ([decimals](../chains/sec.md#decimals)), Int64.",
         ),
         Col::new(
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };

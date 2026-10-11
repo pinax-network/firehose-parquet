@@ -18,7 +18,7 @@
 //!
 //! The columns, their order, types and nullability, and the schema metadata
 //! [`DERIVATION_KEY`], are bound into the protected stream identity: any change
-//! needs a new output root (`docs/chains/hypercore.md`, "Schema changes").
+//! needs a new output root (`docs/chains/hypercore.md`, "`extra_json` and schema changes").
 
 use std::collections::HashMap;
 

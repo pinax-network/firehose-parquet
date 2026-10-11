@@ -2,22 +2,31 @@
 
 Semantics of the `sec` tables beyond their columns, which the [SEC schema reference](../schemas/sec.md) lists with
 each column's source path in the `pinax.sec.v1.Block` protobuf. The data comes from **firesec ≥ 0.13.0**, which turns
-the EDGAR daily feed into one Firehose block per 10-minute window. Build a dataset with
-`--block-type sec --endpoint <firesec Firehose endpoint>`; the stage endpoint is private and gets no automatic
-credentials, so pass `--api-key-envvar` when the gateway needs one ([authentication](../authentication.md)).
+the EDGAR daily feed into one Firehose block per 10-minute window. fireparq does not check the version: an older
+firesec answers with the same EndpointInfo, and its blocks map without an error into a dataset that lacks the 0.13.0
+fields ([below](#rebuilds-and-schema-changes)). Build a dataset with
+`--block-type sec --endpoint <firesec Firehose endpoint>`. SEC has no `--network` alias, so the endpoint gets no
+automatic credentials: pass `--api-key-envvar` when its gateway needs one ([authentication](../authentication.md)).
+`fireparq maintenance` needs all 43 tables in `LAKE_TABLES`, the names of the [table registration](#shipped-views).
 
 **Size the stream and the writer for deadline days.** A 13F or N-PX deadline day puts whole filings of hundreds of
 thousands of votes or holdings into one window. The largest sample window, 2977878 (2026-08-14), is a 143.9 MB
 protobuf, above the generic 128 MiB `--grpc-max-message-bytes`, which would stop the stream with `OutOfRange` on it at
 every restart. A SEC build therefore defaults to 512 MiB; a deployment that sets `GRPC_MAX_MESSAGE_BYTES` must keep it
-at least that high. A window of that size alone takes about 1.5 GB while it is decoded, mapped and flushed. The replay
-of the four sample days at the default flush settings peaked at 2.0 GB RSS, so give the writer at least 3 GiB of
-memory.
+above the largest window. Writer memory is about 10× the largest window plus 0.5 GB: window 2977878 takes about
+1.5 GB while it is decoded, mapped and flushed, and the replay of the four sample days peaked at 2.0 GB RSS. Give the
+writer at least 3 GiB, which covers windows up to about 250 MB. A larger window passes the 512 MiB limit but can get
+the writer killed for memory, on the same window at every restart, where a lower limit stops on it with a clear
+`OutOfRange` error. Size from the heaviest deadline days: the samples hold one 13F deadline and no N-PX deadline
+(August 31). These figures are at the default `--flush-memory-bytes` (256 MiB); a larger flush budget, such as 1 GiB,
+needs more memory.
 
 **A live writer receives one burst a day.** firesec emits a feed day's 144 windows together once EDGAR publishes
 the daily dump (weekends and holidays as empty windows), then nothing until the next one, about a day later. The
 generic settings expect a block every few seconds, so a SEC build changes four defaults when neither flag nor
-environment variable sets them ([CLI](../cli.md#family-defaults)):
+environment variable sets them ([CLI](../cli.md#family-defaults)). They apply when the family is known before
+streaming: with `--block-type sec`, or with `auto` when the endpoint's EndpointInfo names the chain `sec`. An `auto`
+build that recognizes SEC only from the first block keeps the generic defaults.
 
 | Setting | SEC default | Why |
 |---|---|---|
@@ -25,6 +34,12 @@ environment variable sets them ([CLI](../cli.md#family-defaults)):
 | `--metrics-stale-after-secs` | 129600 (36 h) | `/ready` would otherwise fail 120 s after each burst, for most of the day. It now fails when a feed day is missing. |
 | `--stream-idle-timeout-secs` | 93600 (26 h) | The generic 120 s would reconnect about 700 times a day, each a `WARN` and a `grpc_reconnect` error count. HTTP/2 keepalive still detects a dead connection. |
 | `--grpc-max-message-bytes` | 536870912 (512 MiB) | See above. |
+
+`--reconnect-stall-timeout-secs` keeps its generic 900 s, and its timer resets only when a message arrives. On a
+quiet day, two disconnects 15 minutes apart therefore stop the writer with `reconnect stalled` even when the endpoint
+is healthy ([#711](https://github.com/pinax-network/firehose-parquet/issues/711)); it resumes from its output on
+restart. `--reconnect-stall-timeout-secs 0` avoids that exit and keeps the cap of 30 failed attempts without a
+message.
 
 Alert on a writer down for more than a day as on any chain. Window 143 of a feed day reaches a final-only stream
 only with the next day's window 0, because firesec marks each window final when its successor exists.
@@ -35,8 +50,8 @@ only with the next day's window 0, because firesec marks each window final when 
   windows, numbered from `day_start / 600`. `timestamp` is the window start and `date` its UTC day, which is the
   EDGAR feed day (`blocks.feed_date`). The first streamable window is 1761552 (2003-06-30).
 - **Empty windows are blocks.** Every window has one `blocks` row, filings or not (`filing_count` 0), so
-  `fireparq validate` reports a missing window as a gap. A feed day arrives in one burst after EDGAR publishes its
-  daily dump: most of a day's windows then land in a few flushes.
+  `fireparq validate` reports a missing window as a gap. Since a feed day arrives in one burst, most of its windows
+  land in a few flushes.
 - **Ids are decimal text.** `block_id` is the window number written verbatim (`"2979867"`) and `parent_id` the
   previous one; `parent_num = lib_num = block_num − 1`. They are not hashes. The Parquet footer key
   `firehose-parquet.block_id_encoding` says `decimal`.
@@ -80,7 +95,10 @@ dissemination keeps its first copy in the dataset. Build from block 1761552 to a
 - A protobuf `bool` on a message every row has is never NULL: false means false or absent. Inside an optional
   sub-message (`Relationship`, `CoverPage`, `GeneralInfo`, `OfferingData`, `FormCOffering`, `SecurityLending`) it is
   NULL exactly when the sub-message is absent, and an `optional bool` (`aff_10b5_one`, the Form D `*_is_estimate`
-  flags, …) is NULL when unset. `Y`/`N` text becomes a nullable `boolean`.
+  flags, …) is NULL when unset. `Y`/`N` text (`swap_flag`, `provide_info_for_instruction5`, and N-PX
+  `confidential_treatment` and `explanatory_choice`) becomes a nullable `boolean`: `Y`, `YES`, `TRUE` and `1` are
+  true, `N`, `NO`, `FALSE` and `0` false, in any case. Any other text, `N/A` included, is NULL with an `unparseable`
+  issue.
 - `filing_documents.filename` is the document's file name, and it shadows the `filename` column DuckDB's
   `delta_scan` and `read_parquet` add: `SELECT filename` returns the document name, and `filename = true` fails
   with a Binder Error. Give the data file column another name, `delta_scan('…/filing_documents', filename =
@@ -94,7 +112,7 @@ dissemination keeps its first copy in the dataset. Build from block 1761552 to a
 Dates are `date`. One grammar reads every form's spelling: ISO `YYYY-M-D` (with an optional zone suffix, which is
 dropped), and the US forms' month-first `M/D/YYYY` and `M-D-YYYY`. Implausible but valid dates are kept (`1601-05-20`,
 `9999-12-31`). `dissemination_timestamp` (US-Eastern `YYYYMMDD:HHMMSS`), `fiscal_year_end` (`MMDD`) and the 13D's free
-text `date_5_percent_ownership` stay strings. `acceptance_datetime` is a UTC `timestamp`.
+text `item13d_date_5_percent_ownership` stay strings. `acceptance_datetime` is a UTC `timestamp`.
 
 ### Decimals
 
@@ -108,9 +126,9 @@ Amounts are exact decimals in five scale families, chosen per column by meaning:
 | R12 | `decimal(38,12)` | Percents, rates and ratios: N-PORT `pct_value`, returns, `exchange_rate`, rates and spreads, `conversion_ratio`; 13D/G `percent_of_class` |
 | S16 | `decimal(38,16)` | N-PX share counts: `shares_voted`, `shares_on_loan` |
 
-XSD integers are `long` (13F `value`, `shares_or_principal_amount` and voting authority, Form D investor counts) or
-`integer` (years, amendment, sequence and serial numbers). Numbers are parsed exactly; a value with more decimals than
-its scale is rounded half away from zero, like DuckDB's `CAST`, and logged (below).
+XSD integers are `long` (13F `value`, `shares_or_principal_amount` and voting authority, Form D investor and Form C
+employee counts) or `integer` (years, amendment, sequence and serial numbers). Numbers are parsed exactly; a value
+with more decimals than its scale is rounded half away from zero, like DuckDB's `CAST`, and logged (below).
 
 DuckDB multiplies decimals at the sum of the scales and **fails at run time** when the result needs more than 38
 digits:
@@ -133,7 +151,7 @@ item's position. Block-level values (`blocks.feed_date`) have a NULL `filing_ind
 | `issue` | Typed value | When |
 |---|---|---|
 | `unparseable` | NULL | the text does not match the column grammar; digits are ASCII `0`–`9` only, so `١٢` or `１２` is unparseable |
-| `sentinel` | NULL | `N/A`, `NA`, `NONE`, `NULL`, `-` or `XXXX` (any case) |
+| `sentinel` | NULL | `N/A`, `NA`, `NONE`, `NULL`, `-` or `XXXX` (any case) in a number or date column; in a `Y`/`N` column they are `unparseable` |
 | `out_of_range` | NULL | too many integer digits, outside the integer type, an invalid calendar date or a year outside 1000–9999 |
 | `rounded` | rounded | non-zero digits beyond the column scale |
 | `tz_dropped` | the date | an ISO date with a zone suffix (`2014-06-30-05:00`) |
@@ -154,14 +172,16 @@ value.
 filings before 2023-01-03, dollars after, and some filers get it wrong either way. `value_multiplier_rule` (1000 or 1)
 is the legal date rule only (a NULL `filing_date` falls back to `date`). The [`sec_13f_units`](#shipped-views) view
 decides each filing's multiplier. It overrides the rule when the median value per share of at least five plain share
-rows contradicts it, or of one to four rows when the summary total is also about 1000× off the rows in the same
-direction (`value_unit_source` `median_and_total_override`: DAILY JOURNAL's 2014 report, in dollars on the thousands
-rule). [`sec_13f_holdings_usd`](#shipped-views) gives `value_usd`. Filers often state `table_value_total` in another
-unit than their rows (rows in dollars and the summary in thousands, or 2014 rows in thousands and the summary in
-millions: 17 of the 1,998 sample reports with rows), so `table_value_total_usd` uses its own
-`table_value_multiplier`, read from the summary-to-rows ratio when it is about 1000 or 1/1000. `holdings_value_sum`
-next to `table_value_total` still shows the filings whose own total disagrees with their rows by another factor;
-`holdings_complete` shows the information tables shorter than `table_entry_total`.
+rows (no put or call, positive shares and value) contradicts it (`value_unit_source` `median_override`), or of one to
+four rows when the summary total is also about 1000× off the rows in the same direction (`median_and_total_override`:
+DAILY JOURNAL's 2014 report, in dollars on the thousands rule). Five or more rows with a median between 0.5 and 2
+keep the rule as `ambiguous`; every other filing keeps it as `filing_date_rule`.
+[`sec_13f_holdings_usd`](#shipped-views) gives `value_usd`. Filers often state `table_value_total` in another unit
+than their rows (rows in dollars and the summary in thousands, or 2014 rows in thousands and the summary in millions:
+17 of the 1,998 sample reports with rows), so `table_value_total_usd` uses its own `table_value_multiplier`, read from
+the summary-to-rows ratio when it is about 1000 or 1/1000. `holdings_value_sum` next to `table_value_total` still
+shows the filings whose own total disagrees with their rows by another factor; `holdings_complete` shows the
+information tables shorter than `table_entry_total`.
 
 ### Other derived columns
 
@@ -173,9 +193,16 @@ The mapper derives only facts a rule defines; heuristics are the views below.
   of a Form 144. `filing_parties` keeps every party, joint reporting owners and co-registrants included.
 - Form 4 rows (`ownership_transactions`): `signed_shares` (+ for `A`, − for `D`), `value_usd` = `shares ×
   price_per_share` (NULL, never 0, when the price is only in a footnote), `is_open_market` (non-derivative `P` or `S`)
-  and `filing_lag_days`. A joint filing's transactions belong to the filing: `owner_ciks` and `owner_names` list every
-  reporting owner, `any_owner_is_*` are ORs over them, and `officer_titles` holds only the officers' titles. Never
-  join `ownership_reporting_owners` row by row to sum amounts.
+  and `filing_lag_days`. `value_usd` is a trade value on non-derivative rows only. On a derivative row
+  (`is_derivative`) it is the number of derivative securities times the price reported for them, not a value of the
+  underlying shares (a grant of 500,000 options reported at $0.13 gives 65,000), so filter `NOT is_derivative` before
+  summing it. A joint filing's transactions belong to the filing: `owner_ciks` and `owner_names` list every reporting
+  owner, `any_owner_is_*` are ORs over them, and `officer_titles` holds only the officers' titles. Never join
+  `ownership_reporting_owners` row by row to sum amounts.
+- `form144_notices.total_units_sold` adds `units_sold` over the notice's `form144_securities_information` rows, whose
+  `securities_class_title` can differ: a notice that sells two classes adds their units together. Sum
+  `form144_securities_information` per class for units; `total_aggregate_market_value` adds dollars and has no such
+  problem.
 - `cusip_norm`, `issuer_lei_norm` and `put_call_norm` are join keys with placeholders made NULL;
   `other_manager_sequence_numbers` tokenizes the 13F `other_manager_ids` (`03,01` → `[3, 1]`) to join
   `form13f_other_managers.sequence_number` (`list_kind` `summary`).
@@ -379,7 +406,7 @@ QUALIFY row_number() OVER (PARTITION BY r.filer_cik, coalesce(r.series_id, r.ser
 | View | What it decides |
 |---|---|
 | `sec_filings_first` | One row per accession: its first dissemination, never a deletion notice, with `dissemination_count`, `is_redisseminated`, `is_deleted` and `is_corrected`. |
-| `sec_13f_units` | Each 13F report's `value_multiplier`: the date rule, unless ≥ 5 plain share rows with a positive value give a median value per share that contradicts it (`median_override`), or 1–4 such rows do and the summary total is about 1000× off the rows in the same direction (`median_and_total_override`); `ambiguous` when that median is between 0.5 and 2. Otherwise a report with fewer than 5 such rows keeps the date rule. `table_value_multiplier` converts `table_value_total`: `value_multiplier`, times 1000 when the summary is about 1/1000 of the rows, or 1 when the rows are in thousands and the summary about 1000× them. |
+| `sec_13f_units` | Each 13F report's `value_multiplier` and its `value_unit_source` ([13F value units](#13f-value-units)). `table_value_multiplier` converts `table_value_total`: `value_multiplier`, times 1000 when the summary is about 1/1000 of the rows, or 1 when the rows are in thousands and the summary about 1000× them. |
 | `sec_13f_holdings_usd` | 13F holdings with `value_usd`. |
 | `sec_13f_effective_reports` | The reports that count for each manager and quarter: the latest original or `RESTATEMENT`, chosen before any CUSIP filter so a restatement that drops a position wins, plus the `NEW HOLDINGS` amendments accepted after it. Notices excluded; first disseminations only. |
 | `sec_how_voted_norm(h)`, `sec_npx_vote_records_norm` | N-PX `how_voted` in one of `FOR`, `AGAINST`, `WITHHOLD`, `ABSTAIN`, `DID_NOT_VOTE`, `FREQUENCY_1Y`/`2Y`/`3Y`, `SPLIT`, `NONE`, `OTHER` (NULL when empty); every spelling of the sample days gets a label. |
@@ -391,8 +418,9 @@ QUALIFY row_number() OVER (PARTITION BY r.filer_cik, coalesce(r.series_id, r.ser
 All examples read the views of [Shipped views](#shipped-views). The results quoted are from the four 0.13.0 sample
 feed days (2014-08-11, 2026-03-16, 2026-08-14 and 2026-08-28).
 
-Form 4 open-market purchases by officers, with their dollar value. On the samples, 143 officer `P` rows; the 4 with a
-footnote-only price keep `value_usd` NULL, and joint filings list every owner but only the officers' titles:
+Form 4 open-market purchases by officers, with their dollar value. A `4/A` restates the transactions of the Form 4 it
+amends, so the query reads originals only, and a correction made by amendment is not applied. A price given only in a
+footnote keeps `value_usd` NULL, and a joint filing lists every owner but only the officers' titles:
 
 ```sql
 -- Q1. Form 4 open-market purchases by officers, with dollar value.
@@ -400,7 +428,7 @@ SELECT t.issuer_trading_symbol, t.issuer_name, t.owner_names, t.officer_titles,
        t.transaction_date, t.shares, t.price_per_share, t.value_usd, t.aff_10b5_one, t.accession_number
 FROM ownership_transactions t
 SEMI JOIN sec_filings_first f USING (block_num, filing_index)
-WHERE t.form_type IN ('4', '4/A')
+WHERE t.form_type = '4'
   AND t.is_open_market AND t.transaction_code = 'P'
   AND t.any_owner_is_officer
 ORDER BY t.value_usd DESC NULLS LAST
@@ -556,6 +584,6 @@ with `nature_of_ownership`); `transaction_timeliness` is `E` (early) or `L` (lat
 
 When a later firesec release adds protobuf fields and fireparq maps them, the SEC table schemas change: an existing
 SEC root then refuses to resume and needs an SEC-only rebuild into a new root. A change to the shipped views never
-needs one. Blocks produced by firesec
-before 0.13.0 map, but leave the 0.13.0 fields empty (`parties` is empty, so `issuer_*` and `filer_*` are NULL).
-`filing_raw_xml` gets rows only when firesec runs with `--include-raw`.
+needs one. Blocks produced by firesec before 0.13.0 map, but leave the fields 0.13.0 added empty: `Filing.parties`,
+for example, so `filing_parties` has no rows and `issuer_*` and `filer_*` are NULL. Nothing refuses such an endpoint,
+so check its firesec version before a build. `filing_raw_xml` gets rows only when firesec runs with `--include-raw`.

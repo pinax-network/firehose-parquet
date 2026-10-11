@@ -33,10 +33,11 @@ directly after `fork_step`:
 A block identity can return as `NEW` after an `UNDO`, and a replay or reconnect
 can deliver the same block again; every delivery is a new event with a new
 ordinal. Block height, block time, `lib_num`, file names and row order are not
-delivery-order keys (the maintenance job's OPTIMIZE rewrites files and their
-row order), and neither the steps alone nor counting NEW minus UNDO gives the
-current state: `NEW(A), UNDO(A), NEW(A)` ends with A present, while
-`NEW(A), NEW(A), UNDO(A)` ends with A absent despite the same unordered rows.
+delivery-order keys (the maintenance job's OPTIMIZE replaces files, and Delta
+readers promise no row order), and neither the steps alone nor counting NEW
+minus UNDO gives the current state: `NEW(A), UNDO(A), NEW(A)` ends with A
+present, while `NEW(A), NEW(A), UNDO(A)` ends with A absent despite the same
+unordered rows.
 `stream_ordinal` is the order that decides.
 
 ## Canonical live view
@@ -104,9 +105,13 @@ modes cannot share a root, and resuming a root in the other mode is refused. On
 S3 give it its own bucket, since ownership is bucket-wide. Its history is
 append-only (`delta.appendOnly`) and only grows; the maintenance job compacts
 and checkpoints it like any other table, and nothing expires old events
-(deleting data files outside the log breaks readers). A bounded non-final run
-warns on successful completion because reaching its stop does not prove that
-its tail is final, and later UNDO events will not be received after it stops.
+(deleting data files outside the log breaks readers). Compaction expects
+rows in block order, so a closed day that holds a reorg deeper than one block
+(its UNDO events go back down) stays as written, and every run reports it,
+as an error (exit status 1) or in `repairs_unsupported`; its rows are
+unaffected. A bounded non-final run warns on successful completion because
+reaching its stop does not prove that its tail is final, and later UNDO events
+will not be received after it stops.
 A saved cursor or successful exit is not a finality certificate. See the
 [`stream_ordinal` and live view record](audit/648-stream-ordinal.md) and the
 [original non-final implementation](audit/474-non-final-streams.md).

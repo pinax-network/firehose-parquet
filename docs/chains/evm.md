@@ -4,7 +4,7 @@ Semantics of the EVM tables beyond their columns, which the [EVM schema referenc
 
 ## Persistent state changes of failed transactions
 
-A failed EVM transaction still changes chain state: the sender pays for gas, the fee recipients are paid, and the sender's nonce goes up. Everything else it did is rolled back. So `balance_changes` and `nonce_changes` only reconcile with on-chain balances and nonces when failed transactions are included, and only if their rolled-back changes are left out.
+A failed EVM transaction still changes chain state: the sender pays for gas, the fee recipients are paid, and the sender's nonce goes up. Everything else it did is rolled back. So `balance_changes` and `nonce_changes` only reconcile with on-chain balances and nonces when failed transactions are included (the default) and rows with `persisted = false` are left out.
 
 For a failed or reverted transaction, `fireparq` writes:
 
@@ -21,7 +21,7 @@ For a failed or reverted transaction, `fireparq` writes:
 
 This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them. The `persisted` column tells them apart (see below).
 
-Resuming protected EVM authority that records failed transactions as excluded keeps excluding them, so one output does not mix both modes. Legacy cursor-only datasets need a new empty output root. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch semantics, rebuild into a fresh output root with an absent mirror; `--cursor-override` cannot change protected output.
+An output whose resume state records failed transactions as excluded (built with `--exclude-failed-transactions`) keeps excluding them, so one output does not mix both modes, and `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To include them, rebuild into a new empty output root with an absent cursor mirror; `--cursor-override` is only accepted with `--dry-run` and cannot change protected output.
 
 ## Which call recorded a change, and whether it persisted
 
@@ -34,17 +34,23 @@ The transaction-scoped change tables (`balance_changes`, `nonce_changes`, `code_
 | `state_reverted` | `boolean` | The recording call's `state_reverted` flag, the same value as in `calls`. |
 | `persisted` | `boolean` | Whether the change is part of chain state after the transaction. Not on `gas_changes`: gas is consumed even in reverted calls. |
 
-`persisted` is `NOT state_reverted` for successful transactions. For failed or reverted transactions it is always `true`: only their persistent changes are written, and those come from the root call, whose `state_reverted` is `true`. To rebuild state from the change tables, filter on `persisted`:
+`persisted` is `NOT state_reverted` for successful transactions. For failed or reverted transactions it is always `true`: only their persistent changes are written, and those come from the root call, whose `state_reverted` is `true`. To rebuild state from the change tables, filter on `persisted`, and add the block-level changes of the `system_*` tables (withdrawals, block rewards):
 
 ```sql
 -- Balance of each address at the end of the range
 SELECT address, new_value AS balance
-FROM delta_scan('output/mainnet/balance_changes')
-WHERE persisted
+FROM (
+  SELECT block_number, ordinal, address, new_value
+  FROM delta_scan('output/mainnet/balance_changes')
+  WHERE persisted
+  UNION ALL
+  SELECT block_number, ordinal, address, new_value
+  FROM delta_scan('output/mainnet/system_balance_changes')
+)
 QUALIFY row_number() OVER (PARTITION BY address ORDER BY block_number DESC, ordinal DESC) = 1;
 ```
 
-Order persisted changes by `(block_number, ordinal)`; ordinals are unique within a block. Ordinals of changes in reverted calls may be `0`.
+Order persisted changes by `(block_number, ordinal)`; ordinals are unique within a block. Ordinals of changes in reverted calls may be `0`, and the root call of a failed transaction is reverted.
 
 The `system_*` change tables have a nullable `call_index`: the index of the system call that recorded the change, or `NULL` for block-level changes such as beacon-chain withdrawals. System call indexes are not unique within a block: the system calls that run after the transactions (EIP-7002 and EIP-7251 requests) restart at 1. Join a change to its system call on the ordinal range as well:
 
@@ -56,12 +62,10 @@ JOIN delta_scan('output/mainnet/system_calls') s
  AND c.ordinal BETWEEN s.begin_ordinal AND s.end_ordinal;
 ```
 
-The `logs` table holds receipt logs only, so logs emitted by reverted calls are never in it.
-
 ## Receipt log indices and RPC joins
 
 The `logs` table maps `TransactionReceipt.logs`. It contains receipt logs, so
-logs from reverted calls are absent. The two index columns have different scopes:
+logs from reverted calls are absent. The index columns have different scopes:
 
 | Column | Source | Meaning |
 |---|---|---|
@@ -88,7 +92,7 @@ FROM delta_scan('output/mainnet/logs');
 after filtering. Do not infer a transaction-local position from a default zero
 when the upstream source omits `Log.index` at a lower detail level.
 
-## Tables that can be absent
+## Tables that can be empty
 
 `gas_changes` and `account_creations` are extended tables populated only from
 upstream call arrays. A sampled range can contain no rows even when transactions
@@ -98,10 +102,9 @@ a guarantee about every network, provider or block version.
 
 - `account_creations` is deprecated upstream: the checked-in Ethereum protobuf
   says account-creation records are unsupported from block version 4. Do not use
-  an absent table to conclude that no contracts or accounts were created.
+  an empty table to conclude that no contracts or accounts were created.
 - `gas_changes` contains explicit upstream gas-change records. Missing rows do
   not mean zero gas usage; transaction/receipt gas fields provide separate data.
-- `--without-extended` disables both tables regardless of source contents.
 
 `build` creates every table of the stream at its first start, so a table
 without rows is an empty Delta table: `delta_scan` returns an empty relation,
@@ -119,7 +122,7 @@ Three tables hold block and transaction data that is not a column of `blocks` or
 | `access_lists` | entry of a transaction's access list (EIP-2930) | `access_index` is the position in the list; `storage_keys` may be empty |
 | `set_code_authorizations` | authorization of a `SET_CODE` transaction (EIP-7702) | `authorization_index` is the position in the list; `chain_id` is a decimal string (`0` allows any chain); `address` is the delegation target and `authority` the recovered signer |
 
-- A withdrawal also appears in `system_balance_changes` with reason `WITHDRAWAL`, in wei and without the validator. `sum(amount_gwei) * 1e9` per block and address equals the summed balance delta there.
+- A withdrawal also appears in `system_balance_changes` with reason `WITHDRAWAL`, in wei and without the validator. Per block and address, `sum(amount_gwei) * 1000000000` (exact decimal arithmetic; `* 1e9` would be a lossy `double`) equals the summed balance delta there.
 - `authority` is `NULL` when it can't be recovered from the signature, and those authorizations are `discarded`. `address` is `NULL` on the few testnet blocks where Firehose did not record it.
 - `discarded = true` means the chain skipped the authorization as invalid. Accepted authorizations take effect even when the transaction fails (see failed transactions above).
 

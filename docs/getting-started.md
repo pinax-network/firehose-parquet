@@ -2,7 +2,8 @@
 
 Install `fireparq`, run a first `build` and read what it wrote. The Firehose credentials it sends are described in [Authentication](authentication.md).
 
-> `v0.5.0+` renames the installed CLI binary from `firehose-parquet` to `fireparq`. The repository/crate names and Parquet metadata namespace remain `firehose-parquet.*`.
+The binary is `fireparq`; the repository, the Docker image and the Parquet
+metadata namespace (`firehose-parquet.*`) keep the name `firehose-parquet`.
 
 ## Install
 
@@ -17,35 +18,35 @@ tar xzf fireparq-linux-x86_64.tar.gz
 
 The other archives are `fireparq-linux-aarch64`, `fireparq-macos-x86_64` and
 `fireparq-macos-aarch64`. To build from source instead, run
-`cargo install --path blocks` or use the commands below. A
-[Docker image](#docker) is also published.
+`cargo install --path blocks`; it needs `protoc` and the Rust 1.98 toolchain
+that `rust-toolchain.toml` pins. A [Docker image](#docker) is also published.
 
 ## Run
 
-```bash
-# Build
-cargo build --release --workspace
+The examples assume `fireparq` is on your `PATH`. Each is a separate run: a
+dataset root keeps the start block, chain and options of its first run, so a
+different start or option needs a new `--output`
+([parameter validation on resume](cursor-and-resume.md#parameter-validation-on-resume)).
 
+```bash
 # Stream Solana blocks to Delta tables (auto-detect chain). --output is the dataset
 # root; {chain} names a directory after the endpoint's chain_name, so these
 # examples write ./output/solana-mainnet-beta/, ./output/mainnet/, ...
-./target/release/fireparq build \
+fireparq build \
   --network solana-mainnet-beta \
   --start-block 200000000 \
   --stop-block 200001000 \
-  --output './output/{chain}' \
-  --compression zstd
+  --output './output/{chain}'
 
 # Or use an explicit endpoint directly
-./target/release/fireparq build \
+fireparq build \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
   --stop-block 200001000 \
-  --output './output/{chain}' \
-  --compression zstd
+  --output './output/{chain}'
 
 # Disable Solana vote transactions explicitly
-./target/release/fireparq build \
+fireparq build \
   --network solana-mainnet-beta \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -53,7 +54,7 @@ cargo build --release --workspace
   --output './output/{chain}'
 
 # Disable extended EVM tables explicitly (explicit block type)
-./target/release/fireparq build \
+fireparq build \
   --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -64,7 +65,7 @@ cargo build --release --workspace
 # Write to S3: the output must be an explicit s3:// URI, and S3 output needs
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or the matching flags). Several
 # networks share this bucket: the dataset is s3://my-bucket/v1/mainnet
-./target/release/fireparq build \
+fireparq build \
   --network mainnet \
   --start-block 20000000 \
   --stop-block 20001000 \
@@ -72,14 +73,14 @@ cargo build --release --workspace
 
 # One bucket per network: the dataset is the bucket root
 # (s3://ethereum-mainnet/blocks/..., see single-network buckets)
-./target/release/fireparq build \
+fireparq build \
   --network mainnet \
   --start-block 20000000 \
   --stop-block 20001000 \
   --output s3://ethereum-mainnet
 
 # Stream Antelope blocks
-./target/release/fireparq build \
+fireparq build \
   --block-type antelope \
   --endpoint https://eos.firehose.pinax.network:443 \
   --start-block 1000000 \
@@ -89,24 +90,24 @@ cargo build --release --workspace
 # Stream HyperCore (PINAX_API_KEY holds the key). Its data is known from
 # 2026-01-01: without --start-block a new root starts at block 846903317, and
 # an earlier start is refused (docs/chains/hypercore.md)
-./target/release/fireparq build \
+fireparq build \
   --network hypercore \
   --stop-block 846904317 \
   --output './output/{chain}'
 
 # Backfill from a block and keep following finalized blocks
-./target/release/fireparq build \
+fireparq build \
   --network solana-mainnet-beta \
   --start-block 250000000 \
   --output './output/{chain}'
 
 # Start live mode from the endpoint's first streamable block
-./target/release/fireparq build \
+fireparq build \
   --network mainnet \
   --output './output/{chain}'
 
-# Add verbose operational logs for debugging without changing normal output by default
-./target/release/fireparq build \
+# Add verbose operational logs for debugging
+fireparq build \
   --network mainnet \
   --start-block 20000000 \
   --stop-block 20001000 \
@@ -125,10 +126,9 @@ duckdb -c "INSTALL delta; LOAD delta;
 
 ## Docker
 
-The image is published to GitHub Container Registry for each release tag; this
-release is tagged `1.2.0`, `1.2`, `1` and `latest`. The image path stays
-`ghcr.io/pinax-network/firehose-parquet`, and the container entrypoint runs
-`fireparq`.
+The image `ghcr.io/pinax-network/firehose-parquet` is published to GitHub
+Container Registry for each release tag; this release is tagged `1.2.0`, `1.2`,
+`1` and `latest`. Its entrypoint is `fireparq`.
 
 ```bash
 docker pull ghcr.io/pinax-network/firehose-parquet:1.2.0

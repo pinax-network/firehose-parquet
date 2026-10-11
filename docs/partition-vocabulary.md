@@ -1,7 +1,7 @@
 # Partition Vocabulary
 
-This note records the one output partition key and the few CLI names that refer
-to it.
+This note records the one output partition key, the CLI term that refers to
+it, and the layouts and commands it replaced.
 
 ## Decision
 
@@ -13,14 +13,10 @@ table's Delta log records the files of each `date` partition.
 
 ## Output directory key
 
-Every table has one Hive-style directory key, the UTC day of the block time:
-
-| Output | Directory |
-|---|---|
-| every table | `<table>/date=YYYY-MM-DD/` |
-
-`firehose-parquet/src/date_partition.rs` is the one place the key is
-formatted and parsed.
+Every table has one Hive-style directory key, `date=YYYY-MM-DD`, the UTC day of
+the block time. `firehose-parquet/src/date_partition.rs` is the one place the
+key is formatted and parsed; parsing is strict, so a directory of an older
+layout is never read as a date.
 
 Why a single `date=YYYY-MM-DD` key:
 
@@ -33,6 +29,11 @@ Why a single `date=YYYY-MM-DD` key:
   `date = DATE '2026-09-25'` and prune by the log, instead of combining `year`,
   `month` and `day` keys.
 
+The one CLI term for it: `validate --cross-partition` checks block continuity
+between adjacent `date` partitions of a Delta snapshot.
+
+## Removed layouts and commands
+
 Earlier layouts are gone, with no compatibility handling. v0.x chose a layout
 with `--partition`: unpartitioned (the default), `block_range`, `date`,
 `hour`, `minute` or `second`. Its days were `year=YYYY/month=MM/date=DD/`, a
@@ -42,20 +43,13 @@ builds renamed it to `year=YYYY/month=MM/day=DD/`. Every one of these layouts
 was removed with `rollup` before the release (#652), because a single key
 leaves nothing to roll up, and v1.0.0 files are Delta tables (#643).
 
-## CLI terms
+Removed, with no deprecated aliases:
 
-- `validate --cross-partition` checks block continuity between adjacent `date`
-  partitions of a Delta snapshot.
-
-## Resulting rename decisions
-
-- `scan` removed (#643); DuckDB, Polars and the Delta log read the tables
-- `build --partition` and `--block-range-size` removed (#652)
-- `rollup` removed (#652)
+- `scan` (#643); DuckDB, Polars and the Delta log read the tables
+- `build --partition` and `--block-range-size` (#652)
+- `rollup` (#652)
 - `partitions build/ls/validate/resolve/shard` and their flags (`--partition`,
   `--partition-type`, `--partition-value`, `--partition-chain`, `--from`,
-  `--to`, `--all-spans`, ...) removed (#653)
+  `--to`, `--all-spans`, ...) (#653)
 - `truncate` and its `-p date=` filters, and `verify` with its per-`date=`
-  roots, removed (#643)
-
-These decisions are canonical. Deprecated aliases are not accepted.
+  roots (#643); #666 tracks a `verify` over Delta snapshots

@@ -117,7 +117,7 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "year_of_inc",
             Ty::Int32,
             true,
-            "`Filing.body.form_d.primary_issuer.year_of_inc`: integer (§4.3), Int32. NULL when incorporated >5 years ago or yet to be formed.",
+            "`Filing.body.form_d.primary_issuer.year_of_inc`: integer ([decimals](../chains/sec.md#decimals)), Int32. NULL when incorporated >5 years ago or yet to be formed.",
         ),
         Col::new(
             "year_of_inc_status",
@@ -177,7 +177,7 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "date_of_first_sale",
             Ty::Date32,
             true,
-            "`Filing.body.form_d.offering.date_of_first_sale`: date (§4.2).",
+            "`Filing.body.form_d.offering.date_of_first_sale`: date ([dates](../chains/sec.md#dates)).",
         ),
         Col::new(
             "date_of_first_sale_yet_to_occur",
@@ -231,13 +231,13 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "minimum_investment",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.minimum_investment`: decimal s=2 (§4.3, M2). USD.",
+            "`Filing.body.form_d.offering.minimum_investment`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD.",
         ),
         Col::new(
             "total_offering_amount",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.total_offering_amount`: decimal s=2 (§4.3, M2). USD; NULL when `Indefinite`.",
+            "`Filing.body.form_d.offering.total_offering_amount`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD; NULL when `Indefinite`.",
         ),
         Col::new(
             "total_offering_amount_is_indefinite",
@@ -249,13 +249,13 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "total_amount_sold",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.total_amount_sold`: decimal s=2 (§4.3, M2). USD, cumulative.",
+            "`Filing.body.form_d.offering.total_amount_sold`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD, cumulative.",
         ),
         Col::new(
             "total_remaining",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.total_remaining`: decimal s=2 (§4.3, M2). USD; NULL when `Indefinite`.",
+            "`Filing.body.form_d.offering.total_remaining`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD; NULL when `Indefinite`.",
         ),
         Col::new(
             "total_remaining_is_indefinite",
@@ -279,19 +279,19 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "number_non_accredited_investors",
             Ty::Int64,
             true,
-            "`Filing.body.form_d.offering.number_non_accredited_investors`: integer (§4.3), Int64.",
+            "`Filing.body.form_d.offering.number_non_accredited_investors`: integer ([decimals](../chains/sec.md#decimals)), Int64.",
         ),
         Col::new(
             "total_number_already_invested",
             Ty::Int64,
             true,
-            "`Filing.body.form_d.offering.total_already_invested`: integer (§4.3), Int64. A COUNT of investors (renamed from `total_already_invested`).",
+            "`Filing.body.form_d.offering.total_already_invested`: integer ([decimals](../chains/sec.md#decimals)), Int64. A COUNT of investors (renamed from `total_already_invested`).",
         ),
         Col::new(
             "sales_commissions",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.sales_commissions`: decimal s=2 (§4.3, M2). USD.",
+            "`Filing.body.form_d.offering.sales_commissions`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD.",
         ),
         Col::new(
             "sales_commissions_is_estimate",
@@ -303,7 +303,7 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "finders_fees",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.finders_fees`: decimal s=2 (§4.3, M2). USD.",
+            "`Filing.body.form_d.offering.finders_fees`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD.",
         ),
         Col::new(
             "finders_fees_is_estimate",
@@ -321,7 +321,7 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "gross_proceeds_used",
             Ty::Decimal(Family::M2),
             true,
-            "`Filing.body.form_d.offering.gross_proceeds_used`: decimal s=2 (§4.3, M2). USD paid to related persons.",
+            "`Filing.body.form_d.offering.gross_proceeds_used`: decimal s=2 ([decimals](../chains/sec.md#decimals), M2). USD paid to related persons.",
         ),
         Col::new(
             "gross_proceeds_used_is_estimate",
@@ -363,7 +363,7 @@ pub(crate) const FORM_D_NOTICES: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -474,7 +474,7 @@ pub(crate) const FORM_D_CO_ISSUERS: TableSpec = TableSpec {
             "year_of_inc",
             Ty::Int32,
             true,
-            "`Filing.body.form_d.issuers[].year_of_inc`: integer (§4.3), Int32.",
+            "`Filing.body.form_d.issuers[].year_of_inc`: integer ([decimals](../chains/sec.md#decimals)), Int32.",
         ),
         Col::new(
             "year_of_inc_status",
@@ -498,7 +498,7 @@ pub(crate) const FORM_D_CO_ISSUERS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };

@@ -45,7 +45,7 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "report_calendar_year",
             Ty::Int32,
             true,
-            "`Filing.body.npx.cover_page.report_calendar_year`: integer (§4.3), Int32. Proxy year (July–June).",
+            "`Filing.body.npx.cover_page.report_calendar_year`: integer ([decimals](../chains/sec.md#decimals)), Int32. Proxy year (July–June).",
         ),
         Col::new(
             "report_type",
@@ -141,7 +141,7 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "confidential_treatment",
             Ty::Boolean,
             true,
-            "`Filing.body.npx.cover_page.confidential_treatment`: Y/N text → bool (§4.1).",
+            "`Filing.body.npx.cover_page.confidential_treatment`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)).",
         ),
         Col::new(
             "notice_explanation",
@@ -153,7 +153,7 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "explanatory_choice",
             Ty::Boolean,
             true,
-            "`Filing.body.npx.cover_page.explanatory_choice`: Y/N text → bool (§4.1).",
+            "`Filing.body.npx.cover_page.explanatory_choice`: Y/N text → bool ([booleans](../chains/sec.md#strings-lists-and-booleans)).",
         ),
         Col::new(
             "explanatory_notes",
@@ -171,7 +171,7 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "amendment_number",
             Ty::Int32,
             true,
-            "`Filing.body.npx.cover_page.amendment_number`: integer (§4.3), Int32.",
+            "`Filing.body.npx.cover_page.amendment_number`: integer ([decimals](../chains/sec.md#decimals)), Int32.",
         ),
         Col::new(
             "amendment_type",
@@ -249,13 +249,13 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "other_included_managers_count",
             Ty::Int32,
             true,
-            "`Filing.body.npx.cover_page.other_included_managers_count`: integer (§4.3), Int32.",
+            "`Filing.body.npx.cover_page.other_included_managers_count`: integer ([decimals](../chains/sec.md#decimals)), Int32.",
         ),
         Col::new(
             "declared_series_count",
             Ty::Int32,
             true,
-            "`Filing.body.npx.cover_page.series_count`: integer (§4.3), Int32. Declared `seriesPage/seriesCount` (renamed: `series_count` is a list length on `filings`/`ncen_reports`).",
+            "`Filing.body.npx.cover_page.series_count`: integer ([decimals](../chains/sec.md#decimals)), Int32. Declared `seriesPage/seriesCount` (renamed: `series_count` is a list length on `filings`/`ncen_reports`).",
         ),
         Col::new(
             "vote_count",
@@ -279,7 +279,7 @@ pub(crate) const NPX_REPORTS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -330,7 +330,7 @@ pub(crate) const NPX_VOTES: TableSpec = TableSpec {
             "cusip_norm",
             Ty::Utf8,
             true,
-            "Derived from `Filing.body.npx.votes[].cusip`: §4.4 `cusip_norm`.",
+            "Derived from `Filing.body.npx.votes[].cusip`: [`cusip_norm`](../chains/sec.md#other-derived-columns).",
         ),
         Col::new(
             "isin",
@@ -348,7 +348,7 @@ pub(crate) const NPX_VOTES: TableSpec = TableSpec {
             "meeting_date",
             Ty::Date32,
             true,
-            "`Filing.body.npx.votes[].meeting_date`: date (§4.2).",
+            "`Filing.body.npx.votes[].meeting_date`: date ([dates](../chains/sec.md#dates)).",
         ),
         Col::new(
             "vote_description",
@@ -384,19 +384,19 @@ pub(crate) const NPX_VOTES: TableSpec = TableSpec {
             "shares_voted",
             Ty::Decimal(Family::S16),
             true,
-            "`Filing.body.npx.votes[].shares_voted`: decimal s=16 (§4.3, S16).",
+            "`Filing.body.npx.votes[].shares_voted`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16).",
         ),
         Col::new(
             "shares_on_loan",
             Ty::Decimal(Family::S16),
             true,
-            "`Filing.body.npx.votes[].shares_on_loan`: decimal s=16 (§4.3, S16).",
+            "`Filing.body.npx.votes[].shares_on_loan`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16).",
         ),
         Col::new(
             "vote_other_managers",
             Ty::ListInt32,
             false,
-            "`Filing.body.npx.votes[].vote_other_managers[]`: each item: integer (§4.3), Int32; [] when empty. Serial numbers → `npx_other_managers.serial_number`.",
+            "`Filing.body.npx.votes[].vote_other_managers[]`: each item: integer ([decimals](../chains/sec.md#decimals)), Int32; [] when empty. Serial numbers → `npx_other_managers.serial_number`.",
         ),
         Col::new(
             "vote_other_info",
@@ -414,7 +414,7 @@ pub(crate) const NPX_VOTES: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -489,13 +489,13 @@ pub(crate) const NPX_VOTE_RECORDS: TableSpec = TableSpec {
             "how_voted",
             Ty::Utf8,
             true,
-            "`Filing.body.npx.votes[].records[].how_voted`. 73 spellings: normalize with `sec_how_voted_norm` (§7.0).",
+            "`Filing.body.npx.votes[].records[].how_voted`. 73 spellings: normalize with [`sec_how_voted_norm`](../chains/sec.md#shipped-views).",
         ),
         Col::new(
             "shares_voted",
             Ty::Decimal(Family::S16),
             true,
-            "`Filing.body.npx.votes[].records[].shares_voted`: decimal s=16 (§4.3, S16).",
+            "`Filing.body.npx.votes[].records[].shares_voted`: decimal s=16 ([decimals](../chains/sec.md#decimals), S16).",
         ),
         Col::new(
             "management_recommendation",
@@ -507,7 +507,7 @@ pub(crate) const NPX_VOTE_RECORDS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };
@@ -540,7 +540,7 @@ pub(crate) const NPX_OTHER_MANAGERS: TableSpec = TableSpec {
             "serial_number",
             Ty::Int32,
             true,
-            "`Filing.body.npx.cover_page.{other_managers,summary_managers}[].serial_number`: integer (§4.3), Int32. Summary: the key `npx_votes.vote_other_managers` refers to.",
+            "`Filing.body.npx.cover_page.{other_managers,summary_managers}[].serial_number`: integer ([decimals](../chains/sec.md#decimals)), Int32. Summary: the key `npx_votes.vote_other_managers` refers to.",
         ),
         Col::new(
             "other_manager_name",
@@ -576,7 +576,7 @@ pub(crate) const NPX_OTHER_MANAGERS: TableSpec = TableSpec {
             "has_parse_issues",
             Ty::Boolean,
             false,
-            "Derived: true iff this row wrote ≥1 `parse_issues` row (§4.6).",
+            "Derived: true iff this row wrote ≥1 `parse_issues` row ([parse issues](../chains/sec.md#parse-issues)).",
         ),
     ],
 };

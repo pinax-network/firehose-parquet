@@ -2,7 +2,7 @@
 
 Semantics of the Bitcoin tables beyond their columns, which the [Bitcoin schema reference](../schemas/bitcoin.md) lists.
 
-## Amounts, input joins and missing fields
+## Amounts, join keys and missing fields
 
 Use `outputs.value_sats` (`long`) for exact sums. The original `value` column
 remains a `double` coin amount for compatibility. When the protobuf includes
@@ -20,7 +20,10 @@ FROM delta_scan('output/btc/outputs');
 ```
 
 `inputs.tx_index` joins to `transactions.tx_index` within the same canonical
-`block_id`; add `input_index` for an input's position. Coinbase inputs have null
+`block_id`; add `input_index` for an input's position. `outputs` has no
+`tx_index`: its `tx_hash`, like that of `inputs`, is the transaction's `txid`.
+An input spends the output whose `tx_hash` and `output_index` equal its
+`prev_txid` and `prev_vout`, usually in an earlier block. Coinbase inputs have null
 `prev_txid`, `prev_vout` and script-signature columns. Ordinary inputs have null
 `coinbase`; a missing previous txid also keeps `prev_vout` null rather than
 inventing output zero. A real previous output zero remains zero. A missing
@@ -32,9 +35,5 @@ legacy `addresses` entry, and is null if neither is available. The legacy first
 entry is not a claim of exclusive ownership of a multi-address script. Missing
 script-public-key messages yield null script columns; present empty fields stay
 empty. Native protobuf strings are copied verbatim without adding prefixes or
-reversing display-order hashes. Encoding settings apply to canonical ID columns.
-
-These additions and nullable-field changes affect the Bitcoin table schemas.
-Use a new output dataset when upgrading; comparing old and new data needs
-explicit schema reconciliation (see the
-[upgrade guide](../releases/v1.0.0.md#upgrade-guide-read-first)).
+reversing display-order hashes. The `hex` encoding applies only to the canonical
+`block_id` and `parent_id`.
