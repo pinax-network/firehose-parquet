@@ -117,6 +117,19 @@ impl Fixture {
         self.root.join(table).join("_delta_log").join(name)
     }
 
+    /// Ages every log entry of `table` by eight days, past its 7-day log
+    /// retention, as if the table had been idle since.
+    fn idle(&self, table: &str) {
+        let idle = SystemTime::now() - Duration::from_secs(8 * 24 * 3600);
+        for entry in std::fs::read_dir(self.root.join(table).join("_delta_log")).unwrap() {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(entry.unwrap().path())
+                .unwrap();
+            file.set_modified(idle).unwrap();
+        }
+    }
+
     fn events(&self, event: &str) -> Vec<Value> {
         self.log
             .events()
@@ -710,14 +723,7 @@ async fn a_log_cleanup_leaves_the_handle_usable() {
     let mut table = f.table(&store, &OUTCOME_PROBES).await;
     let name = OUTCOME_PROBES.name;
     f.probes(&store, &mut table, 0..18).await;
-    let idle = SystemTime::now() - Duration::from_secs(8 * 24 * 3600);
-    for entry in std::fs::read_dir(f.root.join(name).join("_delta_log")).unwrap() {
-        let file = std::fs::File::options()
-            .write(true)
-            .open(entry.unwrap().path())
-            .unwrap();
-        file.set_modified(idle).unwrap();
-    }
+    f.idle(name);
     let row = probe_row(18, f.now(), ProbeResult::Settled, "x");
     let appended = store.append(&mut table, vec![row]).await.unwrap().unwrap();
     assert_eq!((appended.version, appended.checkpoint_error), (19, None));
@@ -747,6 +753,35 @@ async fn a_log_cleanup_leaves_the_handle_usable() {
         (Some(19), Some(0), 20)
     );
     assert_eq!(store.latest(&table).await.unwrap().len(), 19);
+}
+
+#[tokio::test]
+async fn expired_log_entries_go_after_every_commit() {
+    // As delta-rs's hook does, not only after a checkpoint: a table that
+    // commits once a day keeps its expired entries until its next commit,
+    // not for up to 20 more days. Version 21 is no checkpoint version, and
+    // version 19's checkpoint covers the entries before it.
+    let f = Fixture::new();
+    let store = f.store();
+    let mut table = f.table(&store, &OUTCOME_PROBES).await;
+    let name = OUTCOME_PROBES.name;
+    f.probes(&store, &mut table, 0..20).await;
+    assert_eq!(table.version(), 20);
+    assert!(f.log_file(name, &checkpoint(19)).is_file());
+    f.idle(name);
+    let row = probe_row(20, f.now(), ProbeResult::Settled, "x");
+    let appended = store.append(&mut table, vec![row]).await.unwrap().unwrap();
+    assert_eq!((appended.version, appended.checkpoint_error), (21, None));
+    let commits: Vec<u64> = (0..=21)
+        .filter(|version| f.log_file(name, &format!("{version:020}.json")).exists())
+        .collect();
+    assert_eq!(commits, [19, 20, 21]);
+    assert!(f.log_file(name, &checkpoint(19)).is_file());
+    assert!(!f.log_file(name, &checkpoint(21)).exists());
+    // The handle, reloaded at 21, and a fresh one read every row.
+    assert_eq!(store.latest(&table).await.unwrap().len(), 21);
+    f.probes(&store, &mut table, 21..22).await;
+    assert_eq!(f.rows(&OUTCOME_PROBES).await.len(), 22);
 }
 
 #[tokio::test]

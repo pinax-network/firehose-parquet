@@ -102,6 +102,9 @@ pub trait Transport: Send + Sync {
 
 /// `POST`s to the endpoint with reqwest (rustls, the system's roots): no
 /// redirects (every 3xx is refused), no reqwest retries, no compression.
+/// `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` apply to a public endpoint
+/// only: a loopback one is plain HTTP, and through a proxy its whole URL, key
+/// included, would leave the host in the clear.
 pub struct HttpTransport {
     client: reqwest::Client,
     url: Url,
@@ -110,8 +113,13 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// A transport for `url`, an [`info_url`].
     pub fn new(url: Url) -> Result<Self, ConfigError> {
-        let client = reqwest::Client::builder()
-            .https_only(!is_loopback(&url))
+        let loopback = is_loopback(&url);
+        let mut builder = reqwest::Client::builder();
+        if loopback {
+            builder = builder.no_proxy();
+        }
+        let client = builder
+            .https_only(!loopback)
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .retry(reqwest::retry::never())

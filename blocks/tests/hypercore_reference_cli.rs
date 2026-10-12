@@ -1,15 +1,17 @@
 //! `fireparq hypercore-reference`, the real binary with a cleared environment,
 //! over a loopback `/info` that answers from the recorded fixtures
 //! (`common::info`): its exit statuses, the configuration errors it reports
-//! before any request, the `/info` URL and credentials it never prints, and
-//! the views of docs/hypercore-reference.md, run unmodified in DuckDB over
-//! tables it wrote. The jobs themselves are tested at the library
+//! before any request, the `/info` URL and credentials it never prints, the
+//! loopback `/info` it never asks through a proxy, and the views of
+//! docs/hypercore-reference.md, run unmodified in DuckDB over tables it
+//! wrote. The jobs themselves are tested at the library
 //! (`reference/`), its S3 traffic in `hypercore_reference_s3.rs`, and the
 //! joins with a HyperCore lake in `engine_compat.rs`.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use fireparq_reference::json::Json;
 use fireparq_reference::model::REFERENCE_TABLES;
@@ -169,6 +171,49 @@ fn failures_exit_1_and_never_log_the_url() {
             assert!(!text.contains(hidden), "{hidden}: {run:?}");
         }
     }
+}
+
+/// A loopback `HL_INFO_URL` is asked directly, whatever the proxy variables
+/// say: a plain-HTTP request through a proxy would hand it the whole URL, key
+/// included.
+#[test]
+fn a_loopback_info_url_never_goes_through_a_proxy() {
+    let (_dir, cwd) = workspace();
+    let info = InfoServer::start();
+    // A proxy that counts its connections and closes them unanswered.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let reached = Arc::new(AtomicUsize::new(0));
+    let counted = reached.clone();
+    std::thread::spawn(move || {
+        for _ in proxy.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let url = format!("{}/v1/SECRETKEY/info", info.endpoint);
+    let root = cwd.join("reference");
+    // A request the proxy took would fail at once and end the run: the first
+    // retry's backoff crosses a 1 s budget.
+    let mut env = vec![
+        ("HLREF_ROOT", root.to_str().unwrap()),
+        ("HL_INFO_URL", url.as_str()),
+        ("HLREF_TIME_BUDGET_SECONDS", "1"),
+    ];
+    for name in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        env.push((name, proxy_url.as_str()));
+    }
+    let run = reference(&cwd, &["--no-maintenance", "meta"], &env);
+    assert_eq!(run.status, 0, "{run:?}");
+    assert_eq!(run.last()["failed"], json!([]), "{run:?}");
+    assert_eq!(info.fake.count("spotMeta"), 1);
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "{run:?}");
 }
 
 /// Python's test_configuration_errors_exit_2, and every other setting the

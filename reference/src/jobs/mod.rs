@@ -239,7 +239,8 @@ impl<'a> Run<'a> {
 
     /// Appends `rows` (no commit for none) and counts them in the summary
     /// under the table's name, 0 included. A failed commit is recorded and
-    /// returns false; a failed checkpoint is recorded, but the rows landed.
+    /// returns false; a failed checkpoint or log cleanup is recorded, but the
+    /// rows landed.
     pub async fn commit(&mut self, t: &mut Table, rows: Vec<Row>) -> bool {
         let count = rows.len() as u64;
         match self.store.append(t, rows).await {

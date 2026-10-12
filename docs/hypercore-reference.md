@@ -437,9 +437,10 @@ A run exits 1, and commits the rows it completed first, when:
   `hl_outcome_meta`, `hl_questions`, `hl_outcomes` and the probes in that
   order, each only after the previous one, and `meta` commits `hl_spot_tokens`
   only after `hl_spot_token_details`.
-- **A checkpoint, OPTIMIZE or VACUUM fails** (`<table>: checkpoint at version
-  V failed`, `<table>: OPTIMIZE failed`, `<table>: VACUUM failed`). The rows
-  committed before it count.
+- **A checkpoint, log cleanup, OPTIMIZE or VACUUM fails** (`<table>:
+  checkpoint at version V failed`, `<table>: log cleanup at version V failed`,
+  `<table>: OPTIMIZE failed`, `<table>: VACUUM failed`). The rows committed
+  before it count.
 - **A data file of the table's snapshot is gone** (`an active data file is
   gone (a VACUUM after version V); the next run retries`).
 - **`verify` finds a violation** ([Operations](#operations)).
@@ -483,7 +484,7 @@ hypercore-reference --help` prints them all.
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
 | `HLREF_ROOT` | `--root` | (required) | `s3://<bucket>[/<prefix>]` or a local directory, the tables' own root. A local root is made absolute, with `.` and `..` collapsed |
-| `HL_INFO_URL` | `--info-url` | `https://api.hyperliquid.xyz/info` | The `/info` endpoint, `https://`; plain `http://` only for a loopback host. A URL with an embedded key belongs in a secret: only its scheme and host are ever shown |
+| `HL_INFO_URL` | `--info-url` | `https://api.hyperliquid.xyz/info` | The `/info` endpoint, `https://`; plain `http://` only for a loopback host, which is asked directly, never through `HTTP_PROXY` or `ALL_PROXY`. A URL with an embedded key belongs in a secret: only its scheme and host are ever shown |
 | `HLREF_WEIGHT_PER_MINUTE` | `--weight-per-minute` | `400` | This process's `/info` weight per minute, at least 20 |
 | `HLREF_TIME_BUDGET_SECONDS` | `--time-budget-seconds` | `240` | Seconds after which requests stop; the run commits and exits 0 |
 | | `--no-maintenance` | off | Skip the compaction and VACUUM after the run's commits |
@@ -527,12 +528,12 @@ without an offset it is UTC.
 | any float time budget | finite and 0 or more, else exit 2 |
 | `--outcome-ids ""` swept; `maintain --tables` skipped unknown names | both refused (exit 2) |
 | `--funding-start/-end`: any `fromisoformat` form; a naive time in local time | the forms of [The command](#the-command); a naive time is UTC |
-| plain `http://` for any `HL_INFO_URL`; 301, 302 and 303 followed | plain `http://` only for a loopback host; every redirect refused |
+| plain `http://` for any `HL_INFO_URL`, a loopback one through `HTTP_PROXY` too; 301, 302 and 303 followed | plain `http://` only for a loopback host, never through a proxy; every redirect refused |
 | an entity request could start after the budget ended | `settledOutcome`, `tokenDetails` and `fundingHistory` never start after it; the snapshot requests keep the old rule |
 | `start.info` showed IPv6 hosts unbracketed and IDN hosts in Unicode | bracketed and punycode |
 | a funding entry outside years 1-9999 failed with `OverflowError` | `fundingHistory <coin> returned an entry outside the request` |
 | any answer up to 64 MiB was parsed, however much memory its values took | an answer that would take more than 256 MiB parsed fails its request, without a retry |
-| a checkpoint failure after a commit failed the commit | the commit counts; the checkpoint fails the run on its own |
+| a checkpoint or log cleanup failure after a commit failed the commit | the commit counts; the checkpoint or cleanup fails the run on its own |
 | `delta.checkpointInterval` hook and `table.vacuum` | the same checkpoint versions (19, 39, …) and VACUUM, committed by the command itself ([Compaction and VACUUM](#compaction-and-vacuum)) |
 | JSON lines in insertion order, `"0.1.0"` as `version` | keys sorted, compact; `version` is fireparq's, and `start` adds `deltalake` |
 
@@ -615,7 +616,8 @@ The command maintains its own tables after a run without failures (not with
    same 7 days and which every checkpoint then drops. Only runs in that hour
    read the table history.
 3. **Checkpoints** at versions 19, 39, …, every 20th (`delta.checkpointInterval`),
-   then log cleanup: the log keeps 7 days.
+   and after every commit, as delta-rs does, log cleanup: the entries older
+   than 7 days that a checkpoint covers are deleted.
 
 Never point `fireparq maintenance` at the `hl_*` tables: it compacts `date`
 partitions in a writer's block order and refuses an unpartitioned table
@@ -699,12 +701,12 @@ behind the same egress address calls `/info`, or lower the budgets.
   the parse bound covers what parsing allocates.
 - `blocks/tests/hypercore_reference_cli.rs`: the real binary over a loopback
   `/info`: exit statuses, configuration errors before any request, the URL and
-  credentials never printed, and the [views](#views) in DuckDB over the tables
-  it wrote.
+  credentials never printed, the loopback `/info` never asked through a proxy,
+  and the [views](#views) in DuckDB over the tables it wrote.
 - `blocks/tests/hypercore_reference_s3.rs`: the real binary on a loopback HTTPS
   S3 endpoint: a lost conditional commit, a lost commit answer, an unknown
-  outcome, a retried data write, and the requests' envelope, including the
-  bulk delete of a VACUUM.
+  outcome, a retried data write, and the requests' envelope, including a
+  checkpoint and the bulk deletes of a log cleanup and a VACUUM.
 - `blocks/tests/engine_compat.rs`: [Joining the lake](#joining-the-lake) and
   the [cross-checks](#cross-checks-against-the-lake) over a HyperCore fixture
   lake.

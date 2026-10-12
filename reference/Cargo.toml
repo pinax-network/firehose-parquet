@@ -16,7 +16,7 @@ test-support = []
 [dependencies]
 # DeltaStore, s3_log_client, AwsConfig and the CLI types.
 firehose-parquet = { path = "../firehose-parquet" }
-# is_conflict, is_missing_table and the JSON lines' key order (sorted).
+# is_conflict, compact::StoreReader and the JSON lines' key order (sorted).
 fireparq-maintenance = { path = "../maintenance" }
 # As in maintenance/: no `datafusion`, no `deltalake-aws`. Arrow and Parquet
 # are delta-rs's own 59 (`deltalake_core::arrow`, `deltalake_core::parquet`).

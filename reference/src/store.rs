@@ -16,7 +16,9 @@
 //! ([`crate::compact`]) and VACUUM ([`crate::vacuum`]) are this crate's own.
 //! A checkpoint follows delta-rs's rule (after version `v` when
 //! `(v + 1) % delta.checkpointInterval == 0`), written explicitly once the
-//! commits that crossed it landed.
+//! commits that crossed it landed; after every commit, as delta-rs's hook
+//! does, the log entries past the log retention that a checkpoint covers are
+//! deleted.
 //!
 //! Schemas only grow: a release may append nullable columns after the last
 //! one, and a writer adds them to an older table as a metadata-only commit.
@@ -251,8 +253,8 @@ impl std::error::Error for StoreError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Appended {
     pub version: u64,
-    /// The checkpoint the commit was due for failed: a run failure, though
-    /// the rows landed.
+    /// The checkpoint the commit was due for, or the log cleanup after it,
+    /// failed: a run failure, though the rows landed.
     pub checkpoint_error: Option<String>,
 }
 
@@ -454,8 +456,9 @@ impl Store {
         format!("{}: {}", kind(error), cut(&text, 300))
     }
 
-    /// Commit properties: one attempt, no post-commit hooks (checkpoints are
-    /// explicit), and the run's provenance (`hlref.*`; nothing reads it).
+    /// Commit properties: one attempt, no post-commit hooks (checkpoints and
+    /// log cleanup are explicit), and the run's provenance (`hlref.*`;
+    /// nothing reads it).
     pub(crate) fn commit_properties(&self, action: &str) -> CommitProperties {
         self.commit_metadata(action, None)
     }
@@ -524,25 +527,34 @@ impl Store {
         )
     }
 
-    /// The checkpoint delta-rs's rule asks for after commits took the table
-    /// from version `old` to `new`, then the expired log entries behind it.
-    /// When entries went, the handle is reloaded at its own version `new`, as
-    /// delta-rs's post-commit hook does: its snapshot may still name them
-    /// (all of them after a week without a commit), and a VACUUM planned on
-    /// it reads them. A failure is returned as a run failure: the commits
+    /// delta-rs's post-commit hook, after commits took the table from version
+    /// `old` to `new`: the checkpoint its rule asks for, then, after every
+    /// commit, the deletion of the log entries older than the log retention
+    /// that a checkpoint covers. When entries went, the handle is reloaded at
+    /// its own version `new`, as the hook does: its snapshot may still name
+    /// them (all of them after a week without a commit), and a VACUUM planned
+    /// on it reads them. A failure is returned as a run failure: the commits
     /// stand.
     async fn checkpoint(&self, t: &mut Table, old: u64, new: u64) -> Option<String> {
+        if new <= old {
+            return None;
+        }
         let interval = t
             .delta
             .snapshot()
             .ok()?
             .table_config()
             .checkpoint_interval();
-        if (new + 1) / interval.get() <= (old + 1) / interval.get() {
-            return None;
+        let name = t.spec.name;
+        let failed = |what: &str, error: DeltaTableError| {
+            format!("{name}: {what} at version {new} failed ({})", kind(&error))
+        };
+        if (new + 1) / interval.get() > (old + 1) / interval.get() {
+            if let Err(error) = create_checkpoint(&t.delta, None).await {
+                return Some(failed("checkpoint", error));
+            }
         }
-        let written = async {
-            create_checkpoint(&t.delta, None).await?;
+        let cleaned = async {
             if cleanup_metadata(&t.delta, None).await? > 0 {
                 let state =
                     DeltaTableState::try_new(t.delta.log_store().as_ref(), Some(new)).await?;
@@ -551,13 +563,7 @@ impl Store {
             DeltaResult::Ok(())
         }
         .await;
-        written.err().map(|error| {
-            format!(
-                "{}: checkpoint at version {new} failed ({})",
-                t.spec.name,
-                kind(&error)
-            )
-        })
+        cleaned.err().map(|error| failed("log cleanup", error))
     }
 
     /// The table at its latest version: created empty when missing

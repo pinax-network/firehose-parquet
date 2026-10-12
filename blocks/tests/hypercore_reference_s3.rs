@@ -11,7 +11,8 @@
 //! - a data file's failed `PUT` is retried (its name is unique), a commit's
 //!   never;
 //! - every request stays inside the bucket policy the job's S3 user needs
-//!   (docs/hypercore-reference.md, "The S3 user");
+//!   (docs/hypercore-reference.md, "The S3 user"), checkpoints and log
+//!   cleanup included;
 //! - no credential reaches the output.
 //!
 //! The loopback has no multipart uploads, and its 404s and 412s are not a
@@ -161,6 +162,58 @@ fn commit_key(table: &str, version: u64) -> String {
     format!("{table}/_delta_log/{version:020}.json")
 }
 
+/// Whether `key` is under one of the eleven tables' `<table>/` prefixes.
+fn in_a_table(key: &str) -> bool {
+    ALL_TABLES.iter().any(|spec| {
+        key.strip_prefix(spec.name)
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Every request is one the job's S3 user is granted: an object request
+/// under a table prefix, a listing with a table's `<table>/` prefix, or a
+/// bulk delete of keys under them. Commits are conditional; nothing asks for
+/// a bucket's location, ACL, policy, versioning or tags, or sends an ACL or
+/// tagging header.
+fn assert_inside_the_policy(log: &[s3::Entry]) {
+    for entry in log {
+        let query = entry.query.to_ascii_lowercase();
+        for name in ["location", "acl", "policy", "versioning", "tagging"] {
+            assert!(
+                !query
+                    .split('&')
+                    .any(|pair| pair.split('=').next() == Some(name)),
+                "{entry:?}"
+            );
+        }
+        assert_eq!((&entry.acl, &entry.tagging), (&None, &None), "{entry:?}");
+        if entry.key.is_empty() {
+            match entry.method.as_str() {
+                "GET" => {
+                    let prefix = entry.prefix.as_deref().unwrap_or_default();
+                    assert!(
+                        in_a_table(prefix),
+                        "a listing outside the tables: {entry:?}"
+                    );
+                }
+                "POST" => {
+                    assert!(entry.query.starts_with("delete"), "{entry:?}");
+                    assert!(
+                        entry.delete_keys.iter().all(|key| in_a_table(key)),
+                        "{entry:?}"
+                    );
+                }
+                _ => panic!("a bucket request: {entry:?}"),
+            }
+        } else {
+            assert!(in_a_table(&entry.key), "{entry:?}");
+        }
+        if entry.method == "PUT" && commit_version(&entry.key).is_some() {
+            assert_eq!(entry.if_none_match.as_deref(), Some("*"), "{entry:?}");
+        }
+    }
+}
+
 /// Python's test_the_conditional_put_decides_a_true_race: another writer
 /// took version 2 between this run's read and its commit, so the commit's
 /// conditional `PUT` is refused. It is sent once, never rebased onto version
@@ -293,12 +346,8 @@ async fn a_transient_data_put_failure_is_retried() {
 }
 
 /// Every request of meta, outcomes, funding and a forced maintain is one the
-/// job's S3 user is granted: an object request under one of the eleven
-/// table prefixes, a listing with a table's `<table>/` prefix, or a bulk
-/// delete of keys under them (the VACUUM of a week-old file no version
-/// references). Commits are conditional; nothing asks for a bucket's
-/// location, ACL, policy, versioning or tags, or sends an ACL or tagging
-/// header.
+/// job's S3 user is granted ([`assert_inside_the_policy`]), the VACUUM's
+/// bulk delete of a week-old file no version references included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn requests_stay_inside_the_bucket_policy() {
     let lake = Lake::start().await;
@@ -340,49 +389,9 @@ async fn requests_stay_inside_the_bucket_policy() {
     assert_eq!(pairs["vacuum_deleted"], json!(1), "{run:?}");
     assert!(lake.server.objects(orphan).is_empty());
 
-    let prefixes: Vec<String> = ALL_TABLES
-        .iter()
-        .map(|spec| format!("{}/", spec.name))
-        .collect();
-    let in_a_table = |key: &str| prefixes.iter().any(|prefix| key.starts_with(prefix));
     let log = lake.server.log();
     assert!(log.len() > 100, "{} requests", log.len());
-    for entry in &log {
-        let query = entry.query.to_ascii_lowercase();
-        for name in ["location", "acl", "policy", "versioning", "tagging"] {
-            assert!(
-                !query
-                    .split('&')
-                    .any(|pair| pair.split('=').next() == Some(name)),
-                "{entry:?}"
-            );
-        }
-        assert_eq!((&entry.acl, &entry.tagging), (&None, &None), "{entry:?}");
-        if entry.key.is_empty() {
-            match entry.method.as_str() {
-                "GET" => {
-                    let prefix = entry.prefix.as_deref().unwrap_or_default();
-                    assert!(
-                        in_a_table(prefix),
-                        "a listing outside the tables: {entry:?}"
-                    );
-                }
-                "POST" => {
-                    assert!(entry.query.starts_with("delete"), "{entry:?}");
-                    assert!(
-                        entry.delete_keys.iter().all(|key| in_a_table(key)),
-                        "{entry:?}"
-                    );
-                }
-                _ => panic!("a bucket request: {entry:?}"),
-            }
-        } else {
-            assert!(in_a_table(&entry.key), "{entry:?}");
-        }
-        if entry.method == "PUT" && commit_version(&entry.key).is_some() {
-            assert_eq!(entry.if_none_match.as_deref(), Some("*"), "{entry:?}");
-        }
-    }
+    assert_inside_the_policy(&log);
     // The VACUUM's bulk delete, the only one, named the orphan's full key.
     let deleted: Vec<&str> = log
         .iter()
@@ -402,6 +411,84 @@ async fn requests_stay_inside_the_bucket_policy() {
         .objects("")
         .iter()
         .all(|(key, _)| in_a_table(key)));
+}
+
+/// A checkpoint and the log cleanup after every commit stay inside the bucket
+/// policy too. Nineteen runs take `_hlref/outcome_probes` to version 19, whose
+/// checkpoint is written; once its log is older than the 7-day retention,
+/// the next commit, though no checkpoint is due, deletes the entries the
+/// checkpoint covers with one bulk delete. That request goes out once: a
+/// failed one fails the run, the commit stands, and the next commit's
+/// cleanup deletes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoints_and_log_cleanup_stay_inside_the_bucket_policy() {
+    let lake = Lake::start().await;
+    let probes = "_hlref/outcome_probes";
+    // A named id is probed on every run: one commit each.
+    let args = ["--no-maintenance", "outcomes", "--outcome-ids", "7768"];
+    for _ in 0..19 {
+        let run = lake.run(&args).await;
+        assert_eq!(run.status, 0, "{run:?}");
+    }
+    assert_eq!(lake.versions(probes), (0..=19).collect::<Vec<u64>>());
+    let directory = format!("{probes}/_delta_log/");
+    let checkpoint = format!("{directory}{:020}.checkpoint.parquet", 19);
+    for key in [checkpoint.clone(), format!("{directory}_last_checkpoint")] {
+        assert!(
+            lake.server
+                .log()
+                .iter()
+                .any(|entry| entry.method == "PUT" && entry.key == key),
+            "no PUT of {key}"
+        );
+    }
+    for (key, _) in lake.server.objects(&directory) {
+        assert!(lake
+            .server
+            .backdate(&key, Duration::from_secs(8 * 24 * 3600)));
+    }
+
+    lake.server.inject("POST", "", s3::Fault::Status(500), 1);
+    let run = lake.run(&args).await;
+    assert_eq!(run.status, 1, "{run:?}");
+    let failed = run.done()["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "{run:?}");
+    assert!(
+        failed[0]
+            .as_str()
+            .unwrap()
+            .starts_with("_hlref/outcome_probes: log cleanup at version 20 failed ("),
+        "{run:?}"
+    );
+    assert_eq!(run.done()["summary"][probes], json!(1), "{run:?}");
+    assert_eq!(lake.versions(probes), (0..=20).collect::<Vec<u64>>());
+
+    let run = lake.run(&args).await;
+    assert_eq!(run.status, 0, "{run:?}");
+    assert_eq!(lake.versions(probes), [19, 20, 21]);
+    assert!(!lake.server.objects(&checkpoint).is_empty());
+    let expired: Vec<String> = (0..19).map(|version| commit_key(probes, version)).collect();
+    let deletes: Vec<s3::Entry> = lake
+        .server
+        .log()
+        .into_iter()
+        .filter(|entry| entry.method == "POST")
+        .collect();
+    assert_eq!(
+        deletes.iter().map(|entry| entry.status).collect::<Vec<_>>(),
+        [500, 200],
+        "{deletes:?}"
+    );
+    for entry in &deletes {
+        let mut keys = entry.delete_keys.clone();
+        keys.sort();
+        assert_eq!(keys, expired, "{entry:?}");
+    }
+    // A new process reads the table from the checkpoint on.
+    let run = lake.run(&args).await;
+    assert_eq!(run.status, 0, "{run:?}");
+    assert_eq!(lake.versions(probes), [19, 20, 21, 22]);
+    assert_inside_the_policy(&lake.server.log());
 }
 
 /// A store error on S3 fails the run, and neither credential appears in its

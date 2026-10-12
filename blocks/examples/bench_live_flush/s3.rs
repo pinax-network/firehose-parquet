@@ -102,6 +102,7 @@ enum Target {
     /// A request for exactly this key.
     Key(String),
     /// A request for a key that starts with this.
+    #[cfg(test)]
     KeyPrefix(String),
     /// A ListObjectsV2 request whose prefix starts with this.
     List(String),
@@ -335,7 +336,7 @@ impl Server {
     /// Makes the next `times` `method` requests for a key that starts with
     /// `prefix` meet `fault`: a data file whose name is not known in advance
     /// (`blocks/tests/hypercore_reference_s3.rs`).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn inject_prefix(&self, method: &'static str, prefix: &str, fault: Fault, times: u32) {
         self.state.injections.lock().unwrap().push(Injection {
             method,
@@ -405,9 +406,10 @@ impl Server {
     }
 
     /// Moves `key`'s `Last-Modified` `age` into the past, as if it had been
-    /// written then: a full VACUUM deletes an unreferenced file only once it
-    /// is older than the retention (`blocks/tests/hypercore_reference_s3.rs`).
-    /// Whether it existed.
+    /// written then: a full VACUUM deletes an unreferenced file, and a log
+    /// cleanup a commit, only once it is older than the retention
+    /// (`blocks/tests/hypercore_reference_s3.rs`). Whether it existed.
+    #[cfg(test)]
     pub fn backdate(&self, key: &str, age: Duration) -> bool {
         let mut objects = self.state.objects.lock().unwrap();
         objects
@@ -546,6 +548,7 @@ fn injected(state: &State, method: &str, key: &str, listed: Option<&str>) -> Opt
             && injection.method == method
             && match &injection.target {
                 Target::Key(target) => listed.is_none() && key == target,
+                #[cfg(test)]
                 Target::KeyPrefix(prefix) => listed.is_none() && key.starts_with(prefix.as_str()),
                 Target::List(prefix) => listed.is_some_and(|listed| listed.starts_with(prefix)),
             }
