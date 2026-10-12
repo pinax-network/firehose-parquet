@@ -32,8 +32,11 @@
 //!
 //! `hypercore_documented_sql_runs_over_the_fixture_blocks` builds the 36 real
 //! HyperCore fixture blocks with their true identities and runs the view
-//! pack, monitors, cookbook and reference joins of `docs/chains/hypercore.md`
-//! over them in DuckDB.
+//! pack, monitors and cookbook of `docs/chains/hypercore.md` over them in
+//! DuckDB. `reference_joins_run_over_the_lake_and_the_reference_tables` runs
+//! the joins and cross-checks of `docs/hypercore-reference.md` over the same
+//! blocks and the `hl_*` reference tables `fireparq hypercore-reference`
+//! writes from recorded `/info` answers.
 //!
 //! `hypercore_compaction_drops_the_derivation_key_and_resume_still_works`
 //! builds the same blocks as a contiguous stream, compacts the tables with the
@@ -1256,16 +1259,6 @@ fn labelled_statements(block: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Empty stand-ins for the `hl_*` reference tables of a separate job, with the
-/// columns the documented joins read, so that those joins run.
-const REFERENCE_STUBS: &str = "
-CREATE TABLE hl_spot_pairs_current (coin VARCHAR, base_symbol VARCHAR, quote_symbol VARCHAR);
-CREATE TABLE hl_outcomes_current (outcome_id BIGINT, question_id BIGINT, name VARCHAR, side_names VARCHAR[]);
-CREATE TABLE hl_questions_current (question_id BIGINT, name VARCHAR);
-CREATE TABLE hl_funding_history (coin VARCHAR, funding_time TIMESTAMPTZ, premium DECIMAL(38,10));
-CREATE TABLE hl_perp_dexs_current (dex_index BIGINT, name VARCHAR, full_name VARCHAR);
-";
-
 /// The per-type views of the view pack: one per ledger type and per scalar
 /// body.
 fn per_type_view(view: &str) -> bool {
@@ -1280,14 +1273,30 @@ fn per_type_view(view: &str) -> bool {
         .contains(&view)
 }
 
-/// `docs/chains/hypercore.md`: its table views, view pack, monitors, cookbook
-/// and optional reference joins run in DuckDB over a real `build` of the 36
-/// HyperCore fixture blocks (their true identities, 2025-12-31 to
-/// 2026-10-06). Every monitor returns no rows, every query runs (the joins
-/// over empty `hl_*` stand-ins), the per-type views cover every event that is
-/// not funding or validator rewards, the interpretation views give the
-/// fixtures' known answers, and the decimal arithmetic types are the
-/// documented ones.
+/// A `build` of the 36 HyperCore fixture blocks into `<cwd>/<name>`.
+async fn build_hypercore_fixtures(cwd: &Path, name: &str) -> std::path::PathBuf {
+    let responses = hypercore_fixture_responses();
+    let first = responses[0].metadata.as_ref().unwrap().num;
+    let last = responses.last().unwrap().metadata.as_ref().unwrap().num;
+    let root = cwd.join(name);
+    let stream = Stream {
+        responses: Arc::new(responses),
+        final_only: true,
+        first,
+        last,
+    };
+    build_from(stream, name, "hypercore", cwd, &root).await;
+    root
+}
+
+/// `docs/chains/hypercore.md`: its table views, view pack, monitors and
+/// cookbook run in DuckDB over a real `build` of the 36 HyperCore fixture
+/// blocks (their true identities, 2025-12-31 to 2026-10-06). Every monitor
+/// returns no rows, every query runs, the per-type views cover every event
+/// that is not funding or validator rewards, the interpretation views give
+/// the fixtures' known answers, and the decimal arithmetic types are the
+/// documented ones. Its reference joins are in docs/hypercore-reference.md
+/// (`reference_joins_run_over_the_lake_and_the_reference_tables`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     let dir = tempfile::tempdir().unwrap();
@@ -1295,35 +1304,22 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
     let Some(duckdb) = DuckDb::open(&cwd) else {
         return;
     };
-    let responses = hypercore_fixture_responses();
-    let first = responses[0].metadata.as_ref().unwrap().num;
-    let last = responses.last().unwrap().metadata.as_ref().unwrap().num;
-    let root = cwd.join("hypercore-fixtures");
-    let stream = Stream {
-        responses: Arc::new(responses),
-        final_only: true,
-        first,
-        last,
-    };
-    build_from(stream, "hypercore-fixtures", "hypercore", &cwd, &root).await;
+    let root = build_hypercore_fixtures(&cwd, "hypercore-fixtures").await;
 
     let doc = include_str!("../../docs/chains/hypercore.md");
     let blocks = sql_blocks(doc);
     assert_eq!(
         blocks.len(),
-        5,
-        "table views, view pack, monitors, cookbook, reference joins"
+        4,
+        "table views, view pack, monitors, cookbook"
     );
     let mut sql = blocks[0].replace("<root>", root.to_str().unwrap());
     sql.push_str(blocks[1]);
-    sql.push_str(REFERENCE_STUBS);
     let monitors = labelled_statements(blocks[2]);
     let cookbook = labelled_statements(blocks[3]);
-    let joins = labelled_statements(blocks[4]);
     assert_eq!(monitors.len(), 28, "{monitors:?}");
     assert_eq!(cookbook.len(), 18, "{cookbook:?}");
-    assert_eq!(joins.len(), 3, "{joins:?}");
-    for (label, statement) in monitors.iter().chain(&cookbook).chain(&joins) {
+    for (label, statement) in monitors.iter().chain(&cookbook) {
         sql.push_str(&format!(
             "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
         ));
@@ -1377,7 +1373,7 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
             .collect()
     };
     let results = counts("result");
-    assert_eq!(results.len(), monitors.len() + cookbook.len() + joins.len());
+    assert_eq!(results.len(), monitors.len() + cookbook.len());
     for (label, _) in &monitors {
         assert_eq!(results[label], 0, "monitor {label} found violations");
     }
@@ -1464,6 +1460,174 @@ async fn hypercore_documented_sql_runs_over_the_fixture_blocks() {
             &json!("DOUBLE")
         )
     );
+}
+
+/// The columns of the reference views that the joins with the lake read, with
+/// their DuckDB types: the stand-ins these joins once ran over, now checked
+/// against the tables `fireparq hypercore-reference` writes.
+const REFERENCE_JOIN_COLUMNS: [(&str, &str, &str); 17] = [
+    ("hl_spot_pairs_current", "coin", "VARCHAR"),
+    ("hl_spot_pairs_current", "base_symbol", "VARCHAR"),
+    ("hl_spot_pairs_current", "quote_symbol", "VARCHAR"),
+    ("hl_outcomes_current", "outcome_id", "BIGINT"),
+    ("hl_outcomes_current", "question_id", "BIGINT"),
+    ("hl_outcomes_current", "name", "VARCHAR"),
+    ("hl_outcomes_current", "side_names", "VARCHAR[]"),
+    ("hl_outcomes_current", "settle_fraction", "DECIMAL(38,10)"),
+    ("hl_questions_current", "question_id", "BIGINT"),
+    ("hl_questions_current", "name", "VARCHAR"),
+    ("hl_funding_history", "coin", "VARCHAR"),
+    (
+        "hl_funding_history",
+        "funding_time",
+        "TIMESTAMP WITH TIME ZONE",
+    ),
+    ("hl_funding_history", "premium", "DECIMAL(38,10)"),
+    ("hl_perp_dexs_current", "dex_index", "BIGINT"),
+    ("hl_perp_dexs_current", "full_name", "VARCHAR"),
+    (
+        "hl_perp_assets_history",
+        "valid_from",
+        "TIMESTAMP WITH TIME ZONE",
+    ),
+    ("hl_perp_assets_history", "max_leverage", "BIGINT"),
+];
+
+/// A JSON-lines sink a test reads back.
+#[derive(Clone, Default)]
+struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// docs/hypercore-reference.md, "Joining the lake" and "Cross-checks against
+/// the lake": every query runs in DuckDB over a `build` of the 36 HyperCore
+/// fixture blocks and `hl_*` tables that `fireparq hypercore-reference` (the
+/// library, over the recorded `/info` fixtures) wrote into a second root,
+/// with the lake's table views and view pack and the page's own views. The
+/// columns the joins read have the documented types, so a drift between the
+/// tables and the joins fails here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
+    use fireparq_reference::{run_with, FundingOptions, Job, OutcomesOptions, Runtime, Settings};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let Some(duckdb) = DuckDb::open(&cwd) else {
+        return;
+    };
+    let lake = build_hypercore_fixtures(&cwd, "hypercore-lake").await;
+    let reference = cwd.join("hypercore-ref");
+    let clock = Arc::new(fireparq_reference::testing::FakeClock::new());
+    let fake = Arc::new(fireparq_reference::testing::FakeInfo::new());
+    for job in [
+        Job::Meta {
+            allow_mass_removal: false,
+        },
+        Job::Outcomes(OutcomesOptions {
+            outcome_ids: Some(vec![7768]),
+            ..OutcomesOptions::default()
+        }),
+        Job::Funding(FundingOptions {
+            coins: Some(vec!["BTC".into(), "xyz:XYZ100".into(), "MATIC".into()]),
+            ..FundingOptions::default()
+        }),
+    ] {
+        let settings = Settings {
+            root: Some(reference.to_str().unwrap().to_owned()),
+            ..Settings::new(job)
+        };
+        let runtime = Runtime {
+            clock: clock.clone(),
+            transport: Some(fake.clone()),
+            jitter: Box::new(|| 0.0),
+            funding_page: fireparq_reference::info::FUNDING_PAGE,
+        };
+        let lines = Lines::default();
+        let status = run_with(settings, &|_| None, runtime, Box::new(lines.clone())).await;
+        assert_eq!(
+            status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&lines.0.lock().unwrap())
+        );
+    }
+
+    let lake_doc = include_str!("../../docs/chains/hypercore.md");
+    let lake_blocks = sql_blocks(lake_doc);
+    let mut sql = lake_blocks[0].replace("<root>", lake.to_str().unwrap());
+    sql.push_str(lake_blocks[1]);
+    let doc = include_str!("../../docs/hypercore-reference.md");
+    sql.push_str(
+        &common::section_sql(doc, "Views")
+            .join("\n")
+            .replace("<root>", reference.to_str().unwrap()),
+    );
+    sql.push('\n');
+    let statements = |title: &str| {
+        let blocks = common::section_sql(doc, title);
+        assert_eq!(blocks.len(), 1, "{title}");
+        labelled_statements(&format!("{}\n", blocks[0]))
+    };
+    let joins = statements("Joining the lake");
+    let checks = statements("Cross-checks against the lake");
+    let labels = |statements: &[(String, String)]| -> Vec<String> {
+        statements.iter().map(|(label, _)| label.clone()).collect()
+    };
+    assert_eq!(labels(&joins), ["J1", "J2", "J3", "J4"]);
+    assert_eq!(labels(&checks), ["X1", "X2", "X3", "X4"]);
+    for (label, statement) in joins.iter().chain(&checks) {
+        sql.push_str(&format!(
+            "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
+        ));
+    }
+    for (view, column, _) in REFERENCE_JOIN_COLUMNS {
+        sql.push_str(&format!(
+            "\nSELECT 'type' AS q, '{view}.{column}' AS label, column_type AS type \
+             FROM (DESCRIBE {view}) WHERE column_name = '{column}';"
+        ));
+    }
+    // J3's dex join finds names: the fixture lake's funding events include the
+    // default dex's (0), which the reference tables know.
+    sql.push_str(
+        "\nSELECT 'joined' AS q, 'J3 dexes' AS label, count(d.name) AS n FROM funding_rates r \
+         LEFT JOIN hl_perp_dexs_current d ON d.dex_index = r.dex_index;",
+    );
+    let rows = duckdb.query(&sql);
+    let results: BTreeMap<String, u64> = rows["result"]
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap().to_string(),
+                number(&row["n"]),
+            )
+        })
+        .collect();
+    assert_eq!(results.len(), joins.len() + checks.len(), "{results:?}");
+    let types: BTreeMap<&str, &str> = rows["type"]
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap(),
+                row["type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for (view, column, expected) in REFERENCE_JOIN_COLUMNS {
+        assert_eq!(
+            types.get(format!("{view}.{column}").as_str()),
+            Some(&expected),
+            "{view}.{column}"
+        );
+    }
+    assert!(number(&rows["joined"][0]["n"]) > 0, "{rows:?}");
 }
 
 /// Serves `responses` from a request's cursor (`event-<ordinal>`), or from

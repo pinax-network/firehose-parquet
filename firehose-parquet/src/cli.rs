@@ -1,5 +1,6 @@
 //! Command-line declarations with stable re-exports of command operations.
 mod configuration;
+pub mod hypercore_reference;
 mod inspect;
 mod paths;
 mod validate;
@@ -621,6 +622,46 @@ Example:
   DRY_RUN=1 LAKE_ROOT=./output/mainnet LAKE_TABLES=blocks,transactions fireparq maintenance
 ")]
     Maintenance,
+    /// Snapshot HyperLiquid /info into the hl_* reference tables (Delta) beside a HyperCore lake.
+    ///
+    /// Names and labels HyperCore blocks do not carry (token and pair symbols,
+    /// perp dexes and assets, HIP-4 outcomes and questions, funding history)
+    /// come from HyperLiquid's /info: current state, not state at a block. The
+    /// job appends a row only when an entity's payload changed, to append-only
+    /// Delta tables in their own root, never a fireparq root. Run each job on
+    /// a schedule (deploy/examples/hypercore-reference-cronjob.yaml). It
+    /// prints one JSON object per line and exits 0 when done (an exhausted
+    /// time budget included), 1 when a request, commit or invariant failed, 2
+    /// for a configuration error. See docs/hypercore-reference.md.
+    #[command(after_long_help = "\
+Settings (a flag, or its environment variable; an empty value is unset):
+  HLREF_ROOT                      --root: s3://<bucket>[/<prefix>] or a local directory (required)
+  HL_INFO_URL                     --info-url: the /info endpoint (default https://api.hyperliquid.xyz/info;
+                                  plain http only for a loopback host). Only its scheme and host are shown
+  HLREF_WEIGHT_PER_MINUTE         /info weight per minute (default 400, at least 20)
+  HLREF_TIME_BUDGET_SECONDS       Seconds before requests stop; the run commits and exits 0 (default 240)
+  HLREF_MAX_PROBES                outcomes: settledOutcome probes per run (default 80)
+  AWS_ENDPOINT_URL_S3, AWS_REGION S3 endpoint (https; default AWS) and region (default us-east-1)
+  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+                                  Credentials (both keys required for an s3:// root; never printed)
+S3_ENDPOINT and AWS_ENDPOINT_URL are not read: a value that differs from AWS_ENDPOINT_URL_S3 is
+refused. AWS_S3_ALLOW_UNSAFE_RENAME=true is refused: every commit is a conditional put.
+
+Examples:
+  # The three scheduled jobs
+  HLREF_ROOT=s3://hypercore-ref fireparq hypercore-reference outcomes
+  HLREF_ROOT=s3://hypercore-ref fireparq hypercore-reference meta
+  HLREF_ROOT=s3://hypercore-ref fireparq hypercore-reference funding
+
+  # Probe named outcome ids, or re-read a funding window of two coins
+  fireparq hypercore-reference --root ./reference outcomes --outcome-ids 1,2,3
+  fireparq hypercore-reference --root ./reference funding --coins BTC,xyz:XYZ100 \\
+    --funding-start 2026-03-01 --funding-end 2026-03-08
+
+  # Check the tables' invariants
+  fireparq hypercore-reference --root ./reference verify
+")]
+    HypercoreReference(hypercore_reference::HypercoreReferenceArgs),
     /// Validate the block sequence of a Delta `blocks` table.
     ///
     /// Reads the active data files of the table's latest Delta snapshot, from

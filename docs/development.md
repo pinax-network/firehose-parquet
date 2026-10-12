@@ -12,7 +12,13 @@ cargo build --workspace
 cargo test --workspace --locked
 cargo test -p blocks --example refresh_evm_golden --example refresh_sec_golden --locked
 
-# Build release (`fireparq`, the maintenance job included)
+# The HyperLiquid reference job: the crate, then the real binary (its views and
+# joins in DuckDB, its S3 traffic on the loopback endpoint)
+cargo test -p fireparq-reference --locked
+FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 cargo test -p blocks --locked \
+  --test hypercore_reference_cli --test hypercore_reference_s3 --test engine_compat
+
+# Build release (`fireparq`, the maintenance and reference jobs included)
 cargo build --release -p blocks
 
 # Install
@@ -32,7 +38,8 @@ CI pins and the focused test commands.
 
 ```
 firehose-parquet/
-├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks, maintenance)
+├── Cargo.toml                              # workspace root (firehose-protos, firehose-parquet, blocks, maintenance,
+│                                           #   reference)
 ├── rust-toolchain.toml                     # the pinned Rust toolchain
 ├── Dockerfile                              # multi-stage Docker build of `fireparq`
 ├── .env.example                            # environment variables template (drift-tested against the CLI)
@@ -43,13 +50,15 @@ firehose-parquet/
 ├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
 ├── maintenance/                            # `fireparq maintenance`: the Delta maintenance job (row-order
 │                                           #   compaction, delta-rs VACUUM, checkpoints, log cleanup)
-├── deploy/examples/                        # example Kubernetes manifests (the maintenance CronJobs)
+├── reference/                              # `fireparq hypercore-reference`: the HyperLiquid /info reference
+│                                           #   tables (hl_*), their jobs, Delta store, OPTIMIZE and VACUUM
+├── deploy/examples/                        # example Kubernetes manifests (the maintenance and reference CronJobs)
 ├── docs/                                   # user guides, chain notes, design, schema reference (generated),
 │                                           #   release notes, audit records
 ├── firehose-parquet/                       # core library
 │   └── src/
 │       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
-│       │                                   #   inspect and validate helpers
+│       │                                   #   inspect and validate helpers, hypercore-reference arguments
 │       ├── ingest/                         # all-table transactions, output authority, cursor mirror, recovery
 │       ├── date_partition.rs               # the date=YYYY-MM-DD key, formatted and parsed in one place
 │       ├── writer.rs, writer/              # Arrow -> Parquet part encoding, partition routing, protected parts
@@ -108,7 +117,7 @@ use firehose_parquet::cli::{build_config, init_tracing, Commands};
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>, // Build(BuildArgs), Maintenance, Validate, Inspect, Recovery, Completions
+    command: Option<Commands>, // Build(BuildArgs), Maintenance, HypercoreReference, Validate, Inspect, Recovery, Completions
 
     #[command(flatten)]
     global: GlobalArgs, // --log-level, --verbose, --env-file
@@ -122,3 +131,7 @@ flags) and adds the chain flags (`--network`, `--block-type`,
 `blocks/src/bin/ingestion/`. `Commands::Maintenance` has no flags of its own:
 it runs `fireparq_maintenance::run` (`maintenance/`), which reads its settings
 from the environment ([Delta maintenance](delta-maintenance.md)).
+`Commands::HypercoreReference` takes the arguments of
+`firehose-parquet/src/cli/hypercore_reference.rs` and runs
+`fireparq_reference::run` (`reference/`), which prints JSON lines and exits
+with the job's status ([HyperLiquid reference tables](hypercore-reference.md)).

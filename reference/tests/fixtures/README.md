@@ -12,6 +12,10 @@ removes entries; it never edits a value.
 | `tokenDetails_<name>.json` | `tokenDetails` | whole responses for HSEI, USDC (no deployer) and ASI |
 | `fundingHistory_<coin>.json` | `fundingHistory` from 2026-01-01 | the first six hours of BTC, `xyz:XYZ100` and the delisted MATIC |
 
+`src/testing.rs` (`FakeInfo`) answers from them: in this crate's tests, and,
+through `blocks/tests/common/info.rs`, as a loopback `/info` for the real
+binary.
+
 ## `golden-vectors.json`
 
 Generated on 2026-10-11 by running k8s-parquet PR #82's Python job (commit

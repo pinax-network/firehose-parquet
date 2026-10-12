@@ -24,7 +24,9 @@
 //!
 //! [`run_with`] runs one job: the configuration checks, `start`, the job,
 //! `done`, and the exit status (0 done, an exhausted time budget included; 1
-//! a request, commit or invariant failed; 2 configuration).
+//! a request, commit or invariant failed; 2 configuration). [`run`] is the
+//! command, whose arguments (`firehose_parquet::cli::hypercore_reference`)
+//! live beside the binary's other commands.
 //!
 //! Nothing here links DataFusion, and no serde_json feature beyond the
 //! binary's `raw_value` is enabled (#698).
@@ -47,6 +49,7 @@ use std::fmt;
 use std::io::Write;
 use std::sync::Arc;
 
+use firehose_parquet::cli::hypercore_reference::{HypercoreReferenceArgs, ReferenceJob};
 use firehose_parquet::s3::AwsConfig;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -263,6 +266,46 @@ impl Settings {
     }
 }
 
+impl From<&HypercoreReferenceArgs> for Settings {
+    /// The command line's settings, every empty value unset (clap passes an
+    /// empty environment value through).
+    fn from(args: &HypercoreReferenceArgs) -> Self {
+        let job = match &args.job {
+            ReferenceJob::Outcomes(outcomes) => Job::Outcomes(OutcomesOptions {
+                max_probes: outcomes.max_probes,
+                reprobe_after_minutes: outcomes.reprobe_after_minutes,
+                sweep_from: outcomes.sweep_from,
+                sweep_to: outcomes.sweep_to,
+                outcome_ids: outcomes.outcome_ids.as_ref().map(|ids| ids.0.clone()),
+                allow_mass_removal: outcomes.allow_mass_removal,
+            }),
+            ReferenceJob::Meta(meta) => Job::Meta {
+                allow_mass_removal: meta.allow_mass_removal,
+            },
+            ReferenceJob::Funding(funding) => Job::Funding(FundingOptions {
+                funding_start: funding.funding_start.0,
+                funding_end: funding.funding_end.map(|end| end.0),
+                coins: funding.coins.as_ref().map(|coins| coins.0.clone()),
+                commit_rows: funding.commit_rows as usize,
+            }),
+            ReferenceJob::Maintain(maintain) => Job::Maintain {
+                tables: maintain.tables.as_ref().map(|tables| tables.0.clone()),
+            },
+            ReferenceJob::Verify => Job::Verify,
+        };
+        Self {
+            root: args.root.clone(),
+            info_url: args.info_url.clone(),
+            weight_per_minute: args.weight_per_minute,
+            time_budget_seconds: args.time_budget_seconds,
+            maintenance: !args.no_maintenance,
+            aws: AwsConfig::from(&args.aws),
+            job,
+        }
+        .normalized()
+    }
+}
+
 /// What a run needs from its process: injected by tests.
 pub struct Runtime {
     pub clock: Arc<dyn Clock>,
@@ -307,6 +350,14 @@ fn run_id(job: &str, now_micros: i64) -> String {
         moment.second(),
         &random[..6]
     )
+}
+
+/// `fireparq hypercore-reference`: runs the command line's job on the
+/// process's clocks and HTTP, writing JSON lines to `out`; the exit status.
+/// `env` is read only for the S3 guards (`AWS_S3_ALLOW_UNSAFE_RENAME`, and
+/// the `S3_ENDPOINT` and `AWS_ENDPOINT_URL` this job does not read).
+pub async fn run(args: &HypercoreReferenceArgs, env: Env<'_>, out: Box<dyn Write + Send>) -> i32 {
+    run_with(Settings::from(args), env, Runtime::system(), out).await
 }
 
 /// Runs `settings.job`, writing JSON lines to `out`: the exit status.

@@ -1,8 +1,8 @@
 # CLI reference
 
 `fireparq build` streams Firehose blocks into the Delta tables. The other
-[subcommands](#subcommands) are `maintenance`, `validate`, `inspect`,
-`recovery` and `completions`; DuckDB and Polars read the tables
+[subcommands](#subcommands) are `maintenance`, `hypercore-reference`,
+`validate`, `inspect`, `recovery` and `completions`; DuckDB and Polars read the tables
 ([Reading the tables](reading-tables.md)). The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
@@ -69,7 +69,11 @@ Every `build` flag can also be set with the environment variable that
 `fireparq build --help` names. [`.env.example`](../.env.example) lists them
 all (a test keeps it in sync with the CLI); copy it to `.env` in the directory
 you run `fireparq` from. `fireparq maintenance` takes its own
-variables instead ([Delta maintenance](delta-maintenance.md)). Since #617:
+variables instead ([Delta maintenance](delta-maintenance.md)).
+`fireparq hypercore-reference` reads `HLREF_*`, `HL_INFO_URL` and, like
+`build`, `AWS_ENDPOINT_URL_S3` and the AWS credentials, through its flags; an
+empty value is unset for it ([HyperLiquid reference tables](hypercore-reference.md)).
+Since #617:
 
 - `fireparq` loads `.env` from the **current working directory only**. Parent
   directories are never searched, so a run started in a subdirectory or a git
@@ -338,6 +342,41 @@ DRY_RUN=1 LAKE_ROOT=./output/mainnet LAKE_TABLES=blocks,transactions fireparq ma
 
 [Delta maintenance](delta-maintenance.md) has every setting, the schedule and
 the example CronJobs.
+
+### `hypercore-reference` — HyperLiquid reference tables
+
+Snapshots HyperLiquid's `/info` (token and pair symbols, perp dexes and
+assets, HIP-4 outcomes and questions, funding history) into the append-only
+`hl_*` Delta tables, in a root of their own beside a HyperCore lake, never a
+fireparq dataset root. Three jobs run on a schedule, each the only writer of
+its tables; `maintain` and `verify` are run by hand:
+
+```
+fireparq hypercore-reference [OPTIONS] <outcomes|meta|funding|maintain|verify> [JOB OPTIONS]
+```
+
+Options come before the job and job options after it. The options are
+`--root` (`HLREF_ROOT`, required: `s3://<bucket>[/<prefix>]` or a local
+directory), `--info-url` (`HL_INFO_URL`, default
+`https://api.hyperliquid.xyz/info`; only its scheme and host are ever shown),
+`--weight-per-minute` (`HLREF_WEIGHT_PER_MINUTE`, default 400, at least 20),
+`--time-budget-seconds` (`HLREF_TIME_BUDGET_SECONDS`, default 240),
+`--no-maintenance` and the `AWS / S3` flags; the S3 endpoint is
+`AWS_ENDPOINT_URL_S3` (`https://` only), and `S3_ENDPOINT` or
+`AWS_ENDPOINT_URL` with another value is refused. It prints one JSON object
+per line and exits 0 when done (an exhausted time budget included), 1 when a
+request, commit or invariant failed, and 2 for a configuration error.
+
+```bash
+HLREF_ROOT=s3://hypercore-ref fireparq hypercore-reference outcomes
+fireparq hypercore-reference --root ./reference funding --coins BTC,xyz:XYZ100 \
+  --funding-start 2026-03-01 --funding-end 2026-03-08
+fireparq hypercore-reference --root ./reference verify
+```
+
+[HyperLiquid reference tables](hypercore-reference.md) has the tables, the
+views and joins with the lake, every setting and event, and the example
+CronJobs.
 
 ### `inspect` — display file metadata
 

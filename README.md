@@ -146,7 +146,7 @@ the maintenance CronJobs.
 |---|---|---|
 | Using fireparq | [Getting started](docs/getting-started.md) | Install, `build` examples, Docker |
 | | [Authentication](docs/authentication.md) | Provider-scoped Firehose credentials and explicit selectors |
-| | [CLI reference](docs/cli.md) | Flags, network aliases, environment variables, flush sizing, the `inspect`, `validate`, `recovery`, `maintenance` and `completions` subcommands |
+| | [CLI reference](docs/cli.md) | Flags, network aliases, environment variables, flush sizing, the `inspect`, `validate`, `recovery`, `maintenance`, `hypercore-reference` and `completions` subcommands |
 | | [Non-final streams and reorgs](docs/non-final-streams.md) | `--final-blocks-only=false`, `fork_step`, `stream_ordinal`, the canonical live view |
 | | [Features](docs/features.md) | The full feature list |
 | Output and schemas | [Output layout](docs/output-layout.md) | Dataset root and `{chain}`, directory tree, single-network buckets, identity columns, encodings, file metadata |
@@ -159,6 +159,7 @@ the maintenance CronJobs.
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
 | | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |
+| | [HyperLiquid reference tables](docs/hypercore-reference.md) | `fireparq hypercore-reference`: HyperLiquid `/info` names and labels as `hl_*` Delta tables beside a HyperCore lake, their views and joins, CronJobs |
 | | [Prometheus metrics](docs/metrics.md) | Metrics, `/health` and `/ready` |
 | | [Network registry integration](docs/network-registry-integration.md) | Built-in `--network` aliases (registry and internal Pinax list), provider policy, endpoint check |
 | Design and audit | [Delta Lake design](docs/design/delta-lake.md) | The v1.0.0 Delta Lake output design (#643) |

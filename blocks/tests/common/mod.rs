@@ -1,8 +1,10 @@
 //! Helpers shared by the tests that read fireparq's Delta tables with the
 //! target engines (#643): `engine_compat.rs`, `delta_tables.rs`,
 //! `delta_maintenance.rs`, `delta_recovery.rs`, `delta_readers.rs`,
-//! `non_final_stream.rs` (the live view of docs/non-final-streams.md) and
-//! `sec_docs_sql.rs` (the shipped views of docs/chains/sec.md).
+//! `non_final_stream.rs` (the live view of docs/non-final-streams.md),
+//! `sec_docs_sql.rs` (the shipped views of docs/chains/sec.md) and the
+//! `hypercore_reference_*.rs` tests (the reference tables' views and joins of
+//! docs/hypercore-reference.md, and [`info`], a loopback `/info`).
 //!
 //! Readers and tools:
 //!
@@ -37,6 +39,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
+
+pub mod info;
 
 /// The DuckDB CLI, or `None` locally when it is missing.
 pub fn duckdb_cli() -> Option<PathBuf> {
@@ -86,6 +90,22 @@ pub fn duckdb_cli() -> Option<PathBuf> {
 fn duckdb_version(output: &str) -> Option<(u32, u32)> {
     let mut parts = output.trim().trim_start_matches('v').split(['.', ' ']);
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// The ```` ```sql ```` blocks of the `## {title}` section of a Markdown page.
+pub fn section_sql(markdown: &str, title: &str) -> Vec<String> {
+    let section = markdown
+        .split(&format!("\n## {title}\n"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no `## {title}` section"))
+        .split("\n## ")
+        .next()
+        .unwrap();
+    section
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("\n```").next().unwrap().to_string())
+        .collect()
 }
 
 /// A JSON number or numeric string (DuckDB versions differ) as `u64`.

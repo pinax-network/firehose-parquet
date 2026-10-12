@@ -69,12 +69,12 @@ Rows and bytes per table: [Volume and flushes](#volume-and-flushes).
 - **Names and labels** (spot pair and token names, outcome and question
   labels, perp-dex names, the funding premium) come from HyperLiquid's
   `/info`, not the protobuf, and are not in the lake
-  ([optional reference joins](#optional-reference-joins)).
+  ([reference tables](#reference-tables)).
 
 ### Where to start
 
-`C` numbers are [cookbook](#cookbook) queries, `J` numbers [optional reference
-joins](#optional-reference-joins).
+`C` numbers are [cookbook](#cookbook) queries, `J` numbers the
+[reference joins](../hypercore-reference.md#joining-the-lake).
 
 | Question | Start from | Queries |
 |---|---|---|
@@ -91,7 +91,7 @@ joins](#optional-reference-joins).
 | One account's ledger history | `hypercore_account_events_v` joined to `events` | C7 |
 | Builder revenue | `fills` | C12 |
 | Validator rewards | `validator_rewards` | |
-| Names and labels (pairs, tokens, outcomes, dexes, the funding premium) | the optional `hl_*` tables | J1, J2, J3 |
+| Names and labels (pairs, tokens, outcomes, dexes, the funding premium) | the `hl_*` [reference tables](../hypercore-reference.md) | J1, J2, J3, J4 |
 
 ## Identity and coverage
 
@@ -495,8 +495,9 @@ The numbers are the `LedgerUpdateDelta` case numbers.
   fills at 18:00–21:00 UTC on 2026-10-06 yet no deltas at those funding
   blocks. So:
   - for `funding_rate`, a missing row most likely means a rate of 0. This is
-    inferred, not confirmed (the optional `hl_funding_history` table can
-    confirm it); an average of hourly rates should count such hours as 0 or
+    inferred, not confirmed (the `hl_funding_history`
+    [reference table](../hypercore-reference.md) can confirm it); an average
+    of hourly rates should count such hours as 0 or
     exclude them explicitly;
   - for `open_interest`, the holder counts and the `funding_deltas`
     positions, a missing row means unknown, not zero: they are exact for the
@@ -1371,40 +1372,20 @@ SELECT coin, outcome_id, side_index, shares, last_block_num FROM outcome_positio
 WHERE user = '0x…' AND shares <> 0;
 ```
 
-### Optional reference joins
+### Reference tables
 
 Names and labels that are not in the protobuf (spot pair and token names,
 outcome and question text, perp-dex names, the funding premium) come from
 HyperLiquid's `/info`, which returns current state, not state at a block, and
-are never written into a fireparq root. A separate reference job, not part of
-fireparq, can write them in its own location as small append-only Delta tables
-(`hl_spot_tokens`, `hl_spot_pairs`, `hl_perp_dexs`, `hl_perp_assets`,
-`hl_outcomes`, `hl_questions`, `hl_funding_history`), each with `*_current`
-and `*_history` views, in the lake's vocabulary (`''` for the default dex,
-`side_index`). J3 reads the `hl_funding_history` table itself (keyed by
-`coin, funding_time`), not a `*_history` view, and joins
-`hl_perp_dexs_current` on `dex_index`, the observed ordinal that monitor M18
-checks. When those tables exist, join them at query time:
-
-```sql
--- J1 spot trades with pair names
-SELECT f.block_num, f.fill_index, f.timestamp, p.base_symbol, p.quote_symbol, f.side, f.price, f.size,
-       f.user, f.counterparty, f.crossed
-FROM fills f LEFT JOIN hl_spot_pairs_current p ON p.coin = f.coin
-WHERE f.market_type = 'spot';
--- J2 HIP-4 fills with labels (side_names is 1-based in DuckDB)
-SELECT o.*, m.name AS outcome_name, m.side_names[o.side_index + 1] AS side_label,
-       q.name AS question_name, s.settle_fraction
-FROM outcome_fills o
-LEFT JOIN hl_outcomes_current m USING (outcome_id)
-LEFT JOIN hl_questions_current q ON q.question_id = m.question_id
-LEFT JOIN outcome_settlements_v s USING (outcome_id);
--- J3 hourly funding with the premium and the dex name
-SELECT r.*, h.premium, d.full_name AS dex_full_name
-FROM funding_rates r
-LEFT JOIN hl_funding_history h ON h.coin = r.coin AND h.funding_time = r.timestamp
-LEFT JOIN hl_perp_dexs_current d ON d.dex_index = r.dex_index;
-```
+are never written into a fireparq root. `fireparq hypercore-reference` writes
+them into their own root as small append-only Delta tables (`hl_spot_tokens`,
+`hl_spot_pairs`, `hl_perp_dexs`, `hl_perp_assets`, `hl_outcomes`,
+`hl_questions`, `hl_funding_history`, …), each with `*_current` and
+`*_history` views, in the lake's vocabulary (`''` for the default dex,
+`side_index`). [HyperLiquid reference tables](../hypercore-reference.md) has
+the tables, their views and the joins with this lake
+([J1–J4](../hypercore-reference.md#joining-the-lake)), tested over these
+fixture blocks.
 
 ## Volume and flushes
 

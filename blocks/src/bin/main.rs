@@ -72,6 +72,8 @@ Primary workflow:
   Use `fireparq build` to run the ingestion pipeline.
   Run `fireparq maintenance` beside it to compact and vacuum the tables; `inspect`,
   `validate` and `recovery` are the utility subcommands.
+  `fireparq hypercore-reference` writes HyperLiquid's /info names and labels to
+  their own reference tables, beside a HyperCore lake.
   Read the tables with DuckDB (`delta_scan`) or Polars (`scan_delta`).
 
 Examples:
@@ -1579,6 +1581,13 @@ async fn main() -> Result<()> {
                 let status = fireparq_maintenance::run(&env, &mut std::io::stdout()).await;
                 std::process::exit(status);
             }
+            Commands::HypercoreReference(args) => {
+                // Likewise. Exiting here never waits for the HTTP client's
+                // pool, so a run cannot hang into its activeDeadlineSeconds.
+                let env = |name: &str| std::env::var(name).ok();
+                let status = fireparq_reference::run(args, &env, Box::new(std::io::stdout())).await;
+                std::process::exit(status);
+            }
             Commands::Inspect {
                 path,
                 schema_only,
@@ -2970,6 +2979,27 @@ mod tests {
                     "--log-level",
                 ],
             ),
+            (
+                "hypercore-reference",
+                vec![
+                    "Jobs:",
+                    "Reference tables:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<JOB>",
+                    "--root",
+                    "--info-url",
+                    "--weight-per-minute",
+                    "--time-budget-seconds",
+                    "--no-maintenance",
+                    "--aws-endpoint-url",
+                    "--log-level",
+                    "HLREF_MAX_PROBES",
+                    "AWS_ENDPOINT_URL_S3",
+                ],
+            ),
         ] {
             let help = command_help(&["fireparq", name, "--help"]);
 
@@ -2986,6 +3016,192 @@ mod tests {
                     "expected `{name}` help to mention `{snippet}`\n{help}"
                 );
             }
+        }
+    }
+
+    fn reference_settings(args: &[&str]) -> Result<fireparq_reference::Settings, clap::Error> {
+        let arguments = ["fireparq", "hypercore-reference", "--root", "./reference"];
+        match Cli::try_parse_from(arguments.iter().chain(args))?.command {
+            Some(Commands::HypercoreReference(args)) => {
+                Ok(fireparq_reference::Settings::from(&args))
+            }
+            other => panic!("expected hypercore-reference, got {other:?}"),
+        }
+    }
+
+    /// Python's test_mass_removal_is_allowed_only_when_asked: the flag reaches
+    /// the meta and outcomes jobs, and funding has none.
+    #[test]
+    fn hypercore_reference_allow_mass_removal_reaches_the_job() {
+        use fireparq_reference::Job;
+        let job = |args: &[&str]| reference_settings(args).unwrap().job;
+        assert_eq!(
+            job(&["meta"]),
+            Job::Meta {
+                allow_mass_removal: false
+            }
+        );
+        assert_eq!(
+            job(&["meta", "--allow-mass-removal"]),
+            Job::Meta {
+                allow_mass_removal: true
+            }
+        );
+        let Job::Outcomes(outcomes) = job(&["outcomes", "--allow-mass-removal"]) else {
+            panic!("expected outcomes");
+        };
+        assert!(outcomes.allow_mass_removal);
+        let Job::Outcomes(outcomes) = job(&["outcomes"]) else {
+            panic!("expected outcomes");
+        };
+        assert!(!outcomes.allow_mass_removal);
+        let error = reference_settings(&["funding", "--allow-mass-removal"])
+            .err()
+            .expect("funding has no --allow-mass-removal");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// Options come before the job and job options after it, as in the Python
+    /// job; the job's values reach its settings.
+    #[test]
+    fn hypercore_reference_options_precede_the_job() {
+        use fireparq_reference::{FundingOptions, Job, OutcomesOptions};
+        let settings = Cli::try_parse_from([
+            "fireparq",
+            "hypercore-reference",
+            "--root",
+            "s3://hypercore-ref/",
+            "--info-url",
+            "https://gw.example/info",
+            "--weight-per-minute",
+            "200",
+            "--time-budget-seconds",
+            "2.5",
+            "--no-maintenance",
+            "outcomes",
+            "--max-probes",
+            "60",
+            "--reprobe-after-minutes",
+            "5",
+            "--sweep-from",
+            "9970",
+            "--sweep-to",
+            "9980",
+            "--outcome-ids",
+            "1, 2,3",
+        ])
+        .map(|cli| match cli.command {
+            Some(Commands::HypercoreReference(args)) => fireparq_reference::Settings::from(&args),
+            other => panic!("expected hypercore-reference, got {other:?}"),
+        })
+        .unwrap();
+        assert_eq!(settings.root.as_deref(), Some("s3://hypercore-ref/"));
+        assert_eq!(
+            settings.info_url.as_deref(),
+            Some("https://gw.example/info")
+        );
+        assert_eq!(settings.weight_per_minute, 200);
+        assert_eq!(settings.time_budget_seconds, 2.5);
+        assert!(!settings.maintenance);
+        assert_eq!(
+            settings.job,
+            Job::Outcomes(OutcomesOptions {
+                max_probes: 60,
+                reprobe_after_minutes: 5,
+                sweep_from: 9970,
+                sweep_to: Some(9980),
+                outcome_ids: Some(vec![1, 2, 3]),
+                allow_mass_removal: false,
+            })
+        );
+        assert_eq!(
+            reference_settings(&[
+                "funding",
+                "--funding-start",
+                "2026-03-01",
+                "--funding-end",
+                "2026-03-08T00:00Z",
+                "--coins",
+                "BTC, xyz:XYZ100",
+                "--commit-rows",
+                "10"
+            ])
+            .unwrap()
+            .job,
+            Job::Funding(FundingOptions {
+                funding_start: 1_772_323_200_000_000,
+                funding_end: Some(1_772_928_000_000_000),
+                coins: Some(vec!["BTC".into(), "xyz:XYZ100".into()]),
+                commit_rows: 10,
+            })
+        );
+        // The defaults are the library's.
+        assert_eq!(
+            reference_settings(&["funding"]).unwrap().job,
+            Job::Funding(FundingOptions::default())
+        );
+        assert_eq!(
+            reference_settings(&["maintain", "--tables", "hl_outcomes,_hlref/outcome_probes"])
+                .unwrap()
+                .job,
+            Job::Maintain {
+                tables: Some(vec!["hl_outcomes".into(), "_hlref/outcome_probes".into()])
+            }
+        );
+        assert_eq!(reference_settings(&["verify"]).unwrap().job, Job::Verify);
+        // An empty value is unset, as an empty environment variable is.
+        let settings = reference_settings(&[
+            "--info-url",
+            "",
+            "--aws-session-token",
+            "",
+            "--aws-endpoint-url",
+            "",
+            "verify",
+        ])
+        .unwrap();
+        assert_eq!(settings.info_url, None);
+        assert_eq!(settings.aws.aws_session_token, None);
+        assert_eq!(settings.aws.aws_endpoint_url, None);
+        for (args, kind) in [
+            // Options after the job, and job options before it.
+            (
+                &["verify", "--root", "./other"][..],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["--max-probes", "5", "outcomes"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (&[], clap::error::ErrorKind::MissingSubcommand),
+            (&["views"], clap::error::ErrorKind::InvalidSubcommand),
+            (
+                &["outcomes", "--outcome-ids", " , "],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["outcomes", "--sweep-from=-1"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["funding", "--coins", ""],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["funding", "--commit-rows", "0"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["funding", "--funding-start", "2026-W09-7"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+        ] {
+            let error = reference_settings(args)
+                .err()
+                .unwrap_or_else(|| panic!("{args:?} should be refused"));
+            assert_eq!(error.kind(), kind, "{args:?}: {error}");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
         }
     }
 
