@@ -286,6 +286,12 @@ fn configuration_errors_exit_2_before_any_request() {
             "weight budget must be at least 20 per minute",
         ),
         (
+            "a negative weight",
+            meta.clone(),
+            with(&local, &[("HLREF_WEIGHT_PER_MINUTE", "-5")], &[]),
+            "weight budget must be at least 20 per minute",
+        ),
+        (
             "a negative time budget",
             meta.clone(),
             with(&local, &[("HLREF_TIME_BUDGET_SECONDS", "-1")], &[]),
@@ -323,6 +329,16 @@ fn configuration_errors_exit_2_before_any_request() {
             "a weight that is not a number",
             meta.clone(),
             with(&local, &[("HLREF_WEIGHT_PER_MINUTE", "abc")], &[]),
+        ),
+        (
+            "a negative probe count",
+            vec!["outcomes"],
+            with(&local, &[("HLREF_MAX_PROBES", "-1")], &[]),
+        ),
+        (
+            "a negative cool-down",
+            vec!["outcomes", "--reprobe-after-minutes=-5"],
+            local.to_vec(),
         ),
         (
             "funding has no --allow-mass-removal",

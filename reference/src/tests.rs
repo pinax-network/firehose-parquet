@@ -170,6 +170,32 @@ async fn failures_exit_1_and_never_log_the_url() {
     assert!(!ran.text.contains("SECRETQUERY"), "{}", ran.text);
 }
 
+/// A one-letter `/info` query is no credential: hiding it would turn `done`
+/// into `d***ne` and `hl_outcomes` into `hl_***utc***mes`.
+#[tokio::test]
+async fn a_short_info_url_query_never_rewrites_the_output() {
+    let cli = Cli::new();
+    let settings = Settings {
+        info_url: Some("https://gw.example/info?o".into()),
+        ..cli.settings(outcomes(9975))
+    };
+    let ran = cli.invoke(settings, &[]).await;
+    assert_eq!(ran.status, 0, "{}", ran.text);
+    assert_eq!(
+        (&ran.first()["event"], &ran.first()["mode"]),
+        (&json!("start"), &json!("outcomes"))
+    );
+    assert_eq!(ran.last()["event"], "done");
+    assert!(
+        ran.events
+            .iter()
+            .any(|event| event["event"] == "appended" && event["table"] == "hl_outcomes"),
+        "{}",
+        ran.text
+    );
+    assert!(!ran.text.contains("***"), "{}", ran.text);
+}
+
 #[tokio::test]
 async fn configuration_errors_exit_2() {
     let cli = Cli::new();

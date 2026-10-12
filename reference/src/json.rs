@@ -14,6 +14,10 @@
 //! features would keep number text and key order too, but Cargo unifies
 //! features across the binary, where they change delta-rs's stats parsing and
 //! fireparq's control records (#698): they stay off.
+//!
+//! The tree's memory is bounded before it is built: dense small values take
+//! far more than their text (an array of `{"a":0}` about 100 times), so the
+//! cap on an answer's bytes alone would let one outgrow the job's memory.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +30,25 @@ const MAX_DEPTH: usize = 128;
 
 /// Python refuses to convert an integer of more digits (`sys.int_info`).
 const MAX_INTEGER_DIGITS: usize = 4300;
+
+/// The most memory parsing a document may take, as [`tree_bytes`] counts
+/// it. With the 64 MiB answer it stays well inside the CronJobs' 1 GiB; a
+/// real answer, a few MB counted at 10 to 20 times its size, takes a
+/// fraction of it.
+pub const MAX_TREE_BYTES: usize = 256 << 20;
+
+/// What [`tree_bytes`] counts for every value: its slot in its array or
+/// object, and its entry in the list its level is parsed into, with room
+/// for that list's doubling.
+const VALUE_BYTES: usize = 2 * (size_of::<Json>() + size_of::<&RawValue>());
+/// For every string, key and number besides its text: its allocation's
+/// rounding and header.
+const TEXT_BYTES: usize = 32;
+/// For every object: a B-tree node of 11 entries (an empty one has none).
+const NODE_BYTES: usize = 11 * (size_of::<String>() + size_of::<Json>()) + 16;
+/// For every key: its share of an object's further nodes, and of the list
+/// the object is collected through.
+const ENTRY_BYTES: usize = size_of::<(String, Json)>();
 
 /// A parsed JSON value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,18 +65,33 @@ pub enum Json {
     Obj(BTreeMap<String, Json>),
 }
 
-/// The bytes are not JSON (strict RFC 8259, UTF-8). Carries no input text.
+/// Why bytes were not parsed. Carries no input text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InvalidJson;
+pub enum ParseError {
+    /// Not JSON (strict RFC 8259, UTF-8).
+    Invalid,
+    /// JSON whose tree would take more memory than allowed.
+    TooLarge,
+}
 
 impl Json {
-    /// Parses a whole document. Refused: invalid UTF-8, a byte order mark,
-    /// trailing data, `NaN` and `Infinity`, raw control characters in strings,
-    /// a lone surrogate escape, an integer of more than 4300 digits and
-    /// nesting deeper than 128.
-    pub fn parse(bytes: &[u8]) -> Result<Json, InvalidJson> {
-        let text = std::str::from_utf8(bytes).map_err(|_| InvalidJson)?;
-        let raw: &RawValue = serde_json::from_str(text).map_err(|_| InvalidJson)?;
+    /// Parses a whole document. Refused as invalid: invalid UTF-8, a byte
+    /// order mark, trailing data, `NaN` and `Infinity`, raw control characters
+    /// in strings, a lone surrogate escape, an integer of more than 4300
+    /// digits and nesting deeper than 128; as too large, a tree of more than
+    /// [`MAX_TREE_BYTES`].
+    pub fn parse(bytes: &[u8]) -> Result<Json, ParseError> {
+        Json::parse_within(bytes, MAX_TREE_BYTES)
+    }
+
+    /// [`Json::parse`] with a bound of `max_tree_bytes`, checked on the
+    /// validated text before any of the tree is built.
+    pub fn parse_within(bytes: &[u8], max_tree_bytes: usize) -> Result<Json, ParseError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| ParseError::Invalid)?;
+        let raw: &RawValue = serde_json::from_str(text).map_err(|_| ParseError::Invalid)?;
+        if tree_bytes(raw.get()) > max_tree_bytes {
+            return Err(ParseError::TooLarge);
+        }
         convert(raw, 0)
     }
 
@@ -186,18 +224,59 @@ impl Json {
     }
 }
 
+/// About the most memory [`convert`] holds at once for the validated JSON
+/// `text`, from its tokens alone; it errs high. Every value counts its slot
+/// and list entry, every string, key and number its copy, every object a
+/// B-tree node and every key its share of the rest.
+fn tree_bytes(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut total: usize = 0;
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let start = index;
+        index += 1;
+        let cost = match byte {
+            b'"' => {
+                // To the closing quote; an escaped one goes with its `\`.
+                while let Some(&byte) = bytes.get(index) {
+                    index += if byte == b'\\' { 2 } else { 1 };
+                    if byte == b'"' {
+                        break;
+                    }
+                }
+                VALUE_BYTES + TEXT_BYTES + (index - start)
+            }
+            b'-' | b'0'..=b'9' => {
+                while bytes.get(index).is_some_and(|byte| {
+                    matches!(byte, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                }) {
+                    index += 1;
+                }
+                VALUE_BYTES + TEXT_BYTES + (index - start)
+            }
+            b'{' => VALUE_BYTES + NODE_BYTES,
+            b':' => ENTRY_BYTES,
+            b'[' | b't' | b'f' | b'n' => VALUE_BYTES,
+            // `,`, `]`, `}`, whitespace and the rest of `true`, `false`, `null`.
+            _ => 0,
+        };
+        total = total.saturating_add(cost);
+    }
+    total
+}
+
 /// `raw` at `depth` arrays and objects deep.
-fn convert(raw: &RawValue, depth: usize) -> Result<Json, InvalidJson> {
+fn convert(raw: &RawValue, depth: usize) -> Result<Json, ParseError> {
     let text = raw.get();
     let first = text.as_bytes().first();
     if matches!(first, Some(b'{' | b'[')) && depth >= MAX_DEPTH {
-        return Err(InvalidJson);
+        return Err(ParseError::Invalid);
     }
     match first {
         Some(b'{') => {
             // BTreeMap keeps the last of repeated keys, as Python does.
             let entries: BTreeMap<String, &RawValue> =
-                serde_json::from_str(text).map_err(|_| InvalidJson)?;
+                serde_json::from_str(text).map_err(|_| ParseError::Invalid)?;
             entries
                 .into_iter()
                 .map(|(key, value)| Ok((key, convert(value, depth + 1)?)))
@@ -205,33 +284,35 @@ fn convert(raw: &RawValue, depth: usize) -> Result<Json, InvalidJson> {
                 .map(Json::Obj)
         }
         Some(b'[') => {
-            let items: Vec<&RawValue> = serde_json::from_str(text).map_err(|_| InvalidJson)?;
-            items
-                .into_iter()
-                .map(|item| convert(item, depth + 1))
-                .collect::<Result<_, _>>()
-                .map(Json::Arr)
+            let items: Vec<&RawValue> =
+                serde_json::from_str(text).map_err(|_| ParseError::Invalid)?;
+            // Exactly as long as the list: no room for doubling to waste.
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(convert(item, depth + 1)?);
+            }
+            Ok(Json::Arr(values))
         }
         // A lone surrogate escape is refused here: a `String` is UTF-8.
         Some(b'"') => serde_json::from_str(text)
             .map(Json::Str)
-            .map_err(|_| InvalidJson),
+            .map_err(|_| ParseError::Invalid),
         Some(b't') => Ok(Json::Bool(true)),
         Some(b'f') => Ok(Json::Bool(false)),
         Some(b'n') => Ok(Json::Null),
         Some(b'-' | b'0'..=b'9') => number(text),
-        _ => Err(InvalidJson),
+        _ => Err(ParseError::Invalid),
     }
 }
 
 /// A number token serde_json validated: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?`.
-fn number(text: &str) -> Result<Json, InvalidJson> {
+fn number(text: &str) -> Result<Json, ParseError> {
     if text.contains(['.', 'e', 'E']) {
         return Ok(Json::Num(text.to_owned()));
     }
     let digits = text.strip_prefix('-').unwrap_or(text);
     if digits.len() > MAX_INTEGER_DIGITS {
-        return Err(InvalidJson);
+        return Err(ParseError::Invalid);
     }
     Ok(Json::Int(if digits == "0" {
         digits.to_owned()
@@ -343,21 +424,56 @@ mod tests {
             "1.",
             "",
         ] {
-            assert_eq!(Json::parse(text.as_bytes()), Err(InvalidJson), "{text:?}");
+            assert_eq!(
+                Json::parse(text.as_bytes()),
+                Err(ParseError::Invalid),
+                "{text:?}"
+            );
         }
-        assert_eq!(Json::parse(b"\xff"), Err(InvalidJson));
+        assert_eq!(Json::parse(b"\xff"), Err(ParseError::Invalid));
         let digits = "1".repeat(MAX_INTEGER_DIGITS);
         assert!(Json::parse(digits.as_bytes()).is_ok());
         assert!(Json::parse(format!("-{digits}").as_bytes()).is_ok());
         assert_eq!(
             Json::parse(format!("{digits}1").as_bytes()),
-            Err(InvalidJson)
+            Err(ParseError::Invalid)
         );
         let deep = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
         assert!(Json::parse(deep(MAX_DEPTH).as_bytes()).is_ok());
         assert_eq!(
             Json::parse(deep(MAX_DEPTH + 1).as_bytes()),
-            Err(InvalidJson)
+            Err(ParseError::Invalid)
+        );
+    }
+
+    #[test]
+    fn dense_answers_are_refused_before_their_tree_is_built() {
+        // About 2 MB of `{"a":0}` would take about 200 MB as a tree.
+        let objects = |n: usize| format!("[{}]", vec![r#"{"a":0}"#; n].join(","));
+        let each = tree_bytes(r#"{"a":0}"#);
+        assert!(each > 100 * r#"{"a":0},"#.len(), "{each}");
+        let over = MAX_TREE_BYTES / each + 1;
+        assert!(over * 8 < 4 << 20, "{over} objects");
+        assert_eq!(
+            Json::parse(objects(over).as_bytes()),
+            Err(ParseError::TooLarge)
+        );
+        // The bound is the tree's, not the text's: what it admits parses.
+        let body = objects(1000);
+        let bound = tree_bytes(&body);
+        assert!(Json::parse_within(body.as_bytes(), bound).is_ok());
+        assert_eq!(
+            Json::parse_within(body.as_bytes(), bound - 1),
+            Err(ParseError::TooLarge)
+        );
+        // Invalid JSON is invalid, whatever its size.
+        assert_eq!(Json::parse_within(b"[0,", 0), Err(ParseError::Invalid));
+        // Strings, escapes and literals are counted as tokens: a `{` or a
+        // `:` inside a string is text.
+        assert_eq!(tree_bytes(r#""{:\"x""#), VALUE_BYTES + TEXT_BYTES + 7);
+        assert_eq!(
+            tree_bytes(r#"[true, -1.5e+3, null, false]"#),
+            5 * VALUE_BYTES + TEXT_BYTES + 7
         );
     }
 

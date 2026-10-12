@@ -405,8 +405,11 @@ A run exits 1, and commits the rows it completed first, when:
 
 - **`/info` refuses or keeps failing a request** (`<request> refused with
   HTTP <n>`, `<request> failed after <n> attempts (<reason>)`, or `<request>
-  failed (<reason>) and the time budget ended`), an answer exceeds 64 MiB, or
-  a snapshot is malformed: `spotMeta` with no tokens or pairs, `allPerpMetas`
+  failed (<reason>) and the time budget ended`), an answer exceeds 64 MiB or
+  would take more than 256 MiB parsed (`<request> response exceeded
+  268435456 bytes parsed`; `/info`'s small values take 10 to 20 times their
+  text, and the bound keeps the job inside its 1 GiB), or a snapshot is
+  malformed: `spotMeta` with no tokens or pairs, `allPerpMetas`
   with no asset on the default dex, `outcomeMeta has entries without a valid
   id; they were skipped`. Messages name the request (`settledOutcome(outcome=9975)`),
   never the URL.
@@ -445,7 +448,8 @@ Exit status 2 is a configuration error, reported as a single `config_error`
 line before any request: a missing root or credentials, an unsafe or stale S3
 setting, a bad `HL_INFO_URL`, a weight below 20, a negative time budget, an
 unknown `--tables` name; or a clap usage error on stderr (an unknown option, a
-value that is not a number, a malformed date). A table whose schema this
+value that is not a number, a negative `--max-probes` or
+`--reprobe-after-minutes`, a malformed date). A table whose schema this
 release cannot extend is a `config_error` after `start`, with no `done` line.
 
 ## Coverage and point-in-time limits
@@ -518,6 +522,7 @@ without an offset it is UTC.
 | `S3_ENDPOINT` (then `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`), `AWS_ALLOW_HTTP` | `AWS_ENDPOINT_URL_S3` only, `https://` only; a differing `S3_ENDPOINT` or `AWS_ENDPOINT_URL` is refused. `MALLOC_ARENA_MAX` means nothing |
 | `views` printed the views | the views are the SQL [above](#views) |
 | a non-numeric `HLREF_*` value crashed (exit 1) | a usage error (exit 2) |
+| a negative `--max-probes` (`HLREF_MAX_PROBES`) probed nothing and exited 0; a negative `--reprobe-after-minutes` turned the cool-down off | a usage error (exit 2) |
 | no root: a usage line on stderr | a `config_error` line (exit 2 both) |
 | any float time budget | finite and 0 or more, else exit 2 |
 | `--outcome-ids ""` swept; `maintain --tables` skipped unknown names | both refused (exit 2) |
@@ -526,6 +531,7 @@ without an offset it is UTC.
 | an entity request could start after the budget ended | `settledOutcome`, `tokenDetails` and `fundingHistory` never start after it; the snapshot requests keep the old rule |
 | `start.info` showed IPv6 hosts unbracketed and IDN hosts in Unicode | bracketed and punycode |
 | a funding entry outside years 1-9999 failed with `OverflowError` | `fundingHistory <coin> returned an entry outside the request` |
+| any answer up to 64 MiB was parsed, however much memory its values took | an answer that would take more than 256 MiB parsed fails its request, without a retry |
 | a checkpoint failure after a commit failed the commit | the commit counts; the checkpoint fails the run on its own |
 | `delta.checkpointInterval` hook and `table.vacuum` | the same checkpoint versions (19, 39, …) and VACUUM, committed by the command itself ([Compaction and VACUUM](#compaction-and-vacuum)) |
 | JSON lines in insertion order, `"0.1.0"` as `version` | keys sorted, compact; `version` is fireparq's, and `start` adds `deltalake` |
@@ -689,14 +695,16 @@ behind the same egress address calls `/info`, or lower the budgets.
   Python job's own output on the recorded fixtures,
   `reference/tests/fixtures/README.md`), the `/info` client, the store
   (commits, races, checkpoints, OPTIMIZE, VACUUM) and the jobs over the
-  fixtures, with a fake clock.
+  fixtures, with a fake clock; `reference/tests/json_memory.rs` measures that
+  the parse bound covers what parsing allocates.
 - `blocks/tests/hypercore_reference_cli.rs`: the real binary over a loopback
   `/info`: exit statuses, configuration errors before any request, the URL and
   credentials never printed, and the [views](#views) in DuckDB over the tables
   it wrote.
 - `blocks/tests/hypercore_reference_s3.rs`: the real binary on a loopback HTTPS
   S3 endpoint: a lost conditional commit, a lost commit answer, an unknown
-  outcome, a retried data write, and the requests' envelope.
+  outcome, a retried data write, and the requests' envelope, including the
+  bulk delete of a VACUUM.
 - `blocks/tests/engine_compat.rs`: [Joining the lake](#joining-the-lake) and
   the [cross-checks](#cross-checks-against-the-lake) over a HyperCore fixture
   lake.

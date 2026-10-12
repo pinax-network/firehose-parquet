@@ -212,6 +212,7 @@ impl Settings {
 
     /// What the output never shows: the credentials, and the `/info` URL and
     /// its query (only its scheme and host are ever shown, and never hidden).
+    /// The logger ignores any shorter than [`log::MIN_SECRET_CHARS`].
     fn secrets(&self) -> Vec<String> {
         let aws = &self.aws;
         let mut secrets: Vec<String> = [
@@ -296,7 +297,9 @@ impl From<&HypercoreReferenceArgs> for Settings {
         Self {
             root: args.root.clone(),
             info_url: args.info_url.clone(),
-            weight_per_minute: args.weight_per_minute,
+            // A negative weight is below the floor too (a `config_error`, as
+            // in Python); one beyond `u32` is as unlimited as `u32::MAX`.
+            weight_per_minute: u32::try_from(args.weight_per_minute.max(0)).unwrap_or(u32::MAX),
             time_budget_seconds: args.time_budget_seconds,
             maintenance: !args.no_maintenance,
             aws: AwsConfig::from(&args.aws),

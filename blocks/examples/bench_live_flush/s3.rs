@@ -8,7 +8,8 @@
 //! send; `blocks/tests/delta_recovery.rs` and `delta_maintenance.rs` run them
 //! against this endpoint), `If-None-Match: *` and `If-Match` conditions,
 //! pinned `versionId` reads, byte ranges and ListObjectsV2. Every object's
-//! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age.
+//! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age;
+//! [`Server::backdate`] ages one.
 //! `If-Match` follows RFC 9110 by default; [`Server::set_if_match`] switches
 //! it to Ceph RGW 19.2's literal comparison or refuses every value (#678).
 //! [`Server::inject`], [`Server::inject_prefix`] and [`Server::inject_list`]
@@ -401,6 +402,19 @@ impl Server {
                 modified: time::OffsetDateTime::now_utc(),
             },
         );
+    }
+
+    /// Moves `key`'s `Last-Modified` `age` into the past, as if it had been
+    /// written then: a full VACUUM deletes an unreferenced file only once it
+    /// is older than the retention (`blocks/tests/hypercore_reference_s3.rs`).
+    /// Whether it existed.
+    pub fn backdate(&self, key: &str, age: Duration) -> bool {
+        let mut objects = self.state.objects.lock().unwrap();
+        objects
+            .0
+            .get_mut(key)
+            .map(|stored| stored.modified -= age)
+            .is_some()
     }
 
     /// Deletes `key`, as an external cleanup would; whether it existed.

@@ -3164,6 +3164,23 @@ mod tests {
         assert_eq!(settings.info_url, None);
         assert_eq!(settings.aws.aws_session_token, None);
         assert_eq!(settings.aws.aws_endpoint_url, None);
+        // A negative weight or budget reaches the job, whose `config_error`
+        // refuses it, as Python's did; a weight beyond u32 is u32::MAX.
+        let settings = reference_settings(&[
+            "--weight-per-minute",
+            "-5",
+            "--time-budget-seconds",
+            "-1",
+            "verify",
+        ])
+        .unwrap();
+        assert_eq!(
+            (settings.weight_per_minute, settings.time_budget_seconds),
+            (0, -1.0)
+        );
+        let settings =
+            reference_settings(&["--weight-per-minute", "99999999999", "verify"]).unwrap();
+        assert_eq!(settings.weight_per_minute, u32::MAX);
         for (args, kind) in [
             // Options after the job, and job options before it.
             (
@@ -3182,6 +3199,14 @@ mod tests {
             ),
             (
                 &["outcomes", "--sweep-from=-1"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["outcomes", "--max-probes=-1"],
+                clap::error::ErrorKind::ValueValidation,
+            ),
+            (
+                &["outcomes", "--reprobe-after-minutes=-5"],
                 clap::error::ErrorKind::ValueValidation,
             ),
             (

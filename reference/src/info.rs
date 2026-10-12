@@ -27,7 +27,7 @@ use serde_json::json;
 use url::{Host, Url};
 
 use crate::clock::Clock;
-use crate::json::{subject, Json};
+use crate::json::{subject, Json, ParseError, MAX_TREE_BYTES};
 use crate::log::Logger;
 use crate::ConfigError;
 
@@ -453,7 +453,14 @@ impl InfoClient {
                     }
                     match Json::parse(&payload) {
                         Ok(value) => return Ok((value, received)),
-                        Err(_) => "invalid JSON".into(),
+                        Err(ParseError::TooLarge) => {
+                            return Err(InfoError::new(
+                                format!("{label} response exceeded {MAX_TREE_BYTES} bytes parsed"),
+                                Some(200),
+                            )
+                            .into());
+                        }
+                        Err(ParseError::Invalid) => "invalid JSON".into(),
                     }
                 }
                 (Some((code, _)), _) if !RETRY_STATUSES.contains(&code) => {
@@ -1104,6 +1111,20 @@ mod tests {
         let mut client = answering(vec![Ok((200, vec![b' '; MAX_RESPONSE_BYTES + 1]))], 1200);
         let failure = error(client.info.spot_meta().await.unwrap_err());
         assert_eq!(failure.message, "spotMeta response exceeded 67108864 bytes");
+        assert_eq!(failure.status, Some(200));
+        assert_eq!(client.transport.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn answers_too_large_to_parse_fail_without_retry() {
+        // 2.4 MB, but objects that would take about 300 MB as a tree.
+        let objects = format!("[{}]", vec![r#"{"a":0}"#; 300_000].join(","));
+        let mut client = answering(vec![Ok((200, objects.into_bytes()))], 1200);
+        let failure = error(client.info.spot_meta().await.unwrap_err());
+        assert_eq!(
+            failure.message,
+            "spotMeta response exceeded 268435456 bytes parsed"
+        );
         assert_eq!(failure.status, Some(200));
         assert_eq!(client.transport.calls().len(), 1);
     }

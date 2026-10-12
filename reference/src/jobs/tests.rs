@@ -13,9 +13,9 @@ use super::*;
 use crate::info::InfoClient;
 use crate::json::Json;
 use crate::model::{
-    funding_row, outcome_settled_row, removal_row, Cell, Row, TableSpec, FUNDING_HISTORY, OUTCOMES,
-    OUTCOME_META, OUTCOME_PROBES, PERP_ASSETS, PERP_DEXS, QUESTIONS, SPOT_META, SPOT_PAIRS,
-    SPOT_TOKENS, SPOT_TOKEN_DETAILS,
+    funding_row, outcome_settled_row, removal_row, Cell, Row, TableSpec, ALL_TABLES,
+    FUNDING_HISTORY, OUTCOMES, OUTCOME_META, OUTCOME_PROBES, PERP_ASSETS, PERP_DEXS, QUESTIONS,
+    SPOT_META, SPOT_PAIRS, SPOT_TOKENS, SPOT_TOKEN_DETAILS,
 };
 use crate::store::{OpenMode, Root, Store};
 use crate::testing::{FakeClock, FakeInfo, MemoryLog};
@@ -551,13 +551,15 @@ async fn outcomes_a_settled_outcome_outage_fails_the_run() {
     let done = h.run(Which::Outcomes, sweep(9970)).await;
     assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
     assert!(done.failures[0].contains("settledOutcome: 6 of 6 requests failed with HTTP 500"));
-    // The live snapshot is still written.
+    // The live snapshot is still written, and so is every probe, an error.
     assert_eq!(h.rows(&OUTCOMES).await.len(), 5);
-    assert!(h
+    let results: Vec<Option<String>> = h
         .rows(&OUTCOME_PROBES)
         .await
         .iter()
-        .all(|row| text(row, "result") == Some("error")));
+        .map(|row| text(row, "result").map(str::to_owned))
+        .collect();
+    assert_eq!(results, vec![Some("error".to_owned()); 6]);
 }
 
 /// outcomeMeta t0 with 1472, 1473 (question 198) and 40 more like 1472.
@@ -1543,16 +1545,9 @@ async fn maintain_forces_existing_tables_and_skips_missing_ones() {
         .await;
     assert_eq!(done.failures, no_failures());
     let events = h.log.events()[since..].to_vec();
-    let of = |name: &str| {
-        events
-            .iter()
-            .filter(|event| event["event"] == name)
-            .map(|event| event["table"].as_str().unwrap().to_owned())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(of("skipped"), [SPOT_PAIRS.name]);
+    assert_eq!(tables_of(&events, "skipped"), [SPOT_PAIRS.name]);
     // One file: nothing to compact, and nothing to vacuum yet.
-    assert_eq!(of("maintained"), [OUTCOME_PROBES.name]);
+    assert_eq!(tables_of(&events, "maintained"), [OUTCOME_PROBES.name]);
     let maintained = events
         .iter()
         .find(|event| event["event"] == "maintained")
@@ -1565,4 +1560,34 @@ async fn maintain_forces_existing_tables_and_skips_missing_ones() {
         ),
         (&json!(1), &json!(0), &json!(0))
     );
+
+    // No list and an empty list both name every table.
+    let existing: Vec<&str> = ALL_TABLES
+        .iter()
+        .map(|spec| spec.name)
+        .filter(|name| h.root.join(name).join("_delta_log").is_dir())
+        .collect();
+    let missing: Vec<&str> = ALL_TABLES
+        .iter()
+        .map(|spec| spec.name)
+        .filter(|name| !existing.contains(name))
+        .collect();
+    assert_eq!(existing.len(), 4, "{existing:?}");
+    for tables in [None, Some(Vec::new())] {
+        let since = h.log.events().len();
+        let done = h.run(Which::Maintain(tables), Options::default()).await;
+        assert_eq!(done.failures, no_failures());
+        let events = h.log.events()[since..].to_vec();
+        assert_eq!(tables_of(&events, "maintained"), existing);
+        assert_eq!(tables_of(&events, "skipped"), missing);
+    }
+}
+
+/// The `table` of each `event` line, in order.
+fn tables_of(events: &[Value], event: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter(|line| line["event"] == event)
+        .map(|line| line["table"].as_str().unwrap().to_owned())
+        .collect()
 }

@@ -47,6 +47,7 @@ use deltalake_core::parquet::errors::ParquetError;
 use deltalake_core::parquet::file::properties::WriterProperties;
 use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::table::config::TablePropertiesExt as _;
+use deltalake_core::table::state::DeltaTableState;
 #[cfg(test)]
 use deltalake_core::TableProperty;
 use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
@@ -525,8 +526,12 @@ impl Store {
 
     /// The checkpoint delta-rs's rule asks for after commits took the table
     /// from version `old` to `new`, then the expired log entries behind it.
-    /// A failure is returned as a run failure: the commits stand.
-    async fn checkpoint(&self, t: &Table, old: u64, new: u64) -> Option<String> {
+    /// When entries went, the handle is reloaded at its own version `new`, as
+    /// delta-rs's post-commit hook does: its snapshot may still name them
+    /// (all of them after a week without a commit), and a VACUUM planned on
+    /// it reads them. A failure is returned as a run failure: the commits
+    /// stand.
+    async fn checkpoint(&self, t: &mut Table, old: u64, new: u64) -> Option<String> {
         let interval = t
             .delta
             .snapshot()
@@ -536,10 +541,16 @@ impl Store {
         if (new + 1) / interval.get() <= (old + 1) / interval.get() {
             return None;
         }
-        let written = match create_checkpoint(&t.delta, None).await {
-            Ok(()) => cleanup_metadata(&t.delta, None).await.map(drop),
-            Err(error) => Err(error),
-        };
+        let written = async {
+            create_checkpoint(&t.delta, None).await?;
+            if cleanup_metadata(&t.delta, None).await? > 0 {
+                let state =
+                    DeltaTableState::try_new(t.delta.log_store().as_ref(), Some(new)).await?;
+                t.delta.state = Some(state);
+            }
+            DeltaResult::Ok(())
+        }
+        .await;
         written.err().map(|error| {
             format!(
                 "{}: checkpoint at version {new} failed ({})",
@@ -688,7 +699,7 @@ impl Store {
             .with_commit_properties(self.commit_properties("ADD COLUMNS"))
             .await
             .map_err(|error| failed(kind(&error)))?;
-        let t = Table { spec, delta };
+        let mut t = Table { spec, delta };
         let version = t.version();
         if version != before + 1 {
             return Err(failed(format!(
@@ -700,7 +711,7 @@ impl Store {
             "columns_added",
             json!({"table": spec.name, "columns": names, "version": version}),
         );
-        match self.checkpoint(&t, before, version).await {
+        match self.checkpoint(&mut t, before, version).await {
             Some(error) => Err(StoreError::Failed(error)),
             None => Ok(t),
         }
@@ -942,7 +953,8 @@ impl Store {
             maintained.files_before = Some(files.len());
             maintained.files_removed = Some(compacted.files_removed);
             maintained.files_added = Some(compacted.files_added);
-            if let Some(error) = self.checkpoint(t, before, t.version()).await {
+            let after = t.version();
+            if let Some(error) = self.checkpoint(t, before, after).await {
                 return Err(StoreError::Failed(error));
             }
         }
@@ -961,7 +973,8 @@ impl Store {
                     StoreError::Failed(format!("{name}: VACUUM failed ({})", kind(&error)))
                 })?;
             maintained.vacuum_deleted = Some(deleted);
-            if let Some(error) = self.checkpoint(t, before, t.version()).await {
+            let after = t.version();
+            if let Some(error) = self.checkpoint(t, before, after).await {
                 return Err(StoreError::Failed(error));
             }
         }

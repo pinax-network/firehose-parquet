@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use deltalake_core::kernel::transaction::{CommitBuilder, TransactionError};
 use deltalake_core::kernel::{Action, DataType, StructField};
@@ -696,6 +696,57 @@ async fn a_checkpoint_failure_keeps_the_commit() {
     let row = probe_row(19, f.now(), ProbeResult::Settled, "x");
     assert!(run.commit(&mut table, vec![row]).await);
     assert_eq!(f.rows(&OUTCOME_PROBES).await.len(), 20);
+}
+
+#[tokio::test]
+async fn a_log_cleanup_leaves_the_handle_usable() {
+    // A table idle for longer than its 7-day log retention: version 19's
+    // checkpoint lets the cleanup delete every earlier log entry, which the
+    // handle's snapshot still named. The VACUUM hour's maintenance, a forced
+    // one and the reads then go on with the same handle.
+    let f = Fixture::new();
+    f.clock.set_wall(AT_0605);
+    let store = f.store();
+    let mut table = f.table(&store, &OUTCOME_PROBES).await;
+    let name = OUTCOME_PROBES.name;
+    f.probes(&store, &mut table, 0..18).await;
+    let idle = SystemTime::now() - Duration::from_secs(8 * 24 * 3600);
+    for entry in std::fs::read_dir(f.root.join(name).join("_delta_log")).unwrap() {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(entry.unwrap().path())
+            .unwrap();
+        file.set_modified(idle).unwrap();
+    }
+    let row = probe_row(18, f.now(), ProbeResult::Settled, "x");
+    let appended = store.append(&mut table, vec![row]).await.unwrap().unwrap();
+    assert_eq!((appended.version, appended.checkpoint_error), (19, None));
+    assert!(f.log_file(name, &checkpoint(19)).is_file());
+    assert!(!f.log_file(name, &format!("{:020}.json", 18)).exists());
+
+    let maintained = store
+        .maintain(&mut table, &MaintainOptions::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (maintained.vacuum_deleted, maintained.version),
+        (Some(0), 19)
+    );
+    let forced = MaintainOptions {
+        force: true,
+        ..MaintainOptions::default()
+    };
+    let maintained = store.maintain(&mut table, &forced).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            maintained.files_removed,
+            maintained.vacuum_deleted,
+            maintained.version
+        ),
+        (Some(19), Some(0), 20)
+    );
+    assert_eq!(store.latest(&table).await.unwrap().len(), 19);
 }
 
 #[tokio::test]

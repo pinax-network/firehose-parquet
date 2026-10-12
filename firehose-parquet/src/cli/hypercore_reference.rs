@@ -8,7 +8,8 @@
 //! --max-probes 60`; none is global. Range checks the job reports as a
 //! `config_error` line (the weight floor, the time budget, `--tables` names,
 //! a missing root) are made by the job, so that `kubectl logs | tail -1`
-//! shows them.
+//! shows them; a negative weight or budget is one of them. A negative
+//! `--max-probes` or `--reprobe-after-minutes` is a usage error.
 //!
 //! `--info-url` and the AWS credentials are never shown: their environment
 //! values are hidden from `--help`, `Debug` leaves them out, and the URL is a
@@ -52,16 +53,18 @@ pub struct HypercoreReferenceArgs {
         long,
         env = "HLREF_WEIGHT_PER_MINUTE",
         default_value_t = 400,
+        allow_negative_numbers = true,
         hide_env_values = true,
         help_heading = "Reference tables"
     )]
-    pub weight_per_minute: u32,
+    pub weight_per_minute: i64,
 
     /// Stop starting requests after this many seconds, commit, and exit 0
     #[arg(
         long,
         env = "HLREF_TIME_BUDGET_SECONDS",
         default_value_t = 240.0,
+        allow_negative_numbers = true,
         hide_env_values = true,
         help_heading = "Reference tables"
     )]

@@ -295,9 +295,10 @@ async fn a_transient_data_put_failure_is_retried() {
 /// Every request of meta, outcomes, funding and a forced maintain is one the
 /// job's S3 user is granted: an object request under one of the eleven
 /// table prefixes, a listing with a table's `<table>/` prefix, or a bulk
-/// delete of keys under them. Commits are conditional; nothing asks for a
-/// bucket's location, ACL, policy, versioning or tags, or sends an ACL or
-/// tagging header.
+/// delete of keys under them (the VACUUM of a week-old file no version
+/// references). Commits are conditional; nothing asks for a bucket's
+/// location, ACL, policy, versioning or tags, or sends an ACL or tagging
+/// header.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn requests_stay_inside_the_bucket_policy() {
     let lake = Lake::start().await;
@@ -315,6 +316,14 @@ async fn requests_stay_inside_the_bucket_policy() {
     );
     let run = lake.run(&["funding", "--coins", "BTC,xyz:XYZ100"]).await;
     assert_eq!(run.status, 0, "{run:?}");
+    // A data file a crashed run left eight days ago: older than the 168 h
+    // retention, so the full VACUUM deletes it.
+    let orphan = "hl_spot_pairs/part-00000-orphan.zstd.parquet";
+    lake.server
+        .put(orphan, bytes::Bytes::from_static(b"never committed"));
+    assert!(lake
+        .server
+        .backdate(orphan, Duration::from_secs(8 * 24 * 3600)));
     let run = lake.run(&["maintain"]).await;
     assert_eq!(run.status, 0, "{run:?}");
     assert!(
@@ -323,6 +332,13 @@ async fn requests_stay_inside_the_bucket_policy() {
             .any(|line| line["event"] == "maintained" && line["files_removed"].as_u64() > Some(1)),
         "an OPTIMIZE ran: {run:?}"
     );
+    let pairs = run
+        .lines
+        .iter()
+        .find(|line| line["event"] == "maintained" && line["table"] == "hl_spot_pairs")
+        .unwrap_or_else(|| panic!("no maintained hl_spot_pairs: {run:?}"));
+    assert_eq!(pairs["vacuum_deleted"], json!(1), "{run:?}");
+    assert!(lake.server.objects(orphan).is_empty());
 
     let prefixes: Vec<String> = ALL_TABLES
         .iter()
@@ -367,6 +383,13 @@ async fn requests_stay_inside_the_bucket_policy() {
             assert_eq!(entry.if_none_match.as_deref(), Some("*"), "{entry:?}");
         }
     }
+    // The VACUUM's bulk delete, the only one, named the orphan's full key.
+    let deleted: Vec<&str> = log
+        .iter()
+        .filter(|entry| entry.method == "POST")
+        .flat_map(|entry| entry.delete_keys.iter().map(String::as_str))
+        .collect();
+    assert_eq!(deleted, [orphan]);
     // Every table of the four jobs, and nothing beside them.
     let written: std::collections::BTreeSet<&str> = ALL_TABLES
         .iter()
