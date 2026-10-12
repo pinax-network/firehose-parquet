@@ -109,23 +109,32 @@ mod tests {
 
     const ONE: i128 = 10_000_000_000;
 
+    /// Exact values, canonical or not, and their scaled value.
+    const EXACT: [(&str, i128); 12] = [
+        ("0.0", 0),
+        ("1.0", ONE),
+        ("-1516.0", -1516 * ONE),
+        ("6426274.5300000003", 64_262_745_300_000_003),
+        ("0.0000004703", 4_703),
+        ("184467440737095.53125", 1_844_674_407_370_955_312_500_000),
+        // §2.4 accepted forms: not canonical, but exact.
+        ("1.50", 15 * ONE / 10),
+        ("5", 5 * ONE),
+        ("-0.0", 0),
+        ("-0", 0),
+        ("0.1234567890000", 1_234_567_890),
+        ("00.5", ONE / 2),
+    ];
+
+    /// Not `^-?[0-9]+(\.[0-9]+)?$`.
+    const MALFORMED: [&str; 20] = [
+        "", "-", ".", ".5", "5.", "-.5", "1e-5", "1E5", "+1.0", " 1.0", "1.0 ", "NaN", "inf",
+        "-inf", "1,0", "1.0.0", "--1", "0x10", "١", "1_000",
+    ];
+
     #[test]
     fn exact_values_are_accepted_in_any_exact_form() {
-        for (text, value) in [
-            ("0.0", 0),
-            ("1.0", ONE),
-            ("-1516.0", -1516 * ONE),
-            ("6426274.5300000003", 64_262_745_300_000_003),
-            ("0.0000004703", 4_703),
-            ("184467440737095.53125", 1_844_674_407_370_955_312_500_000),
-            // §2.4 accepted forms: not canonical, but exact.
-            ("1.50", 15 * ONE / 10),
-            ("5", 5 * ONE),
-            ("-0.0", 0),
-            ("-0", 0),
-            ("0.1234567890000", 1_234_567_890),
-            ("00.5", ONE / 2),
-        ] {
+        for (text, value) in EXACT {
             assert_eq!(parse(text), Ok(value), "{text}");
         }
         // 28 integer digits and 10 fractional digits: the extremes.
@@ -136,10 +145,7 @@ mod tests {
 
     #[test]
     fn inexact_or_malformed_strings_are_refused() {
-        for text in [
-            "", "-", ".", ".5", "5.", "-.5", "1e-5", "1E5", "+1.0", " 1.0", "1.0 ", "NaN", "inf",
-            "-inf", "1,0", "1.0.0", "--1", "0x10", "١", "1_000",
-        ] {
+        for text in MALFORMED {
             assert_eq!(parse(text), Err(DecimalError::Syntax), "{text:?}");
         }
         assert_eq!(parse("0.12345678901"), Err(DecimalError::FractionalDigits));
@@ -159,6 +165,43 @@ mod tests {
             DecimalError::IntegerDigits.to_string(),
             "more than 28 integer digits"
         );
+    }
+
+    /// `fireparq hypercore-reference` parses `/info` decimals with its own
+    /// port of the Python job's parser (`fireparq_reference::values`): it must
+    /// accept exactly the strings this one does, with the same value, over the
+    /// reference job's golden inputs and this parser's own cases.
+    #[test]
+    fn agrees_with_the_reference_parser() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../reference/tests/fixtures/golden-vectors.json"
+        )))
+        .unwrap();
+        let vectors = golden["parse_decimal"].as_array().unwrap();
+        assert_eq!(vectors.len(), 29);
+        let max = format!("{}.{}", "9".repeat(28), "9".repeat(10));
+        let mut texts: Vec<String> = vectors
+            .iter()
+            .map(|vector| vector["input"].as_str().unwrap().to_owned())
+            .collect();
+        texts.extend(EXACT.iter().map(|(text, _)| text.to_string()));
+        texts.extend(MALFORMED.iter().map(|text| text.to_string()));
+        texts.extend([
+            "0.12345678901".into(),
+            format!("{}.0", "1".repeat(29)),
+            format!("{}1.0", "0".repeat(40)),
+            format!("1.1{}", "0".repeat(40)),
+            format!("-{max}"),
+            max,
+        ]);
+        for text in &texts {
+            assert_eq!(
+                parse(text).ok(),
+                fireparq_reference::values::decimal_text(text),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

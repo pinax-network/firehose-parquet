@@ -1,0 +1,20 @@
+{
+ "spec": {
+  "outcome": 9974,
+  "name": "template:binaryPrice",
+  "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645",
+  "sideSpecs": [
+   {
+    "name": "template:Yes"
+   },
+   {
+    "name": "template:No"
+   }
+  ],
+  "quoteToken": "USDC",
+  "venue": "out",
+  "deployerFeeScale": "1.0"
+ },
+ "settleFraction": "0.0",
+ "details": "template"
+}

@@ -35,6 +35,9 @@ num-bigint = "0.5"
 solana-vote-interface = { version = "=7.1.0", default-features = false, features = ["serde"] }
 
 [dev-dependencies]
+# The reference tables' decimal parser agrees with the lake's
+# (`hypercore::decimal`); its fakes serve the `/info` the reference tests need.
+fireparq-reference = { path = "../reference", features = ["test-support"] }
 futures = "0.3"
 parquet = { version = "60", features = ["arrow"] }
 tempfile = "3"

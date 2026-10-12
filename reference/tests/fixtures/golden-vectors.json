@@ -1,0 +1,3934 @@
+{
+ "generated_from": "k8s-parquet PR #82 hlref (Python), observed_at = 2026-10-08T16:50:00Z for every row",
+ "table_properties": {
+  "delta.appendOnly": "true",
+  "delta.checkpointInterval": "20",
+  "delta.logRetentionDuration": "interval 7 days",
+  "delta.deletedFileRetentionDuration": "interval 7 days"
+ },
+ "delta_schemas": {
+  "hl_spot_meta": {
+   "key": [
+    "request"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_spot_meta",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "request",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_spot_tokens": {
+   "key": [
+    "token_index"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_spot_tokens",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "token_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "full_name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "token_id",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "sz_decimals",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "wei_decimals",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "evm_contract",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "evm_extra_wei_decimals",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "is_canonical",
+      "type": "boolean",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deployer_trading_fee_share",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_spot_token_details": {
+   "key": [
+    "token_index"
+   ],
+   "snapshot": false,
+   "delta_table_name": "hl_spot_token_details",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "token_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "token_id",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deployer",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deploy_time",
+      "type": "timestamp",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deploy_gas",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_spot_pairs": {
+   "key": [
+    "pair_index"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_spot_pairs",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "pair_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "coin",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "base_token_index",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "quote_token_index",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "base_symbol",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "quote_symbol",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "is_canonical",
+      "type": "boolean",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_perp_dexs": {
+   "key": [
+    "dex_index"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_perp_dexs",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "dex_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "full_name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deployer",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "oracle_updater",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "fee_recipient",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "collateral_token_index",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "collateral_symbol",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_perp_assets": {
+   "key": [
+    "dex_index",
+    "asset_index"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_perp_assets",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "dex_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "asset_index",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "dex",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "coin",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "asset_id",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "sz_decimals",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "max_leverage",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "margin_table_id",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "is_delisted",
+      "type": "boolean",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "only_isolated",
+      "type": "boolean",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "margin_mode",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "growth_mode",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deployer_fee_scale",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_outcome_meta": {
+   "key": [
+    "request"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_outcome_meta",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "request",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "fee_scale",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "venue_deployers",
+      "type": {
+       "type": "map",
+       "keyType": "string",
+       "valueType": "string",
+       "valueContainsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_outcomes": {
+   "key": [
+    "outcome_id"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_outcomes",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "outcome_id",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "question_id",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "description",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "description_kv",
+      "type": {
+       "type": "map",
+       "keyType": "string",
+       "valueType": "string",
+       "valueContainsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "side_names",
+      "type": {
+       "type": "array",
+       "elementType": "string",
+       "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "side_coins",
+      "type": {
+       "type": "array",
+       "elementType": "string",
+       "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "quote_token",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "venue",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "deployer_fee_scale",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "status",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "settle_fraction",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "settle_details",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_questions": {
+   "key": [
+    "question_id"
+   ],
+   "snapshot": true,
+   "delta_table_name": "hl_questions",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "question_id",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "description",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "description_kv",
+      "type": {
+       "type": "map",
+       "keyType": "string",
+       "valueType": "string",
+       "valueContainsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "fallback_outcome_id",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "named_outcome_ids",
+      "type": {
+       "type": "array",
+       "elementType": "long",
+       "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "settled_outcome_ids",
+      "type": {
+       "type": "array",
+       "elementType": "long",
+       "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "status",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "listed",
+      "type": "boolean",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "hl_funding_history": {
+   "key": [
+    "coin",
+    "funding_time"
+   ],
+   "snapshot": false,
+   "delta_table_name": "hl_funding_history",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "coin",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "funding_time",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "dex",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "funding_rate",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "premium",
+      "type": "decimal(38,10)",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "observed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "source",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "payload_sha256",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     },
+     {
+      "name": "payload_json",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  },
+  "_hlref/outcome_probes": {
+   "key": [
+    "outcome_id",
+    "probed_at"
+   ],
+   "snapshot": false,
+   "delta_table_name": "outcome_probes",
+   "schema": {
+    "type": "struct",
+    "fields": [
+     {
+      "name": "outcome_id",
+      "type": "long",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "probed_at",
+      "type": "timestamp",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "result",
+      "type": "string",
+      "nullable": false,
+      "metadata": {}
+     },
+     {
+      "name": "run_id",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+     }
+    ]
+   }
+  }
+ },
+ "rows": [
+  {
+   "table": "hl_spot_meta",
+   "label": "spotMeta",
+   "row": {
+    "request": "spotMeta",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "payload_json": "{}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 0",
+   "row": {
+    "token_index": 0,
+    "name": "USDC",
+    "full_name": null,
+    "token_id": "0x6d1e7cde53ba9467b783cb7c530ce054",
+    "sz_decimals": 8,
+    "wei_decimals": 8,
+    "evm_contract": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+    "evm_extra_wei_decimals": -2,
+    "is_canonical": true,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "ea182764cf876b8bccfca607e3672c220ca3ea699205140c65a4c382e27f6d3b",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0x6b9e773128f453f5c2c60935ee2de2cbc5390a24\",\"evm_extra_wei_decimals\":-2},\"fullName\":null,\"index\":0,\"isCanonical\":true,\"name\":\"USDC\",\"szDecimals\":8,\"tokenId\":\"0x6d1e7cde53ba9467b783cb7c530ce054\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 1",
+   "row": {
+    "token_index": 1,
+    "name": "PURR",
+    "full_name": null,
+    "token_id": "0xc1fb593aeffbeb02f85e0308e9956a90",
+    "sz_decimals": 0,
+    "wei_decimals": 5,
+    "evm_contract": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+    "evm_extra_wei_decimals": 13,
+    "is_canonical": true,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "c30c8e7238d7b7e6361515579ea6f883f18ccf24f78231b29fce118d54bee796",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e\",\"evm_extra_wei_decimals\":13},\"fullName\":null,\"index\":1,\"isCanonical\":true,\"name\":\"PURR\",\"szDecimals\":0,\"tokenId\":\"0xc1fb593aeffbeb02f85e0308e9956a90\",\"weiDecimals\":5}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 2",
+   "row": {
+    "token_index": 2,
+    "name": "HFUN",
+    "full_name": null,
+    "token_id": "0xbaf265ef389da684513d98d68edf4eae",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": "0xa320d9f65ec992eff38622c63627856382db726c",
+    "evm_extra_wei_decimals": 10,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "1adfc8b6e0b98cf7f2315d37b30589c92cb2827b4fd2c11d16a9101a693b2233",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0xa320d9f65ec992eff38622c63627856382db726c\",\"evm_extra_wei_decimals\":10},\"fullName\":null,\"index\":2,\"isCanonical\":false,\"name\":\"HFUN\",\"szDecimals\":2,\"tokenId\":\"0xbaf265ef389da684513d98d68edf4eae\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 40",
+   "row": {
+    "token_index": 40,
+    "name": "ASI",
+    "full_name": "Artificial Superintelligence",
+    "token_id": "0x8811d8fc24b9f4ace2c0bd21996d5899",
+    "sz_decimals": 2,
+    "wei_decimals": 7,
+    "evm_contract": null,
+    "evm_extra_wei_decimals": null,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "2561f56032f04866573c5459d867c452d17c3d761c9ca9e05fd329d4052f2c36",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":null,\"fullName\":\"Artificial Superintelligence\",\"index\":40,\"isCanonical\":false,\"name\":\"ASI\",\"szDecimals\":2,\"tokenId\":\"0x8811d8fc24b9f4ace2c0bd21996d5899\",\"weiDecimals\":7}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 150",
+   "row": {
+    "token_index": 150,
+    "name": "HYPE",
+    "full_name": "Hyperliquid",
+    "token_id": "0x0d01dc56dcaaca66ad901c959b4011ec",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": null,
+    "evm_extra_wei_decimals": null,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "9d77883115de79fa586d0ca47ebf90a2920aa8b5372cbf8df8b9daf3bb465e9a",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":null,\"fullName\":\"Hyperliquid\",\"index\":150,\"isCanonical\":false,\"name\":\"HYPE\",\"szDecimals\":2,\"tokenId\":\"0x0d01dc56dcaaca66ad901c959b4011ec\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 235",
+   "row": {
+    "token_index": 235,
+    "name": "USDE",
+    "full_name": "USDe",
+    "token_id": "0x2e6d84f2d7ca82e6581e03523e4389f7",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+    "evm_extra_wei_decimals": 10,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "29f4ee767129d2a877883d6e03b4d5690caeea1320b067086c81f3eaf0b15c48",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34\",\"evm_extra_wei_decimals\":10},\"fullName\":\"USDe\",\"index\":235,\"isCanonical\":false,\"name\":\"USDE\",\"szDecimals\":2,\"tokenId\":\"0x2e6d84f2d7ca82e6581e03523e4389f7\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 268",
+   "row": {
+    "token_index": 268,
+    "name": "USDT0",
+    "full_name": "USDT0",
+    "token_id": "0x25faedc3f054130dbb4e4203aca63567",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
+    "evm_extra_wei_decimals": -2,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "591a02220b7e7b6bcb0d4b4c7a5c3a66295fa506696b5f7ebdbdbe8e3cd4fedc",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb\",\"evm_extra_wei_decimals\":-2},\"fullName\":\"USDT0\",\"index\":268,\"isCanonical\":false,\"name\":\"USDT0\",\"szDecimals\":2,\"tokenId\":\"0x25faedc3f054130dbb4e4203aca63567\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 360",
+   "row": {
+    "token_index": 360,
+    "name": "USDH",
+    "full_name": "USDH",
+    "token_id": "0x54e00a5988577cb0b0c9ab0cb6ef7f4b",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": "0x111111a1a0667d36bd57c0a9f569b98057111111",
+    "evm_extra_wei_decimals": -2,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "8736b568d0c40a71806d150d261fbb41338ef6297c92b3add82e45cc1a98c773",
+    "payload_json": "{\"deployerTradingFeeShare\":\"0.0\",\"evmContract\":{\"address\":\"0x111111a1a0667d36bd57c0a9f569b98057111111\",\"evm_extra_wei_decimals\":-2},\"fullName\":\"USDH\",\"index\":360,\"isCanonical\":false,\"name\":\"USDH\",\"szDecimals\":2,\"tokenId\":\"0x54e00a5988577cb0b0c9ab0cb6ef7f4b\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_tokens",
+   "label": "token 437",
+   "row": {
+    "token_index": 437,
+    "name": "HSEI",
+    "full_name": "hSEI",
+    "token_id": "0x4519b5c4a2fd0beb66306336f63c7b99",
+    "sz_decimals": 2,
+    "wei_decimals": 8,
+    "evm_contract": "0xbdf43ecadc5cef51b7d1772f722e40596bc1788b",
+    "evm_extra_wei_decimals": 10,
+    "is_canonical": false,
+    "deployer_trading_fee_share": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "34490b01d0ef3bc90b5dd0eaa7f260cacf7ec48dbd8842b6c1afd368cec1a87b",
+    "payload_json": "{\"deployerTradingFeeShare\":\"1.0\",\"evmContract\":{\"address\":\"0xbdf43ecadc5cef51b7d1772f722e40596bc1788b\",\"evm_extra_wei_decimals\":10},\"fullName\":\"hSEI\",\"index\":437,\"isCanonical\":false,\"name\":\"HSEI\",\"szDecimals\":2,\"tokenId\":\"0x4519b5c4a2fd0beb66306336f63c7b99\",\"weiDecimals\":8}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 0",
+   "row": {
+    "pair_index": 0,
+    "coin": "PURR/USDC",
+    "name": "PURR/USDC",
+    "base_token_index": 1,
+    "quote_token_index": 0,
+    "base_symbol": "PURR",
+    "quote_symbol": "USDC",
+    "is_canonical": true,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "cd7ea7f75a1f333e86b7176389cff920bbf6a16ea68760eb018088de71ac9a9f",
+    "payload_json": "{\"index\":0,\"isCanonical\":true,\"name\":\"PURR/USDC\",\"tokens\":[1,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 1",
+   "row": {
+    "pair_index": 1,
+    "coin": "@1",
+    "name": "HFUN/USDC",
+    "base_token_index": 2,
+    "quote_token_index": 0,
+    "base_symbol": "HFUN",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "0a866885bfead98f5b4190662183b4a9ab4f035fc9025d2ae8a0c84639ffcccc",
+    "payload_json": "{\"index\":1,\"isCanonical\":false,\"name\":\"@1\",\"tokens\":[2,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 36",
+   "row": {
+    "pair_index": 36,
+    "coin": "@36",
+    "name": "ASI/USDC",
+    "base_token_index": 40,
+    "quote_token_index": 0,
+    "base_symbol": "ASI",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "93e8a5f307da15ec2dedf0943e75339b969149d469370988b04009d97e60dfb0",
+    "payload_json": "{\"index\":36,\"isCanonical\":false,\"name\":\"@36\",\"tokens\":[40,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 107",
+   "row": {
+    "pair_index": 107,
+    "coin": "@107",
+    "name": "HYPE/USDC",
+    "base_token_index": 150,
+    "quote_token_index": 0,
+    "base_symbol": "HYPE",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "de6eb96ca59db6357c2937c5f7a68e7bb9fed1f9fb33450b57e3379d08135c03",
+    "payload_json": "{\"index\":107,\"isCanonical\":false,\"name\":\"@107\",\"tokens\":[150,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 150",
+   "row": {
+    "pair_index": 150,
+    "coin": "@150",
+    "name": "USDE/USDC",
+    "base_token_index": 235,
+    "quote_token_index": 0,
+    "base_symbol": "USDE",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "ed28b89f52ecd57ff35a71701e18948069b64dc873cd56d274cf4d36125bfa4b",
+    "payload_json": "{\"index\":150,\"isCanonical\":false,\"name\":\"@150\",\"tokens\":[235,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 166",
+   "row": {
+    "pair_index": 166,
+    "coin": "@166",
+    "name": "USDT0/USDC",
+    "base_token_index": 268,
+    "quote_token_index": 0,
+    "base_symbol": "USDT0",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "c322496f94f19c0891efb212d82fb0890dd8dad60ad0647c2e70d9e5caccd60c",
+    "payload_json": "{\"index\":166,\"isCanonical\":false,\"name\":\"@166\",\"tokens\":[268,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 207",
+   "row": {
+    "pair_index": 207,
+    "coin": "@207",
+    "name": "HYPE/USDT0",
+    "base_token_index": 150,
+    "quote_token_index": 268,
+    "base_symbol": "HYPE",
+    "quote_symbol": "USDT0",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "a72ab45ca70e3ad124a5fbc55a241f5b56b4ce3e73a6175a448c535bf2af607e",
+    "payload_json": "{\"index\":207,\"isCanonical\":false,\"name\":\"@207\",\"tokens\":[150,268]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 230",
+   "row": {
+    "pair_index": 230,
+    "coin": "@230",
+    "name": "USDH/USDC",
+    "base_token_index": 360,
+    "quote_token_index": 0,
+    "base_symbol": "USDH",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "b4c5c5b0325c0a9bafee568649aca9bbcfeab79d76b8bcec6bb8a94a8342b05f",
+    "payload_json": "{\"index\":230,\"isCanonical\":false,\"name\":\"@230\",\"tokens\":[360,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 232",
+   "row": {
+    "pair_index": 232,
+    "coin": "@232",
+    "name": "HYPE/USDH",
+    "base_token_index": 150,
+    "quote_token_index": 360,
+    "base_symbol": "HYPE",
+    "quote_symbol": "USDH",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "7705957e85676f099737f107f845728cbb4fd688c4f900f9263a8b64b03dde96",
+    "payload_json": "{\"index\":232,\"isCanonical\":false,\"name\":\"@232\",\"tokens\":[150,360]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 255",
+   "row": {
+    "pair_index": 255,
+    "coin": "@255",
+    "name": "HYPE/USDE",
+    "base_token_index": 150,
+    "quote_token_index": 235,
+    "base_symbol": "HYPE",
+    "quote_symbol": "USDE",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "0fb2a92632ab1332cb3d1cbd9507dcf2e0d71abfcae0ae837cb45a37ef133d3b",
+    "payload_json": "{\"index\":255,\"isCanonical\":false,\"name\":\"@255\",\"tokens\":[150,235]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_pairs",
+   "label": "pair 286",
+   "row": {
+    "pair_index": 286,
+    "coin": "@286",
+    "name": "HSEI/USDC",
+    "base_token_index": 437,
+    "quote_token_index": 0,
+    "base_symbol": "HSEI",
+    "quote_symbol": "USDC",
+    "is_canonical": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "spotMeta",
+    "payload_sha256": "ff0d91984ed9974b3639fd60b80f626344da15d0a656d0ff4e91946ccad28adf",
+    "payload_json": "{\"index\":286,\"isCanonical\":false,\"name\":\"@286\",\"tokens\":[437,0]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_spot_token_details",
+   "label": "tokenDetails HSEI",
+   "row": {
+    "token_index": 437,
+    "token_id": "0x4519b5c4a2fd0beb66306336f63c7b99",
+    "deployer": "0x96fdb9e5c1a3d33f34109118457500b3d96c7094",
+    "deploy_time": {
+     "timestamp_us": 1770192537325998,
+     "iso": "2026-02-04T08:08:57.325998+00:00"
+    },
+    "deploy_gas": {
+     "decimal": "529.8506899600",
+     "unscaled_i128": "5298506899600"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "tokenDetails",
+    "payload_sha256": "315f13671be7343ff97ee38c80c1af94414fc70182ba3629fc54675ba49d125a",
+    "payload_json": "{\"circulatingSupply\":\"99999999999.3938903809\",\"deployGas\":\"529.85068996\",\"deployTime\":\"2026-02-04T08:08:57.325998778\",\"deployer\":\"0x96fdb9e5c1a3d33f34109118457500b3d96c7094\",\"futureEmissions\":\"0.0\",\"genesis\":{\"blacklistUsers\":[],\"existingTokenBalances\":[],\"userBalances\":[[\"0x20000000000000000000000000000000000001b5\",\"100000000000.0\"]]},\"markPx\":\"0.065411\",\"maxSupply\":\"100000000000.0\",\"midPx\":\"0.065292\",\"name\":\"HSEI\",\"nonCirculatingUserBalances\":[],\"prevDayPx\":\"0.068228\",\"seededUsdc\":\"0.0\",\"szDecimals\":2,\"totalSupply\":\"99999999999.3938903809\",\"weiDecimals\":8}"
+   }
+  },
+  {
+   "table": "hl_spot_token_details",
+   "label": "tokenDetails USDC",
+   "row": {
+    "token_index": 0,
+    "token_id": "0x6d1e7cde53ba9467b783cb7c530ce054",
+    "deployer": null,
+    "deploy_time": null,
+    "deploy_gas": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "tokenDetails",
+    "payload_sha256": "44ac673c0dee29dde0e9250eeb6f226c8946bed39d9049a3756e53420017658d",
+    "payload_json": "{\"circulatingSupply\":\"383001485.5598109961\",\"deployGas\":null,\"deployTime\":null,\"deployer\":null,\"futureEmissions\":\"0.0\",\"genesis\":null,\"markPx\":\"1.0\",\"maxSupply\":\"1000000000000.0\",\"midPx\":\"1.0\",\"name\":\"USDC\",\"nonCirculatingUserBalances\":[],\"prevDayPx\":\"1.0\",\"seededUsdc\":\"0.0\",\"szDecimals\":8,\"totalSupply\":\"383001485.5598109961\",\"weiDecimals\":0}"
+   }
+  },
+  {
+   "table": "hl_spot_token_details",
+   "label": "tokenDetails ASI",
+   "row": {
+    "token_index": 40,
+    "token_id": "0x8811d8fc24b9f4ace2c0bd21996d5899",
+    "deployer": "0x1d93b5d8e7cb0a4c31e62caf14b37b8c3f5dcf35",
+    "deploy_time": {
+     "timestamp_us": 1720506748719000,
+     "iso": "2024-07-09T06:32:28.719000+00:00"
+    },
+    "deploy_gas": {
+     "decimal": "8100.3422060000",
+     "unscaled_i128": "81003422060000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "tokenDetails",
+    "payload_sha256": "acf3c58a107cc5d5e9dd364f4956f26880ecb72d801a3d220d5399c4bc81da52",
+    "payload_json": "{\"circulatingSupply\":\"96832123.7997761965\",\"deployGas\":\"8100.342206\",\"deployTime\":\"2024-07-09T06:32:28.719\",\"deployer\":\"0x1d93b5d8e7cb0a4c31e62caf14b37b8c3f5dcf35\",\"futureEmissions\":\"0.0\",\"genesis\":{\"blacklistUsers\":[],\"existingTokenBalances\":[[1,\"10000000.0\"],[9,\"2000000.0\"]],\"userBalances\":[[\"0x1d93b5d8e7cb0a4c31e62caf14b37b8c3f5dcf35\",\"8000000.0\"],[\"0xffffffffffffffffffffffffffffffffffffffff\",\"80000000.0\"]]},\"markPx\":\"0.000191\",\"maxSupply\":\"100000000.0\",\"midPx\":\"0.000645\",\"name\":\"ASI\",\"nonCirculatingUserBalances\":[[\"0x0000000000000000000000000000000000000000\",\"0.9510576\"]],\"prevDayPx\":\"0.000191\",\"seededUsdc\":\"0.0\",\"szDecimals\":2,\"totalSupply\":\"96832124.7508337945\",\"weiDecimals\":7}"
+   }
+  },
+  {
+   "table": "hl_perp_dexs",
+   "label": "dex 0",
+   "row": {
+    "dex_index": 0,
+    "name": "",
+    "full_name": null,
+    "deployer": null,
+    "oracle_updater": null,
+    "fee_recipient": null,
+    "collateral_token_index": 0,
+    "collateral_symbol": "USDC",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "perpDexs+allPerpMetas",
+    "payload_sha256": "331e048aa1058c423574e10d04195c8d2b5c87eab21376806a6deb1b1f9141f1",
+    "payload_json": "{\"allPerpMetas\":{\"collateralToken\":0,\"marginTables\":[[50,{\"description\":\"\",\"marginTiers\":[{\"lowerBound\":\"0.0\",\"maxLeverage\":50}]}]]},\"perpDexs\":null}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_dexs",
+   "label": "dex 1",
+   "row": {
+    "dex_index": 1,
+    "name": "xyz",
+    "full_name": "XYZ",
+    "deployer": "0x88806a71d74ad0a510b350545c9ae490912f0888",
+    "oracle_updater": null,
+    "fee_recipient": "0x83ffcfb1f2ad843c474b2e28df86c721cb869d3a",
+    "collateral_token_index": 0,
+    "collateral_symbol": "USDC",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "perpDexs+allPerpMetas",
+    "payload_sha256": "f74ce7c2ad486c7a79c9658fc0fa65f4cdfc7a3a1cb407a8c3fafbf4389b000b",
+    "payload_json": "{\"allPerpMetas\":{\"collateralToken\":0,\"marginTables\":[[50,{\"description\":\"\",\"marginTiers\":[{\"lowerBound\":\"0.0\",\"maxLeverage\":50}]}]]},\"perpDexs\":{\"assetToFundingClamp\":[],\"assetToFundingInterestRate\":[[\"xyz:EUR\",\"0.0\"],[\"xyz:GBP\",\"0.0\"]],\"assetToFundingMultiplier\":[[\"xyz:AAOI\",\"0.5\"],[\"xyz:AAPL\",\"0.5\"]],\"assetToStreamingOiCap\":[[\"xyz:AAOI\",\"25000000.0\"],[\"xyz:AAPL\",\"200000000.0\"]],\"deployer\":\"0x88806a71d74ad0a510b350545c9ae490912f0888\",\"feeRecipient\":\"0x83ffcfb1f2ad843c474b2e28df86c721cb869d3a\",\"fullName\":\"XYZ\",\"name\":\"xyz\",\"oracleUpdater\":null,\"subDeployers\":[[\"registerAsset\",[\"0x7d16f116d252db609c56d27d6c9605eb03e16657\",\"0x8c4190018486a2dbac2629d688136e8990170ff2\",\"0xc0892b4f864807ec26dde6ad8dad6914e079059d\"]],[\"setOracle\",[\"0x1234567890545d1df9ee64b35fdd16966e08acec\"]]]}}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_dexs",
+   "label": "dex 2",
+   "row": {
+    "dex_index": 2,
+    "name": "flx",
+    "full_name": "Felix Exchange",
+    "deployer": "0x2fab552502a6d45920d5741a2f3ebf4c35536352",
+    "oracle_updater": "0x94757f8dcb4bf73b850195660e959d1105cfedd5",
+    "fee_recipient": "0xe2872b5ae7dcbba40cc4510d08c8bbea95b42d43",
+    "collateral_token_index": 360,
+    "collateral_symbol": "USDH",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "perpDexs+allPerpMetas",
+    "payload_sha256": "1050c87f77d089145461e9ffadb3493df113989cd4d5e66b2fdef967b9ac6ccf",
+    "payload_json": "{\"allPerpMetas\":{\"collateralToken\":360,\"marginTables\":[[50,{\"description\":\"\",\"marginTiers\":[{\"lowerBound\":\"0.0\",\"maxLeverage\":50}]}]]},\"perpDexs\":{\"assetToFundingClamp\":[],\"assetToFundingInterestRate\":[],\"assetToFundingMultiplier\":[[\"flx:COIN\",\"0.0\"],[\"flx:COPPER\",\"0.0\"]],\"assetToStreamingOiCap\":[[\"flx:COIN\",\"8000000.0\"],[\"flx:COPPER\",\"5000000.0\"]],\"deployer\":\"0x2fab552502a6d45920d5741a2f3ebf4c35536352\",\"feeRecipient\":\"0xe2872b5ae7dcbba40cc4510d08c8bbea95b42d43\",\"fullName\":\"Felix Exchange\",\"name\":\"flx\",\"oracleUpdater\":\"0x94757f8dcb4bf73b850195660e959d1105cfedd5\",\"subDeployers\":[[\"registerAsset\",[\"0xd0d4ef34424af3da883672b8cdeca751293655a5\"]],[\"setOracle\",[\"0x94757f8dcb4bf73b850195660e959d1105cfedd5\",\"0xd0d4ef34424af3da883672b8cdeca751293655a5\"]]]}}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 0/0",
+   "row": {
+    "dex_index": 0,
+    "asset_index": 0,
+    "dex": "",
+    "coin": "BTC",
+    "asset_id": 0,
+    "sz_decimals": 5,
+    "max_leverage": 40,
+    "margin_table_id": 56,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": null,
+    "deployer_fee_scale": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "f5120ecba9bd6aee48e4d1ce157bdeaaa8aa2bd6d31b1dadc26f8ef93ab29ecf",
+    "payload_json": "{\"marginTableId\":56,\"maxLeverage\":40,\"name\":\"BTC\",\"szDecimals\":5}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 0/1",
+   "row": {
+    "dex_index": 0,
+    "asset_index": 1,
+    "dex": "",
+    "coin": "ETH",
+    "asset_id": 1,
+    "sz_decimals": 4,
+    "max_leverage": 25,
+    "margin_table_id": 55,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": null,
+    "deployer_fee_scale": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "b4eb57b3ca41c5bd4239067db40c49fe493a26c6b6923739d609f3bc78795aea",
+    "payload_json": "{\"marginTableId\":55,\"maxLeverage\":25,\"name\":\"ETH\",\"szDecimals\":4}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 0/2",
+   "row": {
+    "dex_index": 0,
+    "asset_index": 2,
+    "dex": "",
+    "coin": "ATOM",
+    "asset_id": 2,
+    "sz_decimals": 2,
+    "max_leverage": 5,
+    "margin_table_id": 5,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": null,
+    "deployer_fee_scale": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "b9e5001adf33ea6aa80428d6d650f8c83af9b859fa6405fdd65e446f428a70aa",
+    "payload_json": "{\"marginTableId\":5,\"maxLeverage\":5,\"name\":\"ATOM\",\"szDecimals\":2}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 0/3",
+   "row": {
+    "dex_index": 0,
+    "asset_index": 3,
+    "dex": "",
+    "coin": "MATIC",
+    "asset_id": 3,
+    "sz_decimals": 1,
+    "max_leverage": 20,
+    "margin_table_id": 20,
+    "is_delisted": true,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": null,
+    "deployer_fee_scale": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "2f14decbcc962baaeef60ba0dda53c31faee704348bbdba1af021dd4de221dde",
+    "payload_json": "{\"isDelisted\":true,\"marginTableId\":20,\"maxLeverage\":20,\"name\":\"MATIC\",\"szDecimals\":1}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 0/4",
+   "row": {
+    "dex_index": 0,
+    "asset_index": 4,
+    "dex": "",
+    "coin": "DYDX",
+    "asset_id": 4,
+    "sz_decimals": 1,
+    "max_leverage": 5,
+    "margin_table_id": 5,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": null,
+    "deployer_fee_scale": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "46e4195c057bf7c702240596a757c1cb062814deff13ec78efdf090a1e594946",
+    "payload_json": "{\"marginTableId\":5,\"maxLeverage\":5,\"name\":\"DYDX\",\"szDecimals\":1}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 1/0",
+   "row": {
+    "dex_index": 1,
+    "asset_index": 0,
+    "dex": "xyz",
+    "coin": "xyz:XYZ100",
+    "asset_id": 110000,
+    "sz_decimals": 4,
+    "max_leverage": 30,
+    "margin_table_id": 30,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": "enabled",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "677016a8759c4a3f7be0f05bd555a1e3026d86b66e6f96d04f42eeb2848a69db",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"growthMode\":\"enabled\",\"lastFeeScaleChangeTime\":\"2025-11-23T17:37:10.033211662\",\"marginTableId\":30,\"maxLeverage\":30,\"name\":\"xyz:XYZ100\",\"szDecimals\":4}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 1/1",
+   "row": {
+    "dex_index": 1,
+    "asset_index": 1,
+    "dex": "xyz",
+    "coin": "xyz:TSLA",
+    "asset_id": 110001,
+    "sz_decimals": 3,
+    "max_leverage": 20,
+    "margin_table_id": 20,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": "enabled",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "b6d1fb7eaa36d9ea64dc5e2d45f3a7ee48da3d52bb7f6c711bb1887543dedb5d",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"growthMode\":\"enabled\",\"lastFeeScaleChangeTime\":\"2025-11-23T17:37:10.033211662\",\"marginTableId\":20,\"maxLeverage\":20,\"name\":\"xyz:TSLA\",\"szDecimals\":3}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 1/2",
+   "row": {
+    "dex_index": 1,
+    "asset_index": 2,
+    "dex": "xyz",
+    "coin": "xyz:NVDA",
+    "asset_id": 110002,
+    "sz_decimals": 3,
+    "max_leverage": 20,
+    "margin_table_id": 20,
+    "is_delisted": false,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": "enabled",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "3129f9e2c70b7248f1f0da61284156e97073cfd0334cc7a5b7d08d9d78c807dc",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"growthMode\":\"enabled\",\"lastFeeScaleChangeTime\":\"2025-11-23T17:37:10.033211662\",\"marginTableId\":20,\"maxLeverage\":20,\"name\":\"xyz:NVDA\",\"szDecimals\":3}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 2/0",
+   "row": {
+    "dex_index": 2,
+    "asset_index": 0,
+    "dex": "flx",
+    "coin": "flx:TSLA",
+    "asset_id": 120000,
+    "sz_decimals": 2,
+    "max_leverage": 10,
+    "margin_table_id": 10,
+    "is_delisted": true,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": "enabled",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "7884afc81c8252eae594d2eec0c6ebeab77fcf2323c3f1e367645a64f87064f4",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"growthMode\":\"enabled\",\"isDelisted\":true,\"lastFeeScaleChangeTime\":\"2025-11-24T21:19:25.980742012\",\"marginTableId\":10,\"maxLeverage\":10,\"name\":\"flx:TSLA\",\"szDecimals\":2}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_perp_assets",
+   "label": "asset 2/1",
+   "row": {
+    "dex_index": 2,
+    "asset_index": 1,
+    "dex": "flx",
+    "coin": "flx:NVDA",
+    "asset_id": 120001,
+    "sz_decimals": 2,
+    "max_leverage": 10,
+    "margin_table_id": 10,
+    "is_delisted": true,
+    "only_isolated": null,
+    "margin_mode": null,
+    "growth_mode": "enabled",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "allPerpMetas",
+    "payload_sha256": "ac0b50f3750c6abaec8342ad7b5238e0eba59ad7b3123cdbbac3a5c35d0a32b5",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"growthMode\":\"enabled\",\"isDelisted\":true,\"lastFeeScaleChangeTime\":\"2026-03-08T03:42:24.011287219\",\"marginTableId\":10,\"maxLeverage\":10,\"name\":\"flx:NVDA\",\"szDecimals\":2}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcome_meta",
+   "label": "outcomeMeta t0",
+   "row": {
+    "request": "outcomeMeta",
+    "fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "venue_deployers": [
+     [
+      "skew",
+      "0x08e9c89f46dccee91bdb85c6532eb93a4c335efe"
+     ]
+    ],
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "0ff722e1dd430f10151c83778ac391c0e6f18b2d3a0edf988bcaee1a515b811f",
+    "payload_json": "{\"deployers\":[{\"deployer\":\"0x08e9c89f46dccee91bdb85c6532eb93a4c335efe\",\"subDeployers\":[[\"registerAndAssociateNamedOutcomeFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"registerQuestionFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"registerStandaloneOutcomeFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"settleOutcome\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"settleQuestion\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]]],\"venue\":\"skew\"}],\"feeScale\":\"1.0\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcome_meta",
+   "label": "outcomeMeta t1",
+   "row": {
+    "request": "outcomeMeta",
+    "fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "venue_deployers": [
+     [
+      "skew",
+      "0x08e9c89f46dccee91bdb85c6532eb93a4c335efe"
+     ]
+    ],
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "0ff722e1dd430f10151c83778ac391c0e6f18b2d3a0edf988bcaee1a515b811f",
+    "payload_json": "{\"deployers\":[{\"deployer\":\"0x08e9c89f46dccee91bdb85c6532eb93a4c335efe\",\"subDeployers\":[[\"registerAndAssociateNamedOutcomeFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"registerQuestionFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"registerStandaloneOutcomeFromTemplate\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"settleOutcome\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]],[\"settleQuestion\",[\"0x1c867861e0cffb0eba07d9d94f716189c130dac6\"]]],\"venue\":\"skew\"}],\"feeScale\":\"1.0\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_questions",
+   "label": "live question 198 (t0)",
+   "row": {
+    "question_id": 198,
+    "name": "template:sportsTournamentWinner",
+    "description": "competition:English Premier League|officialSource:English Premier League|resolutionDeadline:20270605-1200|season:2026/2027|sport:football/soccer",
+    "description_kv": [
+     [
+      "competition",
+      "English Premier League"
+     ],
+     [
+      "officialSource",
+      "English Premier League"
+     ],
+     [
+      "resolutionDeadline",
+      "20270605-1200"
+     ],
+     [
+      "season",
+      "2026/2027"
+     ],
+     [
+      "sport",
+      "football/soccer"
+     ]
+    ],
+    "fallback_outcome_id": 1472,
+    "named_outcome_ids": [
+     1473
+    ],
+    "settled_outcome_ids": [],
+    "status": "live",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "40d4201b991e3ba812faf48bf46c12566bcff6b613bdb741e0ec3ad1984ca094",
+    "payload_json": "{\"description\":\"competition:English Premier League|officialSource:English Premier League|resolutionDeadline:20270605-1200|season:2026/2027|sport:football/soccer\",\"fallbackOutcome\":1472,\"name\":\"template:sportsTournamentWinner\",\"namedOutcomes\":[1473],\"question\":198,\"settledNamedOutcomes\":[]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 1472 (t0)",
+   "row": {
+    "outcome_id": 1472,
+    "name": "template fallback",
+    "description": "other",
+    "description_kv": null,
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#14720",
+     "#14721"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": 198,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "60dedde81ef158918aacae5b84c8bf00f79e6602e4de54dafc4c5b9d5e1a6d1f",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"other\",\"name\":\"template fallback\",\"outcome\":1472,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 1473 (t0)",
+   "row": {
+    "outcome_id": 1473,
+    "name": "template:sportsTournamentParticipant",
+    "description": "participant:Arsenal",
+    "description_kv": [
+     [
+      "participant",
+      "Arsenal"
+     ]
+    ],
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#14730",
+     "#14731"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": 198,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "71e48977a629d2ff686efb89ad51664dcce89d49b965ac96850935a5e3782e63",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"participant:Arsenal\",\"name\":\"template:sportsTournamentParticipant\",\"outcome\":1473,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 9973 (t0)",
+   "row": {
+    "outcome_id": 9973,
+    "name": "template:binaryPrice",
+    "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81299|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "BTC"
+     ],
+     [
+      "priceDescription",
+      "BTC-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "81299"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99730",
+     "#99731"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "2a3ec1d289efccfbee367c68af095e59e4ba8513ad6d52eb28e43297c3b1632b",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81299|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9973,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 9974 (t0)",
+   "row": {
+    "outcome_id": 9974,
+    "name": "template:binaryPrice",
+    "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "HYPE"
+     ],
+     [
+      "priceDescription",
+      "HYPE-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "84.432"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99740",
+     "#99741"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "37981eb6179ebd21b2b199b7ec5dd0b9488e22a1cf613dff58f5cb49f92f8076",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9974,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 9975 (t0)",
+   "row": {
+    "outcome_id": 9975,
+    "name": "template:binaryPrice",
+    "description": "perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "ETH"
+     ],
+     [
+      "priceDescription",
+      "ETH-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "2429.3"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99750",
+     "#99751"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "9d84bd1d8624813d9e7d567b2406d342494fa1cadd71a6d05db76d800d547283",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9975,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_questions",
+   "label": "live question 198 (t1)",
+   "row": {
+    "question_id": 198,
+    "name": "template:sportsTournamentWinner",
+    "description": "competition:English Premier League|officialSource:English Premier League|resolutionDeadline:20270605-1200|season:2026/2027|sport:football/soccer",
+    "description_kv": [
+     [
+      "competition",
+      "English Premier League"
+     ],
+     [
+      "officialSource",
+      "English Premier League"
+     ],
+     [
+      "resolutionDeadline",
+      "20270605-1200"
+     ],
+     [
+      "season",
+      "2026/2027"
+     ],
+     [
+      "sport",
+      "football/soccer"
+     ]
+    ],
+    "fallback_outcome_id": 1472,
+    "named_outcome_ids": [
+     1473
+    ],
+    "settled_outcome_ids": [],
+    "status": "live",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "40d4201b991e3ba812faf48bf46c12566bcff6b613bdb741e0ec3ad1984ca094",
+    "payload_json": "{\"description\":\"competition:English Premier League|officialSource:English Premier League|resolutionDeadline:20270605-1200|season:2026/2027|sport:football/soccer\",\"fallbackOutcome\":1472,\"name\":\"template:sportsTournamentWinner\",\"namedOutcomes\":[1473],\"question\":198,\"settledNamedOutcomes\":[]}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 1472 (t1)",
+   "row": {
+    "outcome_id": 1472,
+    "name": "template fallback",
+    "description": "other",
+    "description_kv": null,
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#14720",
+     "#14721"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": 198,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "60dedde81ef158918aacae5b84c8bf00f79e6602e4de54dafc4c5b9d5e1a6d1f",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"other\",\"name\":\"template fallback\",\"outcome\":1472,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 1473 (t1)",
+   "row": {
+    "outcome_id": 1473,
+    "name": "template:sportsTournamentParticipant",
+    "description": "participant:Arsenal",
+    "description_kv": [
+     [
+      "participant",
+      "Arsenal"
+     ]
+    ],
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#14730",
+     "#14731"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": 198,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "71e48977a629d2ff686efb89ad51664dcce89d49b965ac96850935a5e3782e63",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"participant:Arsenal\",\"name\":\"template:sportsTournamentParticipant\",\"outcome\":1473,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 9976 (t1)",
+   "row": {
+    "outcome_id": 9976,
+    "name": "template:binaryPrice",
+    "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.202|time:20261008-1700",
+    "description_kv": [
+     [
+      "perp",
+      "HYPE"
+     ],
+     [
+      "priceDescription",
+      "HYPE-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "84.202"
+     ],
+     [
+      "time",
+      "20261008-1700"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99760",
+     "#99761"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "451c1d18ef0bbc870e85eb786cd0f9168364680e9c3c36504727f5f1ea1391a8",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.202|time:20261008-1700\",\"name\":\"template:binaryPrice\",\"outcome\":9976,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "live outcome 9977 (t1)",
+   "row": {
+    "outcome_id": 9977,
+    "name": "template:binaryPrice",
+    "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81234|time:20261008-1700",
+    "description_kv": [
+     [
+      "perp",
+      "BTC"
+     ],
+     [
+      "priceDescription",
+      "BTC-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "81234"
+     ],
+     [
+      "time",
+      "20261008-1700"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99770",
+     "#99771"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": "b998e4df6fd2db7bcde90b69cbb1d8ebb4d077325a8ca7a3e9ac5a816e4d46e5",
+    "payload_json": "{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81234|time:20261008-1700\",\"name\":\"template:binaryPrice\",\"outcome\":9977,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}",
+    "listed": true
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 0",
+   "row": {
+    "outcome_id": 0,
+    "name": "Recurring",
+    "description": "class:priceBinary|underlying:BTC|expiry:20260503-0600|targetPrice:78213|period:1d",
+    "description_kv": [
+     [
+      "class",
+      "priceBinary"
+     ],
+     [
+      "underlying",
+      "BTC"
+     ],
+     [
+      "expiry",
+      "20260503-0600"
+     ],
+     [
+      "targetPrice",
+      "78213"
+     ],
+     [
+      "period",
+      "1d"
+     ]
+    ],
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#0",
+     "#1"
+    ],
+    "quote_token": "USDH",
+    "venue": null,
+    "deployer_fee_scale": null,
+    "question_id": null,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "price:78212.4",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "c01afc1961c3e9c26e69c1082bbeeab7b34b83230b0354ea9c109491f7b22b13",
+    "payload_json": "{\"details\":\"price:78212.4\",\"settleFraction\":\"0.0\",\"spec\":{\"description\":\"class:priceBinary|underlying:BTC|expiry:20260503-0600|targetPrice:78213|period:1d\",\"name\":\"Recurring\",\"outcome\":0,\"quoteToken\":\"USDH\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}]}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 7768",
+   "row": {
+    "outcome_id": 7768,
+    "name": "template fallback",
+    "description": "other",
+    "description_kv": null,
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#77680",
+     "#77681"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": 373,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "e6a48e0f5f7e934a8bb183dc8186a9f1f96463f639339aa29071757140c4f04c",
+    "payload_json": "{\"details\":\"\",\"question\":{\"description\":\"competition:UEFA Nations League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:England|participantB:Czechia|resolutionDeadline:20261007-1845|scheduledStart:20261006-1845|season:2026/27|sport:Soccer|stage:League A, Matchday 4\",\"name\":\"template:sportsContestResult\",\"question\":{\"settled\":373}},\"settleFraction\":\"0.0\",\"spec\":{\"deployerFeeScale\":\"1.0\",\"description\":\"other\",\"name\":\"template fallback\",\"outcome\":7768,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"Yes\"},{\"name\":\"No\"}],\"venue\":\"out\"}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_questions",
+   "label": "settled question from outcome 7768",
+   "row": {
+    "question_id": 373,
+    "name": "template:sportsContestResult",
+    "description": "competition:UEFA Nations League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:England|participantB:Czechia|resolutionDeadline:20261007-1845|scheduledStart:20261006-1845|season:2026/27|sport:Soccer|stage:League A, Matchday 4",
+    "description_kv": [
+     [
+      "competition",
+      "UEFA Nations League"
+     ],
+     [
+      "contestType",
+      "Match"
+     ],
+     [
+      "countedPlay",
+      "regulation time, 90 minutes plus stoppage time"
+     ],
+     [
+      "officialSource",
+      "Union of European Football Associations"
+     ],
+     [
+      "participantA",
+      "England"
+     ],
+     [
+      "participantB",
+      "Czechia"
+     ],
+     [
+      "resolutionDeadline",
+      "20261007-1845"
+     ],
+     [
+      "scheduledStart",
+      "20261006-1845"
+     ],
+     [
+      "season",
+      "2026/27"
+     ],
+     [
+      "sport",
+      "Soccer"
+     ],
+     [
+      "stage",
+      "League A, Matchday 4"
+     ]
+    ],
+    "fallback_outcome_id": null,
+    "named_outcome_ids": null,
+    "settled_outcome_ids": null,
+    "status": "settled",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "5956ab03671fc9fa11448dbe986609f9c971941832d5fb814caa58d15d5c0032",
+    "payload_json": "{\"description\":\"competition:UEFA Nations League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:England|participantB:Czechia|resolutionDeadline:20261007-1845|scheduledStart:20261006-1845|season:2026/27|sport:Soccer|stage:League A, Matchday 4\",\"name\":\"template:sportsContestResult\",\"question\":{\"settled\":373}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 9174",
+   "row": {
+    "outcome_id": 9174,
+    "name": "template:binaryPrice",
+    "description": "perp:xyz:SPCX|priceDescription:1-minute candle|seconds:300|threshold:174|time:20261006-2000",
+    "description_kv": [
+     [
+      "perp",
+      "xyz:SPCX"
+     ],
+     [
+      "priceDescription",
+      "1-minute candle"
+     ],
+     [
+      "seconds",
+      "300"
+     ],
+     [
+      "threshold",
+      "174"
+     ],
+     [
+      "time",
+      "20261006-2000"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#91740",
+     "#91741"
+    ],
+    "quote_token": "USDC",
+    "venue": "txyz",
+    "deployer_fee_scale": null,
+    "question_id": null,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "template",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "c5623a713c1f5c071eb98812af3bdecdeef54ef4292a570a14b23858b82855dc",
+    "payload_json": "{\"details\":\"template\",\"settleFraction\":\"0.0\",\"spec\":{\"description\":\"perp:xyz:SPCX|priceDescription:1-minute candle|seconds:300|threshold:174|time:20261006-2000\",\"name\":\"template:binaryPrice\",\"outcome\":9174,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"txyz\"}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 9973",
+   "row": {
+    "outcome_id": 9973,
+    "name": "template:binaryPrice",
+    "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81299|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "BTC"
+     ],
+     [
+      "priceDescription",
+      "BTC-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "81299"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99730",
+     "#99731"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "template",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "aba4d719585c46cfd68dceed765316fd7db9e62a284b492a9638fbb38819c560",
+    "payload_json": "{\"details\":\"template\",\"settleFraction\":\"0.0\",\"spec\":{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81299|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9973,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 9974",
+   "row": {
+    "outcome_id": 9974,
+    "name": "template:binaryPrice",
+    "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "HYPE"
+     ],
+     [
+      "priceDescription",
+      "HYPE-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "84.432"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99740",
+     "#99741"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "template",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "7d37025a0db36bb577cd4039b613bf255e5e745b84ede20e80ed40c4954f980f",
+    "payload_json": "{\"details\":\"template\",\"settleFraction\":\"0.0\",\"spec\":{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9974,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "settled outcome 9975",
+   "row": {
+    "outcome_id": 9975,
+    "name": "template:binaryPrice",
+    "description": "perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645",
+    "description_kv": [
+     [
+      "perp",
+      "ETH"
+     ],
+     [
+      "priceDescription",
+      "ETH-USDC perp mark"
+     ],
+     [
+      "seconds",
+      "60"
+     ],
+     [
+      "threshold",
+      "2429.3"
+     ],
+     [
+      "time",
+      "20261008-1645"
+     ]
+    ],
+    "side_names": [
+     "template:Yes",
+     "template:No"
+    ],
+    "side_coins": [
+     "#99750",
+     "#99751"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "question_id": null,
+    "status": "settled",
+    "settle_fraction": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "settle_details": "template",
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "settledOutcome",
+    "payload_sha256": "1a922949c971cdb4d3a28b7478bfa76749c6f9e6ec0b06701e9e514c1ec09311",
+    "payload_json": "{\"details\":\"template\",\"settleFraction\":\"0.0\",\"spec\":{\"deployerFeeScale\":\"1.0\",\"description\":\"perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645\",\"name\":\"template:binaryPrice\",\"outcome\":9975,\"quoteToken\":\"USDC\",\"sideSpecs\":[{\"name\":\"template:Yes\"},{\"name\":\"template:No\"}],\"venue\":\"out\"}}",
+    "listed": false
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767225600063",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767225600063000,
+     "iso": "2026-01-01T00:00:00.063000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0001308388",
+     "unscaled_i128": "-1308388"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "7dc6c23a21fc6359efa58e62dfababde967009241e676225c342fd4ac2187639",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.0001308388\",\"time\":1767225600063}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767229200053",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767229200053000,
+     "iso": "2026-01-01T01:00:00.053000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0001004107",
+     "unscaled_i128": "-1004107"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "ddf046da8193af4ca47a58159d1e210bb93a9bd207515b8ff007df14189e47ab",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.0001004107\",\"time\":1767229200053}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767232800024",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767232800024000,
+     "iso": "2026-01-01T02:00:00.024000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0000694180",
+     "unscaled_i128": "-694180"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "1adf548cb7ba20451abc2e7b4acc0e6613612b110f3e081d440a61c723abd06b",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.000069418\",\"time\":1767232800024}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767236400012",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767236400012000,
+     "iso": "2026-01-01T03:00:00.012000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0000522769",
+     "unscaled_i128": "-522769"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "42f62356004dc64082b22d776f6897dfe58ffd132c715a7631c6c7e953250beb",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.0000522769\",\"time\":1767236400012}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767240000036",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767240000036000,
+     "iso": "2026-01-01T04:00:00.036000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0000451100",
+     "unscaled_i128": "-451100"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "0f7bd473e0e09218037c38cd1263b29c2cc1512a5531c69d5268b340ce0a33f1",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.00004511\",\"time\":1767240000036}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding BTC 1767243600040",
+   "row": {
+    "coin": "BTC",
+    "funding_time": {
+     "timestamp_us": 1767243600040000,
+     "iso": "2026-01-01T05:00:00.040000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000125000",
+     "unscaled_i128": "125000"
+    },
+    "premium": {
+     "decimal": "-0.0000285096",
+     "unscaled_i128": "-285096"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "a80fe18072d6b426bcebf4e86b3d28b78191ca3ea6f3db7fd0b6f7629891527c",
+    "payload_json": "{\"coin\":\"BTC\",\"fundingRate\":\"0.0000125\",\"premium\":\"-0.0000285096\",\"time\":1767243600040}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767225600063",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767225600063000,
+     "iso": "2026-01-01T00:00:00.063000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "-0.0001375517",
+     "unscaled_i128": "-1375517"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "058b716ec196895faf52a7a738b4622ad41eedfa38bc494336f63fc432883364",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"-0.0001375517\",\"time\":1767225600063}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767229200053",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767229200053000,
+     "iso": "2026-01-01T01:00:00.053000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "-0.0000910848",
+     "unscaled_i128": "-910848"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "90c8732835f3abff620710f1e7f2bc501cbd58097d793d95628766e5f401c40b",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"-0.0000910848\",\"time\":1767229200053}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767232800024",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767232800024000,
+     "iso": "2026-01-01T02:00:00.024000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "-0.0000594753",
+     "unscaled_i128": "-594753"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "1a02cd684114c069bdeedd5596892c82962bf248e90e85bb3ea98a3bf63d468c",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"-0.0000594753\",\"time\":1767232800024}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767236400012",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767236400012000,
+     "iso": "2026-01-01T03:00:00.012000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "0.0001644635",
+     "unscaled_i128": "1644635"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "31f33f1e506915c2fcac79ea67225a29ae83e1f82f8ef3ad57c590242c95f104",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"0.0001644635\",\"time\":1767236400012}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767240000036",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767240000036000,
+     "iso": "2026-01-01T04:00:00.036000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "0.0001097455",
+     "unscaled_i128": "1097455"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "d9867cd9df238d1a7a340dd660a4b294ed983334c5f75f9183534dba4fde8a6b",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"0.0001097455\",\"time\":1767240000036}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding xyz:XYZ100 1767243600040",
+   "row": {
+    "coin": "xyz:XYZ100",
+    "funding_time": {
+     "timestamp_us": 1767243600040000,
+     "iso": "2026-01-01T05:00:00.040000+00:00"
+    },
+    "dex": "xyz",
+    "funding_rate": {
+     "decimal": "0.0000062500",
+     "unscaled_i128": "62500"
+    },
+    "premium": {
+     "decimal": "0.0000843389",
+     "unscaled_i128": "843389"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "c6b59e0f32a0e2f34d91f98eb63eef934f5a8d11bfd3dc74c8adc36aa340b05b",
+    "payload_json": "{\"coin\":\"xyz:XYZ100\",\"fundingRate\":\"0.00000625\",\"premium\":\"0.0000843389\",\"time\":1767243600040}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767225600063",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767225600063000,
+     "iso": "2026-01-01T00:00:00.063000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "bed95a028ab61c15d60a4684841a3bac1db7eeb07e977a1d05232a2ae6c67147",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767225600063}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767229200053",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767229200053000,
+     "iso": "2026-01-01T01:00:00.053000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "f588b53593c8fbc8da9dd6bbbf51d2e4cbdaaa3990805bd4025f4847eca6e8af",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767229200053}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767232800024",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767232800024000,
+     "iso": "2026-01-01T02:00:00.024000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "93e29e4701339d597ad7c533f4ab488007f8217dc5a87888e407c1eec5b5cc17",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767232800024}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767236400012",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767236400012000,
+     "iso": "2026-01-01T03:00:00.012000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "eff767ff754ee0c9ff311c76b4329463ec43a1026d25709435c8036c81d37a11",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767236400012}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767240000036",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767240000036000,
+     "iso": "2026-01-01T04:00:00.036000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "260d09abf9dbaa13c3174f01cddbbb67c4c7f6e14f202a9a320ca240e939a9dc",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767240000036}"
+   }
+  },
+  {
+   "table": "hl_funding_history",
+   "label": "funding MATIC 1767243600040",
+   "row": {
+    "coin": "MATIC",
+    "funding_time": {
+     "timestamp_us": 1767243600040000,
+     "iso": "2026-01-01T05:00:00.040000+00:00"
+    },
+    "dex": "",
+    "funding_rate": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "premium": {
+     "decimal": "0.0000000000",
+     "unscaled_i128": "0"
+    },
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "fundingHistory",
+    "payload_sha256": "04e58242cf7c900fbc98a3c0b04382777483a5217063686425bacadbfb30c6f9",
+    "payload_json": "{\"coin\":\"MATIC\",\"fundingRate\":\"0.0\",\"premium\":\"0.0\",\"time\":1767243600040}"
+   }
+  },
+  {
+   "table": "hl_outcomes",
+   "label": "removal of live outcome 1473 (question 198)",
+   "row": {
+    "outcome_id": 1473,
+    "question_id": 198,
+    "name": "template:sportsTournamentParticipant",
+    "description": "participant:Arsenal",
+    "description_kv": [
+     [
+      "participant",
+      "Arsenal"
+     ]
+    ],
+    "side_names": [
+     "Yes",
+     "No"
+    ],
+    "side_coins": [
+     "#14730",
+     "#14731"
+    ],
+    "quote_token": "USDC",
+    "venue": "out",
+    "deployer_fee_scale": {
+     "decimal": "1.0000000000",
+     "unscaled_i128": "10000000000"
+    },
+    "status": "live",
+    "settle_fraction": null,
+    "settle_details": null,
+    "listed": false,
+    "observed_at": {
+     "timestamp_us": 1791478200000000,
+     "iso": "2026-10-08T16:50:00+00:00"
+    },
+    "source": "outcomeMeta",
+    "payload_sha256": null,
+    "payload_json": null
+   }
+  }
+ ],
+ "canonical": [
+  {
+   "input": "{\"b\": 1.50, \"a\": [1e-7, 2, \"xé\"], \"c\": null}",
+   "canonical": "{\"a\":[1e-7,2,\"xé\"],\"b\":1.50,\"c\":null}",
+   "sha256": "28f650f212117bb15a048e3b9c946a4765ce147bbb800d5ec867adcb1da8b38e"
+  },
+  {
+   "input": "-0",
+   "canonical": "0",
+   "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+  },
+  {
+   "input": "-0.0",
+   "canonical": "-0.0",
+   "sha256": "c26617c7ccbcaa6631b45d851b8cf56e21d2ca624bdb1193afdbd4b560702cec"
+  },
+  {
+   "input": "1E+07",
+   "canonical": "1E+07",
+   "sha256": "f4313c9e41083dbd3aeb2ce5713d1f9af3a7c299ae1c66c323fb5ce1db451ae8"
+  },
+  {
+   "input": "1e5",
+   "canonical": "1e5",
+   "sha256": "84af3bdb4539a9eca9a5dfc667361816a7b936f3edbca062c64a1ad7163d4ab2"
+  },
+  {
+   "input": "0.10",
+   "canonical": "0.10",
+   "sha256": "b4af9cbcd052a654a1a0298bffe1abc80d2ccd211031e89c4ee23d84bacd1d42"
+  },
+  {
+   "input": "[1.0, 100, -5, 12345678901234567890123]",
+   "canonical": "[1.0,100,-5,12345678901234567890123]",
+   "sha256": "f8e940d4552936895cea4675ce8936f136fe611f784f19b062842322ecf208e9"
+  },
+  {
+   "input": "\"\\u00e9\"",
+   "canonical": "\"é\"",
+   "sha256": "f2886017e9c7abacf804b54d64787dce2b611c9544ba21f3affdd126a6e50086"
+  },
+  {
+   "input": "\"\\u2028\\u2029\"",
+   "canonical": "\"  \"",
+   "sha256": "e3a0e2262ac7790f4df36b522a8fbdd4ee3370d568eb15dc25c5f1775f14ed6c"
+  },
+  {
+   "input": "\"a\\u0001b\\u007f\"",
+   "canonical": "\"a\\u0001b\"",
+   "sha256": "829ea2843dafe2f602d2b615d3e9f049c3767c8f766717a706fdab3c8b1ce2c3"
+  },
+  {
+   "input": "\"tab\\tnl\\ncr\\rbs\\bff\\f/\\/q\\\"bsl\\\\\"",
+   "canonical": "\"tab\\tnl\\ncr\\rbs\\bff\\f//q\\\"bsl\\\\\"",
+   "sha256": "032c5489f0e4f519c6e9b9ea193b7ba719cc98fce6361d6c435eea4cb9654218"
+  },
+  {
+   "input": "{\"a\":1,\"a\":2}",
+   "canonical": "{\"a\":2}",
+   "sha256": "7e8059f495589fcd981232cc11d00b00da3802c01d688fa1cf1f6bed6e5bb33c"
+  },
+  {
+   "input": "{}",
+   "canonical": "{}",
+   "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+   "input": "[]",
+   "canonical": "[]",
+   "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  {
+   "input": "{\"B\":1,\"a\":2,\"_\":3,\"\\u00e9\":4}",
+   "canonical": "{\"B\":1,\"_\":3,\"a\":2,\"é\":4}",
+   "sha256": "b69390a20038c32ccb2d526d033f66802887c13fa326af2c1ef2f478ec27dd3c"
+  },
+  {
+   "input": "\"\\ud83d\\ude00\"",
+   "canonical": "\"😀\"",
+   "sha256": "7a0c50b92434b015545fe93ab723db2d4b2cdd14a441405624a9ce8be29f1d5a"
+  },
+  {
+   "input": "true",
+   "canonical": "true",
+   "sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+  },
+  {
+   "input": "false",
+   "canonical": "false",
+   "sha256": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+  },
+  {
+   "input": "null",
+   "canonical": "null",
+   "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+  },
+  {
+   "input": " { \"x\" : [ ] } ",
+   "canonical": "{\"x\":[]}",
+   "sha256": "aafef4ec9da9c157b99080944d3884ce851f7c20323d6741681d917a2765141b"
+  },
+  {
+   "input": "{\"k\": 1.0e-10}",
+   "canonical": "{\"k\":1.0e-10}",
+   "sha256": "b6765f9330a4c2281b82ebb7a77ed4481b4e273dc4e6a200a1b6f9829529a5f0"
+  },
+  {
+   "input": "{\"z\": 1, \"a\": true}",
+   "canonical": "{\"a\":true,\"z\":1}",
+   "sha256": "903596123ef8596d132eb70fae4c171f0133ed7cdbe9e3e6a67d01c08c5c6992"
+  }
+ ],
+ "request_bodies": [
+  {
+   "body": "{\"type\":\"spotMeta\"}",
+   "subject": "spotMeta"
+  },
+  {
+   "body": "{\"type\":\"perpDexs\"}",
+   "subject": "perpDexs"
+  },
+  {
+   "body": "{\"type\":\"allPerpMetas\"}",
+   "subject": "allPerpMetas"
+  },
+  {
+   "body": "{\"type\":\"outcomeMeta\"}",
+   "subject": "outcomeMeta"
+  },
+  {
+   "body": "{\"outcome\":9975,\"type\":\"settledOutcome\"}",
+   "subject": "settledOutcome(outcome=9975)"
+  },
+  {
+   "body": "{\"tokenId\":\"0x4519b5c4a2fd0beb66306336f63c7b99\",\"type\":\"tokenDetails\"}",
+   "subject": "tokenDetails(tokenId=0x4519b5c4a2fd0beb66306336f63c7b99)"
+  },
+  {
+   "body": "{\"coin\":\"BTC\",\"startTime\":1767225600000,\"type\":\"fundingHistory\"}",
+   "subject": "fundingHistory(coin=BTC,startTime=1767225600000)"
+  },
+  {
+   "body": "{\"coin\":\"xyz:XYZ100\",\"endTime\":100,\"startTime\":0,\"type\":\"fundingHistory\"}",
+   "subject": "fundingHistory(coin=xyz:XYZ100,endTime=100,startTime=0)"
+  }
+ ],
+ "parse_decimal": [
+  {
+   "input": "0.0000125",
+   "json_kind": "string",
+   "result": {
+    "decimal": "0.0000125000",
+    "unscaled_i128": "125000"
+   }
+  },
+  {
+   "input": "-0.0002624881",
+   "json_kind": "string",
+   "result": {
+    "decimal": "-0.0002624881",
+    "unscaled_i128": "-2624881"
+   }
+  },
+  {
+   "input": "1.0",
+   "json_kind": "string",
+   "result": {
+    "decimal": "1.0000000000",
+    "unscaled_i128": "10000000000"
+   }
+  },
+  {
+   "input": "2.50000000000000",
+   "json_kind": "string",
+   "result": {
+    "decimal": "2.5000000000",
+    "unscaled_i128": "25000000000"
+   }
+  },
+  {
+   "input": "0.00000000001",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "1e-5",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "+1",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": ".5",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "NaN",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "11111111111111111111111111111",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "1111111111111111111111111111",
+   "json_kind": "string",
+   "result": {
+    "decimal": "1111111111111111111111111111.0000000000",
+    "unscaled_i128": "11111111111111111111111111110000000000"
+   }
+  },
+  {
+   "input": "9999999999999999999999999999.9999999999",
+   "json_kind": "string",
+   "result": {
+    "decimal": "10000000000000000000000000000.0000000000",
+    "unscaled_i128": "100000000000000000000000000000000000000"
+   }
+  },
+  {
+   "input": "-0.0",
+   "json_kind": "string",
+   "result": {
+    "decimal": "0.0000000000",
+    "unscaled_i128": "0"
+   }
+  },
+  {
+   "input": "-0",
+   "json_kind": "string",
+   "result": {
+    "decimal": "0.0000000000",
+    "unscaled_i128": "0"
+   }
+  },
+  {
+   "input": "0",
+   "json_kind": "string",
+   "result": {
+    "decimal": "0.0000000000",
+    "unscaled_i128": "0"
+   }
+  },
+  {
+   "input": "00012.5000",
+   "json_kind": "string",
+   "result": {
+    "decimal": "12.5000000000",
+    "unscaled_i128": "125000000000"
+   }
+  },
+  {
+   "input": "00000000000000000000000000000000000000001.5",
+   "json_kind": "string",
+   "result": {
+    "decimal": "1.5000000000",
+    "unscaled_i128": "15000000000"
+   }
+  },
+  {
+   "input": "1.12345678900000000000",
+   "json_kind": "string",
+   "result": {
+    "decimal": "1.1234567890",
+    "unscaled_i128": "11234567890"
+   }
+  },
+  {
+   "input": "1.",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "1.5 ",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": " 1.5",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "",
+   "json_kind": "string",
+   "result": null
+  },
+  {
+   "input": "529.85068996",
+   "json_kind": "string",
+   "result": {
+    "decimal": "529.8506899600",
+    "unscaled_i128": "5298506899600"
+   }
+  },
+  {
+   "input": "8100.342206",
+   "json_kind": "string",
+   "result": {
+    "decimal": "8100.3422060000",
+    "unscaled_i128": "81003422060000"
+   }
+  },
+  {
+   "input": "1.5",
+   "json_kind": "number",
+   "result": {
+    "decimal": "1.5000000000",
+    "unscaled_i128": "15000000000"
+   }
+  },
+  {
+   "input": "1e-5",
+   "json_kind": "number",
+   "result": null
+  },
+  {
+   "input": "1",
+   "json_kind": "number",
+   "result": null
+  },
+  {
+   "input": "true",
+   "json_kind": "bool",
+   "result": null
+  },
+  {
+   "input": "null",
+   "json_kind": "null",
+   "result": null
+  }
+ ],
+ "parse_naive_utc": [
+  {
+   "input": "2026-02-04T08:08:57.325998778",
+   "result": {
+    "timestamp_us": 1770192537325998,
+    "iso": "2026-02-04T08:08:57.325998+00:00"
+   }
+  },
+  {
+   "input": "2024-07-09T06:32:28.719",
+   "result": {
+    "timestamp_us": 1720506748719000,
+    "iso": "2024-07-09T06:32:28.719000+00:00"
+   }
+  },
+  {
+   "input": "2024-07-09T06:32:28",
+   "result": {
+    "timestamp_us": 1720506748000000,
+    "iso": "2024-07-09T06:32:28+00:00"
+   }
+  },
+  {
+   "input": "2024-07-09T06:32:28Z",
+   "result": {
+    "timestamp_us": 1720506748000000,
+    "iso": "2024-07-09T06:32:28+00:00"
+   }
+  },
+  {
+   "input": "2024-07-09T06:32:28.1234567891",
+   "result": null
+  },
+  {
+   "input": "2024-07-09T06:32:28.",
+   "result": null
+  },
+  {
+   "input": "2024-02-30T00:00:00",
+   "result": null
+  },
+  {
+   "input": "2024-02-29T00:00:00",
+   "result": {
+    "timestamp_us": 1709164800000000,
+    "iso": "2024-02-29T00:00:00+00:00"
+   }
+  },
+  {
+   "input": "2023-02-29T00:00:00",
+   "result": null
+  },
+  {
+   "input": "2024-01-01T24:00:00",
+   "result": null
+  },
+  {
+   "input": "2024-01-01T00:00:60",
+   "result": null
+  },
+  {
+   "input": "2024-01-01 00:00:00",
+   "result": null
+  },
+  {
+   "input": "2024-01-01T00:00:00+00:00",
+   "result": null
+  },
+  {
+   "input": "2024-01-01T00:00:00.9999999",
+   "result": {
+    "timestamp_us": 1704067200999999,
+    "iso": "2024-01-01T00:00:00.999999+00:00"
+   }
+  }
+ ],
+ "from_millis": [
+  {
+   "input": 1767225600063,
+   "result": {
+    "timestamp_us": 1767225600063000,
+    "iso": "2026-01-01T00:00:00.063000+00:00"
+   }
+  },
+  {
+   "input": 0,
+   "result": {
+    "timestamp_us": 0,
+    "iso": "1970-01-01T00:00:00+00:00"
+   }
+  },
+  {
+   "input": -1,
+   "result": {
+    "timestamp_us": -1000,
+    "iso": "1969-12-31T23:59:59.999000+00:00"
+   }
+  },
+  {
+   "input": -1001,
+   "result": {
+    "timestamp_us": -1001000,
+    "iso": "1969-12-31T23:59:58.999000+00:00"
+   }
+  }
+ ],
+ "parse_kv": [
+  {
+   "input": "perp:xyz:SPCX|threshold:174",
+   "result": [
+    [
+     "perp",
+     "xyz:SPCX"
+    ],
+    [
+     "threshold",
+     "174"
+    ]
+   ]
+  },
+  {
+   "input": "other",
+   "result": null
+  },
+  {
+   "input": "",
+   "result": null
+  },
+  {
+   "input": "a:1|a:2",
+   "result": null
+  },
+  {
+   "input": ":x",
+   "result": null
+  },
+  {
+   "input": "a:",
+   "result": [
+    [
+     "a",
+     ""
+    ]
+   ]
+  },
+  {
+   "input": "a:|b:2",
+   "result": [
+    [
+     "a",
+     ""
+    ],
+    [
+     "b",
+     "2"
+    ]
+   ]
+  },
+  {
+   "input": "a:1|",
+   "result": null
+  },
+  {
+   "input": "a:1||b:2",
+   "result": null
+  },
+  {
+   "input": "a:1|b",
+   "result": null
+  },
+  {
+   "input": "k:v:w",
+   "result": [
+    [
+     "k",
+     "v:w"
+    ]
+   ]
+  },
+  {
+   "input": "|",
+   "result": null
+  }
+ ],
+ "crc32_hours": {
+  "delisted_hour": {
+   "MATIC": 7,
+   "BTC": 14,
+   "ETH": 11,
+   "ATOM": 15,
+   "DYDX": 6,
+   "xyz:XYZ100": 6,
+   "xyz:TSLA": 15,
+   "xyz:NVDA": 7,
+   "flx:TSLA": 4,
+   "flx:NVDA": 4
+  },
+  "token_hour": {
+   "0x6d1e7cde53ba9467b783cb7c530ce054": 7,
+   "0xc1fb593aeffbeb02f85e0308e9956a90": 13,
+   "0xbaf265ef389da684513d98d68edf4eae": 17,
+   "0x8811d8fc24b9f4ace2c0bd21996d5899": 11,
+   "0x0d01dc56dcaaca66ad901c959b4011ec": 4,
+   "0x2e6d84f2d7ca82e6581e03523e4389f7": 23,
+   "0x25faedc3f054130dbb4e4203aca63567": 19,
+   "0x54e00a5988577cb0b0c9ab0cb6ef7f4b": 14,
+   "0x4519b5c4a2fd0beb66306336f63c7b99": 20
+  }
+ },
+ "asset_id": [
+  {
+   "dex_index": 0,
+   "asset_index": 3,
+   "asset_id": 3
+  },
+  {
+   "dex_index": 1,
+   "asset_index": 0,
+   "asset_id": 110000
+  },
+  {
+   "dex_index": 10,
+   "asset_index": 5,
+   "asset_id": 200005
+  },
+  {
+   "dex_index": 2,
+   "asset_index": 1,
+   "asset_id": 120001
+  }
+ ],
+ "dex_of": {
+  "BTC": "",
+  "xyz:XYZ100": "xyz",
+  ":X": "",
+  "a:b:c": "a",
+  "": ""
+ }
+}

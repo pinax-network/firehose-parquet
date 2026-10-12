@@ -1,0 +1,27 @@
+{
+ "name": "HSEI",
+ "maxSupply": "100000000000.0",
+ "totalSupply": "99999999999.3938903809",
+ "circulatingSupply": "99999999999.3938903809",
+ "szDecimals": 2,
+ "weiDecimals": 8,
+ "midPx": "0.065292",
+ "markPx": "0.065411",
+ "prevDayPx": "0.068228",
+ "genesis": {
+  "userBalances": [
+   [
+    "0x20000000000000000000000000000000000001b5",
+    "100000000000.0"
+   ]
+  ],
+  "existingTokenBalances": [],
+  "blacklistUsers": []
+ },
+ "deployer": "0x96fdb9e5c1a3d33f34109118457500b3d96c7094",
+ "deployGas": "529.85068996",
+ "deployTime": "2026-02-04T08:08:57.325998778",
+ "seededUsdc": "0.0",
+ "nonCirculatingUserBalances": [],
+ "futureEmissions": "0.0"
+}
