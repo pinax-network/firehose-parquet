@@ -226,11 +226,19 @@ pub fn plan(mut files: Vec<DateFile>, target: u64) -> Vec<Bin> {
     bins
 }
 
-/// One data file of the store as a Parquet reader; the log gives its size.
-struct StoreReader {
+/// One data file of the store as a Parquet reader; the log gives its size, so
+/// no HEAD is sent. `fireparq hypercore-reference` reads its tables with it.
+pub struct StoreReader {
     store: ObjectStoreRef,
     path: ObjectPath,
     size: u64,
+}
+
+impl StoreReader {
+    /// The file at `path` (relative to `store`), of `size` bytes.
+    pub fn new(store: ObjectStoreRef, path: ObjectPath, size: u64) -> Self {
+        Self { store, path, size }
+    }
 }
 
 fn store_error(error: object_store::Error) -> ParquetError {
@@ -436,11 +444,11 @@ impl Compaction<'_> {
     }
 
     fn reader(&self, file: &DateFile) -> StoreReader {
-        StoreReader {
-            store: self.table.object_store(),
-            path: file.store_path.clone(),
-            size: file.size,
-        }
+        StoreReader::new(
+            self.table.object_store(),
+            file.store_path.clone(),
+            file.size,
+        )
     }
 
     /// Files in writer order, one after the other, their rows as they are.

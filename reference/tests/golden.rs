@@ -5,11 +5,12 @@
 //! value parsers, the CRC-32 hours, the Delta schemas and the table properties
 //! must match it. Only the public API is used.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use deltalake_core::kernel::StructType;
+use firehose_parquet::s3::AwsConfig;
 use fireparq_reference::arrow::{delta_fields, TABLE_PROPERTIES};
 use fireparq_reference::clock::SystemClock;
 use fireparq_reference::info::{InfoClient, Transport, TransportError};
@@ -21,6 +22,7 @@ use fireparq_reference::model::{
     spot_meta_row, spot_pair_row, spot_token_row, token_details_row, Cell, ColumnType, Row,
     ALL_TABLES,
 };
+use fireparq_reference::store::{OpenMode, Root, Store};
 use fireparq_reference::values::{
     asset_id, crc32_hour, dex_of, from_millis, parse_decimal, parse_kv, parse_naive_utc, valid_id,
     Ordered,
@@ -479,4 +481,62 @@ fn table_properties_match() {
         .map(|(property, value)| (property.as_ref().to_owned(), Value::from(*value)))
         .collect();
     assert_eq!(Value::Object(properties), golden()["table_properties"]);
+}
+
+/// The golden rows appended to their tables and read back: every cell as
+/// built, `payload_json` byte for byte, and each entity's latest row its last
+/// (every golden row has the same `observed_at`, and a tie goes to the later
+/// row).
+#[tokio::test]
+async fn golden_rows_survive_a_delta_round_trip() {
+    let golden = golden();
+    let fixtures = Fixtures::load();
+    let dir = tempfile::tempdir().unwrap();
+    let aws = AwsConfig {
+        aws_access_key_id: None,
+        aws_secret_access_key: None,
+        aws_session_token: None,
+        aws_region: None,
+        aws_endpoint_url: None,
+    };
+    let store = Store::new(
+        Root::Local(dir.path().canonicalize().unwrap()),
+        &aws,
+        &|_| None,
+        "golden".into(),
+        "golden",
+        Logger::new(Box::new(std::io::sink()), Vec::new()),
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let mut tables: BTreeMap<&str, Vec<Row>> = BTreeMap::new();
+    for vector in golden["rows"].as_array().unwrap() {
+        let row = fixtures.row(vector["label"].as_str().unwrap());
+        tables.entry(row.spec.name).or_default().push(row);
+    }
+    assert_eq!(tables.len(), ALL_TABLES.len() - 1);
+    for (name, rows) in tables {
+        let spec = rows[0].spec;
+        let mut table = store.open(spec, OpenMode::Write).await.unwrap().unwrap();
+        store.append(&mut table, rows.clone()).await.unwrap();
+        let columns: Vec<&str> = spec.columns.iter().map(|column| column.name).collect();
+        let mut read = Vec::new();
+        store
+            .for_each_row(&table, &columns, None, &mut |cells| {
+                read.push(cells.to_vec())
+            })
+            .await
+            .unwrap();
+        let built: Vec<Vec<Cell>> = rows.iter().map(|row| row.cells.clone()).collect();
+        assert_eq!(read, built, "{name}");
+        let mut last = HashMap::new();
+        for row in rows {
+            last.insert(row.key(), row);
+        }
+        assert_eq!(
+            store.latest_with(&table, &columns).await.unwrap(),
+            last,
+            "{name}"
+        );
+    }
 }

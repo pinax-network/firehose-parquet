@@ -262,6 +262,13 @@ impl<K: Hash + Eq + Clone, V> Ordered<K, V> {
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.order.iter().map(|key| (key, &self.values[key]))
     }
+
+    /// The values in their keys' first-seen order.
+    pub fn into_values(mut self) -> impl Iterator<Item = V> {
+        self.order
+            .into_iter()
+            .filter_map(move |key| self.values.remove(&key))
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> FromIterator<(K, V)> for Ordered<K, V> {
@@ -476,5 +483,6 @@ mod tests {
         assert!(ordered.contains_key(&2));
         assert!(!ordered.contains_key(&4));
         assert!(Ordered::<i64, ()>::new().is_empty());
+        assert_eq!(ordered.into_values().collect::<Vec<_>>(), ["c", "b", "d"]);
     }
 }

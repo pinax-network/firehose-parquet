@@ -399,6 +399,16 @@ impl Row {
         }
     }
 
+    /// A row holding `cells` in `columns`, NULL in the others: a row read
+    /// back from the table.
+    pub fn of(spec: &'static TableSpec, columns: &[&str], cells: &[Cell]) -> Row {
+        let mut row = Row::new(spec);
+        for (column, cell) in columns.iter().zip(cells) {
+            row.set(column, cell.clone());
+        }
+        row
+    }
+
     pub fn set(&mut self, column: &str, cell: Cell) {
         let index = self.spec.index(column);
         self.cells[index] = cell;

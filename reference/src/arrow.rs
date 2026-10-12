@@ -18,12 +18,13 @@ use deltalake_core::arrow::array::{
     TimestampMicrosecondBuilder,
 };
 use deltalake_core::arrow::datatypes::{
-    DataType as ArrowType, Decimal128Type, Field, Int64Type, SchemaRef, TimeUnit,
+    DataType as ArrowType, Decimal128Type, Field, Int64Type, Schema, SchemaRef, TimeUnit,
     TimestampMicrosecondType,
 };
 use deltalake_core::arrow::error::ArrowError;
+use deltalake_core::kernel::engine::arrow_conversion::TryIntoArrow as _;
 use deltalake_core::kernel::{ArrayType, DataType, DecimalType, MapType, StructField};
-use deltalake_core::TableProperty;
+use deltalake_core::{DeltaResult, DeltaTable, TableProperty};
 
 use crate::model::{Cell, ColumnType, Row, TableSpec};
 
@@ -67,6 +68,14 @@ pub fn delta_fields(spec: &TableSpec) -> Vec<StructField> {
         .iter()
         .map(|column| StructField::new(column.name, delta_type(column.ty), column.nullable))
         .collect()
+}
+
+/// The Arrow schema of the table's data files, as delta-rs converts the
+/// table's current Delta schema: the schema a batch is encoded to and an
+/// OPTIMIZE writes (every table is unpartitioned).
+pub fn file_schema(table: &DeltaTable) -> DeltaResult<SchemaRef> {
+    let schema: Schema = table.snapshot()?.schema().as_ref().try_into_arrow()?;
+    Ok(Arc::new(schema))
 }
 
 fn mismatch(field: &Field, cell: &Cell) -> ArrowError {
@@ -387,7 +396,6 @@ mod tests {
         spot_token_row, token_details_row, ALL_TABLES, OUTCOMES, OUTCOME_META, QUESTIONS,
         SPOT_META, SPOT_TOKENS, SPOT_TOKEN_DETAILS,
     };
-    use deltalake_core::kernel::engine::arrow_conversion::TryIntoArrow as _;
     use deltalake_core::kernel::StructType;
 
     const AT: i64 = 1_791_478_200_000_000;
