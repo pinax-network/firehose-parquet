@@ -1063,7 +1063,7 @@ async fn an_outage_needs_three_500s_and_half_of_a_type_unless_named() {
     // tokenDetails answers HTTP 500 for about one token in three: the one new
     // token of an hourly run keeps its gap. An outage needs at least three
     // 500s and at least as many as the type's answers; a run that names its
-    // entities fails on one, since nothing else refills a repair's gap.
+    // entities fails on any one, since nothing else refills a repair's gap.
     let h = Harness::new();
     let store = h.store();
     let error = InfoError {
@@ -1109,14 +1109,22 @@ async fn an_outage_needs_three_500s_and_half_of_a_type_unless_named() {
     // At least half: 3 of 7 is not an outage, 3 of 6 is.
     assert_eq!(failures(Options::default(), 4, 3), no_failures());
     assert_eq!(failures(Options::default(), 3, 3).len(), 1);
-    // A named run fails on one.
+    // A named run fails on any one, naming it.
     assert_eq!(failures(coins(&["BTC"]), 0, 1).len(), 1);
     let named = Options {
         outcome_ids: Some(vec![8976]),
         ..Options::default()
     };
     assert_eq!(failures(named, 0, 1).len(), 1);
-    assert_eq!(failures(coins(&["BTC"]), 2, 1), no_failures());
+    assert_eq!(
+        failures(coins(&["BTC"]), 2, 1),
+        [
+            "tokenDetails: 1 of 3 requests failed with HTTP 500 (0), and a run that names its \
+          entities must read them all"
+        ]
+    );
+    let many = failures(coins(&["BTC"]), 0, 7);
+    assert!(many[0].contains("(0, 1, 2, 3, 4, …)"), "{many:?}");
 }
 
 #[tokio::test]
@@ -1500,6 +1508,22 @@ async fn funding_a_repair_that_fetches_nothing_fails() {
     assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
     assert!(done.failures[0].contains("fundingHistory: 1 of 1 requests failed with HTTP 500"));
     assert_eq!(h.rows(&FUNDING_HISTORY).await.len(), 2);
+}
+
+#[tokio::test]
+async fn funding_a_named_run_fails_for_a_coin_it_could_not_read() {
+    // BTC, asked first, answers HTTP 500 three times; ETH answers. The run
+    // named both, so BTC's gap fails it.
+    let h = Harness::funding();
+    h.statuses("fundingHistory", vec![500; 3]);
+    let done = h.run(Which::Funding, coins(&["BTC", "ETH"])).await;
+    assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+    assert!(
+        done.failures[0].contains("requests failed with HTTP 500 (BTC)"),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(done.summary["coins_failed"], json!(1));
 }
 
 #[tokio::test]

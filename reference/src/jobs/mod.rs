@@ -161,7 +161,12 @@ pub struct Run<'a> {
     pub summary: Map<String, Value>,
     /// Per entity request type: answered, and failed with HTTP 500.
     answers: BTreeMap<&'static str, (u64, u64)>,
+    /// Per entity request type, the first [`GAPS_NAMED`] entities that failed.
+    gaps: BTreeMap<&'static str, Vec<String>>,
 }
+
+/// How many failed entities a failure message names.
+const GAPS_NAMED: usize = 5;
 
 /// The fewest HTTP 500 entity failures of a request type that make an outage.
 pub const OUTAGE_FAILURES: u64 = 3;
@@ -185,6 +190,7 @@ impl<'a> Run<'a> {
             failures: Vec::new(),
             summary: Map::new(),
             answers: BTreeMap::new(),
+            gaps: BTreeMap::new(),
         }
     }
 
@@ -214,6 +220,13 @@ impl<'a> Run<'a> {
     /// ([`Self::check_outages`]). Logged as a warning naming the entity.
     pub fn entity_failed(&mut self, kind: &'static str, error: &InfoError, context: (&str, Value)) {
         self.answers.entry(kind).or_default().1 += 1;
+        let gaps = self.gaps.entry(kind).or_default();
+        if gaps.len() < GAPS_NAMED {
+            gaps.push(match &context.1 {
+                Value::String(name) => name.clone(),
+                other => other.to_string(),
+            });
+        }
         let mut fields = Map::new();
         fields.insert("message".into(), json!(error.message));
         fields.insert(context.0.into(), context.1);
@@ -225,26 +238,33 @@ impl<'a> Run<'a> {
     /// that type, not a few entities. A lone failure stays its entity's gap:
     /// `tokenDetails` answers 500 for about one token in three, so the one
     /// new token of an hourly run would otherwise fail it. A run that names
-    /// its entities (`--coins`, `--outcome-ids`) needs one: a scheduled run
-    /// never refills a repair's gap behind a coin's cursor, so a repair that
-    /// fetched nothing must not end as if it had.
+    /// its entities (`--coins`, `--outcome-ids`) fails on any of them: a
+    /// scheduled run never refills a repair's gap behind a coin's cursor, so
+    /// a repair that missed one must not end as if it had not.
     pub fn check_outages(&mut self) {
         let named = self.options.coins.is_some() || self.options.outcome_ids.is_some();
-        let floor = if named { 1 } else { OUTAGE_FAILURES };
-        let outages: Vec<String> = self
-            .answers
-            .iter()
-            .filter(|(_, (answered, failed))| *failed >= floor && failed >= answered)
-            .map(|(kind, (answered, failed))| {
-                format!(
-                    "{kind}: {failed} of {} requests failed with HTTP 500: /info is failing \
-                     this request type, not single entities",
-                    answered + failed
-                )
-            })
-            .collect();
-        for outage in outages {
-            self.fail(outage);
+        let mut failures = Vec::new();
+        for (kind, (answered, failed)) in &self.answers {
+            let total = answered + failed;
+            if named && *failed > 0 {
+                let mut gaps = self.gaps.get(kind).cloned().unwrap_or_default();
+                if *failed > gaps.len() as u64 {
+                    gaps.push("…".into());
+                }
+                failures.push(format!(
+                    "{kind}: {failed} of {total} requests failed with HTTP 500 ({}), and a run \
+                     that names its entities must read them all",
+                    gaps.join(", ")
+                ));
+            } else if *failed >= OUTAGE_FAILURES && failed >= answered {
+                failures.push(format!(
+                    "{kind}: {failed} of {total} requests failed with HTTP 500: /info is failing \
+                     this request type, not single entities"
+                ));
+            }
+        }
+        for failure in failures {
+            self.fail(failure);
         }
     }
 
