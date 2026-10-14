@@ -25,7 +25,8 @@ empty when the release is cut.
   ([`deploy/examples/hypercore-reference-cronjob.yaml`](../../deploy/examples/hypercore-reference-cronjob.yaml));
   every commit is a single conditional attempt, never over a concurrent one,
   and each job compacts and vacuums its own tables and backfills across runs.
-  It is the Rust port of the Python job of k8s-parquet PR #82, with the same
+  It is the Rust port of the Python job of
+  [k8s-parquet#82](https://github.com/pinax-network/k8s-parquet/pull/82), with the same
   tables, payload hashes and views. **It needs its own bucket or root**, for example
   `s3://hypercore-ref`, never a fireparq dataset root (whose `build` would then
   refuse to resume), with an S3 user limited to its table prefixes

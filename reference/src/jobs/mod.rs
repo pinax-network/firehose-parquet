@@ -224,12 +224,17 @@ impl<'a> Run<'a> {
     /// HTTP 500, and at least [`OUTAGE_FAILURES`] of them: `/info` is failing
     /// that type, not a few entities. A lone failure stays its entity's gap:
     /// `tokenDetails` answers 500 for about one token in three, so the one
-    /// new token of an hourly run would otherwise fail it.
+    /// new token of an hourly run would otherwise fail it. A run that names
+    /// its entities (`--coins`, `--outcome-ids`) needs one: a scheduled run
+    /// never refills a repair's gap behind a coin's cursor, so a repair that
+    /// fetched nothing must not end as if it had.
     pub fn check_outages(&mut self) {
+        let named = self.options.coins.is_some() || self.options.outcome_ids.is_some();
+        let floor = if named { 1 } else { OUTAGE_FAILURES };
         let outages: Vec<String> = self
             .answers
             .iter()
-            .filter(|(_, (answered, failed))| *failed >= OUTAGE_FAILURES && failed >= answered)
+            .filter(|(_, (answered, failed))| *failed >= floor && failed >= answered)
             .map(|(kind, (answered, failed))| {
                 format!(
                     "{kind}: {failed} of {} requests failed with HTTP 500: /info is failing \

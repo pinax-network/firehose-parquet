@@ -1517,6 +1517,9 @@ impl std::io::Write for Lines {
 /// reference rows, and every row a cross-check returns is one the reference
 /// tables have not reached (NULL reference columns), while X3 and X4 also
 /// agree on some: a drift between the tables and the queries fails here.
+/// X1's base-token branch is not reached: the fixture lake has no crossed
+/// spot BUY on a pair the trimmed `spotMeta` fixture knows, so only its
+/// unknown-pair rows are checked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
     use fireparq_reference::{run_with, FundingOptions, Job, OutcomesOptions, Runtime, Settings};
@@ -1696,15 +1699,18 @@ async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
     for column in ["named", "labelled", "settled"] {
         assert_eq!(number(&j2[column]), number(&j2["n"]), "{column}: {j2:?}");
     }
-    // 8976's settlement agrees, so X2 is empty.
+    // 8976's settlement agrees, so X2 is empty, and every system-address
+    // token is at its index, so X4 is.
     assert_eq!(results["X2"], 0, "{results:?}");
+    assert_eq!(results["X4"], 0, "{results:?}");
     for row in &rows["agreed"] {
         assert!(number(&row["n"]) > 0, "{row:?}");
     }
 }
 
 /// The reference columns of the joins (each finds some) and of the
-/// cross-checks (each NULL in every row returned).
+/// cross-checks (each NULL in every row returned; X4's are by its WHERE, and
+/// it must return none).
 const REFERENCE_COLUMNS: &[(&str, &str)] = &[
     ("J1", "base_symbol"),
     ("J1", "quote_symbol"),
@@ -1717,7 +1723,6 @@ const REFERENCE_COLUMNS: &[(&str, &str)] = &[
     ("X1", "quote_symbol"),
     ("X2", "settle_fraction"),
     ("X3", "name"),
-    ("X4", "token_index"),
 ];
 
 /// Serves `responses` from a request's cursor (`event-<ordinal>`), or from

@@ -58,8 +58,9 @@ pub async fn run_meta(run: &mut Run<'_>) -> Result<(), JobError> {
     // Spot tokens, and tokenDetails once per token: when it is first seen (a
     // token gets its first row only once its details were asked, so a run
     // whose budget ends defers it), and once a day in its own hour, with a
-    // single attempt, for a token /info failed (it answers HTTP 500 for a
-    // third of them, every time). Details are their own table, so a later
+    // single attempt for HTTP 500 (a gateway's 502, 503 or 504 gets
+    // SERVER_ERROR_ATTEMPTS), for a token /info failed (it answers HTTP 500
+    // for a third of them, every time). Details are their own table, so a later
     // answer is a new row.
     let latest = store.latest(&t_tokens).await?;
     let mut detailed = HashSet::new();

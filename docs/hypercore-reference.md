@@ -420,7 +420,9 @@ A run exits 1, and commits the rows it completed first, when:
   later), because `/info` answers 500 for some entities every time. When at
   least half of a request type's requests in a run fail that way, and at
   least three, the run fails: a run's one new token whose details fail stays
-  a gap.
+  a gap. A run that names its entities (`--coins`, `--outcome-ids`) fails on
+  one, since the scheduled runs never refill a repair's gap behind a coin's
+  cursor.
 - **`<table>: the snapshot lacks N of the M listed entities`.** A snapshot that
   would delist more than the larger of 25 entities and 20% of a table's listed
   ones (an HTTP 200 with an empty or cut list) writes no removal row, since
@@ -535,12 +537,13 @@ without an offset it is UTC.
 | `start.info` showed IPv6 hosts unbracketed and IDN hosts in Unicode | bracketed and punycode |
 | a funding entry outside years 1-9999 failed with `OverflowError` | `fundingHistory <coin> returned an entry outside the request` |
 | any answer up to 64 MiB was parsed, however much memory its values took | an answer that would take more than 256 MiB parsed fails its request, without a retry |
-| one entity's HTTP 500, with no other request of its type answered, failed the run | an outage needs at least three such failures, and half of the type's requests |
+| one entity's HTTP 500, with no other request of its type answered, failed the run | an outage needs at least three such failures, and half of the type's requests; one in a run that names its entities |
 | the daily `tokenDetails` retry got one attempt for any 5xx | one for HTTP 500; 502, 503 and 504 get the usual three |
 | a coin named twice in `--coins` was read twice, and a repair could append its hours twice | each coin once |
 | a checkpoint or log cleanup failure after a commit failed the commit | the commit counts; the checkpoint or cleanup fails the run on its own |
 | `delta.checkpointInterval` hook and `table.vacuum` | the same checkpoint versions (19, 39, …) and VACUUM, committed by the command itself ([Compaction and VACUUM](#compaction-and-vacuum)) |
 | JSON lines in insertion order, `"0.1.0"` as `version` | keys sorted, compact; `version` is fireparq's, and `start` adds `deltalake` |
+| `commitInfo` keys `hlref.version`, `hlref.run_id`, `hlref.mode` and `hlref.action` | `fireparq.reference.version`, `.run_id`, `.mode` and `.action` |
 
 ## Output
 

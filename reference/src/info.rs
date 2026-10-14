@@ -619,7 +619,8 @@ impl InfoClient {
     }
 
     /// tokenDetails: `None` when `/info` does not know the token; else an
-    /// object. `attempts` bounds HTTP 5xx (1 for a daily retry).
+    /// object. `attempts` bounds HTTP 500 (1 for a daily retry); 502, 503 and
+    /// 504 get [`SERVER_ERROR_ATTEMPTS`].
     pub async fn token_details(
         &mut self,
         token_id: &str,

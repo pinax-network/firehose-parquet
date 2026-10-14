@@ -1059,41 +1059,64 @@ async fn meta_token_details_errors_are_asked_again_daily() {
 }
 
 #[tokio::test]
-async fn a_lone_entity_500_is_its_gap_not_an_outage() {
+async fn an_outage_needs_three_500s_and_half_of_a_type_unless_named() {
     // tokenDetails answers HTTP 500 for about one token in three: the one new
-    // token of an hourly run keeps its gap. Three, with none answered, are an
-    // outage.
+    // token of an hourly run keeps its gap. An outage needs at least three
+    // 500s and at least as many as the type's answers; a run that names its
+    // entities fails on one, since nothing else refills a repair's gap.
     let h = Harness::new();
     let store = h.store();
-    let mut info = InfoClient::new(
-        h.fake.clone(),
-        100_000,
-        h.clock.clone(),
-        Box::new(|| 0.0),
-        h.log.logger(),
-    )
-    .unwrap();
-    let mut run = Run::new(
-        &store,
-        &mut info,
-        Options::default(),
-        h.log.logger(),
-        "test".into(),
-        h.clock.clone(),
-    );
     let error = InfoError {
         message: "tokenDetails(token=0x00): HTTP 500".into(),
         status: Some(500),
     };
-    for index in 1..OUTAGE_FAILURES {
-        run.entity_failed("tokenDetails", &error, ("token_index", json!(index)));
+    let failures = |options: Options, answered: u64, failed: u64| -> Vec<String> {
+        let mut info = InfoClient::new(
+            h.fake.clone(),
+            100_000,
+            h.clock.clone(),
+            Box::new(|| 0.0),
+            h.log.logger(),
+        )
+        .unwrap();
+        let mut run = Run::new(
+            &store,
+            &mut info,
+            options,
+            h.log.logger(),
+            "test".into(),
+            h.clock.clone(),
+        );
+        for _ in 0..answered {
+            run.answered("tokenDetails");
+        }
+        for index in 0..failed {
+            run.entity_failed("tokenDetails", &error, ("token_index", json!(index)));
+        }
         run.check_outages();
-        assert_eq!(run.failures, no_failures(), "{index}");
+        run.failures
+    };
+    for failed in 1..OUTAGE_FAILURES {
+        assert_eq!(
+            failures(Options::default(), 0, failed),
+            no_failures(),
+            "{failed}"
+        );
     }
-    run.entity_failed("tokenDetails", &error, ("token_index", json!(3)));
-    run.check_outages();
-    assert_eq!(run.failures.len(), 1, "{:?}", run.failures);
-    assert!(run.failures[0].contains("tokenDetails: 3 of 3 requests failed with HTTP 500"));
+    let outage = failures(Options::default(), 0, OUTAGE_FAILURES);
+    assert_eq!(outage.len(), 1, "{outage:?}");
+    assert!(outage[0].contains("tokenDetails: 3 of 3 requests failed with HTTP 500"));
+    // At least half: 3 of 7 is not an outage, 3 of 6 is.
+    assert_eq!(failures(Options::default(), 4, 3), no_failures());
+    assert_eq!(failures(Options::default(), 3, 3).len(), 1);
+    // A named run fails on one.
+    assert_eq!(failures(coins(&["BTC"]), 0, 1).len(), 1);
+    let named = Options {
+        outcome_ids: Some(vec![8976]),
+        ..Options::default()
+    };
+    assert_eq!(failures(named, 0, 1).len(), 1);
+    assert_eq!(failures(coins(&["BTC"]), 2, 1), no_failures());
 }
 
 #[tokio::test]
@@ -1447,6 +1470,36 @@ async fn funding_a_coin_named_twice_is_repaired_once() {
     assert_eq!(times, expected);
     assert_eq!(done.summary["coins"], json!(1));
     assert_eq!(h.verify().await, no_failures());
+}
+
+#[tokio::test]
+async fn funding_a_repair_that_fetches_nothing_fails() {
+    // A named repair whose only coin answers HTTP 500 (three attempts) fills
+    // no gap, and the scheduled runs read only after the cursor: it fails.
+    let h = Harness::funding();
+    let entries = h.entries("BTC");
+    let store = h.store();
+    let mut table = store
+        .open(&FUNDING_HISTORY, OpenMode::Write)
+        .await
+        .unwrap()
+        .unwrap();
+    let at = h.now();
+    let rows = [0, 4]
+        .iter()
+        .map(|index| funding_row(&entries[*index], at))
+        .collect();
+    store.append(&mut table, rows).await.unwrap();
+    h.statuses("fundingHistory", vec![500; 3]);
+    let options = Options {
+        // 2026-01-01T06:00:00Z.
+        funding_end: Some(1_767_247_200_000_000),
+        ..coins(&["BTC"])
+    };
+    let done = h.run(Which::Funding, options).await;
+    assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+    assert!(done.failures[0].contains("fundingHistory: 1 of 1 requests failed with HTTP 500"));
+    assert_eq!(h.rows(&FUNDING_HISTORY).await.len(), 2);
 }
 
 #[tokio::test]
