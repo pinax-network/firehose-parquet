@@ -985,6 +985,69 @@ async fn optimize_keeps_every_row_and_null_count() {
 }
 
 #[tokio::test]
+async fn of_two_overlapping_optimizes_only_one_commits() {
+    // Two compactions of the same files must not both commit: they would
+    // duplicate every row they rewrite. delta-rs's conflict checker ignores
+    // dataChange=false removes (firehose-parquet#717), so this rests on
+    // max_retries(0): the second fails without it, at the version it read.
+    let f = Fixture::new();
+    f.clock.set_wall(AT_1205);
+    let store = f.store();
+    let compact = MaintainOptions {
+        compact_min_files: 2,
+        ..MaintainOptions::default()
+    };
+    let refused = |result: Result<Option<Maintained>, StoreError>| match result {
+        Err(StoreError::Failed(message)) => {
+            assert_eq!(
+                message,
+                "_hlref/outcome_probes: OPTIMIZE failed (MaxCommitAttempts)"
+            );
+        }
+        other => panic!("{:?}", other.map_err(|error| error.to_string())),
+    };
+
+    // One after the other: the second was planned before the first committed.
+    let mut first = f.table(&store, &OUTCOME_PROBES).await;
+    f.probes(&store, &mut first, 0..3).await;
+    let mut second = f.table(&store, &OUTCOME_PROBES).await;
+    assert_eq!(second.version(), first.version());
+    let before = all_rows(&f, &OUTCOME_PROBES).await;
+    store.maintain(&mut first, &compact).await.unwrap().unwrap();
+    refused(store.maintain(&mut second, &compact).await);
+    let table = f.table(&store, &OUTCOME_PROBES).await;
+    assert_eq!(table.version(), first.version());
+    assert_eq!(store.active_files(&table).await.unwrap().len(), 1);
+    assert_eq!(all_rows(&f, &OUTCOME_PROBES).await, before);
+
+    // At once, from the same version: whichever commits, the other fails.
+    let mut writer = f.table(&store, &OUTCOME_PROBES).await;
+    f.probes(&store, &mut writer, 3..6).await;
+    let mut a = f.table(&store, &OUTCOME_PROBES).await;
+    let mut b = f.table(&store, &OUTCOME_PROBES).await;
+    let read = a.version();
+    let before = all_rows(&f, &OUTCOME_PROBES).await;
+    let (ra, rb) = tokio::join!(
+        store.maintain(&mut a, &compact),
+        store.maintain(&mut b, &compact)
+    );
+    let (won, lost) = match (ra, rb) {
+        (Ok(won), lost) | (lost, Ok(won)) => (won, lost),
+        (ra, rb) => panic!(
+            "neither committed: {:?} {:?}",
+            ra.map_err(|error| error.to_string()),
+            rb.map_err(|error| error.to_string())
+        ),
+    };
+    assert_eq!(won.unwrap().files_removed, Some(4));
+    refused(lost);
+    let table = f.table(&store, &OUTCOME_PROBES).await;
+    assert_eq!(table.version(), read + 1);
+    assert_eq!(store.active_files(&table).await.unwrap().len(), 1);
+    assert_eq!(all_rows(&f, &OUTCOME_PROBES).await, before);
+}
+
+#[tokio::test]
 async fn commits_carry_the_run_metadata() {
     let f = Fixture::new();
     f.clock.set_wall(AT_1205);
@@ -1018,7 +1081,7 @@ async fn commits_carry_the_run_metadata() {
         .map(|commit| {
             (
                 commit.operation.clone(),
-                commit.info["hlref.action"].clone(),
+                commit.info["fireparq.reference.action"].clone(),
             )
         })
         .collect();
@@ -1034,9 +1097,9 @@ async fn commits_carry_the_run_metadata() {
         ]
     );
     for commit in &history {
-        assert_eq!(commit.info["hlref.run_id"], json!("test"));
-        assert_eq!(commit.info["hlref.mode"], json!("test"));
-        assert_eq!(commit.info["hlref.version"], json!(VERSION));
+        assert_eq!(commit.info["fireparq.reference.run_id"], json!("test"));
+        assert_eq!(commit.info["fireparq.reference.mode"], json!("test"));
+        assert_eq!(commit.info["fireparq.reference.version"], json!(VERSION));
     }
     // The two replaced files and the orphan.
     assert_eq!(

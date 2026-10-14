@@ -70,7 +70,7 @@ use crate::log::Logger;
 use crate::model::{Cell, Key, Row, TableSpec};
 use crate::{compact, vacuum, ConfigError, Env};
 
-/// The release, recorded in every commit (`hlref.version`).
+/// The release, recorded in every commit (`fireparq.reference.version`).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The rows of one row group, at most: memory while writing is about one.
@@ -457,8 +457,10 @@ impl Store {
     }
 
     /// Commit properties: one attempt, no post-commit hooks (checkpoints and
-    /// log cleanup are explicit), and the run's provenance (`hlref.*`;
-    /// nothing reads it).
+    /// log cleanup are explicit), and the run's provenance
+    /// (`fireparq.reference.*`; nothing reads it). One attempt also keeps two
+    /// OPTIMIZEs of the same files from both committing: delta-rs's conflict
+    /// checker would let the second through (firehose-parquet#717).
     pub(crate) fn commit_properties(&self, action: &str) -> CommitProperties {
         self.commit_metadata(action, None)
     }
@@ -466,10 +468,10 @@ impl Store {
     /// [`Self::commit_properties`] with `operationMetrics`.
     pub(crate) fn commit_metadata(&self, action: &str, metrics: Option<Value>) -> CommitProperties {
         let mut metadata = vec![
-            ("hlref.version".to_owned(), json!(VERSION)),
-            ("hlref.run_id".to_owned(), json!(self.run_id)),
-            ("hlref.mode".to_owned(), json!(self.mode)),
-            ("hlref.action".to_owned(), json!(action)),
+            ("fireparq.reference.version".to_owned(), json!(VERSION)),
+            ("fireparq.reference.run_id".to_owned(), json!(self.run_id)),
+            ("fireparq.reference.mode".to_owned(), json!(self.mode)),
+            ("fireparq.reference.action".to_owned(), json!(action)),
         ];
         if let Some(metrics) = metrics {
             metadata.push(("operationMetrics".to_owned(), metrics));

@@ -568,8 +568,9 @@ outcomes `live_outcomes`, `listed_questions`, `probed`, `probed_settled`,
 `coins_incomplete`, `coins_stale`, `coins_stale_sample` (at most 5 names),
 `funding_budget_exhausted`.
 
-Every commit carries the metadata `hlref.version`, `hlref.run_id`,
-`hlref.mode` and `hlref.action` (`CREATE`, `ADD COLUMNS`, `APPEND`, `OPTIMIZE`,
+Every commit carries the metadata `fireparq.reference.version`,
+`fireparq.reference.run_id`, `fireparq.reference.mode` and
+`fireparq.reference.action` (`CREATE`, `ADD COLUMNS`, `APPEND`, `OPTIMIZE`,
 `VACUUM`) in its `commitInfo`. Nothing reads them back. There are no
 Prometheus metrics: alert on the CronJobs' success (for example
 `kube_cronjob_status_last_successful_time`), since a budget-limited run exits
@@ -593,7 +594,11 @@ consistent at every version.
 On S3, data files go to a client with three bounded retries (their names are
 unique, so a resend cannot duplicate a row); log commits go out once. On a
 local root a commit is a no-clobber link of the log entry. Two runs of one job
-at once are safe but wasteful: one of them fails.
+at once are safe but wasteful: one of them fails. So are two OPTIMIZEs of a
+table, such as a `maintain` beside a scheduled run: delta-rs's own conflict
+checker would let both commit and duplicate the rows they rewrite
+(firehose-parquet#717), but the second one's single attempt at `V+1` is
+refused.
 
 ## Compaction and VACUUM
 
