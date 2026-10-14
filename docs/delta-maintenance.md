@@ -173,7 +173,7 @@ In a container, the writer's image runs it, `fireparq` being its entrypoint:
 ```bash
 docker run --rm -e DRY_RUN=1 -e LAKE_BUCKET=ethereum-mainnet -e LAKE_TABLES=blocks \
   -e S3_ENDPOINT=https://rgw.example.internal -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-  ghcr.io/pinax-network/firehose-parquet:1.2.0 maintenance
+  ghcr.io/pinax-network/firehose-parquet:1.3.0 maintenance
 ```
 
 Up to v1.0.7 the job was a separate binary, `fireparq-maintenance`, published
@@ -184,7 +184,10 @@ job (`scripts/delta_maintenance.py`).
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml)
 runs the writer's image with `args: ["maintenance"]` hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
-weekly. Its `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
+weekly. Never let two maintenance runs of one lake overlap: until
+[#717](https://github.com/pinax-network/firehose-parquet/issues/717) is fixed,
+two runs that compact the same date at once both commit and duplicate its rows,
+and `concurrencyPolicy: Forbid` covers only one CronJob. The example's `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
 table's day, which commits all or nothing: on riv-dev1 the first run of 1.0.6
 took 6 min on eth, 35 min on Base and 90 min on BSC (`calls` alone 44 min).
 It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
