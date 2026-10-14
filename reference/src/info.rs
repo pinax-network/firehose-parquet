@@ -420,8 +420,10 @@ impl InfoClient {
     }
 
     /// The parsed answer to `body` and when it was received (UTC µs). HTTP
-    /// 5xx gets at most `server_error_attempts` attempts; 429, transport
-    /// errors and invalid JSON get six; any other status none more.
+    /// 500 gets at most `server_error_attempts` attempts, 502, 503 and 504 at
+    /// most [`SERVER_ERROR_ATTEMPTS`] (a gateway's transient answer, even for
+    /// a request asked once); 429, transport errors and invalid JSON get six;
+    /// any other status none more.
     pub async fn request(
         &mut self,
         body: &Json,
@@ -482,7 +484,14 @@ impl InfoClient {
                 (None, failure) => failure.unwrap_or_default().into(),
             };
             if attempt == MAX_ATTEMPTS
-                || status.is_some_and(|code| code >= 500 && attempt >= server_error_attempts)
+                || status.is_some_and(|code| {
+                    let attempts = if code == 500 {
+                        server_error_attempts
+                    } else {
+                        SERVER_ERROR_ATTEMPTS
+                    };
+                    code >= 500 && attempt >= attempts
+                })
             {
                 break;
             }

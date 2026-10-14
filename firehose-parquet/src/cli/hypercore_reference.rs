@@ -9,7 +9,9 @@
 //! `config_error` line (the weight floor, the time budget, `--tables` names,
 //! a missing root) are made by the job, so that `kubectl logs | tail -1`
 //! shows them; a negative weight or budget is one of them. A negative
-//! `--max-probes` or `--reprobe-after-minutes` is a usage error.
+//! `--max-probes` or `--reprobe-after-minutes` is a usage error. A blank
+//! number, such as an empty variable, is its default, as for every other
+//! setting.
 //!
 //! `--info-url` and the AWS credentials are never shown: their environment
 //! values are hidden from `--help`, `Debug` leaves them out, and the URL is a
@@ -52,7 +54,8 @@ pub struct HypercoreReferenceArgs {
     #[arg(
         long,
         env = "HLREF_WEIGHT_PER_MINUTE",
-        default_value_t = 400,
+        default_value_t = WEIGHT_PER_MINUTE,
+        value_parser = weight_per_minute,
         allow_negative_numbers = true,
         hide_env_values = true,
         help_heading = "Reference tables"
@@ -63,7 +66,8 @@ pub struct HypercoreReferenceArgs {
     #[arg(
         long,
         env = "HLREF_TIME_BUDGET_SECONDS",
-        default_value_t = 240.0,
+        default_value_t = TIME_BUDGET_SECONDS,
+        value_parser = time_budget_seconds,
         allow_negative_numbers = true,
         hide_env_values = true,
         help_heading = "Reference tables"
@@ -116,7 +120,8 @@ pub struct OutcomesArgs {
     #[arg(
         long,
         env = "HLREF_MAX_PROBES",
-        default_value_t = 80,
+        default_value_t = MAX_PROBES,
+        value_parser = max_probes,
         hide_env_values = true
     )]
     pub max_probes: u32,
@@ -195,6 +200,39 @@ pub struct NameList(pub Vec<String>);
 /// A UTC time in microseconds since the Unix epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UtcMicros(pub i64);
+
+/// `--weight-per-minute`'s default.
+pub const WEIGHT_PER_MINUTE: i64 = 400;
+/// `--time-budget-seconds`'s default.
+pub const TIME_BUDGET_SECONDS: f64 = 240.0;
+/// `--max-probes`'s default.
+pub const MAX_PROBES: u32 = 80;
+
+/// A number, or `default` when `text` is blank: an empty variable is unset.
+fn number_or<T: std::str::FromStr>(text: &str, default: T) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    match text.trim() {
+        "" => Ok(default),
+        text => text.parse().map_err(|error: T::Err| error.to_string()),
+    }
+}
+
+/// `--weight-per-minute`, `HLREF_WEIGHT_PER_MINUTE`.
+pub fn weight_per_minute(text: &str) -> Result<i64, String> {
+    number_or(text, WEIGHT_PER_MINUTE)
+}
+
+/// `--time-budget-seconds`, `HLREF_TIME_BUDGET_SECONDS`.
+pub fn time_budget_seconds(text: &str) -> Result<f64, String> {
+    number_or(text, TIME_BUDGET_SECONDS)
+}
+
+/// `--max-probes`, `HLREF_MAX_PROBES`.
+pub fn max_probes(text: &str) -> Result<u32, String> {
+    number_or(text, MAX_PROBES)
+}
 
 /// `"1, 2,3"`: the items that are not blank, each a signed integer. An empty
 /// list is refused: it would silently mean the sweep.
@@ -398,6 +436,21 @@ mod tests {
         ] {
             assert_eq!(utc_date(text), Err(UTC_DATE_FORMS.to_owned()), "{text:?}");
         }
+    }
+
+    #[test]
+    fn blank_numbers_are_their_defaults() {
+        for text in ["", " ", "\n"] {
+            assert_eq!(weight_per_minute(text), Ok(WEIGHT_PER_MINUTE));
+            assert_eq!(time_budget_seconds(text), Ok(TIME_BUDGET_SECONDS));
+            assert_eq!(max_probes(text), Ok(MAX_PROBES));
+        }
+        assert_eq!(weight_per_minute(" -5 "), Ok(-5));
+        assert_eq!(time_budget_seconds("2.5"), Ok(2.5));
+        assert_eq!(max_probes("60"), Ok(60));
+        assert!(weight_per_minute("4OO").is_err());
+        assert!(time_budget_seconds("soon").is_err());
+        assert!(max_probes("-1").is_err());
     }
 
     #[test]

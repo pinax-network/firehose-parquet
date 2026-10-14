@@ -163,6 +163,9 @@ pub struct Run<'a> {
     answers: BTreeMap<&'static str, (u64, u64)>,
 }
 
+/// The fewest HTTP 500 entity failures of a request type that make an outage.
+pub const OUTAGE_FAILURES: u64 = 3;
+
 impl<'a> Run<'a> {
     pub fn new(
         store: &'a Store,
@@ -218,12 +221,15 @@ impl<'a> Run<'a> {
     }
 
     /// Fails the run when at least half of a request type's requests got
-    /// HTTP 500: `/info` is failing that type, not a few entities.
+    /// HTTP 500, and at least [`OUTAGE_FAILURES`] of them: `/info` is failing
+    /// that type, not a few entities. A lone failure stays its entity's gap:
+    /// `tokenDetails` answers 500 for about one token in three, so the one
+    /// new token of an hourly run would otherwise fail it.
     pub fn check_outages(&mut self) {
         let outages: Vec<String> = self
             .answers
             .iter()
-            .filter(|(_, (answered, failed))| *failed > 0 && failed >= answered)
+            .filter(|(_, (answered, failed))| *failed >= OUTAGE_FAILURES && failed >= answered)
             .map(|(kind, (answered, failed))| {
                 format!(
                     "{kind}: {failed} of {} requests failed with HTTP 500: /info is failing \

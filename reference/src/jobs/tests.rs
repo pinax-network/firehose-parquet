@@ -1037,14 +1037,63 @@ async fn meta_token_details_errors_are_asked_again_daily() {
         1
     );
     assert_eq!(done.summary["token_details_retry_failed"], json!(1));
-    // A day later /info answers: a new row, which verify accepts.
+    // A day later a gateway's transient 503 gets the usual attempts, and
+    // /info answers: a new row, which verify accepts.
     to_hour_of(&usdc);
-    h.run(Which::Meta, Options::default()).await;
+    h.statuses("tokenDetails", vec![503]);
+    let before = h.calls();
+    let done = h.run(Which::Meta, Options::default()).await;
+    assert_eq!(done.failures, no_failures());
+    assert_eq!(
+        h.asked_tokens(before)
+            .iter()
+            .filter(|token_id| **token_id == usdc)
+            .count(),
+        2
+    );
     assert_eq!(
         sorted(h.details().await.keys().copied().collect()),
         [0, 40, 437]
     );
     assert_eq!(h.verify().await, no_failures());
+}
+
+#[tokio::test]
+async fn a_lone_entity_500_is_its_gap_not_an_outage() {
+    // tokenDetails answers HTTP 500 for about one token in three: the one new
+    // token of an hourly run keeps its gap. Three, with none answered, are an
+    // outage.
+    let h = Harness::new();
+    let store = h.store();
+    let mut info = InfoClient::new(
+        h.fake.clone(),
+        100_000,
+        h.clock.clone(),
+        Box::new(|| 0.0),
+        h.log.logger(),
+    )
+    .unwrap();
+    let mut run = Run::new(
+        &store,
+        &mut info,
+        Options::default(),
+        h.log.logger(),
+        "test".into(),
+        h.clock.clone(),
+    );
+    let error = InfoError {
+        message: "tokenDetails(token=0x00): HTTP 500".into(),
+        status: Some(500),
+    };
+    for index in 1..OUTAGE_FAILURES {
+        run.entity_failed("tokenDetails", &error, ("token_index", json!(index)));
+        run.check_outages();
+        assert_eq!(run.failures, no_failures(), "{index}");
+    }
+    run.entity_failed("tokenDetails", &error, ("token_index", json!(3)));
+    run.check_outages();
+    assert_eq!(run.failures.len(), 1, "{:?}", run.failures);
+    assert!(run.failures[0].contains("tokenDetails: 3 of 3 requests failed with HTTP 500"));
 }
 
 #[tokio::test]
@@ -1356,6 +1405,47 @@ async fn funding_repair_window_fills_gaps_behind_the_cursor_only() {
     // The incremental run then continues after the cursor.
     h.run(Which::Funding, coins(&["BTC"])).await;
     assert_eq!(h.rows(&FUNDING_HISTORY).await.len(), 6);
+    assert_eq!(h.verify().await, no_failures());
+}
+
+#[tokio::test]
+async fn funding_a_coin_named_twice_is_repaired_once() {
+    let h = Harness::funding();
+    let entries = h.entries("BTC");
+    let store = h.store();
+    let mut table = store
+        .open(&FUNDING_HISTORY, OpenMode::Write)
+        .await
+        .unwrap()
+        .unwrap();
+    // Hours 0 and 4 are stored: 1, 2 and 3 are missing behind the cursor.
+    let at = h.now();
+    let rows = [0, 4]
+        .iter()
+        .map(|index| funding_row(&entries[*index], at))
+        .collect();
+    store.append(&mut table, rows).await.unwrap();
+    let options = Options {
+        // 2026-01-01T06:00:00Z; a commit after every coin.
+        funding_end: Some(1_767_247_200_000_000),
+        commit_rows: 1,
+        ..coins(&["BTC", "BTC"])
+    };
+    let done = h.run(Which::Funding, options).await;
+    assert_eq!(done.failures, no_failures());
+    let times = sorted(
+        h.rows(&FUNDING_HISTORY)
+            .await
+            .iter()
+            .map(|row| stamp(row, "funding_time"))
+            .collect(),
+    );
+    let expected: Vec<i64> = entries[..5]
+        .iter()
+        .map(|entry| from_millis(time_of(entry)).unwrap())
+        .collect();
+    assert_eq!(times, expected);
+    assert_eq!(done.summary["coins"], json!(1));
     assert_eq!(h.verify().await, no_failures());
 }
 

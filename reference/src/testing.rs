@@ -163,6 +163,7 @@ impl FakeInfo {
             (0, fixture!("settledOutcome_0.json")),
             (1473, fixture!("settledOutcome_1473.json")),
             (7768, fixture!("settledOutcome_7768.json")),
+            (8976, fixture!("settledOutcome_8976.json")),
             (9174, fixture!("settledOutcome_9174.json")),
             (9973, fixture!("settledOutcome_9973.json")),
             (9974, fixture!("settledOutcome_9974.json")),

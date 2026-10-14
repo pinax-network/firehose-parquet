@@ -392,8 +392,9 @@ first `settledOutcome`, `tokenDetails` or `fundingHistory` request.
   and defer the tokens their budget does not reach (`tokens_deferred`).
   `/info` answers HTTP 500 for some tokens every time. A token without details
   is asked again once a day, in its own UTC hour (the CRC-32 of its token id
-  modulo 24), with a single attempt; an answer then appends its
-  `hl_spot_token_details` row.
+  modulo 24), with a single attempt for HTTP 500 (a gateway's 502, 503 or 504
+  gets the usual three); an answer then appends its `hl_spot_token_details`
+  row.
 
 A request can outlast the time budget by at most its 300 s total timeout
 (30 s to connect, 30 s between reads), so keep `HLREF_TIME_BUDGET_SECONDS` +
@@ -417,8 +418,9 @@ A run exits 1, and commits the rows it completed first, when:
   request type, not single entities`.** A final HTTP 500 for one outcome id,
   coin or new token is that entity's gap (a `warning`; it is asked again
   later), because `/info` answers 500 for some entities every time. When at
-  least half of a request type's requests in a run fail that way, the run
-  fails.
+  least half of a request type's requests in a run fail that way, and at
+  least three, the run fails: a run's one new token whose details fail stays
+  a gap.
 - **`<table>: the snapshot lacks N of the M listed entities`.** A snapshot that
   would delist more than the larger of 25 entities and 20% of a table's listed
   ones (an HTTP 200 with an empty or cut list) writes no removal row, since
@@ -520,7 +522,7 @@ without an offset it is UTC.
 | Python job | `fireparq hypercore-reference` |
 |---|---|
 | image `ghcr.io/pinax-network/hypercore-reference`, `args: ["outcomes"]` | the writer's image, `args: ["hypercore-reference", "outcomes"]` |
-| `S3_ENDPOINT` (then `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`), `AWS_ALLOW_HTTP` | `AWS_ENDPOINT_URL_S3` only, `https://` only; a differing `S3_ENDPOINT` or `AWS_ENDPOINT_URL` is refused. `MALLOC_ARENA_MAX` means nothing |
+| `S3_ENDPOINT` (then `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`), `AWS_ALLOW_HTTP` | `AWS_ENDPOINT_URL_S3` only, `https://` only; a differing `S3_ENDPOINT` or `AWS_ENDPOINT_URL` is refused |
 | `views` printed the views | the views are the SQL [above](#views) |
 | a non-numeric `HLREF_*` value crashed (exit 1) | a usage error (exit 2) |
 | a negative `--max-probes` (`HLREF_MAX_PROBES`) probed nothing and exited 0; a negative `--reprobe-after-minutes` turned the cool-down off | a usage error (exit 2) |
@@ -533,6 +535,9 @@ without an offset it is UTC.
 | `start.info` showed IPv6 hosts unbracketed and IDN hosts in Unicode | bracketed and punycode |
 | a funding entry outside years 1-9999 failed with `OverflowError` | `fundingHistory <coin> returned an entry outside the request` |
 | any answer up to 64 MiB was parsed, however much memory its values took | an answer that would take more than 256 MiB parsed fails its request, without a retry |
+| one entity's HTTP 500, with no other request of its type answered, failed the run | an outage needs at least three such failures, and half of the type's requests |
+| the daily `tokenDetails` retry got one attempt for any 5xx | one for HTTP 500; 502, 503 and 504 get the usual three |
+| a coin named twice in `--coins` was read twice, and a repair could append its hours twice | each coin once |
 | a checkpoint or log cleanup failure after a commit failed the commit | the commit counts; the checkpoint or cleanup fails the run on its own |
 | `delta.checkpointInterval` hook and `table.vacuum` | the same checkpoint versions (19, 39, …) and VACUUM, committed by the command itself ([Compaction and VACUUM](#compaction-and-vacuum)) |
 | JSON lines in insertion order, `"0.1.0"` as `version` | keys sorted, compact; `version` is fireparq's, and `start` adds `deltalake` |
@@ -664,10 +669,14 @@ fails.
 [`deploy/examples/hypercore-reference-cronjob.yaml`](../deploy/examples/hypercore-reference-cronjob.yaml)
 has the three CronJobs with placeholders: `concurrencyPolicy: Forbid`,
 `backoffLimit: 0` (the next run is the retry), a read-only root filesystem,
-`/tmp` as an `emptyDir`, UID 65534, and each job's time budget plus 300 s
-below its `activeDeadlineSeconds`. At most 1000 weight a minute when all three
-run at once, which only happens while backfilling; confirm that nothing else
-behind the same egress address calls `/info`, or lower the budgets.
+`/tmp` as an `emptyDir`, UID 65534, a CPU limit (Tokio and delta-rs size
+their worker pools by the CPUs the process sees: without one, the node's), and
+each job's time budget plus 300 s below its `activeDeadlineSeconds`. Even once
+caught up, `funding` spends its 400 weight a minute for about 18 minutes of
+every hour (about 340 listed coins at 21 each), beside the `outcomes` runs;
+`meta` runs at :47, after it. All three run at once, at most 1000 a minute,
+only while backfilling. Confirm that nothing else behind the same egress
+address calls `/info`, or lower the budgets.
 
 ## Operations
 

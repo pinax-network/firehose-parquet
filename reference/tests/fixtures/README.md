@@ -8,7 +8,7 @@ removes entries; it never edits a value.
 | `perpDexs.json` | `perpDexs` | the default dex (`null`), `xyz` and `flx`; list fields cut to two items |
 | `allPerpMetas.json` | `allPerpMetas` | the first three dexes; 5, 3 and 2 assets (MATIC is delisted); one margin table each |
 | `outcomeMeta_t0.json`, `outcomeMeta_t1.json` | `outcomeMeta`, about five minutes apart | outcomes 1472 and 1473 (question 198), and the short-lived 9973–9975 (t0 only, settled by t1) and 9976–9977 (t1 only); question 198 with only the kept outcome ids; one deployer |
-| `settledOutcome_<id>.json` | `settledOutcome` | whole responses: `null` for live 1473 and not-yet-settled 9976; 0 (legacy, USDH), 9973–9975, and 7768 (with its settled question 373) and 9174 recorded at 11:23 UTC |
+| `settledOutcome_<id>.json` | `settledOutcome` | whole responses: `null` for live 1473 and not-yet-settled 9976; 0 (legacy, USDH), 9973–9975, and 7768 (with its settled question 373) and 9174 recorded at 11:23 UTC; 8976 (a binary price outcome without a question, the one the HyperCore fixture lake settles) recorded on 2026-10-14 at 18:23 UTC |
 | `tokenDetails_<name>.json` | `tokenDetails` | whole responses for HSEI, USDC (no deployer) and ASI |
 | `fundingHistory_<coin>.json` | `fundingHistory` from 2026-01-01 | the first six hours of BTC, `xyz:XYZ100` and the delisted MATIC |
 

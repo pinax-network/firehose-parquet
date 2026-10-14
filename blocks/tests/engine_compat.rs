@@ -1513,8 +1513,10 @@ impl std::io::Write for Lines {
 /// fixture blocks and `hl_*` tables that `fireparq hypercore-reference` (the
 /// library, over the recorded `/info` fixtures) wrote into a second root,
 /// with the lake's table views and view pack and the page's own views. The
-/// columns the joins read have the documented types, so a drift between the
-/// tables and the joins fails here.
+/// columns the joins read have the documented types, each join finds
+/// reference rows, and every row a cross-check returns is one the reference
+/// tables have not reached (NULL reference columns), while X3 and X4 also
+/// agree on some: a drift between the tables and the queries fails here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
     use fireparq_reference::{run_with, FundingOptions, Job, OutcomesOptions, Runtime, Settings};
@@ -1527,12 +1529,17 @@ async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
     let reference = cwd.join("hypercore-ref");
     let clock = Arc::new(fireparq_reference::testing::FakeClock::new());
     let fake = Arc::new(fireparq_reference::testing::FakeInfo::new());
+    // `meta` first, observed on 2025-12-31T00:00Z, so that the perp assets'
+    // rows are valid before the fixture lake's first fill (2026-01-01) and
+    // J4's ASOF join finds them; the other jobs at the fixtures' own time.
+    clock.set_wall(1_767_139_200_000_000);
     for job in [
         Job::Meta {
             allow_mass_removal: false,
         },
+        // 8976 is the outcome the fixture lake settles.
         Job::Outcomes(OutcomesOptions {
-            outcome_ids: Some(vec![7768]),
+            outcome_ids: Some(vec![7768, 8976]),
             ..OutcomesOptions::default()
         }),
         Job::Funding(FundingOptions {
@@ -1558,6 +1565,7 @@ async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
             "{}",
             String::from_utf8_lossy(&lines.0.lock().unwrap())
         );
+        clock.set_wall(fireparq_reference::testing::FAKE_START);
     }
 
     let lake_doc = include_str!("../../docs/chains/hypercore.md");
@@ -1588,6 +1596,49 @@ async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
             "\nSELECT 'result' AS q, '{label}' AS label, count(*) AS n FROM ({statement}) t;"
         ));
     }
+    // The reference columns each query reads: their non-NULL rows.
+    let statement = |label: &str| -> &str {
+        &joins
+            .iter()
+            .chain(&checks)
+            .find(|(l, _)| l == label)
+            .unwrap()
+            .1
+    };
+    for (label, column) in REFERENCE_COLUMNS {
+        sql.push_str(&format!(
+            "\nSELECT 'matched' AS q, '{label}.{column}' AS label, count({column}) AS n \
+             FROM ({}) t;",
+            statement(label)
+        ));
+    }
+    // J2 labels every fill of the settled outcome 8976.
+    sql.push_str(&format!(
+        "\nSELECT 'j2' AS q, count(*) AS n, count(outcome_name) AS named, \
+         count(side_label) AS labelled, count(settle_fraction) AS settled \
+         FROM ({}) t WHERE outcome_id = 8976;",
+        statement("J2")
+    ));
+    // What X3 and X4 agree on: dexes whose funding coins carry their name,
+    // and tokens whose system address is their index.
+    sql.push_str(
+        "\nSELECT 'agreed' AS q, 'X3' AS label, count(*) AS n \
+         FROM (SELECT dex_index, list(DISTINCT dex) AS lake_names FROM funding_rates GROUP BY dex_index) r \
+         JOIN hl_perp_dexs_current d USING (dex_index) \
+         WHERE len(r.lake_names) = 1 AND r.lake_names[1] = d.name;",
+    );
+    sql.push_str(
+        "\nSELECT 'agreed' AS q, 'X4' AS label, count(*) AS n \
+         FROM (SELECT token, CAST('0x' || substr(address, 35) AS BIGINT) AS lake_index \
+               FROM (SELECT token, \"user\" AS address FROM events \
+                     WHERE ledger_type IN ('spot_transfer', 'send') \
+                       AND \"user\" LIKE '0x20000000000000000000000000000000000%' \
+                     UNION ALL \
+                     SELECT token, destination FROM events \
+                     WHERE ledger_type IN ('spot_transfer', 'send') \
+                       AND destination LIKE '0x20000000000000000000000000000000000%')) a \
+         JOIN hl_spot_tokens_current t ON t.name = a.token AND t.token_index = a.lake_index;",
+    );
     for (view, column, _) in REFERENCE_JOIN_COLUMNS {
         sql.push_str(&format!(
             "\nSELECT 'type' AS q, '{view}.{column}' AS label, column_type AS type \
@@ -1628,7 +1679,46 @@ async fn reference_joins_run_over_the_lake_and_the_reference_tables() {
         );
     }
     assert!(number(&rows["joined"][0]["n"]) > 0, "{rows:?}");
+    let matched: BTreeMap<&str, u64> = rows["matched"]
+        .iter()
+        .map(|row| (row["label"].as_str().unwrap(), number(&row["n"])))
+        .collect();
+    for (label, column) in REFERENCE_COLUMNS {
+        let n = matched[format!("{label}.{column}").as_str()];
+        if label.starts_with('J') {
+            assert!(n > 0, "{label} finds no {column}: {matched:?}");
+        } else {
+            assert_eq!(n, 0, "{label} disagrees on {column}: {matched:?}");
+        }
+    }
+    let j2 = &rows["j2"][0];
+    assert!(number(&j2["n"]) > 0, "{j2:?}");
+    for column in ["named", "labelled", "settled"] {
+        assert_eq!(number(&j2[column]), number(&j2["n"]), "{column}: {j2:?}");
+    }
+    // 8976's settlement agrees, so X2 is empty.
+    assert_eq!(results["X2"], 0, "{results:?}");
+    for row in &rows["agreed"] {
+        assert!(number(&row["n"]) > 0, "{row:?}");
+    }
 }
+
+/// The reference columns of the joins (each finds some) and of the
+/// cross-checks (each NULL in every row returned).
+const REFERENCE_COLUMNS: &[(&str, &str)] = &[
+    ("J1", "base_symbol"),
+    ("J1", "quote_symbol"),
+    ("J2", "outcome_name"),
+    ("J2", "side_label"),
+    ("J3", "premium"),
+    ("J3", "dex_full_name"),
+    ("J4", "max_leverage"),
+    ("X1", "base_symbol"),
+    ("X1", "quote_symbol"),
+    ("X2", "settle_fraction"),
+    ("X3", "name"),
+    ("X4", "token_index"),
+];
 
 /// Serves `responses` from a request's cursor (`event-<ordinal>`), or from
 /// the first when it has none, through the request's (inclusive) stop block.

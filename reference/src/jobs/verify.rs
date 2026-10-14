@@ -1,6 +1,6 @@
 //! verify: the tables' invariants, read-only.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::json;
 
@@ -40,15 +40,30 @@ pub async fn run_verify(run: &mut Run<'_>) -> Result<(), JobError> {
             .await?;
         let mut columns: Vec<&str> = spec.key.to_vec();
         let (rows, entities, duplicates) = if spec.name == FUNDING_HISTORY.name {
-            let (mut rows, mut keys) = (0u64, HashSet::new());
+            // Each coin's hours, 8 bytes a row: the table grows by every
+            // coin's every hour, so no set of whole keys.
+            let (mut rows, mut hours, mut other) = (0u64, HashMap::new(), HashSet::new());
             store
                 .for_each_row(&table, &columns, None, &mut |cells| {
-                    let row = Row::of(spec, &columns, cells);
                     rows += 1;
-                    keys.insert(row.key());
+                    match cells {
+                        [Cell::Text(coin), Cell::Timestamp(hour)] => hours
+                            .entry(coin.clone())
+                            .or_insert_with(Vec::new)
+                            .push(*hour),
+                        _ => {
+                            other.insert(Row::of(spec, &columns, cells).key());
+                        }
+                    }
                 })
                 .await?;
-            (rows, keys.len() as u64, rows - keys.len() as u64)
+            let mut keys = other.len() as u64;
+            for hours in hours.values_mut() {
+                hours.sort_unstable();
+                hours.dedup();
+                keys += hours.len() as u64;
+            }
+            (rows, keys, rows - keys)
         } else {
             columns.extend(["observed_at", "payload_sha256"]);
             let mut history: Vec<(Key, Cell, Cell)> = Vec::new();

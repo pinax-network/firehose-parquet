@@ -1380,8 +1380,9 @@ HyperLiquid's `/info`, which returns current state, not state at a block, and
 are never written into a fireparq root. `fireparq hypercore-reference` writes
 them into their own root as small append-only Delta tables (`hl_spot_tokens`,
 `hl_spot_pairs`, `hl_perp_dexs`, `hl_perp_assets`, `hl_outcomes`,
-`hl_questions`, `hl_funding_history`, …), each with `*_current` and
-`*_history` views, in the lake's vocabulary (`''` for the default dex,
+`hl_questions`, `hl_funding_history`, …), each with a `*_current` view and,
+but for `hl_funding_history` (a history itself), a `*_history` view, in the
+lake's vocabulary (`''` for the default dex,
 `side_index`). [HyperLiquid reference tables](../hypercore-reference.md) has
 the tables, their views and the joins with this lake
 ([J1–J4](../hypercore-reference.md#joining-the-lake)), tested over these

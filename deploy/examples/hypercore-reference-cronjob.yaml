@@ -44,9 +44,11 @@
 # deadline is at least the budget plus 300 s. Alert on the CronJobs' last
 # successful time: there are no metrics.
 #
-# /info budgets: HyperLiquid allows 1200 weight per minute per IP. These three
-# take at most 400 + 200 + 400 when they all run at once (backfill); steady
-# state is far lower.
+# /info budgets: HyperLiquid allows 1200 weight per minute per IP. Even once
+# caught up, funding spends its 400 a minute for about 18 minutes of every hour
+# (about 340 listed coins at 21 weight each), beside the outcomes runs (400);
+# meta (200) runs at :47, after it. All three at once (1000) only while
+# backfilling.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -106,6 +108,10 @@ spec:
                     name: hypercore-ref-info-url
                     optional: true
               env:
+                # glibc keeps up to 8 malloc arenas per online CPU (the node's,
+                # not the limit's); two keep freed memory reusable.
+                - name: MALLOC_ARENA_MAX
+                  value: "2"
                 - name: HLREF_WEIGHT_PER_MINUTE
                   value: "400"
                 - name: HLREF_TIME_BUDGET_SECONDS
@@ -118,6 +124,9 @@ spec:
                   memory: 256Mi
                   ephemeral-storage: 64Mi
                 limits:
+                  # Tokio and delta-rs size their worker pools by the CPUs the
+                  # process sees: without a limit, the node's.
+                  cpu: "1"
                   memory: 1Gi
                   ephemeral-storage: 1Gi
               securityContext:
@@ -143,8 +152,8 @@ spec:
   # dexes and assets), and tokenDetails once per new token. The first runs
   # fetch tokenDetails for every listed token (some answer HTTP 500 every
   # time); a token without details is asked again once a day, in its own
-  # hour, with one attempt.
-  schedule: "17 * * * *"
+  # hour, with one attempt for HTTP 500.
+  schedule: "47 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 600
   successfulJobsHistoryLimit: 3
@@ -181,6 +190,10 @@ spec:
                     name: hypercore-ref-info-url
                     optional: true
               env:
+                # glibc keeps up to 8 malloc arenas per online CPU (the node's,
+                # not the limit's); two keep freed memory reusable.
+                - name: MALLOC_ARENA_MAX
+                  value: "2"
                 - name: HLREF_WEIGHT_PER_MINUTE
                   value: "200"
                 - name: HLREF_TIME_BUDGET_SECONDS
@@ -191,6 +204,9 @@ spec:
                   memory: 256Mi
                   ephemeral-storage: 64Mi
                 limits:
+                  # Tokio and delta-rs size their worker pools by the CPUs the
+                  # process sees: without a limit, the node's.
+                  cpu: "1"
                   memory: 1Gi
                   ephemeral-storage: 1Gi
               securityContext:
@@ -253,6 +269,10 @@ spec:
                     name: hypercore-ref-info-url
                     optional: true
               env:
+                # glibc keeps up to 8 malloc arenas per online CPU (the node's,
+                # not the limit's); two keep freed memory reusable.
+                - name: MALLOC_ARENA_MAX
+                  value: "2"
                 - name: HLREF_WEIGHT_PER_MINUTE
                   value: "400"
                 - name: HLREF_TIME_BUDGET_SECONDS
@@ -265,6 +285,9 @@ spec:
                   memory: 512Mi
                   ephemeral-storage: 64Mi
                 limits:
+                  # Tokio and delta-rs size their worker pools by the CPUs the
+                  # process sees: without a limit, the node's.
+                  cpu: "1"
                   memory: 2Gi
                   ephemeral-storage: 2Gi
               securityContext:

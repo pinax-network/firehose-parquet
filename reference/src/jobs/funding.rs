@@ -20,20 +20,20 @@ fn millis(micros: i64) -> i64 {
     micros.div_euclid(1000)
 }
 
+/// A funding row's key, `(coin, funding_time)`.
+fn key(row: &Row) -> Option<(String, i64)> {
+    match (row.get("coin"), row.get("funding_time")) {
+        (Cell::Text(coin), Cell::Timestamp(time)) => Some((coin.clone(), *time)),
+        _ => None,
+    }
+}
+
 /// The rows to commit: the first of each `(coin, funding_time)`, and none
 /// already stored (`known`, the repair window's stored keys).
 fn missing(rows: Vec<Row>, known: &HashSet<(String, i64)>) -> Vec<Row> {
     let mut seen = HashSet::new();
     rows.into_iter()
-        .filter(|row| {
-            let (Cell::Text(coin), Cell::Timestamp(time)) =
-                (row.get("coin"), row.get("funding_time"))
-            else {
-                return true;
-            };
-            let key = (coin.clone(), *time);
-            !known.contains(&key) && seen.insert(key)
-        })
+        .filter(|row| key(row).is_none_or(|key| !known.contains(&key) && seen.insert(key)))
         .collect()
 }
 
@@ -83,8 +83,10 @@ pub async fn run_funding(run: &mut Run<'_>) -> Result<(), JobError> {
     let now = run.now();
     let hour = now - now.rem_euclid(HOUR_MICROS);
     let end_ms = window.map(|end| millis(end) - 1);
-    // Coins without stored hours first, then the oldest.
+    // Coins without stored hours first, then the oldest; a coin named twice
+    // once, or a repair would append its hours twice.
     coins.sort_by(|a, b| (last.get(a), a).cmp(&(last.get(b), b)));
+    coins.dedup();
 
     let page = run.options.funding_page;
     let (mut pending, mut fetched, mut skipped, mut stop) = (Vec::new(), 0u64, 0u64, false);
@@ -194,6 +196,10 @@ pub async fn run_funding(run: &mut Run<'_>) -> Result<(), JobError> {
         }
         if pending.len() >= run.options.commit_rows {
             let rows = missing(std::mem::take(&mut pending), &known);
+            // A repair also never appends a key it committed earlier in the run.
+            if window.is_some() {
+                known.extend(rows.iter().filter_map(key));
+            }
             if !run.commit(&mut table, rows).await {
                 return Ok(());
             }

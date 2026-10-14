@@ -138,6 +138,34 @@ fn outcomes_then_verify_over_a_loopback_info() {
     assert_eq!(verified.len(), 3, "{run:?}");
 }
 
+/// An empty numeric variable is unset, as every other setting: its default,
+/// not a usage error.
+#[test]
+fn empty_numeric_variables_take_their_defaults() {
+    let (_dir, cwd) = workspace();
+    let info = InfoServer::start();
+    let url = format!("{}/info", info.endpoint);
+    let root = cwd.join("reference");
+    let env = [
+        ("HLREF_ROOT", root.to_str().unwrap()),
+        ("HL_INFO_URL", url.as_str()),
+        ("HLREF_WEIGHT_PER_MINUTE", ""),
+        ("HLREF_TIME_BUDGET_SECONDS", ""),
+        ("HLREF_MAX_PROBES", ""),
+    ];
+    let run = reference(&cwd, &["outcomes", "--sweep-from", "9975"], &env);
+    assert_eq!(run.status, 0, "{run:?}");
+    let start = run.first();
+    assert_eq!(start["weight_per_minute"], json!(400), "{run:?}");
+    assert_eq!(
+        start["time_budget_seconds"].as_f64(),
+        Some(240.0),
+        "{run:?}"
+    );
+    assert_eq!(run.last()["failed"], json!([]), "{run:?}");
+    assert!(run.stderr.is_empty(), "{run:?}");
+}
+
 /// Python's test_failures_exit_1_and_never_log_the_url: the URL, which may
 /// hold a key, is in no line of stdout or stderr; only its scheme and host.
 #[test]

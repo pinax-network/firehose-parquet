@@ -14,6 +14,25 @@ empty when the release is cut.
 
 ## New features
 
+- **HyperLiquid reference tables: `fireparq hypercore-reference`** (#716).
+  A new subcommand of the same binary and image snapshots HyperLiquid's
+  `/info` into ten small append-only Delta tables (`hl_*`): spot tokens and
+  pairs, perp dexes and assets, HIP-4 outcomes and questions, and the hourly
+  funding premium. Readers join them with a HyperCore lake at query time
+  through the SQL views of [HyperLiquid reference
+  tables](../hypercore-reference.md). Three jobs (`outcomes`, `meta`,
+  `funding`) run on a schedule
+  ([`deploy/examples/hypercore-reference-cronjob.yaml`](../../deploy/examples/hypercore-reference-cronjob.yaml));
+  every commit is a single conditional attempt, never over a concurrent one,
+  and each job compacts and vacuums its own tables and backfills across runs.
+  It is the Rust port of the Python job of k8s-parquet PR #82, with the same
+  tables, payload hashes and views. **It needs its own bucket or root**, for example
+  `s3://hypercore-ref`, never a fireparq dataset root (whose `build` would then
+  refuse to resume), with an S3 user limited to its table prefixes
+  ([The S3 user](../hypercore-reference.md#the-s3-user)). Set
+  `AWS_ENDPOINT_URL_S3` and both keys for an `s3://` root; a URL in
+  `HL_INFO_URL` that embeds a key is never printed.
+
 ## Fixes
 
 ## Performance
