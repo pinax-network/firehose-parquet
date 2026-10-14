@@ -18,6 +18,9 @@ firehose-protos = { path = "../firehose-protos" }
 # `fireparq maintenance` (maintenance/): one binary and one version with the
 # writer. It links no DataFusion either.
 fireparq-maintenance = { path = "../maintenance" }
+# `fireparq hypercore-reference` (reference/), likewise: no DataFusion, and no
+# feature the binary does not already enable.
+fireparq-reference = { path = "../reference" }
 arrow.workspace = true
 prost.workspace = true
 prost-types.workspace = true
@@ -35,6 +38,10 @@ num-bigint = "0.5"
 solana-vote-interface = { version = "=7.1.0", default-features = false, features = ["serde"] }
 
 [dev-dependencies]
+# The reference tables' decimal parser agrees with the lake's
+# (`hypercore::decimal`); its fakes serve the `/info` the reference tests need
+# (`test-support` only adds them; the binary is built without it).
+fireparq-reference = { path = "../reference", features = ["test-support"] }
 futures = "0.3"
 parquet = { version = "60", features = ["arrow"] }
 tempfile = "3"

@@ -1,0 +1,49 @@
+[package]
+name = "fireparq-reference"
+version.workspace = true
+edition.workspace = true
+description = "HyperLiquid /info reference tables (hl_*) as append-only Delta tables (`fireparq hypercore-reference`)"
+
+[lib]
+name = "fireparq_reference"
+path = "src/lib.rs"
+
+[features]
+# Fakes for blocks/tests (the /info fixture server, the reference joins); no
+# behaviour change.
+test-support = []
+
+[dependencies]
+# DeltaStore, s3_log_client, AwsConfig and the CLI types.
+firehose-parquet = { path = "../firehose-parquet" }
+# is_conflict, compact::StoreReader and the JSON lines' key order (sorted).
+fireparq-maintenance = { path = "../maintenance" }
+# As in maintenance/: no `datafusion`, no `deltalake-aws`. Arrow and Parquet
+# are delta-rs's own 59 (`deltalake_core::arrow`, `deltalake_core::parquet`).
+deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls"] }
+object_store = { version = "0.13.2", features = ["aws"] }
+# The /info client, with exactly firehose-parquet's features (no `json`, no
+# compression).
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+# Default features only. `raw_value` is already enabled in the binary by
+# firehose-parquet; it is named here because json.rs uses it, which changes
+# nothing in the unified build. Never `arbitrary_precision` or
+# `preserve_order` (docs/audit/698-control-record-key-order.md).
+serde_json = { version = "1", features = ["raw_value"] }
+# VacuumBuilder::with_retention_period takes chrono::Duration (deltalake_core
+# does not re-export chrono).
+chrono = { version = "0.4", default-features = false }
+sha2.workspace = true
+hex = "0.4"
+# zlib's CRC-32 of the hours a token's details or a delisted coin are read in.
+crc32fast = "1.5"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+# The run id suffix and the backoff jitter; no `rand`.
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+bytes = "1"
+futures = "0.3"
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

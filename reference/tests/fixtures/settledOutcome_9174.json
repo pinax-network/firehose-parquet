@@ -1,0 +1,19 @@
+{
+ "spec": {
+  "outcome": 9174,
+  "name": "template:binaryPrice",
+  "description": "perp:xyz:SPCX|priceDescription:1-minute candle|seconds:300|threshold:174|time:20261006-2000",
+  "sideSpecs": [
+   {
+    "name": "template:Yes"
+   },
+   {
+    "name": "template:No"
+   }
+  ],
+  "quoteToken": "USDC",
+  "venue": "txyz"
+ },
+ "settleFraction": "0.0",
+ "details": "template"
+}

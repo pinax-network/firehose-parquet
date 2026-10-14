@@ -1,0 +1,225 @@
+{
+ "universe": [
+  {
+   "tokens": [
+    1,
+    0
+   ],
+   "name": "PURR/USDC",
+   "index": 0,
+   "isCanonical": true
+  },
+  {
+   "tokens": [
+    2,
+    0
+   ],
+   "name": "@1",
+   "index": 1,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    40,
+    0
+   ],
+   "name": "@36",
+   "index": 36,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    150,
+    0
+   ],
+   "name": "@107",
+   "index": 107,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    235,
+    0
+   ],
+   "name": "@150",
+   "index": 150,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    268,
+    0
+   ],
+   "name": "@166",
+   "index": 166,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    150,
+    268
+   ],
+   "name": "@207",
+   "index": 207,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    360,
+    0
+   ],
+   "name": "@230",
+   "index": 230,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    150,
+    360
+   ],
+   "name": "@232",
+   "index": 232,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    150,
+    235
+   ],
+   "name": "@255",
+   "index": 255,
+   "isCanonical": false
+  },
+  {
+   "tokens": [
+    437,
+    0
+   ],
+   "name": "@286",
+   "index": 286,
+   "isCanonical": false
+  }
+ ],
+ "tokens": [
+  {
+   "name": "USDC",
+   "szDecimals": 8,
+   "weiDecimals": 8,
+   "index": 0,
+   "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+   "isCanonical": true,
+   "evmContract": {
+    "address": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "PURR",
+   "szDecimals": 0,
+   "weiDecimals": 5,
+   "index": 1,
+   "tokenId": "0xc1fb593aeffbeb02f85e0308e9956a90",
+   "isCanonical": true,
+   "evmContract": {
+    "address": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+    "evm_extra_wei_decimals": 13
+   },
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "HFUN",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 2,
+   "tokenId": "0xbaf265ef389da684513d98d68edf4eae",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0xa320d9f65ec992eff38622c63627856382db726c",
+    "evm_extra_wei_decimals": 10
+   },
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "ASI",
+   "szDecimals": 2,
+   "weiDecimals": 7,
+   "index": 40,
+   "tokenId": "0x8811d8fc24b9f4ace2c0bd21996d5899",
+   "isCanonical": false,
+   "evmContract": null,
+   "fullName": "Artificial Superintelligence",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "HYPE",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 150,
+   "tokenId": "0x0d01dc56dcaaca66ad901c959b4011ec",
+   "isCanonical": false,
+   "evmContract": null,
+   "fullName": "Hyperliquid",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "USDE",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 235,
+   "tokenId": "0x2e6d84f2d7ca82e6581e03523e4389f7",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+    "evm_extra_wei_decimals": 10
+   },
+   "fullName": "USDe",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "USDT0",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 268,
+   "tokenId": "0x25faedc3f054130dbb4e4203aca63567",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": "USDT0",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "USDH",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 360,
+   "tokenId": "0x54e00a5988577cb0b0c9ab0cb6ef7f4b",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x111111a1a0667d36bd57c0a9f569b98057111111",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": "USDH",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "HSEI",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 437,
+   "tokenId": "0x4519b5c4a2fd0beb66306336f63c7b99",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0xbdf43ecadc5cef51b7d1772f722e40596bc1788b",
+    "evm_extra_wei_decimals": 10
+   },
+   "fullName": "hSEI",
+   "deployerTradingFeeShare": "1.0"
+  }
+ ]
+}

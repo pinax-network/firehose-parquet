@@ -20,6 +20,8 @@
 //!   checkpoints, listings) are the exception: [`read_retry`] sends them
 //!   again, a bounded number of times, after a transient failure, below
 //!   object_store, while every write still goes out once (#680).
+//!   [`s3_data_client`] is the same client with bounded retries of every
+//!   request, for data files, which are never commits.
 //!
 //! Without `deltalake-aws` (and its AWS SDK) delta-rs has no log store for
 //! `s3://` URLs; [`DeltaStore::log_store`] registers the default one.
@@ -47,6 +49,12 @@ pub use read_retry::READ_ATTEMPTS;
 /// Per-request timeout of the log store's S3 client. A Delta commit or log
 /// read is a small object; the same bound as fireparq's part requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Attempts of each request through [`s3_data_client`].
+pub const DATA_ATTEMPTS: usize = 4;
+
+/// How long [`s3_data_client`] keeps retrying one request.
+const DATA_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The storage of one dataset's Delta tables.
 #[derive(Clone)]
@@ -245,6 +253,24 @@ pub fn s3_log_client(aws: &AwsConfig, bucket: &str) -> Result<Arc<dyn ObjectStor
     ))
 }
 
+/// A client for a Delta table's data files in `bucket`: [`s3_log_client`]'s
+/// builder (conditional creates, credentials, region, endpoint, timeout) with
+/// up to `DATA_ATTEMPTS - 1` = 3 retries of every request. Data files have
+/// unique names, so a resent PUT, part or delete is idempotent. Never commit
+/// through it: commits go through [`s3_log_client`]'s single attempt.
+pub fn s3_data_client(aws: &AwsConfig, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    Ok(Arc::new(
+        s3_builder(aws, bucket)?
+            .with_retry(RetryConfig {
+                max_retries: DATA_ATTEMPTS - 1,
+                retry_timeout: DATA_RETRY_TIMEOUT,
+                ..RetryConfig::default()
+            })
+            .build()
+            .with_context(|| format!("building the Delta data client for bucket {bucket}"))?,
+    ))
+}
+
 /// [`s3_builder`] with the log client's read retries
 /// ([`read_retry::ReadRetryConnector`]).
 pub(crate) fn s3_log_builder(aws: &AwsConfig, bucket: &str) -> Result<AmazonS3Builder> {
@@ -315,5 +341,40 @@ pub(crate) mod test_support {
         let store = Arc::new(InMemory::new());
         stores.push((Arc::downgrade(bucket), Arc::clone(&store)));
         store
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aws(endpoint: &str) -> AwsConfig {
+        AwsConfig {
+            aws_access_key_id: Some("key".into()),
+            aws_secret_access_key: Some("secret".into()),
+            aws_session_token: None,
+            aws_region: Some("us-east-1".into()),
+            aws_endpoint_url: Some(endpoint.into()),
+        }
+    }
+
+    #[test]
+    fn the_data_client_follows_the_log_clients_endpoint_rules() {
+        // A service endpoint serves any bucket, a bucket-bound host its own.
+        for endpoint in [
+            "https://datasets-rgw.example",
+            "https://reference.s3.us-east-1.amazonaws.com",
+        ] {
+            let data = s3_data_client(&aws(endpoint), "reference").unwrap();
+            let log = s3_log_client(&aws(endpoint), "reference").unwrap();
+            // Only the retries differ: three for data files, none for the log.
+            assert!(format!("{data:?}").contains("max_retries: 3"), "{endpoint}");
+            assert!(format!("{log:?}").contains("max_retries: 0"), "{endpoint}");
+        }
+        let bound = aws("https://other.s3.us-east-1.amazonaws.com");
+        let data = s3_data_client(&bound, "reference").unwrap_err().to_string();
+        let log = s3_log_client(&bound, "reference").unwrap_err().to_string();
+        assert_eq!(data, log);
+        assert!(data.contains("is bound to bucket `other`"), "{data}");
     }
 }

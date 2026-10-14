@@ -1,0 +1,38 @@
+[
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "-0.0001375517",
+  "time": 1767225600063
+ },
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "-0.0000910848",
+  "time": 1767229200053
+ },
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "-0.0000594753",
+  "time": 1767232800024
+ },
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "0.0001644635",
+  "time": 1767236400012
+ },
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "0.0001097455",
+  "time": 1767240000036
+ },
+ {
+  "coin": "xyz:XYZ100",
+  "fundingRate": "0.00000625",
+  "premium": "0.0000843389",
+  "time": 1767243600040
+ }
+]

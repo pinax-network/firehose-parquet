@@ -8,16 +8,20 @@
 //! send; `blocks/tests/delta_recovery.rs` and `delta_maintenance.rs` run them
 //! against this endpoint), `If-None-Match: *` and `If-Match` conditions,
 //! pinned `versionId` reads, byte ranges and ListObjectsV2. Every object's
-//! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age.
+//! `Last-Modified` is the time of its PUT, so a full VACUUM sees its real age;
+//! [`Server::backdate`] ages one.
 //! `If-Match` follows RFC 9110 by default; [`Server::set_if_match`] switches
 //! it to Ceph RGW 19.2's literal comparison or refuses every value (#678).
-//! [`Server::inject`] and [`Server::inject_list`] make chosen requests fail
-//! once or more: a 5xx, a dropped connection, or a write applied whose
-//! answer is lost (#680).
+//! [`Server::inject`], [`Server::inject_prefix`] and [`Server::inject_list`]
+//! make chosen requests fail once or more: a 5xx, a dropped connection, or a
+//! write applied whose answer is lost (#680).
 //! Every request waits half its injected
 //! latency before it is applied and half after, like a symmetric round trip;
 //! with `slow_every = N`, every Nth request (by arrival) waits `slow` instead.
-//! Each request is logged with wall-clock start/end times for phase analysis.
+//! Each request is logged with wall-clock start/end times for phase analysis,
+//! and with what a bucket policy decides on: its raw query, its
+//! `If-None-Match`, ACL and tagging headers, and a bulk delete's keys
+//! (`blocks/tests/hypercore_reference_s3.rs`).
 use anyhow::{ensure, Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -68,6 +72,16 @@ pub struct Entry {
     pub prefix: Option<String>,
     /// The injected [`Fault`] this request met, if any.
     pub fault: Option<Fault>,
+    /// The request's `If-None-Match` value.
+    pub if_none_match: Option<String>,
+    /// The raw query string, empty without one.
+    pub query: String,
+    /// The `x-amz-acl` header.
+    pub acl: Option<String>,
+    /// The `x-amz-tagging` header.
+    pub tagging: Option<String>,
+    /// The `<Key>`s of a DeleteObjects (`POST ?delete`) body.
+    pub delete_keys: Vec<String>,
 }
 
 /// A failure injected into a request instead of its normal answer (#680).
@@ -87,6 +101,9 @@ pub enum Fault {
 enum Target {
     /// A request for exactly this key.
     Key(String),
+    /// A request for a key that starts with this.
+    #[cfg(test)]
+    KeyPrefix(String),
     /// A ListObjectsV2 request whose prefix starts with this.
     List(String),
 }
@@ -316,6 +333,19 @@ impl Server {
         });
     }
 
+    /// Makes the next `times` `method` requests for a key that starts with
+    /// `prefix` meet `fault`: a data file whose name is not known in advance
+    /// (`blocks/tests/hypercore_reference_s3.rs`).
+    #[cfg(test)]
+    pub fn inject_prefix(&self, method: &'static str, prefix: &str, fault: Fault, times: u32) {
+        self.state.injections.lock().unwrap().push(Injection {
+            method,
+            target: Target::KeyPrefix(prefix.to_string()),
+            fault,
+            remaining: times,
+        });
+    }
+
     /// Makes the next `times` ListObjectsV2 requests whose prefix starts with
     /// `prefix` meet `fault`.
     #[allow(dead_code)]
@@ -373,6 +403,20 @@ impl Server {
                 modified: time::OffsetDateTime::now_utc(),
             },
         );
+    }
+
+    /// Moves `key`'s `Last-Modified` `age` into the past, as if it had been
+    /// written then: a full VACUUM deletes an unreferenced file, and a log
+    /// cleanup a commit, only once it is older than the retention
+    /// (`blocks/tests/hypercore_reference_s3.rs`). Whether it existed.
+    #[cfg(test)]
+    pub fn backdate(&self, key: &str, age: Duration) -> bool {
+        let mut objects = self.state.objects.lock().unwrap();
+        objects
+            .0
+            .get_mut(key)
+            .map(|stored| stored.modified -= age)
+            .is_some()
     }
 
     /// Deletes `key`, as an external cleanup would; whether it existed.
@@ -504,6 +548,8 @@ fn injected(state: &State, method: &str, key: &str, listed: Option<&str>) -> Opt
             && injection.method == method
             && match &injection.target {
                 Target::Key(target) => listed.is_none() && key == target,
+                #[cfg(test)]
+                Target::KeyPrefix(prefix) => listed.is_none() && key.starts_with(prefix.as_str()),
                 Target::List(prefix) => listed.is_some_and(|listed| listed.starts_with(prefix)),
             }
     })?;
@@ -559,6 +605,11 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Option<Respons
         .flatten();
     let prefix = (key.is_empty() && query.get("list-type").map(String::as_str) == Some("2"))
         .then(|| query.get("prefix").cloned().unwrap_or_default());
+    let delete_keys = if method == "POST" && key.is_empty() && query.contains_key("delete") {
+        delete_request_keys(&body).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let fault = injected(&state, &method, key, prefix.as_deref());
 
     let (status, extra, payload) = if let Some(Fault::Status(status)) = fault {
@@ -619,6 +670,11 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Option<Respons
         note,
         prefix,
         fault,
+        if_none_match: header("if-none-match"),
+        query: uri.query().unwrap_or_default().to_string(),
+        acl: header("x-amz-acl"),
+        tagging: header("x-amz-tagging"),
+        delete_keys,
     });
     match fault {
         Some(Fault::Reset | Fault::ApplyThenReset) => None,
@@ -718,22 +774,35 @@ fn list(
     )
 }
 
+/// The `<Key>`s of a `DeleteObjects` request body, unescaped; `None` when one
+/// is not closed.
+fn delete_request_keys(body: &[u8]) -> Option<Vec<String>> {
+    let request = String::from_utf8_lossy(body);
+    request
+        .split("<Key>")
+        .skip(1)
+        .map(|piece| {
+            let (key, _) = piece.split_once("</Key>")?;
+            Some(
+                key.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&"),
+            )
+        })
+        .collect()
+}
+
 /// `DeleteObjects` (`POST /?delete`), which `deltalake`'s VACUUM uses: every
 /// `<Key>` of the request is deleted and reported deleted.
 fn delete_objects(state: &State, body: &[u8]) -> (StatusCode, Vec<(&'static str, String)>, Bytes) {
-    let request = String::from_utf8_lossy(body);
+    let Some(keys) = delete_request_keys(body) else {
+        return error(StatusCode::BAD_REQUEST, "MalformedXML");
+    };
     let mut objects = state.objects.lock().unwrap();
     let mut deleted = String::new();
-    for piece in request.split("<Key>").skip(1) {
-        let Some((key, _)) = piece.split_once("</Key>") else {
-            return error(StatusCode::BAD_REQUEST, "MalformedXML");
-        };
-        let key = key
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&");
+    for key in keys {
         objects.0.remove(&key);
         deleted.push_str(&format!(
             "<Deleted><Key>{}</Key></Deleted>",

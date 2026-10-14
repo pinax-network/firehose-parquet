@@ -1,0 +1,20 @@
+{
+ "spec": {
+  "outcome": 9975,
+  "name": "template:binaryPrice",
+  "description": "perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645",
+  "sideSpecs": [
+   {
+    "name": "template:Yes"
+   },
+   {
+    "name": "template:No"
+   }
+  ],
+  "quoteToken": "USDC",
+  "venue": "out",
+  "deployerFeeScale": "1.0"
+ },
+ "settleFraction": "0.0",
+ "details": "template"
+}

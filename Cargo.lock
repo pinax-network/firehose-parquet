@@ -785,6 +785,7 @@ dependencies = [
  "firehose-parquet",
  "firehose-protos",
  "fireparq-maintenance",
+ "fireparq-reference",
  "futures",
  "http-body-util",
  "hyper",
@@ -1581,6 +1582,29 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "fireparq-reference"
+version = "1.2.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "crc32fast",
+ "deltalake-core",
+ "firehose-parquet",
+ "fireparq-maintenance",
+ "futures",
+ "hex",
+ "object_store 0.13.2",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+ "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]

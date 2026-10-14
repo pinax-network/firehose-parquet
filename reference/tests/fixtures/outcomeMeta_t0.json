@@ -1,0 +1,135 @@
+{
+ "outcomes": [
+  {
+   "outcome": 1472,
+   "name": "template fallback",
+   "description": "other",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 1473,
+   "name": "template:sportsTournamentParticipant",
+   "description": "participant:Arsenal",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 9973,
+   "name": "template:binaryPrice",
+   "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:81299|time:20261008-1645",
+   "sideSpecs": [
+    {
+     "name": "template:Yes"
+    },
+    {
+     "name": "template:No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 9974,
+   "name": "template:binaryPrice",
+   "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:84.432|time:20261008-1645",
+   "sideSpecs": [
+    {
+     "name": "template:Yes"
+    },
+    {
+     "name": "template:No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 9975,
+   "name": "template:binaryPrice",
+   "description": "perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2429.3|time:20261008-1645",
+   "sideSpecs": [
+    {
+     "name": "template:Yes"
+    },
+    {
+     "name": "template:No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  }
+ ],
+ "questions": [
+  {
+   "question": 198,
+   "name": "template:sportsTournamentWinner",
+   "description": "competition:English Premier League|officialSource:English Premier League|resolutionDeadline:20270605-1200|season:2026/2027|sport:football/soccer",
+   "fallbackOutcome": 1472,
+   "namedOutcomes": [
+    1473
+   ],
+   "settledNamedOutcomes": []
+  }
+ ],
+ "deployers": [
+  {
+   "deployer": "0x08e9c89f46dccee91bdb85c6532eb93a4c335efe",
+   "venue": "skew",
+   "subDeployers": [
+    [
+     "registerAndAssociateNamedOutcomeFromTemplate",
+     [
+      "0x1c867861e0cffb0eba07d9d94f716189c130dac6"
+     ]
+    ],
+    [
+     "registerQuestionFromTemplate",
+     [
+      "0x1c867861e0cffb0eba07d9d94f716189c130dac6"
+     ]
+    ],
+    [
+     "registerStandaloneOutcomeFromTemplate",
+     [
+      "0x1c867861e0cffb0eba07d9d94f716189c130dac6"
+     ]
+    ],
+    [
+     "settleOutcome",
+     [
+      "0x1c867861e0cffb0eba07d9d94f716189c130dac6"
+     ]
+    ],
+    [
+     "settleQuestion",
+     [
+      "0x1c867861e0cffb0eba07d9d94f716189c130dac6"
+     ]
+    ]
+   ]
+  }
+ ],
+ "feeScale": "1.0"
+}

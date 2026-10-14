@@ -682,7 +682,10 @@ pub fn is_missing_table(error: &DeltaTableError) -> bool {
 }
 
 /// A lost commit race: reported as a conflict and left to the next run.
-fn is_conflict(error: &DeltaTableError) -> bool {
+///
+/// That is `VersionAlreadyExists`, `CommitConflict` or `MaxCommitAttempts`;
+/// with `max_retries(0)` every lost race is `MaxCommitAttempts`.
+pub fn is_conflict(error: &DeltaTableError) -> bool {
     matches!(
         error,
         DeltaTableError::VersionAlreadyExists(_)
@@ -1029,7 +1032,7 @@ async fn maintain(
 
 /// `value` with every object's keys in sorted order, whatever map serde_json
 /// was built with.
-fn sorted(value: Value) -> Value {
+pub fn sorted(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let entries: BTreeMap<String, Value> = map

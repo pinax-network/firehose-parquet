@@ -1,0 +1,20 @@
+{
+ "spec": {
+  "outcome": 8976,
+  "name": "template:binaryPrice",
+  "description": "perp:BTC|priceDescription:the Hyperliquid BTC perp trade|seconds:90|threshold:85513|time:20261006-0400",
+  "sideSpecs": [
+   {
+    "name": "template:Yes"
+   },
+   {
+    "name": "template:No"
+   }
+  ],
+  "quoteToken": "USDC",
+  "venue": "skew",
+  "deployerFeeScale": "1.0"
+ },
+ "settleFraction": "0.0",
+ "details": "template"
+}

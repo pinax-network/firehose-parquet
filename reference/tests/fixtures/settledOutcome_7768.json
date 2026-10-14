@@ -1,0 +1,27 @@
+{
+ "spec": {
+  "outcome": 7768,
+  "name": "template fallback",
+  "description": "other",
+  "sideSpecs": [
+   {
+    "name": "Yes"
+   },
+   {
+    "name": "No"
+   }
+  ],
+  "quoteToken": "USDC",
+  "venue": "out",
+  "deployerFeeScale": "1.0"
+ },
+ "settleFraction": "0.0",
+ "details": "",
+ "question": {
+  "question": {
+   "settled": 373
+  },
+  "name": "template:sportsContestResult",
+  "description": "competition:UEFA Nations League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:England|participantB:Czechia|resolutionDeadline:20261007-1845|scheduledStart:20261006-1845|season:2026/27|sport:Soccer|stage:League A, Matchday 4"
+ }
+}
