@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "blocks"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow 60.0.0",
@@ -1518,7 +1518,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firehose-parquet"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow 60.0.0",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "firehose-protos"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "fireparq-maintenance"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "fireparq-reference"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bytes",
  "chrono",

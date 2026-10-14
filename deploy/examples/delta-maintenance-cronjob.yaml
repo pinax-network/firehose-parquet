@@ -94,7 +94,7 @@ spec:
             - name: maintenance
               # `fireparq` is the ENTRYPOINT. Pin the digest of the release's
               # image in production, the writer's.
-              image: ghcr.io/pinax-network/firehose-parquet:1.2.0
+              image: ghcr.io/pinax-network/firehose-parquet:1.3.0
               args: ["maintenance"]
               envFrom:
                 - configMapRef:
@@ -125,8 +125,11 @@ spec:
 # Weekly full VACUUM: also deletes untracked files older than the enforced
 # 168 h retention (files of a failed OPTIMIZE), but never a table's top-level
 # metadata/ (Iceberg metadata of an XTable sync). It runs half an hour away from
-# the hourly job; an overlap is safe (a lost commit race is retried next run),
-# only wasteful.
+# the hourly job, and must not overlap it: until #717 is fixed, two runs that
+# compact the same date at once both commit and duplicate that date's rows, and
+# `concurrencyPolicy: Forbid` only keeps one CronJob from overlapping itself.
+# Where an hourly run can last longer than the gap, widen it or suspend the
+# hourly job while this one runs.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -160,7 +163,7 @@ spec:
             - name: maintenance
               # `fireparq` is the ENTRYPOINT. Pin the digest of the release's
               # image in production, the writer's.
-              image: ghcr.io/pinax-network/firehose-parquet:1.2.0
+              image: ghcr.io/pinax-network/firehose-parquet:1.3.0
               args: ["maintenance"]
               env:
                 - name: FULL_VACUUM
