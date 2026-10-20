@@ -43,10 +43,10 @@ pub fn row_order_key(table: &str) -> Option<&'static [KeyPart]> {
     Some(match table {
         "blocks" => &[],
         "transactions" | "withdrawals" => TX_ORDER,
-        "logs" => LOG_ORDER,
+        "logs" | "erc20_transfers" => LOG_ORDER,
         "access_lists" => &[Column("tx_index"), Column("access_index")],
         "set_code_authorizations" => &[Column("tx_index"), Column("authorization_index")],
-        "calls" => CALL_ORDER,
+        "calls" | "native_transfers" => CALL_ORDER,
         "balance_changes" | "code_changes" | "storage_changes" | "nonce_changes"
         | "gas_changes" | "account_creations" => CHANGE_ORDER,
         "system_calls" => SYSTEM_CALL_ORDER,
@@ -61,10 +61,12 @@ pub fn row_order_key(table: &str) -> Option<&'static [KeyPart]> {
 }
 
 /// The tables [`row_order_key`] knows, the EVM tables of `fireparq build`.
-pub const EVM_TABLES: [&str; 20] = [
+pub const EVM_TABLES: [&str; 22] = [
     "blocks",
     "transactions",
     "logs",
+    "erc20_transfers",
+    "native_transfers",
     "withdrawals",
     "access_lists",
     "set_code_authorizations",

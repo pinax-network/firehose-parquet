@@ -83,6 +83,7 @@ Related docs:
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.
   - `tests/parquet_compatibility.rs`: reads the Parquet 58 files of `tests/fixtures/parquet58/` (never regenerate them) with the current Parquet crate.
 - `blocks/`: chain-specific mapping crate and the unified `fireparq` binary.
+  - `src/evm/transfers.rs`: Arrow-independent ERC-20 extraction through the shared `substreams-abis` decoder and native CALL/CREATE value extraction; `transfer_builders.rs` materializes those records. `tests/evm_transfers.rs` covers transfer semantics and Delta/Parquet round trips, `evm_golden.rs` independently checks real transfer rows, and `delta_tables.rs` checks publication/restart and transfer-commit crash recovery.
   - `src/bin/main.rs`: `fireparq` entrypoint, command dispatch (`Commands::*`), shared ingestion helpers, and the `.env.example` drift test.
   - `src/bin/ingestion/mod.rs`: `run_ingestion`, the `fireparq build` orchestration; dataset ownership outlives the session and runtime.
   - `src/bin/ingestion/setup.rs`: endpoint preflight (EndpointInfo, block type, encodings), resumed configuration and metrics labels.

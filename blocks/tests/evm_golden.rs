@@ -27,10 +27,11 @@ use std::sync::OnceLock;
 #[path = "../../maintenance/src/row_order.rs"]
 mod row_order;
 
-const STANDARD_TABLES: [&str; 6] = [
+const STANDARD_TABLES: [&str; 7] = [
     "blocks",
     "transactions",
     "logs",
+    "erc20_transfers",
     "withdrawals",
     "access_lists",
     "set_code_authorizations",
@@ -49,6 +50,8 @@ struct Fixture {
     /// Delta data files store the timestamp in microseconds.
     timestamp_millis: i64,
     date: i32,
+    /// Independently counted from the retained wire payload, not the mapper.
+    transfer_counts: (usize, usize),
 }
 
 /// Mainnet 26,049,575: blob, legacy and dynamic-fee transactions, one reverted.
@@ -61,6 +64,7 @@ fn block_26049575() -> Fixture {
         transactions: 182,
         timestamp_millis: 1_790_280_203_000,
         date: 20720,
+        transfer_counts: (190, 115),
     }
 }
 
@@ -80,6 +84,7 @@ fn block_26000004() -> Fixture {
         transactions: 397,
         timestamp_millis: 1_789_681_811_000,
         date: 20713,
+        transfer_counts: (1_909, 801),
     }
 }
 
@@ -302,9 +307,100 @@ fn assert_writer_row_order(table: &str, batch: &RecordBatch, source: &str) {
     }
 }
 
+/// Re-derive every transfer directly from the fixed protobuf. This oracle uses
+/// BigUint for amounts and explicit ABI checks, never the production decoder,
+/// decimal formatter or byte encoder. The counts were also obtained with a
+/// standalone protobuf wire reader; historical raw-table expectations stay
+/// unchanged in expected.json.
+fn transfer_expectations(fixture: &Fixture) -> BTreeMap<&'static str, Vec<Value>> {
+    let raw = eth::Block::decode(fixture.block).unwrap();
+    let mut erc20 = Vec::new();
+    let mut native = Vec::new();
+    for tx in &raw.transaction_traces {
+        if tx.status != eth::TransactionTraceStatus::Succeeded as i32 {
+            continue;
+        }
+        for log in tx.receipt.iter().flat_map(|receipt| &receipt.logs) {
+            if log.topics.len() != 3
+                || hex(&log.topics[0])
+                    != "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+                || log.address.len() != 20
+                || log.data.len() != 32
+                || log.topics[1..]
+                    .iter()
+                    .any(|topic| topic.len() != 32 || topic[..12].iter().any(|&byte| byte != 0))
+            {
+                continue;
+            }
+            erc20.push(json!({
+                "block_number": raw.number,
+                "tx_hash": hex(&tx.hash),
+                "tx_index": tx.index,
+                "log_index": log.index,
+                "block_index": log.block_index,
+                "ordinal": log.ordinal,
+                "token_address": hex(&log.address),
+                "from": hex(&log.topics[1][12..]),
+                "to": hex(&log.topics[2][12..]),
+                "value": num_bigint::BigUint::from_bytes_be(&log.data).to_string(),
+                "decoder_version": 1
+            }));
+        }
+        for call in &tx.calls {
+            let value = num_bigint::BigUint::from_bytes_be(
+                call.value
+                    .as_ref()
+                    .map_or(&[][..], |value| value.bytes.as_ref()),
+            );
+            if call.state_reverted
+                || call.status_failed
+                || call.status_reverted
+                || value == num_bigint::BigUint::from(0u32)
+                || !matches!(
+                    eth::CallType::try_from(call.call_type),
+                    Ok(eth::CallType::Call | eth::CallType::Create)
+                )
+            {
+                continue;
+            }
+            native.push(json!({
+                "block_number": raw.number,
+                "tx_hash": hex(&tx.hash),
+                "tx_index": tx.index,
+                "call_index": call.index,
+                "call_type": match eth::CallType::try_from(call.call_type).unwrap() {
+                    eth::CallType::Call => "CALL",
+                    eth::CallType::Create => "CREATE",
+                    _ => unreachable!()
+                },
+                "ordinal": call.begin_ordinal,
+                "from": hex(&call.caller),
+                "to": hex(&call.address),
+                "value": value.to_string(),
+                "decoder_version": 1
+            }));
+        }
+    }
+    assert_eq!((erc20.len(), native.len()), fixture.transfer_counts);
+    // Fixed exact amounts and source positions qualify the independent
+    // arithmetic and selection as well as comparing all rows below.
+    let (first_erc20_tx, first_erc20_value, first_native_call, first_native_value) =
+        match raw.number {
+            26_049_575 => (0, "399700000", 1, "267080795608303"),
+            26_000_004 => (11, "3253195078445409763328", 7, "89100000000000000"),
+            _ => panic!("unqualified transfer fixture"),
+        };
+    assert_eq!(erc20[0]["tx_index"], first_erc20_tx);
+    assert_eq!(erc20[0]["value"], first_erc20_value);
+    assert_eq!(native[0]["call_index"], first_native_call);
+    assert_eq!(native[0]["value"], first_native_value);
+    BTreeMap::from([("erc20_transfers", erc20), ("native_transfers", native)])
+}
+
 fn check_fixture(fixture: &Fixture) {
     let identity = fixture_identity(fixture);
     let expected: Value = serde_json::from_str(fixture.expected).unwrap();
+    let transfers = transfer_expectations(fixture);
     assert_eq!(expected["format_version"], 1);
     // The `date` partition of every table is the block's UTC day.
     assert_eq!(
@@ -321,13 +417,21 @@ fn check_fixture(fixture: &Fixture) {
                     .iter()
                     .map(|(table, batch)| (table.clone(), batch.num_rows()))
                     .collect();
-                let expected_counts: BTreeMap<_, _> = expected["counts"]
+                let mut expected_counts: BTreeMap<_, _> = expected["counts"]
                     .as_object()
                     .unwrap()
                     .iter()
                     .filter(|(name, _)| extended || STANDARD_TABLES.contains(&name.as_str()))
                     .map(|(name, count)| (name.clone(), count.as_u64().unwrap() as usize))
                     .collect();
+                expected_counts
+                    .insert("erc20_transfers".into(), transfers["erc20_transfers"].len());
+                if extended {
+                    expected_counts.insert(
+                        "native_transfers".into(),
+                        transfers["native_transfers"].len(),
+                    );
+                }
                 assert_eq!(
                     actual_counts, expected_counts,
                     "{}: extended={extended}, encoding={encoding:?}, fork_step={fork_step}",
@@ -384,6 +488,16 @@ fn check_fixture(fixture: &Fixture) {
                 // by it gives the writer's order back (`maintenance/src/row_order.rs`).
                 for (table, batch) in &batches {
                     assert_writer_row_order(table, batch, fixture.name);
+                }
+                for (table, rows) in &transfers {
+                    if !extended && *table == "native_transfers" {
+                        continue;
+                    }
+                    for (row, values) in rows.iter().enumerate() {
+                        for (column, value) in values.as_object().unwrap() {
+                            assert_value(&batches[*table], row, column, value, fixture.name);
+                        }
+                    }
                 }
                 for selection in expected["selections"].as_array().unwrap() {
                     let table = selection["table"].as_str().unwrap();
