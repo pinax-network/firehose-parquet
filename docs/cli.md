@@ -252,14 +252,19 @@ stream, for final-only and non-final streams and any block time.
   which block time advanced more than 2× faster than the wall clock. A sample
   lasts at least 5 seconds and ends at a block with a timestamp.
 - **Caught up**: samples at no more than 1.25× the wall clock covering 20
-  seconds (the writer's own commits do not count toward them), or 60 seconds
-  without a block timestamp. Samples between 1.25× and 2× change nothing.
+  seconds, or 60 seconds without a block timestamp. Samples between 1.25× and
+  2× change nothing.
+- The writer's own commits stay in a sample's ratio but do not count toward
+  the 30, 20 or 60 seconds. A replay that spends most of its time committing
+  switches later: with 4 seconds of blocks between 6-second commits, after
+  about 80 seconds.
 - Block age is not used: a final-only stream stays about the finality lag
   behind the tip even at the head (measured on 2026-09-27: 15.8 minutes on
   Ethereum, 6.7 on Base, 1.0 on Arbitrum, 0.4 on Robinhood). Finality bursts,
   such as an Ethereum epoch of 32 blocks every 6.4 minutes, do not look like a
   catch-up: a wait longer than one sample between two blocks is measured on
-  its own, so the gap after each burst reads as real time.
+  its own, so the gap after each burst reads as real time. A commit of the
+  writer is not such a wait.
 - Every run starts caught up, which is also the answer when in doubt. Missing,
   repeated or backward timestamps (such as Solana slots without a block time)
   never count as catching up, and a catch-up slower than 2× the chain's rate

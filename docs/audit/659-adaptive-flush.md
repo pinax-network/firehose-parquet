@@ -36,7 +36,7 @@ synthesized Solana routing time or a bootstrap time.
 | Fast sample | ratio > 2.0 |
 | Real-time sample | ratio ≤ 1.25 |
 | Neutral sample | 1.25 < ratio ≤ 2.0: breaks both streaks, changes nothing |
-| Enter catching up | ≥ 3 consecutive fast samples covering ≥ 30 s |
+| Enter catching up | ≥ 3 consecutive fast samples covering ≥ 30 s, not counting the writer's own commits (#721) |
 | Leave catching up | consecutive real-time samples covering ≥ 20 s, not counting the writer's own commits |
 | Missing timestamps | while catching up, 60 s without a timestamped block (commits excluded) means caught up |
 | Start | caught up (today's behavior) |
@@ -83,7 +83,8 @@ from reading as a catch-up:
 - A wait longer than one sample between two blocks is measured as a sample of
   its own. The partial sample before it is dropped, so the gap after a burst
   (about 1 block time over 6 minutes) reads as real time, and neither a burst
-  nor the tail of a replay lends its pace to the wait that follows.
+  nor the tail of a replay lends its pace to the wait that follows. The time
+  the writer spent committing is taken off the wait first (#721, below).
 
 A burst that takes longer to map (for example 192 Base blocks over 10 s) closes
 at most one or two fast samples before its gap resets the streak. That stays
@@ -102,6 +103,25 @@ second, the backlog after each one reads as 3×, which the unit tests check.
 The pause does not count toward the 20 s real-time window that ends a
 catch-up, nor toward the 60 s missing-timestamp window, so a slow commit during
 a catch-up is not mistaken for a stall.
+
+Since #721 the pause is also not a wait of the stream, and it does not count
+toward the 30 s that start a catch-up. Until then (seen on v1.3.0) a commit
+of 5 s or more was measured as a sample of its own, like a finality gap, and
+the partial sample before it was dropped. On 2026-11-09 an Ethereum writer
+resumed near block 22.8M with a 1 GiB memory trigger: each flush was 240
+blocks over about 4 s, then a commit of 5.4 to 6.5 s. The 4 s of replay was
+always the dropped part. Only the commit waits closed as samples, at 12 s of
+block time over the commit: 1.85× to 2.2×, on both sides of the 2× entry
+ratio, so the streak kept resetting. The writer reported `caught_up` 490 days
+behind the head for as long as it ran, at about 290× real time. The writer it
+replaced had entered the catch-up at genesis, where flushes are rare, and
+kept it for five days: a sample at 1.85× or more is no evidence for leaving.
+
+Now a sample runs across the commit: the same stream closes one fast sample
+per flush (2,880 s of block time over about 10 s). Each counts its 4 s of
+streaming toward the 30 s, so the writer switches after eight flushes, about
+80 s. Counting the commits too would let commits inside one finality burst
+stretch it past the entry window; the unit tests check both shapes.
 
 ### Missing and non-monotonic timestamps
 
