@@ -17,7 +17,7 @@ empty when the release is cut.
 ## Fixes
 
 - **A replay with commits of 5 seconds or more is detected as a catch-up**
-  (#721).
+  (#721, #722).
   - **What was wrong:** a writer that started deep in a backfill could stay
     `caught_up` for the whole replay: `firehose_parquet_catching_up` stayed 0,
     flushes carried `pace="caught_up"`, and `--flush-interval-secs` stayed
