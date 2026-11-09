@@ -315,6 +315,69 @@ fn the_writers_own_commits_are_not_stalls() {
 }
 
 #[test]
+fn a_replay_whose_commits_outlast_a_sample_counts_as_catching_up() {
+    // #721: Ethereum history near block 22.8M under a 1 GiB memory trigger.
+    // Each flush is 240 blocks over 4 s, then a commit of 5.4 to 6.5 s while
+    // the stream waits. Measured on their own, those waits read as 1.85x to
+    // 2.2x and reset the streak, and the replay between them is never a
+    // sample: the writer stayed caught up 490 days behind the head.
+    const COMMITS_MS: [u64; 6] = [5_400, 6_500, 5_800, 6_100, 5_600, 6_300];
+    fn flushes(replay: &mut Replay, count: usize) {
+        for flush in 0..count {
+            replay.blocks(240, ms(16), 12 * SECOND);
+            replay.commit(ms(COMMITS_MS[flush % COMMITS_MS.len()]));
+        }
+    }
+    let mut replay = Replay::new();
+    flushes(&mut replay, 7);
+    assert_eq!(
+        replay.pace(),
+        StreamPace::CaughtUp,
+        "27 s of streaming is not yet sustained"
+    );
+    flushes(&mut replay, 5);
+    assert_eq!(replay.paces(), [StreamPace::CatchingUp]);
+    let (at, transition) = replay.switches[0];
+    assert!(at >= secs(60) && at <= secs(90), "{at:?}");
+    assert_eq!(transition.cause, PaceCause::Pace);
+    // 2,880 s of block time per flush of about 9.8 s, commit included.
+    let ratio = transition.ratio.unwrap();
+    assert!(ratio > 250.0 && ratio < 350.0, "{ratio}");
+    // The rest of the replay keeps the state.
+    flushes(&mut replay, 60);
+    assert_eq!(replay.paces(), [StreamPace::CatchingUp]);
+    // A wait of the stream after a commit is still measured on its own: the
+    // first finality gap at the head ends the catch-up.
+    replay.blocks(32, ms(16), 12 * SECOND);
+    replay.commit(secs(6));
+    replay.stall(secs(300));
+    replay.blocks(1, ms(16), 12 * SECOND);
+    assert_eq!(
+        replay.paces(),
+        [StreamPace::CatchingUp, StreamPace::CaughtUp]
+    );
+    assert_eq!(replay.switches[1].0, replay.wall);
+}
+
+#[test]
+fn the_writers_own_commits_do_not_count_toward_a_catch_up() {
+    // Base final-only at the head, with three 10 s commits inside each burst
+    // of 192 blocks. Each commit ends a fast sample, and with the commits
+    // counted the three would cover 44 s. The stream itself delivered 15 s,
+    // which is a burst and not a replay.
+    let mut replay = Replay::new();
+    for _ in 0..40 {
+        for _ in 0..3 {
+            replay.blocks(60, ms(80), 2 * SECOND);
+            replay.commit(secs(10));
+        }
+        replay.blocks(12, ms(80), 2 * SECOND);
+        replay.stall(secs(384) - secs(30) - ms(80 * 192));
+    }
+    assert!(replay.switches.is_empty());
+}
+
+#[test]
 fn missing_timestamps_never_cause_catching_up() {
     // No block has a timestamp: the pace is unknown, which is caught up.
     let mut replay = Replay::new();

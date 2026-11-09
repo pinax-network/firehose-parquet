@@ -25,8 +25,9 @@
 //! streaks. A wait longer than one sample between two blocks is measured as a
 //! sample of its own, so the gap after a finality burst reads as real time and
 //! the burst itself (delivered within one sample) is never evidence. The
-//! writer's own commits count in the ratio but not toward leaving a catch-up
-//! ([`PaceDetector::exclude_pause`]).
+//! writer's own commits ([`PaceDetector::exclude_pause`]) count in the ratio,
+//! but they are not such a wait and do not count toward either window: a
+//! replay whose commits take longer than one sample is still measured (#721).
 //!
 //! The detector starts caught up, today's behavior, and returns there when in
 //! doubt: block time is the newest timestamp seen so far, so missing, repeated
@@ -165,8 +166,8 @@ struct Streak {
     samples: u32,
     /// Wall time of the samples, which the ratio uses.
     wall: Duration,
-    /// Wall time that counts toward a switch: for real-time evidence, the
-    /// writer's own commits are left out.
+    /// Wall time that counts toward a switch: the writer's own commits are
+    /// left out.
     counted: Duration,
     block_millis: i64,
     blocks: u64,
@@ -262,9 +263,15 @@ impl PaceDetector {
         {
             // A gap longer than one sample is measured on its own. The partial
             // sample before it is dropped, so neither a finality burst nor the
-            // tail of a replay lends its pace to the wait that follows.
-            if previous > anchor_at && now.saturating_duration_since(previous) >= self.timing.sample
-            {
+            // tail of a replay lends its pace to the wait that follows. The
+            // writer's own commit is not such a gap: the stream was ready and
+            // the writer was not. Without this, a replay whose commits take
+            // longer than one sample is never measured, only its commit waits
+            // are (#721).
+            let waited = now
+                .saturating_duration_since(previous)
+                .saturating_sub(gap_paused);
+            if previous > anchor_at && waited >= self.timing.sample {
                 self.anchor = Some((previous, newest));
                 self.blocks = 0;
                 self.sample_paused = gap_paused;
@@ -301,9 +308,11 @@ impl PaceDetector {
     /// The writer's own commit blocked the stream for `pause` after the last
     /// observed block. The chain kept moving, so the pause stays in the
     /// measured ratio (leaving it out would make the head look fast whenever
-    /// commits take most of an interval). It does not count toward the
-    /// real-time evidence that ends a catch-up, nor toward the
-    /// missing-timestamp window: a slow commit is not a stall.
+    /// commits take most of an interval). It is not a wait of the stream, so
+    /// it never starts a sample of its own, and it counts toward neither the
+    /// fast evidence that starts a catch-up, nor the real-time evidence that
+    /// ends one, nor the missing-timestamp window: a slow commit is neither a
+    /// stall nor a longer burst.
     pub fn exclude_pause(&mut self, pause: Duration) {
         self.sample_paused = self.sample_paused.saturating_add(pause);
         self.gap_paused = self.gap_paused.saturating_add(pause);
@@ -338,13 +347,14 @@ impl PaceDetector {
         blocks: u64,
     ) -> Option<PaceTransition> {
         let sample_ratio = ratio(block_millis, wall);
-        let (evidence, counted) = if sample_ratio > ENTER_RATIO {
-            (Some(Evidence::Fast), wall)
+        let evidence = if sample_ratio > ENTER_RATIO {
+            Some(Evidence::Fast)
         } else if sample_ratio <= EXIT_RATIO {
-            (Some(Evidence::RealTime), wall.saturating_sub(paused))
+            Some(Evidence::RealTime)
         } else {
-            (None, Duration::ZERO)
+            None
         };
+        let counted = wall.saturating_sub(paused);
         if evidence.is_none() || evidence != self.streak.evidence {
             self.streak = Streak {
                 evidence,

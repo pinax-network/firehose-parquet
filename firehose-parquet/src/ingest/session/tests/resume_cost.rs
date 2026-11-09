@@ -200,7 +200,8 @@ async fn local_resume_walks_no_data_directory() {
     let _restore = Restore(sealed.clone());
     std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-    // `recovery` ownership walks the tree and refuses the nested symlink;
+    // `recovery` ownership walks the tree and stops at the nested symlink or
+    // at the unreadable directory, whichever the file system lists first;
     // `build` acquires without that walk and checks each path it touches.
     let recovery = DatasetOwnership::acquire(
         "recovery",
@@ -210,9 +211,11 @@ async fn local_resume_walks_no_data_directory() {
     .await
     .err()
     .expect("recovery ownership walks the tree");
+    let recovery = format!("{recovery:#}");
     assert!(
-        recovery.to_string().contains("nested symlinks"),
-        "{recovery:#}"
+        recovery.contains("nested symlinks")
+            || recovery.contains("inspecting a guarded local mutation tree"),
+        "{recovery}"
     );
     let owner = DatasetOwnership::acquire_for_ingestion(
         ingestion_mutation_scopes(&config).unwrap(),
