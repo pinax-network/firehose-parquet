@@ -120,6 +120,10 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
         ChainKind::Evm => &[
             "Extended tables are populated only from blocks at the EXTENDED detail level; \
              the `system_*` tables hold block-level events without `tx_hash`.",
+            "`erc20_transfers` decodes standard receipt Transfer logs of successful transactions. \
+             `native_transfers` requires extended output and records successful, persisted, \
+             positive-value CALL/CREATE operations. These tables are not balance snapshots; \
+             see [EVM transfer coverage](../chains/evm.md#decoded-transfers).",
         ],
         ChainKind::Tron => &[
             "Hash columns (block, transaction and internal transaction hashes, `tx_trie_root` \
@@ -177,6 +181,19 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
 }
 
 const TABLE_DESCRIPTIONS: &[(ChainKind, &str, &str)] = &[
+    (
+        ChainKind::Evm,
+        "erc20_transfers",
+        "Standard ERC-20 Transfer receipt events, including zero-value transfers, mints and burns. \
+         ERC-721 and nonstandard event layouts are excluded.",
+    ),
+    (
+        ChainKind::Evm,
+        "native_transfers",
+        "Positive native value moved by persisted CALL/CREATE operations of successful transactions, \
+         including the root call once. Requires EXTENDED traces. Fees, rewards, withdrawals, \
+         selfdestruct payouts and system calls are outside this table.",
+    ),
     (
         ChainKind::Evm,
         "system_calls",
@@ -365,6 +382,48 @@ const HYPERCORE_EXTRA_JSON: &str = crate::hypercore::schema::EXTRA_JSON_DESCRIPT
 /// `(chain, table, column, description)`.
 const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
     // EVM
+    (
+        ChainKind::Evm,
+        "erc20_transfers",
+        "value",
+        "Exact uint256 decimal string in raw token units; no decimals or metadata lookup.",
+    ),
+    (
+        ChainKind::Evm,
+        "erc20_transfers",
+        "decoder_version",
+        "Version 1 of the receipt-transfer extraction contract.",
+    ),
+    (
+        ChainKind::Evm,
+        "erc20_transfers",
+        "log_index",
+        "Firehose transaction-relative `Log.index` (guaranteed at EXTENDED detail).",
+    ),
+    (
+        ChainKind::Evm,
+        "erc20_transfers",
+        "block_index",
+        "Receipt `Log.blockIndex`, the JSON-RPC logIndex. Use this for block-local identity at BASE detail.",
+    ),
+    (
+        ChainKind::Evm,
+        "native_transfers",
+        "value",
+        "Exact decimal string in the chain's native base unit (wei on Ethereum).",
+    ),
+    (
+        ChainKind::Evm,
+        "native_transfers",
+        "ordinal",
+        "The source call's `begin_ordinal`; use `(tx_index, call_index)` for the transfer identity.",
+    ),
+    (
+        ChainKind::Evm,
+        "native_transfers",
+        "decoder_version",
+        "Version 1 of the CALL/CREATE value-transfer extraction contract.",
+    ),
     (
         ChainKind::Evm,
         "logs",

@@ -12,7 +12,19 @@ empty when the release is cut.
 
 ## Breaking changes
 
+- EVM datasets add `erc20_transfers` and, with extended output,
+  `native_transfers` (#713). The table inventory changes the protected output
+  identity: rebuild into a new empty output root to obtain the transfer history.
+  Existing EVM roots cannot resume under this schema. Other chain families and
+  the existing EVM table schemas are unchanged.
+
 ## New features
+
+- Built-in EVM ERC-20 receipt transfers use the shared `substreams-abis`
+  decoder; native transfers record persisted positive CALL/CREATE values,
+  including internal contract creation. Exact amounts, source identities and
+  non-final stream events are retained. See [coverage and balances](../chains/evm.md#decoded-transfers)
+  for excluded events and the distinction from account-balance snapshots.
 
 ## Fixes
 

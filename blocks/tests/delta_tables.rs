@@ -4,7 +4,7 @@
 //!
 //! A cursor-aware mock Firehose serves four final EVM blocks over two UTC
 //! days. `build` runs twice, `[100, 102)` then a clean restart to `[100,
-//! 104)`, with one transaction per block, on local disk and on a loopback
+//! 104)`, with two transactions per block, on local disk and on a loopback
 //! HTTPS S3 endpoint (`examples/bench_live_flush/s3.rs`, trusted through
 //! `SSL_CERT_FILE`). The test then checks, from the logs:
 //!
@@ -23,6 +23,10 @@
 //!
 //! The S3 dataset is copied out of the loopback server and read locally.
 //! Engines: see `common/mod.rs`.
+use arrow::{
+    array::{Int64Array, StringArray},
+    record_batch::RecordBatch,
+};
 use firehose_parquet::writer::read_parquet;
 use firehose_protos::{eth, firehose};
 use prost::Message;
@@ -46,11 +50,19 @@ const MIDNIGHT: i64 = 1_700_006_400;
 const BUCKET: &str = "delta-lake";
 
 /// Rows of each checked table per block, and its partition-free columns.
-const TABLES: [(&str, u64); 4] = [
+const TABLES: [(&str, u64); 7] = [
     ("blocks", 1),
     ("transactions", 2),
     ("logs", 2),
+    ("erc20_transfers", 2),
+    ("native_transfers", 2),
+    ("calls", 2),
     ("access_lists", 2),
+];
+
+const TRANSFER_TOPIC: [u8; 32] = [
+    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
+    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
 ];
 
 #[derive(Clone)]
@@ -131,7 +143,8 @@ fn seconds(number: u64) -> i64 {
     MIDNIGHT - 102 + number as i64
 }
 
-/// A final EVM block with two transactions, each with a log and an access list.
+/// A final EVM block with two transactions, each with an ERC20 receipt log,
+/// native root CALL and an access list. Amounts distinguish block and tx.
 fn response(number: u64) -> firehose::Response {
     let id = number as u8;
     let transaction = |index: u32| eth::TransactionTrace {
@@ -141,6 +154,12 @@ fn response(number: u64) -> firehose::Response {
         from: vec![0x11; 20].into(),
         to: vec![0x22; 20].into(),
         gas_used: 21_000,
+        value: Some(eth::BigInt {
+            bytes: (number * 1_000 + u64::from(index))
+                .to_be_bytes()
+                .to_vec()
+                .into(),
+        }),
         access_list: vec![eth::AccessTuple {
             address: vec![0x33; 20].into(),
             storage_keys: vec![vec![0x44; 32].into()],
@@ -148,14 +167,38 @@ fn response(number: u64) -> firehose::Response {
         receipt: Some(eth::TransactionReceipt {
             logs: vec![eth::Log {
                 address: vec![0x66; 20].into(),
-                topics: vec![vec![0x77; 32].into()],
-                data: vec![1, 2, 3].into(),
+                topics: vec![
+                    TRANSFER_TOPIC.to_vec().into(),
+                    [vec![0; 12], vec![0x11; 20]].concat().into(),
+                    [vec![0; 12], vec![0x22; 20]].concat().into(),
+                ],
+                data: [
+                    vec![0; 24],
+                    (number * 100 + u64::from(index)).to_be_bytes().to_vec(),
+                ]
+                .concat()
+                .into(),
                 index: 0,
                 block_index: index,
+                ordinal: u64::from(index) * 100 + 50,
                 ..Default::default()
             }],
             ..Default::default()
         }),
+        calls: vec![eth::Call {
+            index: 0,
+            call_type: eth::CallType::Call as i32,
+            caller: vec![0x11; 20].into(),
+            address: vec![0x22; 20].into(),
+            value: Some(eth::BigInt {
+                bytes: (number * 1_000 + u64::from(index))
+                    .to_be_bytes()
+                    .to_vec()
+                    .into(),
+            }),
+            begin_ordinal: u64::from(index) * 100 + 10,
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let block = eth::Block {
@@ -226,7 +269,7 @@ impl Storage<'_> {
     }
 }
 
-/// `build` to `stop` (exclusive) from a mock Firehose, one transaction per block.
+/// `build` to `stop` (exclusive) from a mock Firehose, one flush per block.
 async fn build(storage: &Storage<'_>, cwd: &Path, stop: u64) {
     let output = run(storage, cwd, stop, None).await;
     assert!(
@@ -292,6 +335,71 @@ fn authority_ordinal(root: &Path) -> i64 {
         serde_json::from_slice(&std::fs::read(root.join(".fireparq-ingest/state.json")).unwrap())
             .unwrap();
     state["payload"]["checkpoint"]["ordinal"].as_i64().unwrap()
+}
+
+/// Check actual published transfer values as well as log counts. Distinct
+/// amounts and source ordinals prevent a replay from passing by duplicating
+/// one transaction's rows or confusing ERC20 and native amounts.
+fn check_transfer_rows(table: &str, batches: &[RecordBatch], block_number: u64) {
+    if !matches!(table, "erc20_transfers" | "native_transfers") {
+        return;
+    }
+    let mut indices = Vec::new();
+    for batch in batches {
+        let integer = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row)
+        };
+        let string = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row)
+        };
+        for row in 0..batch.num_rows() {
+            let index = integer("tx_index", row);
+            indices.push(index);
+            assert_eq!(integer("block_num", row), block_number as i64);
+            assert_eq!(integer("block_number", row), block_number as i64);
+            assert_eq!(integer("decoder_version", row), 1);
+            assert_eq!(string("from", row), format!("0x{}", "11".repeat(20)));
+            assert_eq!(string("to", row), format!("0x{}", "22".repeat(20)));
+            assert_eq!(
+                string("tx_hash", row),
+                format!(
+                    "0x{}",
+                    format!("{:02x}", block_number as u8 ^ (index as u8 + 1)).repeat(32)
+                )
+            );
+            let (multiplier, ordinal_offset) = if table == "erc20_transfers" {
+                assert_eq!(integer("log_index", row), 0);
+                assert_eq!(integer("block_index", row), index);
+                assert_eq!(
+                    string("token_address", row),
+                    format!("0x{}", "66".repeat(20))
+                );
+                (100, 50)
+            } else {
+                assert_eq!(integer("call_index", row), 0);
+                assert_eq!(string("call_type", row), "CALL");
+                (1_000, 10)
+            };
+            assert_eq!(
+                string("value", row),
+                (block_number * multiplier + index as u64).to_string()
+            );
+            assert_eq!(integer("ordinal", row), index * 100 + ordinal_offset);
+        }
+    }
+    assert_eq!(indices, [0, 1], "{table}: each transaction once");
 }
 
 /// Checks the logs of every table against the parts they add; returns the
@@ -399,11 +507,9 @@ fn check_logs(root: &Path, transactions: u64) -> BTreeMap<String, u64> {
                 .unwrap()
                 .starts_with(&format!("date={date}/")));
             let stats: Value = serde_json::from_str(add["stats"].as_str().unwrap()).unwrap();
-            let file_rows: u64 = read_parquet(&path)
-                .unwrap()
-                .iter()
-                .map(|batch| batch.num_rows() as u64)
-                .sum();
+            let batches = read_parquet(&path).unwrap();
+            check_transfer_rows(&name, &batches, 99 + version);
+            let file_rows: u64 = batches.iter().map(|batch| batch.num_rows() as u64).sum();
             assert_eq!(stats["numRecords"].as_u64(), Some(file_rows), "{name}");
             assert_eq!(stats["nullCount"]["block_num"], json!(0));
             assert!(stats["minValues"]["timestamp"]
@@ -700,6 +806,30 @@ async fn a_crash_after_every_delta_commit_restarts_without_a_duplicate() {
     }
     build(&storage, &cwd, 102).await;
     check_logs(&root, 2);
+}
+
+/// The derived tables participate in the same all-table recovery as the raw
+/// tables, including a crash while only a prefix of Delta logs is committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crashes_after_transfer_commits_roll_forward_without_duplicates() {
+    for table in ["erc20_transfers", "native_transfers"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let storage = Storage::Local(cwd.join("dataset"));
+        let fault = format!("crash-after-delta-commit:{table}");
+        let crashed = run(&storage, &cwd, 102, Some(&fault)).await;
+        assert!(!crashed.status.success(), "{fault}: build must abort");
+        let root = storage.local_copy(&cwd);
+        assert_eq!(authority_ordinal(&root), 0);
+        assert_eq!(common::delta_log(&root.join(table)).len(), 2);
+        assert_eq!(
+            common::delta_log(&root.join("blocks")).len(),
+            1,
+            "blocks has not committed the partially published transaction"
+        );
+        build(&storage, &cwd, 102).await;
+        check_logs(&root, 2);
+    }
 }
 
 /// The tracing lines of `text` logged at ERROR (ANSI colors removed).

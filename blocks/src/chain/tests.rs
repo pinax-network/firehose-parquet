@@ -618,6 +618,16 @@ fn inventory_lines_with(
     mapper: &mut dyn BlockMapper,
     project: impl Fn(&str, &Schema) -> Option<Schema>,
 ) -> Vec<String> {
+    inventory_lines_with_tables(kind, options, mapper, |_| true, project)
+}
+
+fn inventory_lines_with_tables(
+    kind: ChainKind,
+    options: &MapperOptions,
+    mapper: &mut dyn BlockMapper,
+    include_table: impl Fn(&str) -> bool,
+    project: impl Fn(&str, &Schema) -> Option<Schema>,
+) -> Vec<String> {
     let context = format!(
         "{}|{:?}|ext={}|votes={}|fork={}|synth={}|failed={}",
         kind.label(),
@@ -628,11 +638,20 @@ fn inventory_lines_with(
         options.synthetic_partition_routing,
         options.include_failed_transactions
     );
-    let mut lines = vec![format!("{context}|names={:?}", mapper.table_names())];
+    let names: Vec<_> = mapper
+        .table_names()
+        .iter()
+        .copied()
+        .filter(|table| include_table(table))
+        .collect();
+    let mut lines = vec![format!("{context}|names={names:?}")];
     let batches = mapper.flush().unwrap();
     let mut tables: Vec<_> = batches.iter().collect();
     tables.sort_by(|left, right| left.0.cmp(right.0));
     for (table, batch) in tables {
+        if !include_table(table) {
+            continue;
+        }
         if let Some(schema) = project(table, &batch.schema()) {
             lines.push(format!("{context}|{table}|{schema:?}"));
         }
@@ -656,6 +675,32 @@ fn schema_digest_where(
     include: impl Fn(&MapperOptions) -> bool,
     project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
 ) -> String {
+    schema_digest_tables(include_family, include, |_, _| true, project)
+}
+
+/// Project out only the two newly introduced EVM tables. Historical pins
+/// continue to verify every pre-existing table and its inventory order.
+fn schema_digest_before_transfers(
+    include_family: impl Fn(ChainKind) -> bool,
+    include: impl Fn(&MapperOptions) -> bool,
+    project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
+) -> String {
+    schema_digest_tables(
+        include_family,
+        include,
+        |kind, table| {
+            !(kind == ChainKind::Evm && matches!(table, "erc20_transfers" | "native_transfers"))
+        },
+        project,
+    )
+}
+
+fn schema_digest_tables(
+    include_family: impl Fn(ChainKind) -> bool,
+    include: impl Fn(&MapperOptions) -> bool,
+    include_table: impl Fn(ChainKind, &str) -> bool,
+    project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>,
+) -> String {
     let mut hasher = Sha256::new();
     for kind in ChainKind::ALL
         .into_iter()
@@ -666,9 +711,13 @@ fn schema_digest_where(
             .filter(|options| include(options))
         {
             let mut mapper = kind.create_mapper(options.clone());
-            let lines = inventory_lines_with(kind, &options, mapper.as_mut(), |table, schema| {
-                project(kind, table, schema)
-            });
+            let lines = inventory_lines_with_tables(
+                kind,
+                &options,
+                mapper.as_mut(),
+                |table| include_table(kind, table),
+                |table, schema| project(kind, table, schema),
+            );
             for line in lines {
                 hasher.update(line.as_bytes());
                 hasher.update(b"\n");
@@ -736,7 +785,7 @@ fn every_mapper_schema_matches_the_pinned_digest() {
 #[test]
 fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
     assert_eq!(
-        schema_digest_where(
+        schema_digest_before_transfers(
             pre_sec_family,
             |options| !options.include_fork_step,
             |_, _, schema| Some(schema.clone())
@@ -754,7 +803,7 @@ fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
 #[test]
 fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
-        schema_digest_where(pre_sec_family, |_| true, without_appended_columns),
+        schema_digest_before_transfers(pre_sec_family, |_| true, without_appended_columns),
         PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED
     );
 }
@@ -957,7 +1006,7 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
 #[test]
 fn pre_sec_families_reproduce_their_pre_sec_digests() {
     assert_eq!(
-        schema_digest_where(
+        schema_digest_before_transfers(
             pre_sec_family,
             |_| true,
             |_, _, schema| Some(schema.clone())
@@ -966,7 +1015,7 @@ fn pre_sec_families_reproduce_their_pre_sec_digests() {
         "an earlier family's mapper schema changed"
     );
     assert_eq!(
-        schema_digest_where(
+        schema_digest_before_transfers(
             pre_sec_family,
             |_| true,
             |kind, table, schema| Some(
@@ -1030,10 +1079,10 @@ fn each_later_family_reproduces_its_own_pinned_digests() {
 }
 
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "8f172021f35d62a4d78139a13214320b0c5bc5a96c0166bd734145b9f5d9a7c1";
+    "d1c0fce8df4f17a1c0848199adda66c274d02a3f4cf7b46c181e482fdf810ed9";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "4e8870c8d0a2eb74f8519f10bc95e2343ef0a6b9642be1a33c57d5dbcb90f85e";
+    "aac8b3bba7793667c05273c6bdafcd0102e404f657af634ad62d4cc560581598";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
     "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
