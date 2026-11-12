@@ -50,11 +50,31 @@ struct Slot {
 pub struct S3StateStore<'a> {
     ownership: &'a S3Ownership,
     prefix: String,
+    /// A lane owner's view of the dataset root: reads only.
+    read_only: bool,
 }
 
 impl<'a> S3StateStore<'a> {
     /// `dataset_prefix` is a normalized bucket-relative directory, never a URL.
+    ///
+    /// Under a backfill lane's owner the records are the lane's own, in its
+    /// control directory: a lane can never write the dataset's authority.
     pub fn new(ownership: &'a S3Ownership, dataset_prefix: &str) -> Result<Self> {
+        let mut store = Self::dataset_root(ownership, dataset_prefix)?;
+        if let Some(lane) = ownership.lane() {
+            if lane.dataset_prefix() != dataset_prefix.trim_end_matches('/') {
+                bail!("control root is not the dataset of this backfill lane");
+            }
+            store.prefix = lane.directory();
+            store.read_only = false;
+        }
+        Ok(store)
+    }
+
+    /// The dataset root's own records whoever the owner is. Under a lane
+    /// owner they are read-only: the backfill plan and whether the dataset
+    /// has been sealed.
+    pub fn dataset_root(ownership: &'a S3Ownership, dataset_prefix: &str) -> Result<Self> {
         let prefix = dataset_prefix.trim_end_matches('/');
         if dataset_prefix.starts_with('/')
             || dataset_prefix.contains(['?', '#', '\\'])
@@ -83,6 +103,7 @@ impl<'a> S3StateStore<'a> {
             } else {
                 format!("{prefix}/{CONTROL_DIRECTORY}")
             },
+            read_only: ownership.lane().is_some(),
         })
     }
 
@@ -158,6 +179,9 @@ impl<'a> S3StateStore<'a> {
     }
 
     fn require_resolved_owner(&self) -> Result<()> {
+        if self.read_only {
+            bail!("a backfill lane cannot change the dataset's own control records");
+        }
         if self.ownership.is_mutation_uncertain() {
             bail!("unresolved remote mutation requires explicit quiescent recovery before further control writes");
         }

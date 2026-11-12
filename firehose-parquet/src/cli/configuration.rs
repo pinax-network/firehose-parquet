@@ -367,6 +367,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         )
         .filter(|secs| *secs > 0),
         reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs.filter(|secs| *secs > 0),
+        backfill_lane: None,
     })
 }
 

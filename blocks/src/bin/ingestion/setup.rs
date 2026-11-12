@@ -13,9 +13,12 @@ pub(super) struct ResolvedEndpoint {
 }
 
 impl ResolvedEndpoint {
+    /// `lanes`: whether this command may fill a lane of an open parallel
+    /// backfill (`build`), or addresses the dataset itself (`backfill open`).
     pub(super) async fn resolve(
         args: &BuildArgs,
         shutdown: &CancellationToken,
+        lanes: bool,
     ) -> Result<Option<Self>> {
         let mut block_type = parse_requested_block_type(&args.block_type)?;
         // Refuse before any endpoint or storage access, so a new root behaves
@@ -100,6 +103,19 @@ impl ResolvedEndpoint {
             block_type = Some(inferred_block_type_from_endpoint_info(&endpoint_info)
             .context("cannot resolve the mapper from EndpointInfo before protected recovery; provide --block-type explicitly")?);
         }
+        // A build into a root whose parallel backfill is not sealed (#725) is
+        // one of its lanes, or it is refused, before any ownership request.
+        let lane = match lanes {
+            true => firehose_parquet::ingest::enter_backfill_lane(&mut config).await?,
+            false => None,
+        };
+        if let Some((start, stop)) = lane {
+            info!(
+                lane_start = start,
+                lane_stop = stop,
+                "this build fills a lane of the dataset's parallel backfill"
+            );
+        }
         let cursor_location = resolve_cursor_location(&config)?;
         log_write_destinations(&config);
         Ok(Some(Self {
@@ -127,6 +143,7 @@ impl ResolvedEndpoint {
                         .output
                         .to_str()
                         .context("output path must be UTF-8")?,
+                    config.backfill_lane,
                 )
                 .await?,
             )

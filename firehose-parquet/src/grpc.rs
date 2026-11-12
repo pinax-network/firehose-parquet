@@ -1325,6 +1325,7 @@ mod tests {
             metrics_port: None,
             stream_idle_timeout_secs: None,
             reconnect_stall_timeout_secs: None,
+            backfill_lane: None,
         }
     }
 

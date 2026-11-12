@@ -32,6 +32,84 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Result<T> = std::result::Result<T, OwnershipError>;
 
+/// Directory of per-lane control state, inside a dataset's control directory.
+pub const LANES_DIRECTORY: &str = "lanes";
+
+/// One block range of a parallel backfill (`crate::ingest::backfill`).
+///
+/// A lane keeps its own owner record, canaries and control records under
+/// `<dataset>/.fireparq-ingest/lanes/<start>-<stop>/`. Lanes of one dataset
+/// therefore run side by side, and a stranded lane owner blocks only its own
+/// range, never the bucket.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneScope {
+    dataset_prefix: String,
+    start: u64,
+    stop: u64,
+}
+
+impl LaneScope {
+    /// `dataset_prefix` is the normalized bucket-relative dataset root (empty
+    /// at the bucket root); the range is `[start, stop)`.
+    pub fn new(dataset_prefix: &str, start: u64, stop: u64) -> anyhow::Result<Self> {
+        let prefix = dataset_prefix.trim_end_matches('/');
+        anyhow::ensure!(start < stop, "a backfill lane must hold at least one block");
+        anyhow::ensure!(
+            !prefix.starts_with('/')
+                && !prefix.contains(['?', '#', '\\'])
+                && !prefix.contains("://")
+                && (prefix.is_empty()
+                    || prefix
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != ".."))
+                && !crate::artifacts::is_control_path(prefix),
+            "invalid bucket-relative dataset root for a backfill lane"
+        );
+        Ok(Self {
+            dataset_prefix: prefix.to_owned(),
+            start,
+            stop,
+        })
+    }
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+    pub fn stop(&self) -> u64 {
+        self.stop
+    }
+    pub fn dataset_prefix(&self) -> &str {
+        &self.dataset_prefix
+    }
+    /// `<start>-<stop>`, as `--lane` takes it.
+    pub fn name(&self) -> String {
+        format!("{}-{}", self.start, self.stop)
+    }
+    /// The lane's bucket-relative control directory.
+    pub fn directory(&self) -> String {
+        let control = crate::durable_state::CONTROL_DIRECTORY;
+        let name = self.name();
+        if self.dataset_prefix.is_empty() {
+            format!("{control}/{LANES_DIRECTORY}/{name}")
+        } else {
+            format!("{}/{control}/{LANES_DIRECTORY}/{name}", self.dataset_prefix)
+        }
+    }
+}
+
+/// The bucket-relative directory holding an owner record and its canaries:
+/// the bucket root, or a lane's control directory.
+fn owner_base(lane: Option<&LaneScope>) -> String {
+    lane.map(LaneScope::directory).unwrap_or_default()
+}
+
+fn owner_path(base: &str, name: &str) -> Path {
+    if base.is_empty() {
+        Path::from(name)
+    } else {
+        Path::from(format!("{base}/{name}"))
+    }
+}
+
 /// Errors intentionally omit backend errors, payloads, paths and opaque versions.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OwnershipError {
@@ -264,6 +342,9 @@ pub struct S3Ownership {
     delta_log: Option<Arc<dyn object_store_delta::ObjectStore>>,
     owned: OwnerRecord,
     version: UpdateVersion,
+    /// `Some` for a backfill lane owner, whose record is in the lane's
+    /// control directory instead of the bucket root.
+    lane: Option<LaneScope>,
     /// Chosen by this acquisition's canary; every conditional request
     /// through this owner uses it.
     etag_form: ETagForm,
@@ -290,8 +371,30 @@ impl S3Ownership {
         operation: &str,
         scopes: Vec<String>,
     ) -> Result<Self> {
+        Self::acquire_at(store, None, operation, scopes).await
+    }
+
+    /// [`Self::acquire`] for one backfill lane: the same record protocol on
+    /// the lane's own key, independent of the bucket owner and of every other
+    /// lane.
+    pub async fn acquire_lane(
+        store: Arc<dyn ObjectStore>,
+        lane: LaneScope,
+        operation: &str,
+        scopes: Vec<String>,
+    ) -> Result<Self> {
+        Self::acquire_at(store, Some(lane), operation, scopes).await
+    }
+
+    async fn acquire_at(
+        store: Arc<dyn ObjectStore>,
+        lane: Option<LaneScope>,
+        operation: &str,
+        scopes: Vec<String>,
+    ) -> Result<Self> {
         let scopes = normalize_request(operation, scopes)?;
-        let current = read_record(&store).await?;
+        let base = owner_base(lane.as_ref());
+        let current = read_record(&store, &base).await?;
         if current
             .as_ref()
             .is_some_and(|(record, _)| record.state == OwnerState::Owned)
@@ -303,7 +406,7 @@ impl S3Ownership {
             .map_or(0, |(record, _)| record.generation)
             .checked_add(1)
             .ok_or(OwnershipError::GenerationExhausted)?;
-        let etag_form = qualify_conditions(&store).await?;
+        let etag_form = qualify_conditions(&store, &base).await?;
         let owned = OwnerRecord {
             format_version: FORMAT_VERSION,
             generation,
@@ -317,13 +420,14 @@ impl S3Ownership {
             None => PutMode::Create,
             Some((_, version)) => update(etag_form, &version)?,
         };
-        let version = transition(&store, &owned, mode).await?;
+        let version = transition(&store, &base, &owned, mode).await?;
         Ok(Self {
             store,
             native_upload: None,
             delta_log: None,
             owned,
             version,
+            lane,
             etag_form,
             mutation_uncertain: AtomicBool::new(false),
             control_mutation: tokio::sync::Mutex::new(()),
@@ -333,10 +437,11 @@ impl S3Ownership {
 
     pub(crate) async fn acquire_native(
         upload: crate::s3::upload::NativeS3Upload,
+        lane: Option<LaneScope>,
         operation: &str,
         scopes: Vec<String>,
     ) -> Result<Self> {
-        let mut owner = Self::acquire(upload.object_store(), operation, scopes).await?;
+        let mut owner = Self::acquire_at(upload.object_store(), lane, operation, scopes).await?;
         owner.native_upload = Some(upload);
         Ok(owner)
     }
@@ -362,7 +467,30 @@ impl S3Ownership {
 
     /// Read-only inspection. Never probes, renews, releases or creates an object.
     pub async fn status(store: &Arc<dyn ObjectStore>) -> Result<Option<OwnerRecord>> {
-        Ok(read_record(store).await?.map(|(record, _)| record))
+        Ok(read_record(store, "").await?.map(|(record, _)| record))
+    }
+
+    /// [`Self::status`] of one backfill lane's owner.
+    pub async fn lane_status(
+        store: &Arc<dyn ObjectStore>,
+        lane: &LaneScope,
+    ) -> Result<Option<OwnerRecord>> {
+        Ok(read_record(store, &lane.directory())
+            .await?
+            .map(|(record, _)| record))
+    }
+
+    /// The record now stored where this owner's is: the bucket's, or its
+    /// lane's. It equals [`Self::record`] while this guard still owns.
+    pub async fn stored_record(&self) -> Result<Option<OwnerRecord>> {
+        Ok(read_record(&self.store, &owner_base(self.lane.as_ref()))
+            .await?
+            .map(|(record, _)| record))
+    }
+
+    /// The backfill lane this owner guards; `None` for a bucket owner.
+    pub fn lane(&self) -> Option<&LaneScope> {
+        self.lane.as_ref()
     }
 
     pub(crate) fn acquire_transaction_session(
@@ -437,7 +565,8 @@ impl S3Ownership {
     }
 
     async fn release_once(&self, released: &OwnerRecord) -> Result<()> {
-        let Some((current, version)) = read_record(&self.store).await? else {
+        let base = owner_base(self.lane.as_ref());
+        let Some((current, version)) = read_record(&self.store, &base).await? else {
             return Err(OwnershipError::StateChanged);
         };
         // An earlier attempt of this release landed; only it writes this record.
@@ -449,6 +578,7 @@ impl S3Ownership {
         }
         transition(
             &self.store,
+            &base,
             released,
             update(self.etag_form, &self.version)?,
         )
@@ -463,6 +593,26 @@ impl S3Ownership {
         expected: &OwnerRecord,
         authorization: RecoveryAuthorization,
     ) -> Result<()> {
+        Self::operator_release_at(store, None, expected, authorization).await
+    }
+
+    /// [`Self::operator_release`] of one backfill lane's owner.
+    pub async fn operator_release_lane(
+        store: Arc<dyn ObjectStore>,
+        lane: &LaneScope,
+        expected: &OwnerRecord,
+        authorization: RecoveryAuthorization,
+    ) -> Result<()> {
+        Self::operator_release_at(store, Some(lane), expected, authorization).await
+    }
+
+    async fn operator_release_at(
+        store: Arc<dyn ObjectStore>,
+        lane: Option<&LaneScope>,
+        expected: &OwnerRecord,
+        authorization: RecoveryAuthorization,
+    ) -> Result<()> {
+        let base = owner_base(lane);
         expected.validate()?;
         if expected.state != OwnerState::Owned
             || authorization.expected_owner != expected.owner_id
@@ -470,17 +620,17 @@ impl S3Ownership {
         {
             return Err(OwnershipError::RecoveryEvidenceRequired);
         }
-        let Some((current, version)) = read_record(&store).await? else {
+        let Some((current, version)) = read_record(&store, &base).await? else {
             return Err(OwnershipError::StateChanged);
         };
         if current != *expected {
             return Err(OwnershipError::StateChanged);
         }
-        let etag_form = qualify_conditions(&store).await?;
+        let etag_form = qualify_conditions(&store, &base).await?;
         let mut released = expected.clone();
         released.state = OwnerState::Released;
         released.recovery = Some(authorization.receipt);
-        transition(&store, &released, update(etag_form, &version)?).await?;
+        transition(&store, &base, &released, update(etag_form, &version)?).await?;
         Ok(())
     }
 }
@@ -698,8 +848,11 @@ async fn read_bytes(
     .map_err(|_| OwnershipError::ReadFailed)?
 }
 
-async fn read_record(store: &Arc<dyn ObjectStore>) -> Result<Option<(OwnerRecord, UpdateVersion)>> {
-    let Some((bytes, version)) = read_bytes(store, &Path::from(OWNER_KEY)).await? else {
+async fn read_record(
+    store: &Arc<dyn ObjectStore>,
+    base: &str,
+) -> Result<Option<(OwnerRecord, UpdateVersion)>> {
+    let Some((bytes, version)) = read_bytes(store, &owner_path(base, OWNER_KEY)).await? else {
         return Ok(None);
     };
     let record: OwnerRecord =
@@ -807,6 +960,7 @@ fn reported_version_matches(reported: &PutResult, current: &UpdateVersion) -> bo
 
 async fn transition(
     store: &Arc<dyn ObjectStore>,
+    base: &str,
     next: &OwnerRecord,
     mode: PutMode,
 ) -> Result<UpdateVersion> {
@@ -815,7 +969,7 @@ async fn transition(
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(OwnershipError::InvalidRecord);
     }
-    write_and_verify(store, &Path::from(OWNER_KEY), bytes.into(), mode).await
+    write_and_verify(store, &owner_path(base, OWNER_KEY), bytes.into(), mode).await
 }
 
 /// `PutMode::Update` on `version` in `form`. An ETag that the form cannot
@@ -834,14 +988,14 @@ fn update(form: ETagForm, version: &UpdateVersion) -> Result<PutMode> {
 /// refused ETag was quoted. That form is adopted only if every step passes,
 /// including the wrong-version and stale-version refusals. Anything else
 /// fails closed.
-async fn qualify_conditions(store: &Arc<dyn ObjectStore>) -> Result<ETagForm> {
-    match canary(store, ETagForm::AsReturned).await {
+async fn qualify_conditions(store: &Arc<dyn ObjectStore>, base: &str) -> Result<ETagForm> {
+    match canary(store, base, ETagForm::AsReturned).await {
         Ok(()) => {
             tracing::debug!("s3 conditional writes: If-Match ETags sent as returned");
             Ok(ETagForm::AsReturned)
         }
         Err(CanaryFailure::CorrectVersionRefused { quoted: true }) => {
-            canary(store, ETagForm::Unquoted)
+            canary(store, base, ETagForm::Unquoted)
                 .await
                 .map_err(|_| OwnershipError::ConditionalWritesUnproven)?;
             tracing::info!(
@@ -874,9 +1028,10 @@ impl From<OwnershipError> for CanaryFailure {
 /// negative probes must never target the real ownership record.
 async fn canary(
     store: &Arc<dyn ObjectStore>,
+    base: &str,
     form: ETagForm,
 ) -> std::result::Result<(), CanaryFailure> {
-    let key = Path::from(format!("{PROBE_PREFIX}/{}.json", Uuid::new_v4()));
+    let key = owner_path(base, &format!("{PROBE_PREFIX}/{}.json", Uuid::new_v4()));
     let result = canary_steps(store, &key, form).await;
     // Only this random, private canary is deleted. The owner key is never deleted.
     let deleted = tokio::time::timeout(REQUEST_TIMEOUT, store.delete(&key)).await;

@@ -117,6 +117,9 @@ logs = pl.scan_delta("output/mainnet/logs").filter(
 )
 ```
 
+The rule does not hold while a [parallel backfill](parallel-backfill.md) is
+not sealed: its lanes fill disjoint ranges in any order.
+
 For a final-only dataset this cut is the canonical chain up to the frontier.
 Non-final output applies the same rule with `stream_ordinal` in place of
 `block_num` (heights repeat in its event history): bound every other table by

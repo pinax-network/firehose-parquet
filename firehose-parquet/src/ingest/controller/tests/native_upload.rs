@@ -15,9 +15,10 @@ async fn native_controller_spools_receipts_before_put_then_commits_verified_part
         .await
         .unwrap()
         .is_empty());
-    let owner = S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()])
-        .await
-        .unwrap();
+    let owner =
+        S3Ownership::acquire_native(server.client.clone(), None, "build", vec!["dataset".into()])
+            .await
+            .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut descriptor = actual_descriptor(temp.path());
     descriptor.output = StorageIdentity::S3 {
@@ -96,10 +97,14 @@ async fn native_controller_retains_writing_owner_and_cursor_on_uncertain_publica
         Fault::OversizeHeaders,
     ] {
         let server = Server::start().await;
-        let owner =
-            S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()])
-                .await
-                .unwrap();
+        let owner = S3Ownership::acquire_native(
+            server.client.clone(),
+            None,
+            "build",
+            vec!["dataset".into()],
+        )
+        .await
+        .unwrap();
         let owner_record = owner.record().clone();
         let store = owner.object_store().clone();
         let temp = tempfile::tempdir().unwrap();
@@ -172,9 +177,10 @@ async fn native_controller_retains_writing_owner_and_cursor_on_uncertain_publica
 #[tokio::test]
 async fn cancelling_native_put_after_acceptance_retains_owner_and_writing() {
     let server = Server::start().await;
-    let owner = S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()])
-        .await
-        .unwrap();
+    let owner =
+        S3Ownership::acquire_native(server.client.clone(), None, "build", vec!["dataset".into()])
+            .await
+            .unwrap();
     let expected_owner = owner.record().clone();
     let store = owner.object_store().clone();
     let temp = tempfile::tempdir().unwrap();

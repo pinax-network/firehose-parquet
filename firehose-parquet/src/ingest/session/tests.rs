@@ -1467,5 +1467,6 @@ async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappea
     owner.finish(Ok(())).await.unwrap();
 }
 
+mod backfill;
 mod delta;
 mod resume_cost;

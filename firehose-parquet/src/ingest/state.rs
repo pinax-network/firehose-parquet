@@ -261,6 +261,16 @@ impl StreamDescriptor {
         self.validate()?;
         Digest::hash("stream", self)
     }
+    /// The stream of one parallel backfill lane of this dataset
+    /// ([`super::backfill`]): the same semantics and output, starting at the
+    /// lane's first block and without a cursor mirror.
+    pub(crate) fn backfill_lane(&self, start: u64) -> Self {
+        Self {
+            origin_start: start,
+            mirror: MirrorBinding::Disabled,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -477,6 +487,40 @@ impl AuthorityState {
     pub fn validate(&self) -> Result<()> {
         self.descriptor.validate()?;
         self.checkpoint.validate(&self.descriptor)
+    }
+    /// The authority of a dataset sealed from a complete parallel backfill
+    /// ([`super::backfill`]): everything from the stream's start up to `stop`
+    /// is accepted and complete, ending at the last lane's final `event`,
+    /// whose cursor the live writer resumes from. `ordinal` is the lanes'
+    /// accepted events in total; no table holds a `txn` of this stream yet,
+    /// so the next transaction's ordinal is above every lane's.
+    pub(crate) fn sealed(
+        descriptor: StreamDescriptor,
+        ordinal: u64,
+        event: EventIdentity,
+        stop: u64,
+    ) -> Result<Self> {
+        let stream = descriptor.id()?;
+        let initial = Checkpoint::initial(&descriptor)?;
+        let mut accepted = Checkpoint {
+            id: initial.id.clone(),
+            previous: Some(initial.id),
+            ordinal,
+            event: Some(event),
+            routing: RoutingCheckpoint {
+                policy: descriptor.routing_policy,
+                anchor: None,
+            },
+            completed_stop: None,
+        };
+        accepted.id = accepted.identity(&stream)?;
+        accepted.validate(&descriptor)?;
+        let state = Self {
+            checkpoint: accepted.complete_request(&descriptor, stop)?,
+            descriptor,
+        };
+        state.validate()?;
+        Ok(state)
     }
     pub fn install(&self, pending: &PendingTransaction) -> Result<Self> {
         self.validate_predecessor(pending)?;

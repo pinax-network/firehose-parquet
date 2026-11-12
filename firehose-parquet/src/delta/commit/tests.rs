@@ -42,6 +42,7 @@ fn identity(seed: char) -> DeltaIdentity {
         descriptor: seed.to_string().repeat(64),
         chain: "test-chain".into(),
         block_type: "evm".into(),
+        lane: None,
     }
 }
 

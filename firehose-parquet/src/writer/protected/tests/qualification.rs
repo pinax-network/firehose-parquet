@@ -144,10 +144,14 @@ fn native_spool_process_qualification() {
                     assert!(endpoint.starts_with("http://127.0.0.1:"));
                     let native =
                         crate::s3::upload::NativeS3Upload::fixture_client(endpoint).unwrap();
-                    let owner =
-                        S3Ownership::acquire_native(native, "fixture", vec!["dataset".into()])
-                            .await
-                            .unwrap();
+                    let owner = S3Ownership::acquire_native(
+                        native,
+                        None,
+                        "fixture",
+                        vec!["dataset".into()],
+                    )
+                    .await
+                    .unwrap();
                     let store = S3PartStore::new(&owner, "dataset").unwrap();
                     store.publish(&encoded).await.unwrap();
                     owner.release().await.unwrap();

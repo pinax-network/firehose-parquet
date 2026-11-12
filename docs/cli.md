@@ -440,6 +440,24 @@ Lookup order matches `inspect`: explicit `s3://...` URIs win, existing local pat
 | `--cross-partition` | `false` | Check continuity between adjacent partitions |
 | `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
 
+### `backfill` — parallel backfill of a new dataset
+
+```bash
+fireparq backfill open --network base --output s3://base \
+  --start-block 0 --stop-block 20000000 --lane-blocks 250000
+fireparq backfill status s3://base
+fireparq backfill seal s3://base
+```
+
+| Subcommand | Behavior |
+|---|---|
+| `open` | Takes the options of `build` plus `--lane-blocks`, and writes the backfill plan and the empty tables into an empty S3 root. `--stop-block` is required |
+| `status` | Read-only: the range, the lanes by state (`not_started`, `running`, `stopped`, `complete`) and the first incomplete ones |
+| `seal` | Requires every lane complete, checks `blocks` for continuity (`--no-validate` skips it, `--allow-gaps` allows skipped heights), and writes the dataset's authority |
+
+Each lane is an ordinary `build` with the lane's `--start-block` and
+`--stop-block`. See [Parallel backfill](parallel-backfill.md).
+
 ### `recovery` — ownership and recovery state
 
 `build` and `recovery recover` hold dataset ownership. After an interrupted
@@ -468,6 +486,9 @@ fireparq recovery release s3://ethereum-mainnet \
 | `status` | Read-only ownership and control-record summary |
 | `recover` | Recover protected ingestion and the mirror under one owner, including the Delta tables of an interrupted transaction, and print `{"recovered_protected_roots": N}`. A retained S3 owner must be released first |
 | `release` | S3 only. Requires `--expected-owner` and `--expected-generation` exactly as reported by `status`, plus `--stopped-writer-evidence` and `--provider-quiescence-evidence` (non-secret operator references). It changes only ownership and repairs no data |
+
+`status` and `release` take `--lane <start>-<stop>` for the owner and records
+of one [parallel backfill](parallel-backfill.md) lane instead of the bucket's.
 
 Local ownership is an OS directory lock that is released when the owning process
 exits; it cannot be forcibly released. Stopping a process or waiting does not

@@ -264,9 +264,14 @@ async fn live_flush_phase_benchmark() {
         };
         let remote_owner = match &backend {
             Backend::S3(server) => Some(
-                S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()])
-                    .await
-                    .unwrap(),
+                S3Ownership::acquire_native(
+                    server.client.clone(),
+                    None,
+                    "build",
+                    vec!["dataset".into()],
+                )
+                .await
+                .unwrap(),
             ),
             Backend::Local(_) => None,
         };
