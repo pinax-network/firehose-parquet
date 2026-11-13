@@ -97,7 +97,7 @@ spec:
             - name: outcomes
               # `fireparq` is the ENTRYPOINT. Pin the digest of the release's
               # image in production, the writer's.
-              image: ghcr.io/pinax-network/firehose-parquet:1.3.1
+              image: ghcr.io/pinax-network/firehose-parquet:1.4.0
               args: ["hypercore-reference", "outcomes"]
               envFrom:
                 - configMapRef:
@@ -179,7 +179,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: meta
-              image: ghcr.io/pinax-network/firehose-parquet:1.3.1
+              image: ghcr.io/pinax-network/firehose-parquet:1.4.0
               args: ["hypercore-reference", "meta"]
               envFrom:
                 - configMapRef:
@@ -258,7 +258,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: funding
-              image: ghcr.io/pinax-network/firehose-parquet:1.3.1
+              image: ghcr.io/pinax-network/firehose-parquet:1.4.0
               args: ["hypercore-reference", "funding"]
               envFrom:
                 - configMapRef:
