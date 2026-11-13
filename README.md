@@ -158,6 +158,7 @@ the maintenance CronJobs.
 | | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
+| | [Parallel backfill](docs/parallel-backfill.md) | `fireparq backfill`: fill a new dataset's history with one `build` per block range, then seal it |
 | | [Delta maintenance](docs/delta-maintenance.md) | `fireparq maintenance`: compaction in the writer's row order, VACUUM, checkpoints, CronJobs |
 | | [HyperLiquid reference tables](docs/hypercore-reference.md) | `fireparq hypercore-reference`: HyperLiquid `/info` names and labels as `hl_*` Delta tables beside a HyperCore lake, their views and joins, CronJobs |
 | | [Prometheus metrics](docs/metrics.md) | Metrics, `/health` and `/ready` |

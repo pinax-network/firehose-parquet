@@ -94,6 +94,10 @@ pub struct DeltaIdentity {
     pub chain: String,
     /// The descriptor's block family label.
     pub block_type: String,
+    /// The committer's own id (SHA-256, hex) when it is not the dataset's
+    /// stream: a parallel backfill lane (`ingest::backfill`). Lanes share
+    /// the dataset's tables and each has its own `txn` application id.
+    pub lane: Option<String>,
 }
 
 impl DeltaIdentity {
@@ -106,12 +110,28 @@ impl DeltaIdentity {
             descriptor: descriptor.id()?.as_str().to_string(),
             chain: descriptor.chain.clone(),
             block_type,
+            lane: None,
         })
     }
 
-    /// The `txn` application id: `fireparq:<descriptor SHA-256>`.
+    /// The identity the backfill lane `[start, stop)` commits with: this
+    /// dataset's tables, and an application id of its own, derived from the
+    /// dataset and the range. It differs from the dataset's and from every
+    /// other lane's, even where a lane's stream descriptor equals the
+    /// dataset's (the first lane of a dataset without a cursor mirror).
+    pub fn for_lane(mut self, start: u64, stop: u64) -> Result<Self> {
+        let id = crate::ingest::Digest::hash("backfill-lane", &(&self.descriptor, start, stop))?;
+        self.lane = Some(id.as_str().to_string());
+        Ok(self)
+    }
+
+    /// The `txn` application id: `fireparq:<SHA-256>` of the dataset's
+    /// descriptor, or the lane's own id when a backfill lane commits.
     pub fn app_id(&self) -> String {
-        format!("fireparq:{}", self.descriptor)
+        format!(
+            "fireparq:{}",
+            self.lane.as_deref().unwrap_or(&self.descriptor)
+        )
     }
 
     /// The `fireparq.*` table properties.
@@ -264,6 +284,7 @@ mod tests {
             descriptor: "a".repeat(64),
             chain: "eth-mainnet".into(),
             block_type: "evm".into(),
+            lane: None,
         }
     }
 

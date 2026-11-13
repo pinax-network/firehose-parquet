@@ -246,3 +246,86 @@ fn overlapping_partition_at_max_height_has_no_wrapping_boundary() {
     assert!(result.cross_partition_issues.is_empty());
     assert_eq!(result.max_block, Some(u64::MAX));
 }
+
+/// Blocks `first..=last` of one chain: block `n` is `b<n>` with parent `b<n-1>`.
+fn chain(first: u64, last: u64) -> Vec<BlockTuple> {
+    (first..=last)
+        .map(|n| (n, format!("b{n}"), format!("b{}", n.wrapping_sub(1)), None))
+        .collect()
+}
+
+/// The range check of partitions given as their sorted tuples.
+fn range_problems(partitions: &[Vec<BlockTuple>], start: u64, stop: u64) -> Vec<String> {
+    let mut check = BlockRangeCheck::default();
+    let mut runs = Vec::new();
+    for partition in partitions {
+        block_runs(partition, &mut runs, &mut check);
+    }
+    join_block_runs(runs, start, stop, &mut check);
+    assert_eq!(check.problem_count, check.problems.len() as u64);
+    check.problems
+}
+
+#[test]
+fn block_range_joins_partitions_in_block_order() {
+    // Partitions in any order, and one whose blocks interleave with its
+    // neighbour's (a block time earlier than its parent's).
+    let mut split = chain(100, 104);
+    split.extend(chain(106, 106));
+    let mut other = chain(105, 105);
+    other.extend(chain(107, 109));
+    assert!(range_problems(&[chain(110, 119), other, split], 100, 120).is_empty());
+}
+
+#[test]
+fn block_range_refuses_a_table_that_is_not_the_range() {
+    let one = |partitions: &[Vec<BlockTuple>]| {
+        let problems = range_problems(partitions, 100, 110);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        problems.into_iter().next().unwrap()
+    };
+    // The beginning and the end, which no pair of rows shows.
+    assert_eq!(
+        one(&[chain(101, 109)]),
+        "the first block is 101, not the start block 100"
+    );
+    assert_eq!(one(&[chain(100, 108)]), "the last block is 108, not 109");
+    assert_eq!(one(&[chain(100, 110)]), "the last block is 110, not 109");
+    assert_eq!(one(&[]), "the table has no blocks");
+    // Between partitions, and inside one.
+    assert_eq!(
+        one(&[chain(100, 103), chain(105, 109)]),
+        "blocks 104 to 104 are missing"
+    );
+    assert_eq!(
+        one(&[chain(100, 105), chain(104, 109)]),
+        "blocks 104 to 105 are stored more than once"
+    );
+    let mut twice = chain(100, 109);
+    twice.insert(3, twice[3].clone());
+    assert_eq!(one(&[twice]), "block 103 is stored more than once");
+    // A broken parent link inside a partition, and where two partitions join.
+    let mut broken = chain(100, 109);
+    broken[4].2 = "fork".into();
+    assert_eq!(
+        one(&[broken]),
+        "block 104 has parent fork, but block 103 is b103"
+    );
+    let mut tail = chain(105, 109);
+    tail[0].2 = "fork".into();
+    assert_eq!(
+        one(&[chain(100, 104), tail]),
+        "block 105 has parent fork, but block 104 is b104"
+    );
+}
+
+#[test]
+fn block_range_lists_a_bounded_number_of_problems() {
+    let gapped: Vec<BlockTuple> = (0..100).flat_map(|n| chain(n * 2, n * 2)).collect();
+    let mut check = BlockRangeCheck::default();
+    let mut runs = Vec::new();
+    block_runs(&gapped, &mut runs, &mut check);
+    join_block_runs(runs, 0, 199, &mut check);
+    assert_eq!(check.problem_count, 99);
+    assert_eq!(check.problems.len(), LISTED_RANGE_PROBLEMS);
+}

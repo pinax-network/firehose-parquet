@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use crate::cli::{AwsArgs, AwsConfig};
 use crate::dataset_lock::LocalOwnership;
-use crate::dataset_lock_s3::{OwnerRecord, OwnerState, RecoveryAuthorization, S3Ownership};
+use crate::dataset_lock_s3::{
+    LaneScope, OwnerRecord, OwnerState, RecoveryAuthorization, S3Ownership,
+};
 use crate::durable_state::{
     ControlKey, ControlVersion, LocalStateStore, CONTROL_DIRECTORY, MAX_CONTROL_BYTES,
 };
@@ -43,6 +45,10 @@ pub const LEGACY_ENDPOINT_ENV: &str = "AWS_ENDPOINT_URL";
 pub struct RecoveryStorageArgs {
     /// Existing local dataset root or explicit s3://bucket/prefix URI.
     pub path: String,
+    /// A parallel backfill lane of that root, as <start>-<stop>: its owner
+    /// and records instead of the bucket's and the dataset's (S3 only).
+    #[arg(long)]
+    pub lane: Option<String>,
     #[command(flatten)]
     pub aws: AwsArgs,
 }
@@ -138,6 +144,9 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
     let result = match command {
         RecoveryCommands::Status(storage) => status(storage).await?,
         RecoveryCommands::Recover(storage) => {
+            if storage.lane.is_some() {
+                bail!("a backfill lane recovers itself: rerun `build` with the lane's --start-block and --stop-block");
+            }
             let aws = storage.aws();
             let prepared = crate::ingest::maintenance::acquire(
                 "recovery",
@@ -167,8 +176,9 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
             )?;
             let store: Arc<dyn ObjectStore> =
                 Arc::new(args.storage.aws().build_s3_client_for_mutation(&bucket)?);
-            release_exact(store.clone(), args).await?;
-            remote_status(store, &prefix).await?
+            let lane = lane_scope(&args.storage, &prefix)?;
+            release_exact(store.clone(), lane.as_ref(), args).await?;
+            remote_status(store, &prefix, lane.as_ref()).await?
         }
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -179,8 +189,12 @@ async fn status(storage: &RecoveryStorageArgs) -> Result<RecoveryStatus> {
     if storage.path.starts_with("s3://") {
         let (bucket, prefix) = remote_path(&storage.path)?;
         let store: Arc<dyn ObjectStore> = Arc::new(storage.aws().build_read_client(&bucket)?);
-        remote_status(store, &prefix).await
+        let lane = lane_scope(storage, &prefix)?;
+        remote_status(store, &prefix, lane.as_ref()).await
     } else {
+        if storage.lane.is_some() {
+            bail!("backfill lanes exist only in S3 datasets");
+        }
         local_status(Path::new(&storage.path))
     }
 }
@@ -236,19 +250,47 @@ fn remote_path(path: &str) -> Result<(String, String)> {
     Ok((bucket, prefix))
 }
 
-async fn remote_status(store: Arc<dyn ObjectStore>, prefix: &str) -> Result<RecoveryStatus> {
-    let record = S3Ownership::status(&store).await?;
+/// The lane `--lane` names in the dataset at `prefix`.
+fn lane_scope(storage: &RecoveryStorageArgs, prefix: &str) -> Result<Option<LaneScope>> {
+    storage
+        .lane
+        .as_deref()
+        .map(|lane| crate::ingest::parse_lane(prefix, lane))
+        .transpose()
+}
+
+async fn owner_status(
+    store: &Arc<dyn ObjectStore>,
+    lane: Option<&LaneScope>,
+) -> Result<Option<OwnerRecord>> {
+    Ok(match lane {
+        Some(lane) => S3Ownership::lane_status(store, lane).await?,
+        None => S3Ownership::status(store).await?,
+    })
+}
+
+async fn remote_status(
+    store: Arc<dyn ObjectStore>,
+    prefix: &str,
+    lane: Option<&LaneScope>,
+) -> Result<RecoveryStatus> {
+    let record = owner_status(&store, lane).await?;
     let ownership = match record.as_ref().map(OwnerRecord::state) {
         Some(OwnerState::Owned) => "owned",
         Some(OwnerState::Released) => "released",
         None => "absent",
     };
     // GET-only: do not create ownership probes, acquire, or release anything.
-    let state = remote_slot(&store, prefix, ControlKey::State).await?;
-    let pending = remote_slot(&store, prefix, ControlKey::Pending).await?;
+    let directory = match lane {
+        Some(lane) => lane.directory(),
+        None if prefix.is_empty() => CONTROL_DIRECTORY.to_owned(),
+        None => format!("{prefix}/{CONTROL_DIRECTORY}"),
+    };
+    let state = remote_slot(&store, &directory, ControlKey::State).await?;
+    let pending = remote_slot(&store, &directory, ControlKey::Pending).await?;
     // Status is not an ownership capability. Refuse a torn owner snapshot rather
     // than suggesting its generation can safely authorize a future mutation.
-    if S3Ownership::status(&store).await? != record {
+    if owner_status(&store, lane).await? != record {
         bail!("ownership changed while reading status; retry the read-only status command");
     }
     Ok(RecoveryStatus {
@@ -266,15 +308,11 @@ async fn remote_status(store: Arc<dyn ObjectStore>, prefix: &str) -> Result<Reco
 
 async fn remote_slot(
     store: &Arc<dyn ObjectStore>,
-    prefix: &str,
+    directory: &str,
     key: ControlKey,
 ) -> Result<SlotSummary> {
     use futures::TryStreamExt;
-    let key = object_store::path::Path::from(if prefix.is_empty() {
-        format!("{CONTROL_DIRECTORY}/{}", key.filename())
-    } else {
-        format!("{prefix}/{CONTROL_DIRECTORY}/{}", key.filename())
-    });
+    let key = object_store::path::Path::from(format!("{directory}/{}", key.filename()));
     tokio::time::timeout(Duration::from_secs(10), async {
         let object = match store.get(&key).await {
             Ok(object) => object,
@@ -307,8 +345,12 @@ async fn remote_slot(
     .map_err(|_| anyhow::anyhow!("control status read timed out"))?
 }
 
-async fn release_exact(store: Arc<dyn ObjectStore>, args: &RecoveryReleaseArgs) -> Result<()> {
-    let expected = S3Ownership::status(&store)
+async fn release_exact(
+    store: Arc<dyn ObjectStore>,
+    lane: Option<&LaneScope>,
+    args: &RecoveryReleaseArgs,
+) -> Result<()> {
+    let expected = owner_status(&store, lane)
         .await?
         .context("there is no S3 owner to release")?;
     if expected.owner_id() != args.expected_owner
@@ -321,7 +363,12 @@ async fn release_exact(store: Arc<dyn ObjectStore>, args: &RecoveryReleaseArgs) 
         &args.stopped_writer_evidence,
         &args.provider_quiescence_evidence,
     )?;
-    S3Ownership::operator_release(store, &expected, authorization).await?;
+    match lane {
+        Some(lane) => {
+            S3Ownership::operator_release_lane(store, lane, &expected, authorization).await?
+        }
+        None => S3Ownership::operator_release(store, &expected, authorization).await?,
+    }
     Ok(())
 }
 
@@ -369,10 +416,12 @@ mod tests {
             for command in [
                 RecoveryCommands::Status(RecoveryStorageArgs {
                     path: path.clone(),
+                    lane: None,
                     aws: Default::default(),
                 }),
                 RecoveryCommands::Recover(RecoveryStorageArgs {
                     path: path.clone(),
+                    lane: None,
                     aws: Default::default(),
                 }),
             ] {
@@ -391,7 +440,7 @@ mod tests {
     async fn remote_status_is_get_only_even_when_owner_absent() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         assert_eq!(
-            remote_status(store.clone(), "dataset")
+            remote_status(store.clone(), "dataset", None)
                 .await
                 .unwrap()
                 .ownership,
@@ -422,11 +471,17 @@ mod tests {
             .await
             .unwrap();
         owner.release().await.unwrap();
-        let status = remote_status(store.clone(), "").await.unwrap();
+        let status = remote_status(store.clone(), "", None).await.unwrap();
         assert!(status.state.present);
         assert!(!status.pending.present);
         assert_eq!(status.ownership, "released");
-        assert!(!remote_status(store, "mainnet").await.unwrap().state.present);
+        assert!(
+            !remote_status(store, "mainnet", None)
+                .await
+                .unwrap()
+                .state
+                .present
+        );
     }
 
     #[test]
@@ -468,6 +523,7 @@ mod tests {
         RecoveryReleaseArgs {
             storage: RecoveryStorageArgs {
                 path: "s3://fixture/data".into(),
+                lane: None,
                 aws: AwsArgs::default(),
             },
             expected_owner: owner.owner_id().to_owned(),
@@ -487,20 +543,20 @@ mod tests {
         drop(owner);
         let mut request = args(&expected);
         request.expected_generation += 1;
-        assert!(release_exact(store.clone(), &request).await.is_err());
+        assert!(release_exact(store.clone(), None, &request).await.is_err());
         request.expected_generation = expected.generation();
         request.provider_quiescence_evidence.clear();
-        assert!(release_exact(store.clone(), &request).await.is_err());
+        assert!(release_exact(store.clone(), None, &request).await.is_err());
         assert_eq!(
             S3Ownership::status(&store).await.unwrap(),
             Some(expected.clone())
         );
         request = args(&expected);
-        release_exact(store.clone(), &request).await.unwrap();
+        release_exact(store.clone(), None, &request).await.unwrap();
         let released = S3Ownership::status(&store).await.unwrap().unwrap();
         assert_eq!(released.state(), OwnerState::Released);
         assert_eq!(released.generation(), expected.generation());
-        assert!(release_exact(store, &request).await.is_err());
+        assert!(release_exact(store, None, &request).await.is_err());
         let debug = format!("{request:?}");
         assert!(!debug.contains("fixture task"));
     }

@@ -825,20 +825,20 @@ async fn each_canary_form_proves_its_refusals() {
     // A store with unquoted ETags passes in both forms, which render alike.
     let memory: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     for form in [ETagForm::AsReturned, ETagForm::Unquoted] {
-        canary(&memory, form).await.unwrap();
+        canary(&memory, "", form).await.unwrap();
     }
     // RGW 19.2: the quoted form of the correct version is refused, cleanly.
     let rgw: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::default());
     assert!(matches!(
-        canary(&rgw, ETagForm::AsReturned).await,
+        canary(&rgw, "", ETagForm::AsReturned).await,
         Err(CanaryFailure::CorrectVersionRefused { quoted: true })
     ));
-    canary(&rgw, ETagForm::Unquoted).await.unwrap();
+    canary(&rgw, "", ETagForm::Unquoted).await.unwrap();
     // Neither form matches: both runs fail on the correct version.
     let refusing: Arc<dyn ObjectStore> = Arc::new(Rgw19Store::refusing_every_version());
     for form in [ETagForm::AsReturned, ETagForm::Unquoted] {
         assert!(matches!(
-            canary(&refusing, form).await,
+            canary(&refusing, "", form).await,
             Err(CanaryFailure::CorrectVersionRefused { .. })
         ));
     }
@@ -902,3 +902,122 @@ async fn a_store_refusing_both_forms_fails_closed() {
 
 mod provider;
 mod wire;
+
+/// #725: a backfill lane's owner is the same record protocol on the lane's
+/// own key. Lanes and the bucket owner are independent of one another; one
+/// lane still has one owner.
+#[tokio::test]
+async fn lane_owners_are_independent_of_the_bucket_owner_and_of_other_lanes() {
+    let (fake, store) = store();
+    let lane = |start, stop| LaneScope::new("mainnet", start, stop).unwrap();
+    let scopes = || vec!["mainnet".to_string()];
+    let bucket = acquire(&store).await;
+    let first = S3Ownership::acquire_lane(store.clone(), lane(0, 100), "backfill-lane", scopes())
+        .await
+        .unwrap();
+    let second =
+        S3Ownership::acquire_lane(store.clone(), lane(100, 200), "backfill-lane", scopes())
+            .await
+            .unwrap();
+    assert_eq!(first.lane(), Some(&lane(0, 100)));
+    assert_eq!(bucket.lane(), None);
+    // One lane, one owner.
+    assert_eq!(
+        S3Ownership::acquire_lane(store.clone(), lane(0, 100), "backfill-lane", scopes())
+            .await
+            .unwrap_err(),
+        OwnershipError::Busy
+    );
+    // Each record is at its own key, and the bucket's is untouched by lanes.
+    let keys: Vec<String> = fake
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| key.ends_with(OWNER_KEY))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            OWNER_KEY.to_string(),
+            format!("mainnet/.fireparq-ingest/lanes/0-100/{OWNER_KEY}"),
+            format!("mainnet/.fireparq-ingest/lanes/100-200/{OWNER_KEY}"),
+        ]
+    );
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap(),
+        *bucket.record()
+    );
+    assert_eq!(
+        S3Ownership::lane_status(&store, &lane(100, 200))
+            .await
+            .unwrap()
+            .unwrap(),
+        *second.record()
+    );
+    assert!(S3Ownership::lane_status(&store, &lane(200, 300))
+        .await
+        .unwrap()
+        .is_none());
+
+    // Releasing a lane leaves the bucket owner and the other lane owned, and
+    // the lane can be taken again at the next generation.
+    first.release().await.unwrap();
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap().state(),
+        OwnerState::Owned
+    );
+    assert_eq!(
+        S3Ownership::lane_status(&store, &lane(100, 200))
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        OwnerState::Owned
+    );
+    let again = S3Ownership::acquire_lane(store.clone(), lane(0, 100), "backfill-lane", scopes())
+        .await
+        .unwrap();
+    assert_eq!(again.record().generation(), 2);
+
+    // A stranded lane owner is released by its exact record, like a bucket's.
+    let stranded = again.record().clone();
+    drop(again);
+    let authorization = RecoveryAuthorization::assert_provider_quiescence(
+        &stranded,
+        "process reaped",
+        "provider drained",
+    )
+    .unwrap();
+    S3Ownership::operator_release_lane(store.clone(), &lane(0, 100), &stranded, authorization)
+        .await
+        .unwrap();
+    assert_eq!(
+        S3Ownership::lane_status(&store, &lane(0, 100))
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        OwnerState::Released
+    );
+    bucket.release().await.unwrap();
+    second.release().await.unwrap();
+}
+
+#[test]
+fn lane_scopes_reject_empty_ranges_and_control_paths() {
+    assert!(LaneScope::new("mainnet", 5, 5).is_err());
+    assert!(LaneScope::new("mainnet", 6, 5).is_err());
+    assert!(LaneScope::new("/mainnet", 0, 5).is_err());
+    assert!(LaneScope::new("a/../b", 0, 5).is_err());
+    assert!(LaneScope::new("mainnet/.fireparq-ingest", 0, 5).is_err());
+    assert_eq!(
+        LaneScope::new("", 0, 5).unwrap().directory(),
+        ".fireparq-ingest/lanes/0-5"
+    );
+    assert_eq!(
+        LaneScope::new("v1/mainnet/", 0, 5).unwrap().directory(),
+        "v1/mainnet/.fireparq-ingest/lanes/0-5"
+    );
+}

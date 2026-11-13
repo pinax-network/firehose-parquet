@@ -456,6 +456,15 @@ pub fn validate_table(
     aws: Option<&AwsConfig>,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
+    let (store, table, path) = table_store(path, aws)?;
+    block_on_async(validate_snapshot(&store, &table, &path, opts))
+}
+
+/// The store of the table at `path`, the table's name and the resolved path.
+fn table_store(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<(DeltaStore, String, String)> {
     use anyhow::Context;
 
     let path = resolve_parquet_input_path_string(path);
@@ -482,7 +491,188 @@ pub fn validate_table(
         };
         (DeltaStore::local(parent)?, table.to_string())
     };
-    block_on_async(validate_snapshot(&store, &table, &path, opts))
+    Ok((store, table, path))
+}
+
+/// What [`validate_block_range`] read, and why the table is not the range.
+#[derive(Debug, Default)]
+pub struct BlockRangeCheck {
+    /// The pinned table version whose active files were read.
+    pub version: u64,
+    pub files_scanned: usize,
+    pub total_blocks: u64,
+    /// The first [`LISTED_RANGE_PROBLEMS`] problems; empty when the table
+    /// holds exactly the range.
+    pub problems: Vec<String>,
+    /// All problems found, listed or not.
+    pub problem_count: u64,
+}
+
+impl BlockRangeCheck {
+    pub fn is_valid(&self) -> bool {
+        self.problem_count == 0
+    }
+
+    fn problem(&mut self, problem: String) {
+        self.problem_count += 1;
+        if self.problems.len() < LISTED_RANGE_PROBLEMS {
+            self.problems.push(problem);
+        }
+    }
+}
+
+pub(in crate::cli) const LISTED_RANGE_PROBLEMS: usize = 20;
+const RANGE_READ_CONCURRENCY: usize = 16;
+/// A table this broken is not worth summarizing further.
+const MAX_BLOCK_RUNS: usize = 1_000_000;
+
+/// Consecutive, parent-linked block numbers of one partition.
+#[derive(Debug)]
+pub(in crate::cli) struct BlockRun {
+    first: u64,
+    first_parent_id: String,
+    last: u64,
+    last_block_id: String,
+}
+
+/// Splits one partition's tuples, sorted by block number, into its runs of
+/// consecutive block numbers. Duplicates and broken parent links inside a
+/// run are problems.
+pub(in crate::cli) fn block_runs(
+    sorted: &[BlockTuple],
+    runs: &mut Vec<BlockRun>,
+    check: &mut BlockRangeCheck,
+) {
+    let Some(mut previous) = sorted.first() else {
+        return;
+    };
+    let mut first = previous;
+    for tuple in &sorted[1..] {
+        if tuple.0 == previous.0 {
+            check.problem(format!("block {} is stored more than once", tuple.0));
+            continue;
+        }
+        if tuple.0 == previous.0 + 1 {
+            if tuple.2 != previous.1 {
+                check.problem(format!(
+                    "block {} has parent {}, but block {} is {}",
+                    tuple.0, tuple.2, previous.0, previous.1
+                ));
+            }
+        } else {
+            runs.push(BlockRun {
+                first: first.0,
+                first_parent_id: first.2.clone(),
+                last: previous.0,
+                last_block_id: previous.1.clone(),
+            });
+            first = tuple;
+        }
+        previous = tuple;
+    }
+    runs.push(BlockRun {
+        first: first.0,
+        first_parent_id: first.2.clone(),
+        last: previous.0,
+        last_block_id: previous.1.clone(),
+    });
+}
+
+/// The runs of every partition must join into exactly `[start, stop)`: no
+/// block missing, none twice, each run's first block linked to its parent.
+pub(in crate::cli) fn join_block_runs(
+    mut runs: Vec<BlockRun>,
+    start: u64,
+    stop: u64,
+    check: &mut BlockRangeCheck,
+) {
+    runs.sort_by_key(|run| run.first);
+    let mut covered: Option<(u64, String)> = None;
+    for run in runs {
+        match &covered {
+            None if run.first != start => check.problem(format!(
+                "the first block is {}, not the start block {start}",
+                run.first
+            )),
+            None => {}
+            Some((last, _)) if run.first <= *last => check.problem(format!(
+                "blocks {} to {} are stored more than once",
+                run.first,
+                run.last.min(*last)
+            )),
+            Some((last, _)) if run.first > last + 1 => check.problem(format!(
+                "blocks {} to {} are missing",
+                last + 1,
+                run.first - 1
+            )),
+            Some((last, block_id)) if run.first_parent_id != *block_id => {
+                check.problem(format!(
+                    "block {} has parent {}, but block {last} is {block_id}",
+                    run.first, run.first_parent_id
+                ));
+            }
+            Some(_) => {}
+        }
+        if covered.as_ref().is_none_or(|(last, _)| run.last > *last) {
+            covered = Some((run.last, run.last_block_id));
+        }
+    }
+    match covered {
+        None => check.problem("the table has no blocks".to_string()),
+        Some((last, _)) if last + 1 != stop => check.problem(format!(
+            "the last block is {last}, not {}",
+            stop.saturating_sub(1)
+        )),
+        Some(_) => {}
+    }
+}
+
+/// Whether the `blocks` table at `path` holds exactly the blocks of
+/// `[start, stop)`, each once and linked to its parent.
+///
+/// Unlike [`validate_table`] it holds one `date` partition in memory at a
+/// time, so it fits a table of any length (#725: `backfill seal`).
+pub async fn validate_block_range(
+    path: &str,
+    aws: Option<&AwsConfig>,
+    start: u64,
+    stop: u64,
+) -> anyhow::Result<BlockRangeCheck> {
+    use futures::{StreamExt, TryStreamExt};
+
+    let (store, table, path) = table_store(path, aws)?;
+    let pinned = pinned_files(&store, &table, &path).await?;
+    let mut check = BlockRangeCheck {
+        version: pinned.version,
+        files_scanned: pinned.files.len(),
+        ..Default::default()
+    };
+    let mut partitions: std::collections::BTreeMap<&str, Vec<_>> = Default::default();
+    for (name, location, partition) in &pinned.files {
+        partitions
+            .entry(partition)
+            .or_default()
+            .push((name, location));
+    }
+    let mut runs = Vec::new();
+    for files in partitions.into_values() {
+        let mut tuples: Vec<BlockTuple> = futures::stream::iter(files)
+            .map(|(name, location)| {
+                read_active_file(pinned.data.as_ref(), name, location, pinned.version)
+            })
+            .buffer_unordered(RANGE_READ_CONCURRENCY)
+            .try_concat()
+            .await?;
+        tuples.sort_by_key(|tuple| tuple.0);
+        check.total_blocks += tuples.len() as u64;
+        block_runs(&tuples, &mut runs, &mut check);
+        anyhow::ensure!(
+            runs.len() <= MAX_BLOCK_RUNS,
+            "{path} has more than {MAX_BLOCK_RUNS} gaps in its block numbers"
+        );
+    }
+    join_block_runs(runs, start, stop, &mut check);
+    Ok(check)
 }
 
 /// A read-only client of `bucket` for the Delta log and its data files, on
@@ -500,14 +690,16 @@ fn s3_read_client(
     Ok(std::sync::Arc::new(builder.build()?))
 }
 
-async fn validate_snapshot(
-    store: &DeltaStore,
-    table: &str,
-    path: &str,
-    opts: &ValidateOptions,
-) -> anyhow::Result<ValidateResult> {
+/// One pinned snapshot of a Delta table: its version and active data files.
+struct PinnedFiles {
+    version: u64,
+    data: std::sync::Arc<dyn object_store_delta::ObjectStore>,
+    /// (name in the log, object location, `date=...` partition).
+    files: Vec<(String, object_store_delta::path::Path, String)>,
+}
+
+async fn pinned_files(store: &DeltaStore, table: &str, path: &str) -> anyhow::Result<PinnedFiles> {
     use anyhow::Context;
-    use object_store_delta::ObjectStoreExt;
 
     anyhow::ensure!(
         !store.lacks_local_log(table)?,
@@ -522,7 +714,7 @@ async fn validate_snapshot(
         .context("an opened Delta table has no version")?;
     let version = u64::try_from(version).context("negative Delta table version")?;
     // The pinned snapshot's active files, with their `date` partition values.
-    let files: Vec<_> = delta
+    let files = delta
         .snapshot()?
         .log_data()
         .iter()
@@ -539,29 +731,57 @@ async fn validate_snapshot(
             )
         })
         .collect();
-    let data = delta.object_store();
-    let mut infos = Vec::with_capacity(files.len());
-    for (name, location, partition) in files {
-        let bytes = match data.get(&location).await {
-            Ok(object) => object.bytes().await,
-            Err(error) => Err(error),
-        };
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
-            Err(object_store_delta::Error::NotFound { .. }) => anyhow::bail!(
-                "active file {name} of version {version} is missing: a VACUUM removed it after \
-                 this snapshot was read; validate again"
-            ),
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading active file {name}"));
-            }
-        };
-        let tuples = read_validation_columns(bytes)
-            .with_context(|| format!("reading active file {name}"))?;
-        infos.push(FileInfo { partition, tuples });
+    Ok(PinnedFiles {
+        version,
+        data: delta.object_store(),
+        files,
+    })
+}
+
+/// The validation columns of one active data file of `version`.
+async fn read_active_file(
+    data: &dyn object_store_delta::ObjectStore,
+    name: &str,
+    location: &object_store_delta::path::Path,
+    version: u64,
+) -> anyhow::Result<Vec<BlockTuple>> {
+    use anyhow::Context;
+    use object_store_delta::ObjectStoreExt;
+
+    let bytes = match data.get(location).await {
+        Ok(object) => object.bytes().await,
+        Err(error) => Err(error),
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(object_store_delta::Error::NotFound { .. }) => anyhow::bail!(
+            "active file {name} of version {version} is missing: a VACUUM removed it after \
+             this snapshot was read; validate again"
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading active file {name}"));
+        }
+    };
+    read_validation_columns(bytes).with_context(|| format!("reading active file {name}"))
+}
+
+async fn validate_snapshot(
+    store: &DeltaStore,
+    table: &str,
+    path: &str,
+    opts: &ValidateOptions,
+) -> anyhow::Result<ValidateResult> {
+    let pinned = pinned_files(store, table, path).await?;
+    let mut infos = Vec::with_capacity(pinned.files.len());
+    for (name, location, partition) in &pinned.files {
+        let tuples = read_active_file(pinned.data.as_ref(), name, location, pinned.version).await?;
+        infos.push(FileInfo {
+            partition: partition.clone(),
+            tuples,
+        });
     }
     let mut result = validate_from_files(infos, opts);
-    result.version = version;
+    result.version = pinned.version;
     Ok(result)
 }
 

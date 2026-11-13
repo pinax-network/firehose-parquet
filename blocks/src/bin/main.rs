@@ -1567,6 +1567,14 @@ async fn main() -> Result<()> {
                 firehose_parquet::recovery::run_recovery(command).await?;
                 return Ok(());
             }
+            Commands::Backfill(firehose_parquet::backfill::BackfillCommands::Open(args)) => {
+                ingestion::run_backfill_open(args, &cli.global).await?;
+                return Ok(());
+            }
+            Commands::Backfill(command) => {
+                firehose_parquet::backfill::run_backfill(command).await?;
+                return Ok(());
+            }
             Commands::Completions { shell } => {
                 firehose_parquet::cli::generate_completions::<Cli>(*shell);
                 return Ok(());

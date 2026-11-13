@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
 
+use super::backfill::BackfillPlan;
 use super::state::{AuthorityState, PartReceipt, PendingTransaction, TransactionPhase};
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::S3Ownership;
@@ -37,8 +38,68 @@ impl<'a> TransactionStateStore<'a> {
     pub fn local(root: &Path, owner: &'a LocalOwnership) -> Result<Self> {
         Ok(Self::Local(LocalStateStore::new(root, owner)?))
     }
+    /// Under a backfill lane's owner these are the lane's own records.
     pub fn s3(prefix: &str, owner: &'a S3Ownership) -> Result<Self> {
         Ok(Self::S3(S3StateStore::new(owner, prefix)?))
+    }
+    /// The dataset root's own records whoever the owner is; read-only under
+    /// a backfill lane's owner.
+    pub fn s3_dataset_root(prefix: &str, owner: &'a S3Ownership) -> Result<Self> {
+        Ok(Self::S3(S3StateStore::dataset_root(owner, prefix)?))
+    }
+
+    /// The plan of the dataset's parallel backfill, if one was opened.
+    pub async fn backfill_plan(&self) -> Result<Option<BackfillPlan>> {
+        let plan = self.read::<BackfillPlan>(ControlKey::Backfill).await?;
+        match plan {
+            Some(plan) => {
+                plan.payload.validate()?;
+                Ok(Some(plan.payload))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Opens a parallel backfill. Caller must first prove the destination is
+    /// eligible for initialization, exactly as for [`Self::initialize`].
+    pub async fn create_backfill_plan(&self, plan: &BackfillPlan) -> Result<()> {
+        plan.validate()?;
+        let observed = self.load().await?;
+        if observed.authority.is_some() || observed.pending.is_some() {
+            bail!("ingestion state already exists; a backfill cannot be opened over it");
+        }
+        self.create(ControlKey::Backfill, plan).await?;
+        Ok(())
+    }
+
+    /// Whether the dataset root has an authority: an ordinary dataset, or a
+    /// backfill that was sealed.
+    pub async fn has_authority(&self) -> Result<bool> {
+        Ok(self
+            .read::<serde_json::Value>(ControlKey::State)
+            .await?
+            .is_some())
+    }
+
+    /// Seals a parallel backfill: the dataset's first authority, already
+    /// complete up to the plan's stop. Caller must have verified every lane.
+    pub async fn install_sealed(
+        &self,
+        authority: AuthorityState,
+    ) -> Result<Versioned<AuthorityState>> {
+        authority.validate()?;
+        if authority.checkpoint.completed_stop.is_none() || authority.checkpoint.ordinal == 0 {
+            bail!("a sealed authority must hold a completed, non-empty range");
+        }
+        let observed = self.load().await?;
+        if observed.authority.is_some() || observed.pending.is_some() {
+            bail!("ingestion state already exists; sealing cannot replace it");
+        }
+        let version = self.create(ControlKey::State, &authority).await?;
+        Ok(Versioned {
+            version,
+            payload: authority,
+        })
     }
 
     pub async fn load(&self) -> Result<JournalSnapshot> {

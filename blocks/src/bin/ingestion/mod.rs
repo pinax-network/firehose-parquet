@@ -82,7 +82,7 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
     let cursor_shutdown = Arc::new(AtomicBool::new(false));
     spawn_ingestion_shutdown_handler(shutdown.clone(), Arc::clone(&cursor_shutdown));
 
-    let Some(endpoint) = setup::ResolvedEndpoint::resolve(args, &shutdown).await? else {
+    let Some(endpoint) = setup::ResolvedEndpoint::resolve(args, &shutdown, true).await? else {
         return Ok(());
     };
     // Keep ownership outside all session/runtime borrows and acquire before resume.
@@ -105,6 +105,55 @@ pub(super) async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Resu
         Some(ownership) => ownership.finish(result).await,
         None => result,
     }
+}
+
+/// `fireparq backfill open`: the `build` setup up to the mapper's table
+/// inventory, then the backfill plan and the empty tables instead of a
+/// session. Nothing is streamed.
+pub(super) async fn run_backfill_open(
+    args: &firehose_parquet::backfill::BackfillOpenArgs,
+    global: &GlobalArgs,
+) -> Result<()> {
+    let build = &args.build;
+    init_tracing(
+        &build.common.log_level,
+        build.common.verbose || global.verbose,
+    );
+    anyhow::ensure!(
+        !build.common.dry_run,
+        "a backfill cannot be opened in a dry run"
+    );
+    let shutdown = CancellationToken::new();
+    let Some(endpoint) = setup::ResolvedEndpoint::resolve(build, &shutdown, false).await? else {
+        return Ok(());
+    };
+    let ownership = endpoint
+        .acquire_ownership()
+        .await?
+        .context("a backfill needs ownership of its dataset root")?;
+    let opened = async {
+        let setup = setup::IngestionSetup::resolve(build, endpoint, Some(&ownership)).await?;
+        let mut state = runtime::MapperState::new(build, &setup)?;
+        let semantics = state.semantics(&setup)?;
+        firehose_parquet::ingest::open_backfill(
+            &setup.config,
+            semantics,
+            &ownership,
+            args.lane_blocks,
+        )
+        .await
+    }
+    .await;
+    let opened = ownership.finish(opened).await?;
+    info!(
+        created = opened.created,
+        start_block = opened.start,
+        stop_block = opened.stop,
+        lane_blocks = opened.lane_blocks,
+        lanes = opened.lanes,
+        "parallel backfill is open; run one build per lane, then `fireparq backfill seal`"
+    );
+    Ok(())
 }
 
 async fn run_owned(

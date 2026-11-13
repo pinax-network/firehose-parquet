@@ -22,6 +22,9 @@ pub const MAX_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 pub enum ControlKey {
     State,
     Pending,
+    /// The plan of a parallel backfill (`crate::ingest::backfill`), written
+    /// once at the dataset root when the backfill is opened.
+    Backfill,
 }
 
 impl ControlKey {
@@ -29,6 +32,7 @@ impl ControlKey {
         match self {
             Self::State => "state.json",
             Self::Pending => "pending.json",
+            Self::Backfill => "backfill.json",
         }
     }
 }

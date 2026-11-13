@@ -318,8 +318,11 @@ fn plain_logs(output: &Output) -> String {
     }
     plain
 }
+/// The deadline only bounds a hang. On CI one run of
+/// `parallel_flush_faults_recover_every_row_exactly_once` (the aborted
+/// process) already took about 14 s, so 15 s left no margin.
 async fn run(mut command: tokio::process::Command) -> Output {
-    tokio::time::timeout(Duration::from_secs(15), command.output())
+    tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
         .expect("CLI exceeded bounded test deadline")
         .unwrap()

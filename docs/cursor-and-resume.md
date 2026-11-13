@@ -19,7 +19,9 @@ A restart costs the same however large the dataset has grown (#655). When
 `--output` already holds a dataset, `build` reads:
 
 - its control records: the S3 owner record, `.fireparq-ingest/` (the authority
-  and a pending transaction) and the `_fireparq/cursor.parquet` mirror;
+  and a pending transaction) and the `_fireparq/cursor.parquet` mirror; on S3,
+  also `.fireparq-ingest/backfill.json`, absent unless the dataset came from a
+  [parallel backfill](parallel-backfill.md);
 - each table's Delta log from its last checkpoint: `_delta_log/_last_checkpoint`,
   the checkpoint, and the commits after it (one LIST of `_delta_log/` and one
   GET per commit). The hourly [maintenance](delta-maintenance.md) checkpoint
@@ -252,7 +254,8 @@ a shutdown during local retry backoff still reports the durability failure.
 ## Ownership
 
 `build` and `recovery` hold common ownership over the output and an external
-cursor location. Local ownership uses macOS/Linux directory locks; nested
+cursor location. (A [parallel backfill](parallel-backfill.md) lane holds its
+own owner record instead of the bucket's, with the same rules.) Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
 there is one owner per bucket, and a second writing command on any prefix of it
 fails with `bucket ownership is held`. It requires conditional-write

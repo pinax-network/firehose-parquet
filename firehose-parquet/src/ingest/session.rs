@@ -108,7 +108,7 @@ pub(crate) fn aws_config(config: &Config) -> AwsConfig {
     AwsConfig::from(config)
 }
 
-fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescriptor> {
+pub(super) fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescriptor> {
     let origin = config
         .start_block
         .context("protected ingestion requires a resolved original start")?;
@@ -144,7 +144,7 @@ fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescript
     Ok(descriptor)
 }
 
-fn reserve<'a>(
+pub(super) fn reserve<'a>(
     output: &StorageIdentity,
     ownership: &'a DatasetOwnership,
 ) -> Result<SessionPermit<'a>> {
@@ -159,7 +159,9 @@ fn reserve<'a>(
             .acquire_transaction_session(),
     }
 }
-fn states<'a>(
+/// The control records this owner's session reads and writes: the dataset
+/// root's, or a backfill lane's own under a lane owner.
+pub(super) fn states<'a>(
     output: &StorageIdentity,
     ownership: &'a DatasetOwnership,
 ) -> Result<TransactionStateStore<'a>> {
@@ -301,6 +303,8 @@ pub struct IngestionSession<'a> {
     delta_types: DeltaTypes,
     failed: bool,
     metrics: Option<&'a PipelineMetrics>,
+    /// A backfill lane (#725), which takes every height of its range.
+    lane: bool,
 }
 
 impl<'a> IngestionSession<'a> {
@@ -357,7 +361,11 @@ impl<'a> IngestionSession<'a> {
         listing: &ListingStats,
     ) -> Result<Self> {
         let resumed = existing(&expected.output, ownership).await?;
-        let resuming = resumed.is_some();
+        // A backfill lane (#725) writes into a dataset its plan created: it
+        // never needs an empty root, and its tables carry the plan's stream.
+        let backfill =
+            super::backfill::session_plan(config, &expected, ownership, resumed.is_none()).await?;
+        let resuming = resumed.is_some() || backfill.is_some();
         super::maintenance::validate_ingestion_target(
             &expected.output,
             ownership,
@@ -380,10 +388,12 @@ impl<'a> IngestionSession<'a> {
         let authority = match resumed {
             Some(authority) => authority,
             None => {
-                super::eligibility::require_initializable(
-                    &expected, ownership, aws, &mirror, listing,
-                )
-                .await?;
+                if backfill.is_none() {
+                    super::eligibility::require_initializable(
+                        &expected, ownership, aws, &mirror, listing,
+                    )
+                    .await?;
+                }
                 if matches!(expected.output, StorageIdentity::Local { .. }) {
                     ownership.revalidate_local_paths()?;
                     // Keep lexical alias spelling here to sync both parent chains.
@@ -413,9 +423,16 @@ impl<'a> IngestionSession<'a> {
             }
             Ok(())
         };
+        let identity = match (&backfill, config.backfill_lane) {
+            (Some(plan), Some((start, stop))) => {
+                DeltaIdentity::of(&plan.descriptor)?.for_lane(start, stop)?
+            }
+            (None, None) => DeltaIdentity::of(&expected)?,
+            _ => bail!("the backfill lane's plan and request disagree"),
+        };
         let tables = DeltaTables::open_with(
             delta_store(&expected.output, ownership)?,
-            DeltaIdentity::of(&expected)?,
+            identity,
             delta_columns,
             authority.checkpoint.ordinal == 0,
             config.flush_concurrency.publications,
@@ -469,6 +486,7 @@ impl<'a> IngestionSession<'a> {
             delta_types,
             failed: false,
             metrics,
+            lane: config.backfill_lane.is_some(),
         })
     }
 
@@ -588,6 +606,24 @@ impl<'a> IngestionSession<'a> {
             "mapping must resolve received envelopes in order"
         );
         let event = self.frontier.received(ordinal)?.clone();
+        if self.lane {
+            // Mapping resolves in order, so the frontier's last event is this
+            // one's predecessor. A later first block or a skipped height
+            // could not be told from lost blocks when the lanes are sealed.
+            let start = self.authority().descriptor.origin_start;
+            let expected = match self.frontier.last_accepted() {
+                Some(previous) if previous.block_num >= start => previous.block_num + 1,
+                _ => start,
+            };
+            ensure!(
+                event.block_num == expected,
+                "backfill lane expected block {expected} but received block {}: a parallel \
+                 backfill needs every block number of its range, so chains that skip block \
+                 numbers, and a backfill that starts before the chain's first block, are not \
+                 supported",
+                event.block_num
+            );
+        }
         let policy = self.authority().descriptor.routing_policy;
         let anchor = match policy {
             RoutingPolicy::SolanaLastKnownV1 => {
@@ -782,7 +818,7 @@ fn require_prefix_stream_ordinals(
 
 /// The Delta table columns of every declared table, after checking that each
 /// data file schema is exactly the one its inventory digest binds.
-fn delta_columns(
+pub(super) fn delta_columns(
     tables: &BTreeMap<String, Digest>,
     schemas: &BTreeMap<String, arrow::datatypes::Schema>,
 ) -> Result<BTreeMap<String, Vec<deltalake_core::kernel::StructField>>> {
@@ -807,7 +843,10 @@ fn delta_columns(
 
 /// Where the output's Delta tables live: the local root, or the output
 /// bucket through its owner's Delta log client.
-fn delta_store(output: &StorageIdentity, ownership: &DatasetOwnership) -> Result<DeltaStore> {
+pub(super) fn delta_store(
+    output: &StorageIdentity,
+    ownership: &DatasetOwnership,
+) -> Result<DeltaStore> {
     match output {
         StorageIdentity::Local { canonical_root } => DeltaStore::local(Path::new(canonical_root)),
         StorageIdentity::S3 { bucket, prefix, .. } => {

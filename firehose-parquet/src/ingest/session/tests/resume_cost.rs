@@ -221,6 +221,7 @@ async fn local_resume_walks_no_data_directory() {
         ingestion_mutation_scopes(&config).unwrap(),
         None,
         root.to_str().unwrap(),
+        None,
     )
     .await
     .unwrap();

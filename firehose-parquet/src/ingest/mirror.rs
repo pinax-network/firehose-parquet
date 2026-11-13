@@ -280,8 +280,7 @@ impl<'a> ProtectedMirror<'a> {
                 let mut options = crate::writer::s3_put_options("no-store, no-cache, max-age=0");
                 options.mode = mode;
                 ensure!(
-                    S3Ownership::status(owner.object_store()).await?.as_ref()
-                        == Some(owner.record()),
+                    owner.stored_record().await?.as_ref() == Some(owner.record()),
                     "mirror ownership changed before publication"
                 );
                 let mut attempt = RemoteAttempt {

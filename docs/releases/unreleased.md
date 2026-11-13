@@ -14,6 +14,16 @@ empty when the release is cut.
 
 ## New features
 
+- **Parallel backfill** (#725): `fireparq backfill open` plans fixed block
+  ranges (lanes) in a new, empty S3 dataset root, one `build` per lane fills
+  them at the same time into the same Delta tables, and `fireparq backfill
+  seal` turns the result into an ordinary dataset that `build` continues
+  live. Until the seal every other `build` into the root is refused.
+  `recovery status` and `recovery release` take `--lane <start>-<stop>` for a
+  lane's own owner. Final-only streams on chains with every block number
+  (not Solana, NEAR or Beacon). See
+  [Parallel backfill](../parallel-backfill.md).
+
 ## Fixes
 
 ## Performance

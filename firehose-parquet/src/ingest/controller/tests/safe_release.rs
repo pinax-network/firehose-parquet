@@ -18,7 +18,7 @@ fn s3_descriptor(root: &Path) -> StreamDescriptor {
 }
 
 async fn try_owner(server: &Server) -> std::result::Result<S3Ownership, OwnershipError> {
-    S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()]).await
+    S3Ownership::acquire_native(server.client.clone(), None, "build", vec!["dataset".into()]).await
 }
 
 async fn initialized(server: &Server, root: &Path) -> (S3Ownership, StreamDescriptor) {

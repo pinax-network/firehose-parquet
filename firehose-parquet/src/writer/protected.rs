@@ -963,10 +963,7 @@ impl<'a> S3PartStore<'a> {
             );
         }
         ensure!(
-            S3Ownership::status(self.ownership.object_store())
-                .await?
-                .as_ref()
-                == Some(self.ownership.record()),
+            self.ownership.stored_record().await?.as_ref() == Some(self.ownership.record()),
             "remote ownership changed before part publication"
         );
         ensure!(

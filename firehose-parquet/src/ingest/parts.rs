@@ -242,8 +242,7 @@ impl<'a> TransactionParts<'a> {
                 if owner.is_mutation_uncertain() {
                     bail!("remote rollback requires provider-quiescent ownership");
                 }
-                if S3Ownership::status(owner.object_store()).await?.as_ref() != Some(owner.record())
-                {
+                if owner.stored_record().await?.as_ref() != Some(owner.record()) {
                     bail!("remote ownership changed before journal rollback");
                 }
                 let key = object_key(prefix, &part.final_relative_path)?;

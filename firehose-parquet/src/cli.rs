@@ -575,6 +575,31 @@ pub enum Commands {
     /// Inspect recovery state or explicitly release a provider-quiescent S3 owner.
     #[command(subcommand)]
     Recovery(crate::recovery::RecoveryCommands),
+    /// Fill a new dataset's history with parallel writers, then seal it.
+    ///
+    /// `open` plans fixed block ranges (lanes) in an empty S3 root, one
+    /// `build` per lane fills them side by side, and `seal` turns the
+    /// result into an ordinary dataset that `build` continues live.
+    #[command(
+        subcommand,
+        after_long_help = "\
+Example:
+  # Plan 0..20,000,000 in lanes of 250,000 blocks
+  fireparq backfill open --network base --output s3://base \\
+    --start-block 0 --stop-block 20000000 --lane-blocks 250000
+
+  # One build per lane, as many at a time as wanted
+  fireparq build --network base --output s3://base \\
+    --start-block 250000 --stop-block 500000
+
+  fireparq backfill status s3://base
+  fireparq backfill seal s3://base
+
+  # Continue live from block 20,000,000
+  fireparq build --network base --output s3://base
+"
+    )]
+    Backfill(crate::backfill::BackfillCommands),
     /// Generate shell completions for the given shell
     Completions {
         /// Shell to generate completions for

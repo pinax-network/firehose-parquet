@@ -187,6 +187,9 @@ pub struct Config {
     pub metrics_port: Option<u16>,
     pub stream_idle_timeout_secs: Option<u64>,
     pub reconnect_stall_timeout_secs: Option<u64>,
+    /// `[start, stop)` of the parallel backfill lane this run fills
+    /// ([`crate::ingest::backfill`]); `None` for an ordinary dataset.
+    pub backfill_lane: Option<(u64, u64)>,
 }
 
 impl std::fmt::Display for Compression {
@@ -368,6 +371,7 @@ impl Default for Config {
             metrics_port: None,
             stream_idle_timeout_secs: Some(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
             reconnect_stall_timeout_secs: Some(900),
+            backfill_lane: None,
         }
     }
 }

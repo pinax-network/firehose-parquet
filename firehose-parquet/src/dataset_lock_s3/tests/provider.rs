@@ -61,7 +61,7 @@ async fn qualify_real_provider_conditional_writes() {
         client,
         prefix.as_str(),
     ));
-    match qualify_conditions(&store).await {
+    match qualify_conditions(&store, "").await {
         Ok(form) => println!(
             "s3://{bucket}/{prefix}: conditional writes qualified, If-Match ETag form {form:?}"
         ),
@@ -70,7 +70,7 @@ async fn qualify_real_provider_conditional_writes() {
             for form in [ETagForm::AsReturned, ETagForm::Unquoted] {
                 println!(
                     "s3://{bucket}/{prefix}: canary with {form:?}: {:?}",
-                    canary(&store, form).await
+                    canary(&store, "", form).await
                 );
             }
             panic!("s3://{bucket}/{prefix}: {error}");

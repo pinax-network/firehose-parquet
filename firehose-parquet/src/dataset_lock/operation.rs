@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::AwsConfig;
-use crate::dataset_lock_s3::{OwnershipError, S3Ownership};
+use crate::dataset_lock_s3::{LaneScope, OwnershipError, S3Ownership};
 
 use super::LocalOwnership;
 
@@ -69,6 +69,8 @@ enum RetainReason {
 
 struct RetainedOwner {
     uri: String,
+    /// `<start>-<stop>` when the kept owner is a backfill lane's.
+    lane: Option<String>,
     owner_id: String,
     generation: u64,
     reason: RetainReason,
@@ -85,6 +87,7 @@ impl RetainedOwner {
         };
         Self {
             uri,
+            lane: owner.lane().map(LaneScope::name),
             owner_id: record.owner_id().to_owned(),
             generation: record.generation(),
             reason,
@@ -105,13 +108,22 @@ impl std::fmt::Display for RetainedOwnership {
         for owner in &self.0 {
             let RetainedOwner {
                 uri,
+                lane,
                 owner_id,
                 generation,
                 reason,
             } = owner;
+            // A lane owner blocks only its own range; the commands name it.
+            let (subject, lane_flag) = match lane {
+                Some(lane) => (
+                    format!("{uri} (backfill lane {lane})"),
+                    format!(" --lane {lane}"),
+                ),
+                None => (uri.clone(), String::new()),
+            };
             write!(
                 f,
-                "\n- {uri}: owner {owner_id}, generation {generation}, kept because "
+                "\n- {subject}: owner {owner_id}, generation {generation}, kept because "
             )?;
             match reason {
                 RetainReason::UncertainMutation => f.write_str(
@@ -132,9 +144,10 @@ impl std::fmt::Display for RetainedOwnership {
             }
             write!(
                 f,
-                ".\n  Inspect: fireparq recovery status {uri}\n  Release: fireparq recovery \
-                 release {uri} --expected-owner {owner_id} --expected-generation {generation} \
-                 --stopped-writer-evidence <reference> --provider-quiescence-evidence <reference>"
+                ".\n  Inspect: fireparq recovery status {uri}{lane_flag}\n  Release: fireparq \
+                 recovery release {uri}{lane_flag} --expected-owner {owner_id} \
+                 --expected-generation {generation} --stopped-writer-evidence <reference> \
+                 --provider-quiescence-evidence <reference>"
             )?;
         }
         f.write_str(
@@ -168,7 +181,7 @@ impl DatasetOwnership {
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
     ) -> Result<Self> {
-        Self::acquire_inner(operation, scopes, aws, None, TreeCheck::Walk).await
+        Self::acquire_inner(operation, scopes, aws, None, None, TreeCheck::Walk).await
     }
 
     /// Protected CLI ingestion may stream large authenticated S3 parts. The
@@ -181,17 +194,42 @@ impl DatasetOwnership {
     /// each path it touches instead, component by component: part staging and
     /// publication, transaction recovery, the control records and the mirror.
     /// A new root must be empty.
+    ///
+    /// `lane` is the `[start, stop)` range of a parallel backfill lane
+    /// (`crate::ingest::backfill`). The output bucket's owner is then that
+    /// lane's own record instead of the bucket-wide one, so lanes of one
+    /// dataset run side by side.
     pub async fn acquire_for_ingestion(
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
         output: &str,
+        lane: Option<(u64, u64)>,
     ) -> Result<Self> {
-        let bucket = if output.starts_with("s3://") {
-            Some(crate::writer::parse_s3_url(output)?.0)
+        let remote = if output.starts_with("s3://") {
+            Some(crate::writer::parse_s3_url(output)?)
         } else {
             None
         };
-        Self::acquire_inner("build", scopes, aws, bucket.as_deref(), TreeCheck::Paths).await
+        let lane = match (lane, &remote) {
+            (None, _) => None,
+            (Some((start, stop)), Some((_, prefix))) => Some(LaneScope::new(prefix, start, stop)?),
+            (Some(_), None) => bail!("a parallel backfill lane requires S3 output"),
+        };
+        let operation = if lane.is_some() {
+            "backfill-lane"
+        } else {
+            "build"
+        };
+        let bucket = remote.map(|(bucket, _)| bucket);
+        Self::acquire_inner(
+            operation,
+            scopes,
+            aws,
+            bucket.as_deref(),
+            lane,
+            TreeCheck::Paths,
+        )
+        .await
     }
 
     async fn acquire_inner(
@@ -199,8 +237,10 @@ impl DatasetOwnership {
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
         native_bucket: Option<&str>,
+        lane: Option<LaneScope>,
         tree_check: TreeCheck,
     ) -> Result<Self> {
+        ensure_lane_scopes(lane.as_ref(), &scopes)?;
         let mut local = Vec::new();
         let mut remote: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for scope in scopes {
@@ -274,7 +314,9 @@ impl DatasetOwnership {
         };
         for (bucket, client, native, delta_log, scopes) in clients {
             let acquired = match native {
-                Some(native) => S3Ownership::acquire_native(native, operation, scopes).await,
+                Some(native) => {
+                    S3Ownership::acquire_native(native, lane.clone(), operation, scopes).await
+                }
                 None => S3Ownership::acquire(client, operation, scopes).await,
             };
             let guard = match acquired {
@@ -287,8 +329,17 @@ impl DatasetOwnership {
                     // performed data writes. Release those exact owners; if
                     // release cannot be proven, its record remains Owned.
                     let release = ownership.release_remote().await;
+                    let busy_lane = lane
+                        .as_ref()
+                        .filter(|_| error == OwnershipError::Busy)
+                        .map(LaneScope::name);
                     return match release {
-                        Ok(()) => Err(error).context("acquiring all dataset ownership scopes"),
+                        Ok(()) => match busy_lane {
+                            Some(lane) => Err(error).context(format!(
+                                "backfill lane {lane} is owned by another worker"
+                            )),
+                            None => Err(error).context("acquiring all dataset ownership scopes"),
+                        },
                         Err(release_error) => Err(error).context(format!(
                             "acquisition also left an unresolved prior owner: {release_error:#}"
                         )),
@@ -409,6 +460,19 @@ impl DatasetOwnership {
         }
         Ok(())
     }
+}
+
+/// A lane owns exactly the output bucket: one S3 scope and nothing local, so
+/// its owner record can never stand in for another bucket's or a local lock.
+fn ensure_lane_scopes(lane: Option<&LaneScope>, scopes: &[MutationScope]) -> Result<()> {
+    if lane.is_none() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        scopes.len() == 1 && scopes[0].path.starts_with("s3://") && !scopes[0].file,
+        "a parallel backfill lane owns only its S3 dataset root; it has no cursor mirror"
+    );
+    Ok(())
 }
 
 /// How acquisition checks local mutation trees for nested symlinks.
