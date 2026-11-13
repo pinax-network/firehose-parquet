@@ -31,13 +31,16 @@ fireparq build --network base --output s3://base
 | Lanes | `[start, start + lane-blocks)` from `--start-block`; the last one ends at `--stop-block`. A `build` whose range is not exactly one lane is refused |
 | Before the seal | Only lanes write. A `build` without a lane's range (a live writer included) fails with `this dataset is being backfilled in parallel and is not sealed`, before any Blocks request |
 | One lane | One worker at a time: a second fails with `backfill lane <start>-<stop> is owned by another worker` |
+| Every block number | A lane's first block is its start, and each next block the following number; anything else fails the lane with `backfill lane expected block <n> but received block <m>` |
 | A complete lane | Running it again is a no-op |
-| `seal` | Refuses unless every lane is complete with its owner released, and `blocks` has no gap, duplicate or broken parent link (the `validate --cross-partition` check; `--no-validate` skips it, `--allow-gaps` is for chains with skipped heights). Sealing twice changes nothing |
+| `seal` | Refuses unless every lane is complete with its owner released, and `blocks` holds exactly the backfill's range: its first and last block, no gap, no duplicate, every block linked to its parent, lane boundaries included. The check reads `blocks` one `date` at a time, so its memory does not grow with the range; `--no-validate` skips it. Sealing twice changes nothing |
 | After the seal | An ordinary dataset whose start is the backfill's. `build` resumes from the stored cursor, at the backfill's stop block; `--start-block` must be omitted or equal that start, so a lane's range is refused |
 
 Limits: S3 output, final-only streams, and block families whose rows are
-routed by their own block time (not Solana). An existing dataset cannot be
-backfilled below its start.
+routed by their own block time (not Solana). The chain must have every block
+number of the range: chains that skip block numbers (NEAR, Beacon) are not
+supported, and `--start-block` must not be below the chain's first block. An
+existing dataset cannot be backfilled below its start.
 
 ## How it works
 

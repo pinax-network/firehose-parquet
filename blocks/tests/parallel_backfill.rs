@@ -11,6 +11,7 @@
 //! - every lane commits to the same tables under its own `txn` application
 //!   id, and the tables carry one `fireparq.descriptor`, the dataset's;
 //! - `seal` refuses until every lane is complete;
+//! - a lane that does not receive its first block fails;
 //! - the sealed dataset holds every block exactly once, `validate` passes
 //!   across the lanes, and a `build` continues from the stored cursor under
 //!   the dataset's own application id, refusing any other start.
@@ -79,7 +80,8 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
                     + 1
             }
         };
-        let responses: Vec<_> = (first..=request.stop_block_num.min(LAST))
+        // The chain begins at FIRST, whatever start is requested.
+        let responses: Vec<_> = (first.max(FIRST)..=request.stop_block_num.min(LAST))
             .map(|number| Ok(response(number)))
             .collect();
         Box::pin(async move {
@@ -470,7 +472,25 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
         "lanes write no cursor mirror"
     );
 
-    // Seal: validates `blocks` across the lanes and writes the authority.
+    // The seal reads `blocks` itself: with one block's file holding another
+    // block, the range is not all there and nothing is sealed.
+    let files: Vec<_> = fixture
+        .s3
+        .objects(&format!("{CHAIN}/blocks/"))
+        .into_iter()
+        .filter(|(key, _)| key.ends_with(".parquet") && !key.contains("_delta_log"))
+        .collect();
+    assert_eq!(files.len() as u64, STOP - FIRST);
+    fixture.s3.put(&files[0].0, files[1].1.clone());
+    let seal = output(fixture.command(&["backfill", "seal", &root])).await;
+    assert!(!seal.status.success());
+    for expected in ["the dataset was not sealed", "stored more than once"] {
+        assert!(text(&seal).contains(expected), "{}", text(&seal));
+    }
+    assert_eq!(fixture.status().await["sealed"], false);
+    fixture.s3.put(&files[0].0, files[0].1.clone());
+
+    // Seal: checks `blocks` against the range and writes the authority.
     let sealed = fixture.json(&["backfill", "seal", &root]).await;
     assert_eq!(sealed["sealed_now"], true, "{sealed}");
     assert_eq!(sealed["last_block"], STOP - 1);
@@ -517,5 +537,18 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
 
     // The whole table is continuous, parent links included.
     succeed(fixture.command(&["validate", &format!("{root}/blocks"), "--cross-partition"])).await;
+
+    // A backfill opened below the chain's first block: its first lane fails
+    // at the first block it receives, long before any seal.
+    let early = format!("s3://{BUCKET}/early-start");
+    let range = Some((FIRST - 2, FIRST + 2));
+    let mut open = fixture.ingest_into(&early, &["backfill", "open"], range);
+    open.args(["--lane-blocks", "4"]);
+    succeed(open).await;
+    refused(
+        fixture.ingest_into(&early, &["build"], range),
+        &format!("expected block {} but received block {FIRST}", FIRST - 2),
+    )
+    .await;
     firehose.abort();
 }

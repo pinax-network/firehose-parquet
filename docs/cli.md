@@ -453,7 +453,7 @@ fireparq backfill seal s3://base
 |---|---|
 | `open` | Takes the options of `build` plus `--lane-blocks`, and writes the backfill plan and the empty tables into an empty S3 root. `--stop-block` is required |
 | `status` | Read-only: the range, the lanes by state (`not_started`, `running`, `stopped`, `complete`) and the first incomplete ones |
-| `seal` | Requires every lane complete, checks `blocks` for continuity (`--no-validate` skips it, `--allow-gaps` allows skipped heights), and writes the dataset's authority |
+| `seal` | Requires every lane complete, checks that `blocks` holds exactly the backfill's range, each block once and linked to its parent (`--no-validate` skips it), and writes the dataset's authority |
 
 Each lane is an ordinary `build` with the lane's `--start-block` and
 `--stop-block`. See [Parallel backfill](parallel-backfill.md).

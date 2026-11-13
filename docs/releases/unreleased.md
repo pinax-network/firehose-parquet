@@ -20,7 +20,8 @@ empty when the release is cut.
   seal` turns the result into an ordinary dataset that `build` continues
   live. Until the seal every other `build` into the root is refused.
   `recovery status` and `recovery release` take `--lane <start>-<stop>` for a
-  lane's own owner. Final-only streams, not Solana. See
+  lane's own owner. Final-only streams on chains with every block number
+  (not Solana, NEAR or Beacon). See
   [Parallel backfill](../parallel-backfill.md).
 
 ## Fixes

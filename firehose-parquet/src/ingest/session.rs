@@ -303,6 +303,8 @@ pub struct IngestionSession<'a> {
     delta_types: DeltaTypes,
     failed: bool,
     metrics: Option<&'a PipelineMetrics>,
+    /// A backfill lane (#725), which takes every height of its range.
+    lane: bool,
 }
 
 impl<'a> IngestionSession<'a> {
@@ -484,6 +486,7 @@ impl<'a> IngestionSession<'a> {
             delta_types,
             failed: false,
             metrics,
+            lane: config.backfill_lane.is_some(),
         })
     }
 
@@ -603,6 +606,24 @@ impl<'a> IngestionSession<'a> {
             "mapping must resolve received envelopes in order"
         );
         let event = self.frontier.received(ordinal)?.clone();
+        if self.lane {
+            // Mapping resolves in order, so the frontier's last event is this
+            // one's predecessor. A later first block or a skipped height
+            // could not be told from lost blocks when the lanes are sealed.
+            let start = self.authority().descriptor.origin_start;
+            let expected = match self.frontier.last_accepted() {
+                Some(previous) if previous.block_num >= start => previous.block_num + 1,
+                _ => start,
+            };
+            ensure!(
+                event.block_num == expected,
+                "backfill lane expected block {expected} but received block {}: a parallel \
+                 backfill needs every block number of its range, so chains that skip block \
+                 numbers, and a backfill that starts before the chain's first block, are not \
+                 supported",
+                event.block_num
+            );
+        }
         let policy = self.authority().descriptor.routing_policy;
         let anchor = match policy {
             RoutingPolicy::SolanaLastKnownV1 => {

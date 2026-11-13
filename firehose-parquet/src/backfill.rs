@@ -6,7 +6,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::cli::{BuildArgs, ValidateOptions};
+use crate::cli::BuildArgs;
 use crate::recovery::RecoveryStorageArgs;
 
 #[derive(Subcommand, Debug)]
@@ -22,9 +22,10 @@ pub enum BackfillCommands {
     Open(Box<BackfillOpenArgs>),
     /// Seal a complete backfill into an ordinary dataset.
     ///
-    /// Refuses unless every lane is complete and released, and `blocks` is
-    /// continuous across the lanes. Then `build` without --stop-block
-    /// continues live from the backfill's stop block.
+    /// Refuses unless every lane is complete and released, and `blocks` holds
+    /// exactly the backfill's range, each block once and linked to its
+    /// parent. Then `build` without --stop-block continues live from the
+    /// backfill's stop block.
     Seal(BackfillSealArgs),
     /// Report a backfill's lanes without changing anything.
     Status(RecoveryStorageArgs),
@@ -43,13 +44,10 @@ pub struct BackfillOpenArgs {
 pub struct BackfillSealArgs {
     #[command(flatten)]
     pub storage: RecoveryStorageArgs,
-    /// Skip the continuity check of `blocks` (gaps, duplicates and parent
-    /// links across lanes), for example after `fireparq validate` passed.
+    /// Skip the check of `blocks` (first and last block, gaps, duplicates and
+    /// parent links across lanes).
     #[arg(long, default_value = "false")]
     pub no_validate: bool,
-    /// Allow gaps in block numbers in that check (chains with skipped heights).
-    #[arg(long, default_value = "false")]
-    pub allow_gaps: bool,
 }
 
 /// `seal` and `status`. `open` is run by the binary, with the mapper.
@@ -73,22 +71,26 @@ pub async fn run_backfill(command: &BackfillCommands) -> Result<()> {
             // Cheap refusals first, then the read of `blocks`, then the seal
             // itself, which checks every lane again under the owner. A lane
             // that is complete stays complete, so nothing can change between.
-            crate::ingest::seal_preflight(path, &aws).await?;
-            if !args.no_validate {
+            let range = crate::ingest::seal_preflight(path, &aws).await?;
+            if let (Some((start, stop)), false) = (range, args.no_validate) {
                 let blocks = format!("{path}/blocks");
-                let result = crate::cli::validate_table(
-                    &blocks,
-                    Some(&aws),
-                    &ValidateOptions {
-                        cross_partition: true,
-                        allow_gaps: args.allow_gaps,
-                    },
-                )?;
-                if !result.is_valid() {
-                    result.print(&blocks);
+                let check =
+                    crate::cli::validate_block_range(&blocks, Some(&aws), start, stop).await?;
+                if !check.is_valid() {
+                    let more = check.problem_count - check.problems.len() as u64;
                     anyhow::bail!(
-                        "`blocks` is not continuous across the backfill's lanes; the dataset \
-                         was not sealed"
+                        "`blocks` does not hold exactly blocks {start} to {} (version {}, {} \
+                         blocks in {} files); the dataset was not sealed: {}{}",
+                        stop - 1,
+                        check.version,
+                        check.total_blocks,
+                        check.files_scanned,
+                        check.problems.join("; "),
+                        if more > 0 {
+                            format!("; and {more} more")
+                        } else {
+                            String::new()
+                        }
                     );
                 }
             }

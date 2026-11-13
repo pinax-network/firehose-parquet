@@ -39,7 +39,7 @@ Related docs:
     - `cli/configuration.rs`: CLI-to-`Config` conversion, value parsers, working-directory `.env` / `--env-file` loading, logging and completions.
     - `cli/paths.rs`: local/S3 input and output policy (explicit `s3://` for writes, `S3_BUCKET` shorthand for reads), credential preflight, and the `--output` dataset-root resolver (`resolve_output_root`, `{chain}` expansion, `{{`/`}}` escapes).
     - `cli/hypercore_reference.rs`: the arguments of `fireparq hypercore-reference` (options, jobs, the `--outcome-ids`, `--coins` and `--funding-start` parsers); the job itself is `reference/`.
-    - `cli/inspect.rs`, `cli/validate.rs`: read-only single-file `inspect`, and `validate`, which checks block continuity over the active files of a pinned Delta snapshot of a `blocks` table (never a directory walk, #643).
+    - `cli/inspect.rs`, `cli/validate.rs`: read-only single-file `inspect`, and `validate`, which checks block continuity over the active files of a pinned Delta snapshot of a `blocks` table (never a directory walk, #643). `validate_block_range` is `backfill seal`'s check that the table holds exactly a block range, one `date` partition in memory at a time (#725).
     - `cli/{tests,validate_tests}.rs`: CLI and validation regressions.
   - Configuration and endpoints:
     - `src/config.rs`: pipeline `Config`, `Compression` (including `zstd:<level>`) and receive-transport defaults.

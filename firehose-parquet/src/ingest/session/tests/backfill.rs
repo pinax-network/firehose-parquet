@@ -183,3 +183,33 @@ async fn lanes_share_the_tables_and_the_seal_leaves_an_ordinary_dataset() {
     assert!(refusal(open(&lane(100, 102), &late).await).contains("sealed"));
     late.release().await.unwrap();
 }
+
+/// A lane takes every block number of its range, from its first: what it
+/// never received could not be told from lost blocks at the seal.
+#[tokio::test]
+async fn a_lane_refuses_a_late_first_block_and_a_skipped_block_number() {
+    let store = Arc::new(InMemory::new());
+    let owner = bucket_owner(&store).await;
+    open_backfill(&dataset(Some(104)), mapper(BlockFamily::Evm), &owner, 4)
+        .await
+        .unwrap();
+    owner.release().await.unwrap();
+
+    let owner = lane_owner(&store, 100, 104).await;
+    let mut late = open(&lane(100, 104), &owner).await.unwrap();
+    let ordinal = receive(&mut late, 101, TIME, 1);
+    assert!(refusal(late.accept_mapped(ordinal, Some(TIME), None))
+        .contains("expected block 100 but received block 101"));
+    drop(late);
+
+    // Also after a restart: the expected block follows the stored checkpoint.
+    let mut lane_session = open(&lane(100, 104), &owner).await.unwrap();
+    fill(&mut lane_session, 100).await;
+    drop(lane_session);
+    let mut resumed = open(&lane(100, 104), &owner).await.unwrap();
+    let ordinal = receive(&mut resumed, 102, TIME, 1);
+    assert!(refusal(resumed.accept_mapped(ordinal, Some(TIME), None))
+        .contains("expected block 101 but received block 102"));
+    drop(resumed);
+    owner.release().await.unwrap();
+}

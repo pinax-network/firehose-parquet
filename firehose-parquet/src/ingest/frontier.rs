@@ -41,6 +41,10 @@ impl AcceptedFrontier {
     pub fn routing(&self) -> &RoutingCheckpoint {
         &self.routing
     }
+    /// The last event of the contiguous accepted prefix.
+    pub fn last_accepted(&self) -> Option<&EventIdentity> {
+        self.last_event.as_ref()
+    }
     pub fn next_accepted_ordinal(&self) -> Result<u64> {
         self.accepted_ordinal
             .checked_add(1)

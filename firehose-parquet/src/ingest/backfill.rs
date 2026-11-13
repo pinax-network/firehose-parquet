@@ -611,18 +611,20 @@ pub struct BackfillSealed {
     pub last_block: u64,
 }
 
-/// Read-only: the plan, and a refusal unless every lane can be sealed.
-/// `seal` runs it before validating `blocks` and again under the owner.
-pub async fn seal_preflight(path: &str, aws: &AwsConfig) -> Result<()> {
+/// Read-only: a refusal unless every lane can be sealed, then the plan's
+/// `[start, stop)`, or `None` when the dataset is already sealed. `seal`
+/// runs it before checking `blocks` and again under the owner.
+pub async fn seal_preflight(path: &str, aws: &AwsConfig) -> Result<Option<(u64, u64)>> {
     let (bucket, prefix) = remote(path)?;
     let store: Arc<dyn ObjectStore> = Arc::new(aws.build_read_client(&bucket)?);
     let plan = read_plan(store.as_ref(), &prefix)
         .await?
         .context("no parallel backfill was opened at this dataset root")?;
     if root_has_authority(store.as_ref(), &prefix).await? {
-        return Ok(());
+        return Ok(None);
     }
-    sealable(&inspect_lanes(&store, &plan, &prefix).await?).map(|_| ())
+    sealable(&inspect_lanes(&store, &plan, &prefix).await?)?;
+    Ok(Some((plan.start(), plan.stop)))
 }
 
 /// The lanes' accepted events in total and the last lane's final event, or a
@@ -668,9 +670,10 @@ fn sealable(reports: &[LaneReport]) -> Result<(u64, EventIdentity)> {
 ///
 /// Refuses unless every lane is complete with nothing pending and its owner
 /// released, and every table exists with the dataset's identity. It changes
-/// one record, the root's authority, by conditional create. Block continuity
-/// and parent links across lanes are `validate`'s to check, which the
-/// `backfill seal` command runs first.
+/// one record, the root's authority, by conditional create. That `blocks`
+/// holds exactly the plan's range, parent-linked across lanes, is
+/// `validate_block_range`'s to check, which the `backfill seal` command runs
+/// first.
 pub async fn seal_backfill(path: &str, aws: &AwsConfig) -> Result<BackfillSealed> {
     let (bucket, prefix) = remote(path)?;
     let ownership = DatasetOwnership::acquire(
