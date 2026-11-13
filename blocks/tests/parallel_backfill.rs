@@ -12,6 +12,9 @@
 //!   id, and the tables carry one `fireparq.descriptor`, the dataset's;
 //! - `seal` refuses until every lane is complete;
 //! - a lane that does not receive its first block fails;
+//! - a lane that died between two tables' commits recovers after the
+//!   maintenance job compacted, vacuumed and checkpointed the tables (the
+//!   second test);
 //! - the sealed dataset holds every block exactly once, `validate` passes
 //!   across the lanes, and a `build` continues from the stored cursor under
 //!   the dataset's own application id, refusing any other start.
@@ -169,6 +172,61 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// The mock Firehose (its server task is returned) and the loopback S3.
+    async fn start(dir: &Path) -> (Self, tokio::task::JoinHandle<()>) {
+        let cwd = std::fs::canonicalize(dir).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let firehose = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(Info)
+                .add_service(Stream)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let s3 = s3::Server::start(
+            &cwd.join("tls"),
+            BUCKET,
+            s3::Latency {
+                base_ms: 0,
+                slow_every: 0,
+                slow_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+        (Self { cwd, endpoint, s3 }, firehose)
+    }
+
+    /// One run of the maintenance job over `tables`; no table may fail.
+    async fn maintain(&self, tables: &[String], settings: &[(&str, &str)]) -> common::JobRun {
+        let mut env: Vec<(&str, String)> = vec![
+            ("LAKE_ROOT", self.output()),
+            ("LAKE_TABLES", tables.join(",")),
+            ("S3_ENDPOINT", self.s3.endpoint.clone()),
+            ("AWS_ACCESS_KEY_ID", "loopback-access-key".into()),
+            ("AWS_SECRET_ACCESS_KEY", "loopback-secret-key".into()),
+            ("AWS_REGION", "us-east-1".into()),
+            ("SSL_CERT_FILE", self.s3.ca_file.to_str().unwrap().into()),
+        ];
+        env.extend(
+            settings
+                .iter()
+                .map(|(key, value)| (*key, value.to_string())),
+        );
+        let run = common::maintenance_job(Path::new(env!("CARGO_BIN_EXE_fireparq")), &env).await;
+        assert_eq!(run.status, 0, "{run:?}");
+        assert_eq!(run.done()["failed"], serde_json::json!([]), "{run:?}");
+        for table in run.tables() {
+            assert_eq!(table["errors"], serde_json::json!([]), "{table}");
+        }
+        run
+    }
+
     fn output(&self) -> String {
         format!("s3://{BUCKET}/{CHAIN}")
     }
@@ -349,32 +407,7 @@ fn dataset_descriptor(root: &Path) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
     let dir = tempfile::tempdir().unwrap();
-    let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let incoming = futures::stream::unfold(listener, |listener| async {
-        Some((listener.accept().await.map(|(socket, _)| socket), listener))
-    });
-    let firehose = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(Info)
-            .add_service(Stream)
-            .serve_with_incoming(incoming)
-            .await
-            .unwrap();
-    });
-    let s3 = s3::Server::start(
-        &cwd.join("tls"),
-        BUCKET,
-        s3::Latency {
-            base_ms: 0,
-            slow_every: 0,
-            slow_ms: 0,
-        },
-    )
-    .await
-    .unwrap();
-    let fixture = Fixture { cwd, endpoint, s3 };
+    let (fixture, firehose) = Fixture::start(dir.path()).await;
     let root = fixture.output();
 
     // Before a backfill is open, a lane-shaped build is just a new dataset;
@@ -550,5 +583,108 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
         &format!("expected block {} but received block {FIRST}", FIRST - 2),
     )
     .await;
+    firehose.abort();
+}
+
+/// The maintenance job's modes: a lite VACUUM that deletes replaced files at
+/// once, the same compacting every date, and the weekly full VACUUM.
+const MAINTENANCE: [&[(&str, &str)]; 3] = [
+    &[("VACUUM_RETENTION_HOURS", "0")],
+    &[("VACUUM_RETENTION_HOURS", "0"), ("OPTIMIZE_DATES", "all")],
+    &[("FULL_VACUUM", "1")],
+];
+
+/// A lane dies between two tables' commits of one transaction. Before it is
+/// rerun, the maintenance job compacts, vacuums and checkpoints the shared
+/// tables in every mode, also while another lane writes. The lane's recovery
+/// must find its own `txn` in the rewritten logs: commit the tables that
+/// lack the transaction, and no table twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, firehose) = Fixture::start(dir.path()).await;
+    let root = fixture.output();
+    succeed(fixture.open(3)).await;
+
+    // The last lane fills 2023-11-15 with blocks 106 and 107. The middle
+    // lane then dies on its first block, 103 of the same date, once
+    // `transactions` has its commit: `blocks`, which commits last, has not.
+    succeed(fixture.lane(LANES[2])).await;
+    let mut crashed = fixture.lane(LANES[1]);
+    crashed.env(
+        "FIREPARQ_DEBUG_FAULT",
+        "crash-after-delta-commit:transactions",
+    );
+    assert!(!output(crashed).await.status.success());
+    let copy = fixture.local_copy();
+    let tables = common::delta_tables(&copy);
+    let block_nums = |root: PathBuf, table: &'static str| async move {
+        let read = common::delta_read(&common::open_local(&root, table).await).await;
+        common::delta_block_nums(&root.join(table), &read)
+    };
+    assert_eq!(
+        block_nums(copy.clone(), "transactions").await,
+        [103, 106, 107]
+    );
+    assert_eq!(block_nums(copy, "blocks").await, [106, 107]);
+
+    // Maintenance in every mode: `OPTIMIZE_DATES=all` compacts the date all
+    // lanes share, the crashed lane's committed part with it, and the lite
+    // VACUUM deletes the replaced files at once.
+    let mut compacted = 0;
+    for mode in MAINTENANCE {
+        let run = fixture.maintain(&tables, mode).await;
+        assert_eq!(run.done()["conflicts"], 0, "{run:?}");
+        compacted += run.table("transactions")["compacted"]
+            .as_array()
+            .unwrap()
+            .len();
+    }
+    assert!(compacted > 0, "the crashed lane's part was not compacted");
+
+    // The first lane writes while the job runs again.
+    let first = tokio::spawn(output(fixture.lane(LANES[0])));
+    for mode in MAINTENANCE {
+        fixture.maintain(&tables, mode).await;
+    }
+    let first = first.await.unwrap();
+    assert!(first.status.success(), "{}", text(&first));
+
+    // The crashed lane is released and rerun: it rolls its transaction
+    // forward into the compacted tables and finishes, beside the job.
+    fixture.release_lane(LANES[1]).await;
+    let rerun = tokio::spawn(output(fixture.lane(LANES[1])));
+    for mode in MAINTENANCE {
+        fixture.maintain(&tables, mode).await;
+    }
+    let rerun = rerun.await.unwrap();
+    assert!(rerun.status.success(), "{}", text(&rerun));
+    for mode in MAINTENANCE {
+        let run = fixture.maintain(&tables, mode).await;
+        assert_eq!(run.done()["conflicts"], 0, "{run:?}");
+    }
+
+    // The seal's own check passes, and every table holds each block's rows
+    // exactly once: the rows of one sequential writer.
+    let sealed = fixture.json(&["backfill", "seal", &root]).await;
+    assert_eq!(sealed["sealed_now"], true, "{sealed}");
+    let copy = fixture.local_copy();
+    let (blocks, writers) = blocks_and_writers(&copy).await;
+    assert_eq!(blocks, (FIRST as i64..STOP as i64).collect::<Vec<_>>());
+    assert_eq!(writers.len(), LANES.len(), "{writers:?}");
+    let single = format!("s3://{BUCKET}/single-writer");
+    succeed(fixture.ingest_into(&single, &["build"], Some((FIRST, STOP)))).await;
+    let single = fixture.copy_of("single-writer");
+    assert_eq!(tables, common::delta_tables(&single));
+    let rows = common::delta_counts(&copy, &tables).await;
+    assert_eq!(rows, common::delta_counts(&single, &tables).await);
+    assert_eq!(rows["blocks"], STOP - FIRST);
+    for table in ["blocks", "transactions"] {
+        let read = common::delta_read(&common::open_local(&copy, table).await).await;
+        let mut stored = common::delta_block_nums(&copy.join(table), &read);
+        stored.sort_unstable();
+        assert_eq!(stored, blocks, "{table}");
+    }
+    succeed(fixture.command(&["validate", &format!("{root}/blocks"), "--cross-partition"])).await;
     firehose.abort();
 }

@@ -68,7 +68,11 @@ existing dataset cannot be backfilled below its start.
 - The [maintenance job](delta-maintenance.md) may run. It treats days a lane
   is still filling as closed and compacts them again as parts arrive, as
   `OPTIMIZE_DATES=all` does. Lanes commit several times faster than one
-  writer, so run its checkpoint more often than hourly.
+  writer, so run its checkpoint more often than hourly. A day two lanes
+  share can be compacted before the earlier lane reaches it; the job then
+  sorts that day back into block order as a
+  [repair](delta-maintenance.md#row-order), `OPTIMIZE_REPAIR_DATES` days per
+  table and run (default 1), so allow about one such day per lane.
 
 ## A lane that failed
 
@@ -87,4 +91,6 @@ fireparq recovery release s3://base --lane 250000-500000 \
 
 `blocks/tests/parallel_backfill.rs` runs the whole sequence against a mock
 Firehose and a loopback S3: concurrent lanes, a crashed lane, the refusals,
-the seal and a `build` that extends the sealed dataset.
+the seal and a `build` that extends the sealed dataset. Its second test
+crashes a lane between two tables' commits and runs the maintenance job in
+every mode before and while the lane recovers.
