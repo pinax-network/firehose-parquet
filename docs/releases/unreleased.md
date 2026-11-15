@@ -14,6 +14,17 @@ empty when the release is cut.
 
 ## New features
 
+- **Relocate a dataset: `fireparq recovery rebind` (#635).** A stopped dataset
+  copied to a new root (`cp -R`, `aws s3 sync`) on the same storage service
+  resumes there after `fireparq recovery rebind <new root> --from <old root>`.
+  It checks that the copy is complete and that the old root is quiet, then
+  changes only the copy's binding: `state.json`, each Delta table's
+  `fireparq.descriptor` (one `SET TBLPROPERTIES` commit per table, `blocks`
+  last) and the cursor mirror. The old root is only read, and a rerun completes
+  an interrupted rebind. `build` and `recovery recover` now name the command when
+  they find a dataset bound to another root. See [Relocating a
+  dataset](../cursor-and-resume.md#relocating-a-dataset).
+
 ## Fixes
 
 ## Performance

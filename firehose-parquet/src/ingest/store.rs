@@ -289,6 +289,37 @@ impl<'a> TransactionStateStore<'a> {
         })
     }
 
+    /// Binds `authority` to a new output root (`fireparq recovery rebind`):
+    /// one CAS of the state record to `next`, from
+    /// [`AuthorityState::rebound`]. No journal may remain, and authority must
+    /// not have changed since the caller read it.
+    pub async fn rebind(
+        &self,
+        authority: &Versioned<AuthorityState>,
+        next: AuthorityState,
+    ) -> Result<Versioned<AuthorityState>> {
+        let observed = self.load().await?;
+        if observed.pending.is_some() {
+            bail!("cannot rebind a dataset while an ingestion journal remains");
+        }
+        if observed.authority.as_ref().map(|state| &state.version) != Some(&authority.version) {
+            bail!("authority changed before the rebind");
+        }
+        next.validate()?;
+        if next.checkpoint.previous.as_ref() != Some(&authority.payload.checkpoint.id)
+            || next.checkpoint.ordinal != authority.payload.checkpoint.ordinal
+        {
+            bail!("a rebound authority must follow the current head at the same ordinal");
+        }
+        let version = self
+            .replace(ControlKey::State, &authority.version, &next)
+            .await?;
+        Ok(Versioned {
+            version,
+            payload: next,
+        })
+    }
+
     /// Only after verified rollback (Writing) or verified roll-forward + mirror
     /// reconciliation (Committed). Version checks cannot prove physical cleanup.
     pub async fn clear(

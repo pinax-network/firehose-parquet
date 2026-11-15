@@ -522,6 +522,44 @@ impl AuthorityState {
         state.validate()?;
         Ok(state)
     }
+    /// This authority bound to `descriptor`: the same stream at another
+    /// output root, after the dataset was copied there (`fireparq recovery
+    /// rebind`, [`super::rebind`]). Only the descriptor's `output` and
+    /// `mirror` may differ. The head checkpoint keeps its ordinal, event,
+    /// routing and completion, follows the current head (`previous`), and is
+    /// identified under the new stream. An authority that has accepted
+    /// nothing is not rebound: the new root is built from scratch instead.
+    pub(crate) fn rebound(&self, descriptor: StreamDescriptor) -> Result<Self> {
+        self.validate()?;
+        ensure!(
+            self.checkpoint.ordinal > 0,
+            "an authority that has accepted nothing is not rebound"
+        );
+        let unchanged = StreamDescriptor {
+            output: self.descriptor.output.clone(),
+            mirror: self.descriptor.mirror.clone(),
+            ..descriptor.clone()
+        };
+        ensure!(
+            unchanged == self.descriptor,
+            "a rebound stream may change only its output and cursor mirror locations"
+        );
+        ensure!(
+            descriptor.output != self.descriptor.output,
+            "a rebound stream changes its output root"
+        );
+        let mut checkpoint = Checkpoint {
+            previous: Some(self.checkpoint.id.clone()),
+            ..self.checkpoint.clone()
+        };
+        checkpoint.id = checkpoint.identity(&descriptor.id()?)?;
+        let state = Self {
+            descriptor,
+            checkpoint,
+        };
+        state.validate()?;
+        Ok(state)
+    }
     pub fn install(&self, pending: &PendingTransaction) -> Result<Self> {
         self.validate_predecessor(pending)?;
         if pending.phase != TransactionPhase::Committed {

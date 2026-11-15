@@ -205,14 +205,63 @@ impl<'a> ProtectedMirror<'a> {
     /// checks, and ambiguous or cancelled S3 publication alike.
     pub(crate) async fn reconcile(&self, authority: &AuthorityState) -> Result<MirrorOutcome> {
         let failures = FailureCount::new(self.metrics);
-        let outcome = self.reconcile_counted(authority, &failures).await?;
+        let outcome = self.reconcile_counted(authority, None, &failures).await?;
         failures.resolve();
         Ok(outcome)
+    }
+
+    /// [`Self::reconcile`] after `fireparq recovery rebind` bound `authority`
+    /// to a new root ([`super::rebind`]): a stored mirror may also be the one
+    /// copied from the root of the `previous` stream, which is then replaced
+    /// (a conditional write, like any repair). A mirror of any other stream
+    /// is still refused.
+    pub(crate) async fn reconcile_rebound(
+        &self,
+        authority: &AuthorityState,
+        previous: &StreamDescriptor,
+    ) -> Result<MirrorOutcome> {
+        let failures = FailureCount::new(self.metrics);
+        let outcome = self
+            .reconcile_counted(authority, Some(previous), &failures)
+            .await?;
+        failures.resolve();
+        Ok(outcome)
+    }
+
+    /// Reads the stored mirror and checks that [`Self::reconcile_rebound`]
+    /// can adopt it, without writing: the rebind's check before its first
+    /// write.
+    pub(crate) async fn check_rebound(
+        &self,
+        authority: &AuthorityState,
+        previous: &StreamDescriptor,
+    ) -> Result<()> {
+        authority.validate()?;
+        let stored = match &self.binding {
+            MirrorBinding::Disabled => return Ok(()),
+            MirrorBinding::Local { absolute_path } => {
+                let _lock = self.local_owner()?.lock_control_mutation()?;
+                read_local(&self.local_path(absolute_path)?)?
+            }
+            MirrorBinding::S3 { bucket, key, .. } => {
+                let owner = self
+                    .ownership
+                    .remote(bucket)
+                    .context("missing mirror ownership")?;
+                let _lock = owner.lock_control_mutation().await;
+                read_remote(owner, key).await?.map(|(bytes, _)| bytes)
+            }
+        };
+        let current = stored
+            .map(|bytes| decode_stored(bytes, authority, Some(previous)))
+            .transpose()?;
+        needs_repair(authority, current.as_ref()).map(|_| ())
     }
 
     async fn reconcile_counted(
         &self,
         authority: &AuthorityState,
+        previous: Option<&StreamDescriptor>,
         failures: &FailureCount<'_>,
     ) -> Result<MirrorOutcome> {
         authority.validate()?;
@@ -226,7 +275,12 @@ impl<'a> ProtectedMirror<'a> {
                 let mut had_write = false;
                 for attempt in 0..3 {
                     let mut attempted_write = false;
-                    let result = self.local_attempt(absolute_path, authority, &mut attempted_write);
+                    let result = self.local_attempt(
+                        absolute_path,
+                        authority,
+                        previous,
+                        &mut attempted_write,
+                    );
                     had_write |= attempted_write;
                     match result {
                         Ok(outcome) => {
@@ -264,7 +318,7 @@ impl<'a> ProtectedMirror<'a> {
                 let existing = read_remote(owner, key).await?;
                 let current = existing
                     .as_ref()
-                    .map(|(bytes, _)| decode(bytes.clone(), &authority.descriptor))
+                    .map(|(bytes, _)| decode_stored(bytes.clone(), authority, previous))
                     .transpose()?;
                 if !needs_repair(authority, current.as_ref())? {
                     return Ok(MirrorOutcome::Unchanged);
@@ -371,13 +425,14 @@ impl<'a> ProtectedMirror<'a> {
         &self,
         absolute_path: &str,
         authority: &AuthorityState,
+        previous: Option<&StreamDescriptor>,
         attempted_write: &mut bool,
     ) -> Result<MirrorOutcome> {
         let _lock = self.local_owner()?.lock_control_mutation()?;
         let path = self.local_path(absolute_path)?;
         let bytes = read_local(&path)?;
         let current = bytes
-            .map(|bytes| decode(bytes, &authority.descriptor))
+            .map(|bytes| decode_stored(bytes, authority, previous))
             .transpose()?;
         if !needs_repair(authority, current.as_ref())? {
             if current.is_some() {
@@ -461,7 +516,42 @@ impl<'a> ProtectedMirror<'a> {
     }
 }
 
-fn needs_repair(authority: &AuthorityState, current: Option<&Envelope>) -> Result<bool> {
+/// A stored mirror, as [`needs_repair`] reads it.
+enum Stored {
+    /// The mirror of the authority's own stream.
+    Own(Box<Envelope>),
+    /// The mirror copied from the root of the stream a rebind replaced
+    /// ([`ProtectedMirror::reconcile_rebound`]), at most at authority's
+    /// ordinal: it is always rewritten.
+    Copied,
+}
+
+/// Decodes a stored mirror under `authority`'s stream or, after a rebind,
+/// under the `previous` stream it was copied with.
+fn decode_stored(
+    bytes: Bytes,
+    authority: &AuthorityState,
+    previous: Option<&StreamDescriptor>,
+) -> Result<Stored> {
+    let own = decode(bytes.clone(), &authority.descriptor).map(Box::new);
+    let Some(previous) = previous else {
+        return own.map(Stored::Own);
+    };
+    if let Ok(envelope) = own {
+        return Ok(Stored::Own(envelope));
+    }
+    let copied = decode(bytes, previous).context(
+        "the protected mirror belongs neither to the rebound stream nor to the stream it was \
+         copied from",
+    )?;
+    ensure!(
+        copied.checkpoint.ordinal <= authority.checkpoint.ordinal,
+        "protected mirror is ahead of mandatory authority"
+    );
+    Ok(Stored::Copied)
+}
+
+fn needs_repair(authority: &AuthorityState, current: Option<&Stored>) -> Result<bool> {
     if authority.checkpoint.ordinal == 0 {
         ensure!(
             current.is_none(),
@@ -469,8 +559,9 @@ fn needs_repair(authority: &AuthorityState, current: Option<&Envelope>) -> Resul
         );
         return Ok(false);
     }
-    let Some(current) = current else {
-        return Ok(true);
+    let current = match current {
+        None | Some(Stored::Copied) => return Ok(true),
+        Some(Stored::Own(current)) => current,
     };
     let stored = &current.checkpoint;
     let target = &authority.checkpoint;

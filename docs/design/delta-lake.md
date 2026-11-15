@@ -497,6 +497,13 @@ log commit with an unknown outcome no longer marks the S3 owner uncertain
   (`fireparq.descriptor`). At startup fireparq refuses a table whose metadata
   names another descriptor, or whose schema, partition columns or protocol
   differ from the ones it would create.
+- A dataset moved to another root has another descriptor. `fireparq recovery
+  rebind` (#635) gives each table, `blocks` last, one `SET TBLPROPERTIES`
+  commit that sets the new `fireparq.descriptor` and carries `txn {appId:
+  fireparq:<new descriptor>, version: authority's ordinal}`, from which
+  `check_progress` reads the moved stream's progress. The previous stream's
+  `txn` entries stay in the log, unread
+  ([Relocating a dataset](../cursor-and-resume.md#relocating-a-dataset)).
 
 ### 3.3 Table creation
 

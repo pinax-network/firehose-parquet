@@ -11,6 +11,8 @@ use crate::cli::AwsConfig;
 /// rules as both production S3 builders. It intentionally does not equate DNS
 /// aliases or different regional/global endpoints: changing those requires a
 /// separately qualified migration, not an implicit append to another service.
+/// `fireparq recovery rebind` (`super::rebind`) moves a dataset to another
+/// bucket or prefix of the same service only.
 pub(crate) fn resolve_service_identity(aws: &AwsConfig, bucket: &str) -> Result<Digest> {
     validate_bucket(bucket)?;
     let region = aws.aws_region.as_deref().unwrap_or("us-east-1");
@@ -146,10 +148,10 @@ pub(crate) fn validate_runtime_bindings(
     aws: &AwsConfig,
 ) -> Result<()> {
     descriptor.validate()?;
-    ensure!(
-        descriptor.output == resolve_output_identity(output_path, aws)?,
-        "authoritative output binding differs from the selected storage destination"
-    );
+    let selected = resolve_output_identity(output_path, aws)?;
+    if descriptor.output != selected {
+        bail!("{}", rebind_hint(&descriptor.output, &selected));
+    }
     if let MirrorBinding::S3 {
         service, bucket, ..
     } = &descriptor.mirror
@@ -160,6 +162,28 @@ pub(crate) fn validate_runtime_bindings(
         );
     }
     Ok(())
+}
+
+/// The refusal of a dataset found at another root than the one it is bound
+/// to: a copy or a move (#635). It names both roots and the command that
+/// binds the copy to its new root, or, when only the S3 service differs
+/// (another endpoint or region for the same bucket and prefix), says so.
+pub(crate) fn rebind_hint(bound: &StorageIdentity, selected: &StorageIdentity) -> String {
+    let (bound, selected) = (output_path(bound), output_path(selected));
+    if bound == selected {
+        return format!(
+            "authoritative output binding differs from the selected storage destination: this \
+             dataset is bound to {bound} on another S3 endpoint or region. The endpoint's \
+             scheme, host, port and path, and the region, are part of the binding: use the ones \
+             it was created with"
+        );
+    }
+    format!(
+        "authoritative output binding differs from the selected storage destination: this \
+         dataset is bound to {bound}, not to {selected}. A dataset copied or moved from \
+         {bound} resumes here only after `fireparq recovery rebind {selected} --from {bound}` \
+         (docs/cursor-and-resume.md, \"Relocating a dataset\")"
+    )
 }
 
 pub(crate) fn mirror_service(binding: &MirrorBinding, aws: &AwsConfig) -> Result<Option<Digest>> {
@@ -201,7 +225,7 @@ fn parse_remote(path: &str, empty_allowed: bool) -> Result<(String, String)> {
     Ok((bucket, key))
 }
 
-fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+pub(crate) fn lexical_absolute(path: &Path) -> Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {

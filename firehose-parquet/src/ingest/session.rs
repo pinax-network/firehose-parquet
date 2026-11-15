@@ -408,10 +408,12 @@ impl<'a> IngestionSession<'a> {
         };
         // Refuse another stream before any table is opened or created for it
         // (the controller checks this again).
-        ensure!(
-            authority.descriptor == expected,
-            super::controller::STREAM_MISMATCH
-        );
+        if authority.descriptor != expected {
+            return Err(super::controller::stream_mismatch(
+                &authority.descriptor,
+                &expected,
+            ));
+        }
         // The Delta tables, before recovery, which rolls a Committed
         // transaction forward into them (#643 L4). A table is created only
         // while the stream has accepted nothing, which also completes a start

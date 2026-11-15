@@ -31,6 +31,15 @@ pub enum RecoveryCommands {
     /// If the provider cannot conclusively drain or revoke prior requests, this
     /// operation must not be used for a dataset read through ordinary file globs.
     Release(RecoveryReleaseArgs),
+    /// Bind a dataset copied or moved to PATH to that root, so it resumes there.
+    ///
+    /// Run it after copying the stopped dataset at --from (its writer and its
+    /// maintenance stopped, and released). It checks that the copy is
+    /// complete, then rewrites only the copy's binding: `state.json`, each
+    /// Delta table's `fireparq.descriptor` and the cursor mirror. --from is
+    /// only read, and a rerun completes an interrupted rebind. Both roots are
+    /// local, or S3 on the same endpoint (docs/cursor-and-resume.md).
+    Rebind(RecoveryRebindArgs),
 }
 
 /// Endpoint variable `recovery` read before it shared `AWS_ENDPOINT_URL_S3` with every
@@ -92,6 +101,23 @@ pub struct RecoveryReleaseArgs {
     pub provider_quiescence_evidence: String,
 }
 
+#[derive(Args)]
+pub struct RecoveryRebindArgs {
+    #[command(flatten)]
+    pub storage: RecoveryStorageArgs,
+    /// The dataset root the copy at PATH was made from, which the dataset is
+    /// bound to: a local directory, or s3://bucket/prefix on PATH's
+    /// endpoint. It is only read.
+    #[arg(long)]
+    pub from: String,
+}
+
+impl std::fmt::Debug for RecoveryRebindArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryRebindArgs").finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for RecoveryReleaseArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecoveryReleaseArgs")
@@ -139,9 +165,26 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
     let path = match command {
         RecoveryCommands::Status(storage) | RecoveryCommands::Recover(storage) => &storage.path,
         RecoveryCommands::Release(args) => &args.storage.path,
+        RecoveryCommands::Rebind(args) => &args.storage.path,
     };
     refuse_artifact_directory(path)?;
     let result = match command {
+        RecoveryCommands::Rebind(args) => {
+            if args.storage.lane.is_some() {
+                bail!("a dataset is rebound as a whole: rerun without --lane");
+            }
+            refuse_artifact_directory(&args.from)?;
+            for path in [&args.storage.path, &args.from] {
+                if path.starts_with("s3://") {
+                    remote_path(path)?;
+                }
+            }
+            let rebound =
+                crate::ingest::rebind::rebind(&args.storage.path, &args.from, &args.storage.aws())
+                    .await?;
+            println!("{}", serde_json::to_string_pretty(&rebound)?);
+            return Ok(());
+        }
         RecoveryCommands::Status(storage) => status(storage).await?,
         RecoveryCommands::Recover(storage) => {
             if storage.lane.is_some() {
@@ -283,8 +326,7 @@ async fn remote_status(
     // GET-only: do not create ownership probes, acquire, or release anything.
     let directory = match lane {
         Some(lane) => lane.directory(),
-        None if prefix.is_empty() => CONTROL_DIRECTORY.to_owned(),
-        None => format!("{prefix}/{CONTROL_DIRECTORY}"),
+        None => control_directory(prefix),
     };
     let state = remote_slot(&store, &directory, ControlKey::State).await?;
     let pending = remote_slot(&store, &directory, ControlKey::Pending).await?;
@@ -306,17 +348,40 @@ async fn remote_status(
     })
 }
 
+/// The control directory of the dataset at `prefix` in its bucket.
+pub(crate) fn control_directory(prefix: &str) -> String {
+    if prefix.is_empty() {
+        CONTROL_DIRECTORY.to_owned()
+    } else {
+        format!("{prefix}/{CONTROL_DIRECTORY}")
+    }
+}
+
 async fn remote_slot(
     store: &Arc<dyn ObjectStore>,
     directory: &str,
     key: ControlKey,
 ) -> Result<SlotSummary> {
+    Ok(match remote_control_slot(store, directory, key).await? {
+        Some((version, Some(_))) => SlotSummary::active(version),
+        _ => SlotSummary::default(),
+    })
+}
+
+/// The control record `key` of `directory`, read with GETs only and without
+/// ownership: its version and payload (`None` for a tombstone), or `None`
+/// when it is absent.
+pub(crate) async fn remote_control_slot(
+    store: &Arc<dyn ObjectStore>,
+    directory: &str,
+    key: ControlKey,
+) -> Result<Option<(ControlVersion, Option<serde_json::Value>)>> {
     use futures::TryStreamExt;
     let key = object_store::path::Path::from(format!("{directory}/{}", key.filename()));
     tokio::time::timeout(Duration::from_secs(10), async {
         let object = match store.get(&key).await {
             Ok(object) => object,
-            Err(object_store::Error::NotFound { .. }) => return Ok(SlotSummary::default()),
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(_) => bail!("control status read failed"),
         };
         if object.meta.size > MAX_CONTROL_BYTES as u64 {
@@ -334,12 +399,7 @@ async fn remote_slot(
             }
             bytes.extend_from_slice(&chunk);
         }
-        let (version, payload) = crate::durable_state::decode_slot(&bytes)?;
-        Ok(if payload.is_some() {
-            SlotSummary::active(version)
-        } else {
-            SlotSummary::default()
-        })
+        Ok(Some(crate::durable_state::decode_slot(&bytes)?))
     })
     .await
     .map_err(|_| anyhow::anyhow!("control status read timed out"))?

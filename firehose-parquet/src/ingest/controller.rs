@@ -102,6 +102,22 @@ pub struct CommittedTable {
 /// Refusal of a request whose stream descriptor differs from authority's.
 pub(super) const STREAM_MISMATCH: &str = "existing authoritative stream differs from this request; use a new output root for changed semantics or bindings";
 
+/// The refusal of an authority whose stream differs from the request's. A
+/// dataset bound to another root than the requested one was copied or moved
+/// there, and the refusal names `fireparq recovery rebind` (#635).
+pub(super) fn stream_mismatch(
+    stored: &super::state::StreamDescriptor,
+    expected: &super::state::StreamDescriptor,
+) -> anyhow::Error {
+    if stored.output != expected.output {
+        return anyhow::anyhow!(
+            "{}",
+            super::binding::rebind_hint(&stored.output, &expected.output)
+        );
+    }
+    anyhow::anyhow!("{STREAM_MISMATCH}")
+}
+
 impl<'a, M: MirrorAction> TransactionController<'a, M> {
     /// Journal recovery without Delta tables, for the #468 unit tests of the
     /// journal alone.
@@ -157,7 +173,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             "protected ingestion authority is absent; eligible-root initialization is required",
         )?;
         if authority.payload.descriptor != *expected {
-            bail!("{STREAM_MISMATCH}");
+            return Err(stream_mismatch(&authority.payload.descriptor, expected));
         }
         // A Committed transaction whose authority has not advanced yet: its
         // Delta commits may be incomplete.
