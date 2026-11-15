@@ -37,7 +37,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use deltalake_core::kernel::transaction::{
     CommitBuilder, CommitConflictError, CommitProperties, TransactionError,
 };
-use deltalake_core::kernel::{Action, Add, StructField, StructType, Transaction};
+use deltalake_core::kernel::{Action, Add, MetadataExt, StructField, StructType, Transaction};
 use deltalake_core::logstore::LogStoreRef;
 use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::{DeltaTable, DeltaTableError};
@@ -642,6 +642,249 @@ impl DeltaTables {
             })
             .collect()
     }
+}
+
+/// The Delta tables of a dataset being bound to a new output root
+/// (`fireparq recovery rebind`, `crate::ingest::rebind`). Each table is the
+/// previous stream's, or already the new one's: a rebind interrupted between
+/// tables is completed by the next run.
+///
+/// [`Self::commit`] changes a table's `fireparq.descriptor` and nothing else:
+/// one `metaData` action (`SET TBLPROPERTIES`) holding the table's metadata
+/// with the new descriptor, and `txn {appId: fireparq:<new descriptor>,
+/// version: authority's ordinal}`, which the next `build`'s
+/// [`DeltaTables::check_progress`] reads as this stream's progress. The
+/// previous stream's `txn` entries stay, and no file is added or removed.
+pub struct DeltaRebind {
+    store: DeltaStore,
+    previous: DeltaIdentity,
+    next: DeltaIdentity,
+    /// Each table, and whether it already holds the new descriptor.
+    tables: BTreeMap<String, (OpenTable, bool)>,
+}
+
+impl fmt::Debug for DeltaRebind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeltaRebind")
+            .field("store", &self.store)
+            .field("tables", &self.tables.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl DeltaRebind {
+    /// Opens the existing tables `names`, each validated exactly as
+    /// [`DeltaTables::open_existing`] does, against the previous stream's
+    /// properties or the new one's.
+    pub async fn open<'n>(
+        store: DeltaStore,
+        previous: DeltaIdentity,
+        next: DeltaIdentity,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Self> {
+        ensure!(
+            previous.lane.is_none()
+                && next.lane.is_none()
+                && previous.descriptor != next.descriptor,
+            "a rebind changes a dataset's own stream"
+        );
+        let mut tables = BTreeMap::new();
+        for name in names {
+            let table = open_existing_table(&store, name)
+                .await
+                .with_context(|| format!("opening the Delta table `{name}`"))?;
+            let rebound = table
+                .snapshot()?
+                .metadata()
+                .configuration()
+                .get(super::DESCRIPTOR_PROPERTY)
+                == Some(&next.descriptor);
+            let identity = if rebound { &next } else { &previous };
+            validate(&table, name, None, &identity.configuration())?;
+            let checkpoint = read_checkpoint_hint(&table, name).await;
+            let open = OpenTable {
+                table,
+                checkpoint,
+                checkpoint_read: Instant::now(),
+            };
+            tables.insert(name.to_string(), (open, rebound));
+        }
+        ensure!(!tables.is_empty(), "a dataset has at least one Delta table");
+        Ok(Self {
+            store,
+            previous,
+            next,
+            tables,
+        })
+    }
+
+    /// Each table's current version.
+    pub fn versions(&self) -> Result<BTreeMap<String, u64>> {
+        self.tables
+            .iter()
+            .map(|(name, (open, _))| Ok((name.clone(), open.version()?)))
+            .collect()
+    }
+
+    /// The tables that still hold the previous stream's descriptor.
+    pub fn pending(&self) -> Vec<String> {
+        self.tables
+            .iter()
+            .filter(|(_, (_, rebound))| !rebound)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Checks every table's log against authority, whose accepted ordinal is
+    /// `ordinal`, before anything changes: no table holds a `txn` of the
+    /// previous stream above it; [`LAST_TABLE`], which commits last in every
+    /// transaction, holds exactly it, so no log is behind authority; and a
+    /// table already rebound holds the new stream's `txn` at it, while one
+    /// that is not holds none.
+    pub async fn check(&self, ordinal: u64) -> Result<()> {
+        let accepted = txn_version_of(ordinal)?;
+        let (previous, next) = (self.previous.app_id(), self.next.app_id());
+        for (name, (open, rebound)) in &self.tables {
+            let snapshot = open.table.snapshot()?;
+            let log_store = open.table.log_store();
+            let old = snapshot
+                .transaction_version(log_store.as_ref(), previous.as_str())
+                .await
+                .with_context(|| format!("reading the `txn` of Delta table `{name}`"))?;
+            let new = snapshot
+                .transaction_version(log_store.as_ref(), next.as_str())
+                .await
+                .with_context(|| format!("reading the `txn` of Delta table `{name}`"))?;
+            if let Some(version) = old.filter(|version| *version > accepted) {
+                return Err(log_ahead(name, version, ordinal, None, &previous));
+            }
+            if name == LAST_TABLE {
+                ensure!(
+                    old == Some(accepted),
+                    "the Delta log of table `{name}` holds transaction {old:?} of this stream \
+                     (`txn` appId {previous}), but authority has accepted up to ordinal \
+                     {ordinal}: the log is behind authority. If the source is a sealed parallel \
+                     backfill, run its writer there until it has committed once; otherwise the \
+                     copy is incomplete. Nothing was changed"
+                );
+            }
+            let expected = rebound.then_some(accepted);
+            ensure!(
+                new == expected,
+                "Delta table `{name}` holds `txn` {new:?} of the rebound stream ({next}); a \
+                 table {} holds {expected:?}. Nothing was changed",
+                if *rebound {
+                    "already rebound"
+                } else {
+                    "not rebound yet"
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Commits the new descriptor to every table that still holds the
+    /// previous one, [`LAST_TABLE`] last, with `txn` at authority's
+    /// `ordinal` and `audit` in the commit's `commitInfo`, and returns them
+    /// with their new versions. A failed commit leaves the tables before it
+    /// rebound and the others not; the next run completes them.
+    pub async fn commit(
+        &mut self,
+        ordinal: u64,
+        audit: &HashMap<String, Value>,
+    ) -> Result<Vec<TableCommit>> {
+        let version = txn_version_of(ordinal)?;
+        let Self {
+            store,
+            next,
+            tables,
+            ..
+        } = self;
+        let app_id = next.app_id();
+        let expected = next.configuration();
+        let mut order: Vec<String> = tables
+            .iter()
+            .filter(|(_, (_, rebound))| !rebound)
+            .map(|(name, _)| name.clone())
+            .collect();
+        order.sort_by_key(|name| name == LAST_TABLE);
+        let mut committed = Vec::with_capacity(order.len());
+        for name in order {
+            let (open, rebound) = tables.get_mut(&name).context("an opened table")?;
+            let started = Instant::now();
+            let snapshot = open
+                .table
+                .snapshot()
+                .with_context(|| format!("Delta table `{name}` is not loaded"))?;
+            let metadata = snapshot.metadata().clone().add_config_key(
+                super::DESCRIPTOR_PROPERTY.to_string(),
+                next.descriptor.clone(),
+            )?;
+            let properties = CommitProperties::default()
+                .with_application_transaction(Transaction::new(&app_id, version))
+                .with_create_checkpoint(false)
+                .with_cleanup_expired_logs(Some(false))
+                .with_max_retries(MAX_COMMIT_ATTEMPTS)
+                .with_metadata(audit.clone());
+            let operation = DeltaOperation::SetTableProperties {
+                properties: HashMap::from([(
+                    super::DESCRIPTOR_PROPERTY.to_string(),
+                    next.descriptor.clone(),
+                )]),
+            };
+            let finalized = CommitBuilder::from(properties)
+                .with_actions(vec![Action::Metadata(metadata)])
+                .build(Some(snapshot), open.table.log_store(), operation)
+                .await
+                .with_context(|| {
+                    format!("committing the new descriptor of Delta table `{name}`")
+                })?;
+            let table_version = finalized.version();
+            let retries = finalized.metrics.num_retries;
+            open.table.state = Some(finalized.snapshot());
+            sync_commit(store, &name, table_version, false).await?;
+            validate(&open.table, &name, None, &expected)?;
+            *rebound = true;
+            committed.push(TableCommit {
+                tail_commits: open.tail_commits()?,
+                table: name,
+                version: table_version,
+                retries,
+                elapsed: started.elapsed(),
+                found_in_log: false,
+            });
+        }
+        Ok(committed)
+    }
+}
+
+/// Opens the existing table `name`, refusing a missing one.
+async fn open_existing_table(store: &DeltaStore, name: &str) -> Result<DeltaTable> {
+    ensure!(
+        !store.lacks_local_log(name)?,
+        "table `{name}` has no Delta log"
+    );
+    Ok(open_table(store.log_store(name)?).await?)
+}
+
+/// The latest version of each of the existing tables `names`, read without
+/// validating them: the root a dataset was copied from
+/// (`crate::ingest::rebind`), which is never written.
+pub async fn latest_versions<'n>(
+    store: &DeltaStore,
+    names: impl IntoIterator<Item = &'n str>,
+) -> Result<BTreeMap<String, u64>> {
+    let mut versions = BTreeMap::new();
+    for name in names {
+        let table = open_existing_table(store, name)
+            .await
+            .with_context(|| format!("opening the Delta table `{name}`"))?;
+        let version = table
+            .version()
+            .with_context(|| format!("Delta table `{name}` has no version"))?;
+        versions.insert(name.to_string(), version);
+    }
+    Ok(versions)
 }
 
 struct CommitContext<'c> {

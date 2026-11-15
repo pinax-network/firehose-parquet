@@ -8,6 +8,7 @@ pub(crate) mod frontier;
 pub(crate) mod maintenance;
 pub(crate) mod mirror;
 pub(crate) mod parts;
+pub(crate) mod rebind;
 pub(crate) mod session;
 pub(crate) mod state;
 pub(crate) mod store;

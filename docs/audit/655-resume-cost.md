@@ -103,8 +103,9 @@ dataset. Resuming the copy is still refused by its ancestor check (tested, on S3
 and locally). Resuming the enclosing dataset does not notice the copy.
 Maintenance still walks the whole tree and refuses both ("nested protected
 datasets have conflicting authority"), and `build` of the enclosing dataset
-writes only its own table paths. Moving or copying datasets is out of scope
-(#635).
+writes only its own table paths. A whole dataset copied to a separate root is
+bound there by `fireparq recovery rebind` (#635), which runs the same ancestor
+check, so a copy inside another dataset is refused there too.
 
 ## Merge journals
 

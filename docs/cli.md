@@ -479,6 +479,9 @@ fireparq recovery release s3://ethereum-mainnet \
   --expected-generation <generation-from-status> \
   --stopped-writer-evidence <reference> \
   --provider-quiescence-evidence <reference>
+
+# Bind a stopped dataset, copied with `aws s3 sync`, to its new root
+fireparq recovery rebind s3://ethereum-mainnet-v2 --from s3://ethereum-mainnet
 ```
 
 | Subcommand | Behavior |
@@ -486,6 +489,7 @@ fireparq recovery release s3://ethereum-mainnet \
 | `status` | Read-only ownership and control-record summary |
 | `recover` | Recover protected ingestion and the mirror under one owner, including the Delta tables of an interrupted transaction, and print `{"recovered_protected_roots": N}`. A retained S3 owner must be released first |
 | `release` | S3 only. Requires `--expected-owner` and `--expected-generation` exactly as reported by `status`, plus `--stopped-writer-evidence` and `--provider-quiescence-evidence` (non-secret operator references). It changes only ownership and repairs no data |
+| `rebind` | Binds a stopped dataset copied from `--from` (`cp -R`, `aws s3 sync`) to its new root, so that `build` resumes it there. Both roots are local, or S3 on one endpoint and region. It refuses unless the copy is complete and `--from` is quiet, then changes the copy's `state.json`, each Delta table's `fireparq.descriptor` and its cursor mirror, and prints the previous and new stream ids, the ordinal and the tables it changed. `--from` is only read; a rerun completes an interrupted rebind. See [Relocating a dataset](cursor-and-resume.md#relocating-a-dataset) |
 
 `status` and `release` take `--lane <start>-<stop>` for the owner and records
 of one [parallel backfill](parallel-backfill.md) lane instead of the bucket's.
