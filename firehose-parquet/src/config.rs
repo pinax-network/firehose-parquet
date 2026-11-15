@@ -72,6 +72,9 @@ pub const DEFAULT_FLUSH_ENCODE_CONCURRENCY: usize = 2;
 pub const DEFAULT_FLUSH_PUBLISH_CONCURRENCY: usize = 4;
 /// Default budget for encoded parts in flight within one flush (256 MiB).
 pub const DEFAULT_FLUSH_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+/// Default flushes a parallel backfill lane commits to the Delta logs
+/// together (#728).
+pub const DEFAULT_LANE_COMMIT_FLUSHES: usize = 64;
 
 /// Bounded table work inside one protected all-table transaction (#516).
 ///
@@ -190,6 +193,9 @@ pub struct Config {
     /// `[start, stop)` of the parallel backfill lane this run fills
     /// ([`crate::ingest::backfill`]); `None` for an ordinary dataset.
     pub backfill_lane: Option<(u64, u64)>,
+    /// Flushes a backfill lane commits to the Delta logs together
+    /// (`--lane-commit-flushes`, #728). Ordinary datasets commit every flush.
+    pub lane_commit_flushes: usize,
 }
 
 impl std::fmt::Display for Compression {
@@ -372,6 +378,7 @@ impl Default for Config {
             stream_idle_timeout_secs: Some(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
             reconnect_stall_timeout_secs: Some(900),
             backfill_lane: None,
+            lane_commit_flushes: DEFAULT_LANE_COMMIT_FLUSHES,
         }
     }
 }

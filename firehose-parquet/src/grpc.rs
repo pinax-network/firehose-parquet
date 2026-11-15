@@ -1326,6 +1326,7 @@ mod tests {
             stream_idle_timeout_secs: None,
             reconnect_stall_timeout_secs: None,
             backfill_lane: None,
+            lane_commit_flushes: crate::config::DEFAULT_LANE_COMMIT_FLUSHES,
         }
     }
 

@@ -32,7 +32,7 @@ fireparq build --network base --output s3://base
 | Before the seal | Only lanes write. A `build` without a lane's range (a live writer included) fails with `this dataset is being backfilled in parallel and is not sealed`, before any Blocks request |
 | One lane | One worker at a time: a second fails with `backfill lane <start>-<stop> is owned by another worker` |
 | Every block number | A lane's first block is its start, and each next block the following number; anything else fails the lane with `backfill lane expected block <n> but received block <m>` |
-| A complete lane | Running it again is a no-op |
+| A complete lane | Every file it wrote is in the Delta logs. Running it again is a no-op |
 | `seal` | Refuses unless every lane is complete with its owner released, and `blocks` holds exactly the backfill's range: its first and last block, no gap, no duplicate, every block linked to its parent, lane boundaries included. The check reads `blocks` one `date` at a time, so its memory does not grow with the range; `--no-validate` skips it. Sealing twice changes nothing |
 | After the seal | An ordinary dataset whose start is the backfill's. `build` resumes from the stored cursor, at the backfill's stop block; `--start-block` must be omitted or equal that start, so a lane's range is refused |
 
@@ -53,6 +53,14 @@ existing dataset cannot be backfilled below its start.
   range. Its owner record, checkpoint and pending journal are under
   `.fireparq-ingest/lanes/<start>-<stop>/`, it has no cursor mirror, and its
   parts go straight to `<table>/date=YYYY-MM-DD/`. Nothing is staged or copied.
+- A lane does not commit every flush to the Delta logs, which all lanes
+  share: lanes that did lost most of their commit attempts to one another
+  (#728). A flush is published and accepted in the lane's own state, in one
+  write that also lists its files as owed to the logs. The lane commits what
+  it owes together, one commit per table and `blocks` last: every
+  `--lane-commit-flushes` flushes (`LANE_COMMIT_FLUSHES`, default 64, 1-256),
+  when it finishes, when it stops on SIGTERM, and at every start. A lane is
+  complete only once it owes nothing.
 - Each lane commits with its own `txn` application id, so lanes are blind
   appends beside one another, as `build` is beside the maintenance job. The
   tables record the dataset's `fireparq.descriptor`, not a lane's.
@@ -63,22 +71,33 @@ existing dataset cannot be backfilled below its start.
 
 - The [frontier rule](reading-tables.md#consistent-reads-across-tables) does
   not hold: the tables hold complete but disjoint ranges, and the newest
-  `block_num` of `blocks` says nothing about the blocks below it. Keep the
-  bucket out of readers' hands until it is sealed.
+  `block_num` of `blocks` says nothing about the blocks below it. A running
+  lane's newest flushes are in no table yet. Keep the bucket out of readers'
+  hands until it is sealed.
 - The [maintenance job](delta-maintenance.md) may run. It treats days a lane
   is still filling as closed and compacts them again as parts arrive, as
-  `OPTIMIZE_DATES=all` does. Lanes commit several times faster than one
-  writer, so run its checkpoint more often than hourly. A day two lanes
+  `OPTIMIZE_DATES=all` does. Lanes commit in batches, so the logs stay short
+  and the hourly checkpoint is enough. A day two lanes
   share can be compacted before the earlier lane reaches it; the job then
   sorts that day back into block order as a
   [repair](delta-maintenance.md#row-order), `OPTIMIZE_REPAIR_DATES` days per
   table and run (default 1), so allow about one such day per lane.
+- The files a lane owes to the logs are untracked until its next commit. The
+  lite VACUUM never deletes an untracked file. The weekly full VACUUM
+  (`FULL_VACUUM=1`) deletes those older than its retention, at least 7 days:
+  do not leave a stopped lane that long beside it. Rerun the lane, or skip
+  the full VACUUM until the seal. A lane whose owed file is gone stops with
+  its state kept, and the backfill is redone into a new root.
 
 ## A lane that failed
 
 Rerun it: the lane recovers its own journal before streaming, like any
-`build`. A lane that kept its owner (an uncertain request, a killed process)
-blocks only itself and is released like a bucket owner, with `--lane`:
+`build`, and commits what it still owes to the Delta logs. If it stopped
+inside such a commit, it reads each table's `txn` and adds only the files
+that table lacks. `backfill status` reports a lane's owed flushes as
+`uncommitted_flushes`. A lane that kept its owner (an uncertain request, a
+killed process) blocks only itself and is released like a bucket owner, with
+`--lane`:
 
 ```bash
 fireparq recovery status s3://base --lane 250000-500000
@@ -93,4 +112,11 @@ fireparq recovery release s3://base --lane 250000-500000 \
 Firehose and a loopback S3: concurrent lanes, a crashed lane, the refusals,
 the seal and a `build` that extends the sealed dataset. Its second test
 crashes a lane between two tables' commits and runs the maintenance job in
-every mode before and while the lane recovers.
+every mode before and while the lane recovers. Its third runs a lane that
+commits every three flushes and dies inside the first such commit.
+`firehose-parquet/src/ingest/controller/tests/deferred.rs` interrupts a
+flush and a batch at every step.
+
+Lanes written by v1.4.0, which committed every flush, are resumed by later
+releases. The reverse is refused: v1.4.0 cannot read the state of a lane
+that owes files, so it never drops them.

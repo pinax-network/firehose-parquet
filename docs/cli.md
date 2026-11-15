@@ -21,6 +21,7 @@ Non-final output (`--final-blocks-only=false`) is described in [Non-final stream
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
 | Runtime | `--final-blocks-only[=true\|false]` (default `true`), `--dry-run` (decode and map without writing), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` / `--flush-idle-secs` (`0` disables rows, interval and idle; the interval applies at the chain head only, [details](#flush-interval-and-catch-up)) |
 | Flush concurrency | `--flush-encode-concurrency` (`FLUSH_ENCODE_CONCURRENCY`, default `2`), `--flush-publish-concurrency` (`FLUSH_PUBLISH_CONCURRENCY`, default `4`, also the local I/O threads), `--flush-inflight-bytes` (`FLUSH_INFLIGHT_BYTES`, default 256 MiB): bounded table work inside each flush ([details](#flush-concurrency)) |
+| Parallel backfill | `--lane-commit-flushes` (`LANE_COMMIT_FLUSHES`, default `64`, 1-256): flushes a [backfill lane](parallel-backfill.md#how-it-works) commits to the Delta logs together; every other `build` commits each flush |
 
 ## Network aliases
 

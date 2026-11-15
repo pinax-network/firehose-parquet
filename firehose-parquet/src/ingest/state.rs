@@ -18,6 +18,10 @@ pub const MAPPER_EPOCH: &str = "fireparq-mapping-v3";
 pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
+/// Flushes a backfill lane may hold before it commits them to the Delta logs
+/// ([`AuthorityState::deferred`]). It bounds the lane's state record and how
+/// long a published part stays out of every log.
+pub const MAX_DEFERRED_TRANSACTIONS: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -475,6 +479,17 @@ impl Checkpoint {
 pub struct AuthorityState {
     pub descriptor: StreamDescriptor,
     pub checkpoint: Checkpoint,
+    /// Accepted transactions whose parts are published and verified but not
+    /// yet in the Delta logs, oldest first (#728). Only a backfill lane holds
+    /// any: it commits them together, one commit per table, instead of one per
+    /// flush. They are part of this record so that accepting a transaction
+    /// and owing its Delta commits is one write.
+    ///
+    /// The field is absent while empty, so an ordinary dataset's record is
+    /// unchanged, and a release that predates it refuses a record that holds
+    /// some instead of dropping them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<DeferredTransaction>,
 }
 impl AuthorityState {
     pub fn initial(descriptor: StreamDescriptor) -> Result<Self> {
@@ -482,11 +497,31 @@ impl AuthorityState {
         Ok(Self {
             descriptor,
             checkpoint,
+            deferred: Vec::new(),
         })
     }
     pub fn validate(&self) -> Result<()> {
         self.descriptor.validate()?;
-        self.checkpoint.validate(&self.descriptor)
+        self.checkpoint.validate(&self.descriptor)?;
+        self.validate_deferred()
+    }
+    fn validate_deferred(&self) -> Result<()> {
+        ensure!(
+            self.deferred.len() <= MAX_DEFERRED_TRANSACTIONS,
+            "authority holds more deferred transactions than a lane may"
+        );
+        let mut previous = 0_u64;
+        for transaction in &self.deferred {
+            ensure!(
+                transaction.first_ordinal > previous
+                    && transaction.last_ordinal >= transaction.first_ordinal
+                    && transaction.last_ordinal <= self.checkpoint.ordinal,
+                "deferred transactions are not ordered accepted windows"
+            );
+            previous = transaction.last_ordinal;
+            transaction.validate(&self.descriptor)?;
+        }
+        Ok(())
     }
     /// The authority of a dataset sealed from a complete parallel backfill
     /// ([`super::backfill`]): everything from the stream's start up to `stop`
@@ -518,10 +553,12 @@ impl AuthorityState {
         let state = Self {
             checkpoint: accepted.complete_request(&descriptor, stop)?,
             descriptor,
+            deferred: Vec::new(),
         };
         state.validate()?;
         Ok(state)
     }
+    /// Authority after `pending`, whose parts are in the Delta logs.
     pub fn install(&self, pending: &PendingTransaction) -> Result<Self> {
         self.validate_predecessor(pending)?;
         if pending.phase != TransactionPhase::Committed {
@@ -530,7 +567,30 @@ impl AuthorityState {
         Ok(Self {
             descriptor: self.descriptor.clone(),
             checkpoint: pending.target.clone(),
+            deferred: self.deferred.clone(),
         })
+    }
+    /// Authority after `pending`, whose parts are published and verified but
+    /// not in the Delta logs yet: they join [`Self::deferred`].
+    pub fn install_deferred(&self, pending: &PendingTransaction) -> Result<Self> {
+        let mut next = self.install(pending)?;
+        if let Some(transaction) = DeferredTransaction::of(pending)? {
+            ensure!(
+                next.deferred.len() < MAX_DEFERRED_TRANSACTIONS,
+                "a lane cannot defer more transactions before committing them to the Delta logs"
+            );
+            next.deferred.push(transaction);
+        }
+        next.validate()?;
+        Ok(next)
+    }
+    /// Authority once every deferred transaction is in the Delta logs.
+    pub fn settled(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            checkpoint: self.checkpoint.clone(),
+            deferred: Vec::new(),
+        }
     }
     pub fn validate_predecessor(&self, pending: &PendingTransaction) -> Result<()> {
         self.validate()?;
@@ -617,6 +677,160 @@ impl PartReceipt {
             modification_time: 1_700_000_000_000,
         }
     }
+}
+
+/// One part of a [`DeferredTransaction`]: what its Delta `add` and its
+/// verification need. Its path is derived, as a pending transaction's is.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferredPart {
+    pub table: String,
+    /// The part's `date=YYYY-MM-DD` directory.
+    pub partition: String,
+    pub entry_index: u32,
+    pub row_count: u64,
+    pub receipt: PartReceipt,
+}
+
+/// An accepted transaction whose parts are not in the Delta logs yet
+/// ([`AuthorityState::deferred`]).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferredTransaction {
+    pub id: Digest,
+    pub first_ordinal: u64,
+    pub last_ordinal: u64,
+    pub parts: Vec<DeferredPart>,
+}
+impl DeferredTransaction {
+    /// The record of a Committed transaction, or `None` when it has no part.
+    fn of(pending: &PendingTransaction) -> Result<Option<Self>> {
+        ensure!(
+            pending.phase == TransactionPhase::Committed,
+            "only a Committed transaction can be deferred"
+        );
+        if pending.parts.is_empty() {
+            return Ok(None);
+        }
+        let parts = pending
+            .parts
+            .iter()
+            .map(|part| {
+                let plan = pending
+                    .tables
+                    .iter()
+                    .find(|plan| plan.table == part.table)
+                    .context("a committed part has no table plan")?;
+                Ok(DeferredPart {
+                    table: part.table.clone(),
+                    partition: plan.partition.clone(),
+                    entry_index: part.entry_index,
+                    row_count: part.row_count,
+                    receipt: part
+                        .receipt
+                        .clone()
+                        .context("a committed part has no receipt")?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Some(Self {
+            id: pending.id.clone(),
+            first_ordinal: pending.prefix.first_ordinal,
+            last_ordinal: pending.prefix.last_ordinal,
+            parts,
+        }))
+    }
+    fn validate(&self, descriptor: &StreamDescriptor) -> Result<()> {
+        ensure!(!self.parts.is_empty(), "a deferred transaction has no part");
+        let mut previous = None;
+        for part in &self.parts {
+            let position = descriptor
+                .tables
+                .keys()
+                .position(|table| *table == part.table)
+                .context("a deferred part belongs to no table of the stream")?;
+            ensure!(
+                u32::try_from(position).ok() == Some(part.entry_index)
+                    && previous < Some(part.entry_index),
+                "deferred parts are not the stream's tables in order"
+            );
+            previous = Some(part.entry_index);
+            crate::date_partition::DatePartition::parse(&part.partition)
+                .context("a deferred part's partition is not a date=YYYY-MM-DD directory")?;
+            ensure!(
+                part.row_count > 0
+                    && part.receipt.byte_size > 0
+                    && part.receipt.modification_time > 0,
+                "a deferred part has an invalid receipt"
+            );
+            crate::delta::stats::check_stats(&part.receipt.stats, part.row_count)
+                .context("a deferred part has invalid Delta statistics")?;
+        }
+        Ok(())
+    }
+    /// The parts as a pending transaction plans them, with their receipts:
+    /// the same deterministic paths, under the stream `descriptor`.
+    pub fn planned_parts(&self, descriptor: &StreamDescriptor) -> Result<Vec<PlannedPart>> {
+        let stream = descriptor.id()?;
+        self.parts
+            .iter()
+            .map(|part| {
+                let (final_relative_path, temporary_relative_path) = part_paths(
+                    &stream,
+                    &self.id,
+                    self.first_ordinal,
+                    self.last_ordinal,
+                    &part.table,
+                    &part.partition,
+                    part.entry_index,
+                )?;
+                Ok(PlannedPart {
+                    table: part.table.clone(),
+                    final_relative_path,
+                    temporary_relative_path,
+                    schema_sha256: descriptor
+                        .tables
+                        .get(&part.table)
+                        .context("a deferred part belongs to no table of the stream")?
+                        .clone(),
+                    entry_index: part.entry_index,
+                    row_count: part.row_count,
+                    receipt: Some(part.receipt.clone()),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The final and temporary paths of the part of `table` at `index` of the
+/// transaction `id`, relative to the dataset root.
+fn part_paths(
+    stream: &Digest,
+    id: &Digest,
+    first_ordinal: u64,
+    last_ordinal: u64,
+    table: &str,
+    partition: &str,
+    index: u32,
+) -> Result<(String, String)> {
+    let directory = if partition.is_empty() {
+        table.to_string()
+    } else {
+        format!("{table}/{partition}")
+    };
+    let final_name = format!(
+        "part-v1-{}-{first_ordinal}-{last_ordinal}-{}-{index}.parquet",
+        stream.as_str(),
+        id.as_str()
+    );
+    let temporary = format!(".fireparq-txn-{}-{index}.tmp", id.as_str());
+    if final_name.len() > 255 {
+        bail!("deterministic part filename exceeds filesystem component limit");
+    }
+    Ok((
+        format!("{directory}/{final_name}"),
+        format!("{directory}/{temporary}"),
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -718,28 +932,22 @@ impl PendingTransaction {
             if table.rows == 0 {
                 continue;
             }
-            let directory = if table.partition.is_empty() {
-                table.table.clone()
-            } else {
-                format!("{}/{}", table.table, table.partition)
-            };
-            let final_name = format!(
-                "part-v1-{}-{}-{}-{}-{index}.parquet",
-                stream.as_str(),
+            let entry_index = u32::try_from(index)?;
+            let (final_relative_path, temporary_relative_path) = part_paths(
+                stream,
+                id,
                 prefix.first_ordinal,
                 prefix.last_ordinal,
-                id.as_str()
-            );
-            let temporary = format!(".fireparq-txn-{}-{index}.tmp", id.as_str());
-            if final_name.len() > 255 {
-                bail!("deterministic part filename exceeds filesystem component limit");
-            }
+                &table.table,
+                &table.partition,
+                entry_index,
+            )?;
             parts.push(PlannedPart {
                 table: table.table.clone(),
-                final_relative_path: format!("{directory}/{final_name}"),
-                temporary_relative_path: format!("{directory}/{temporary}"),
+                final_relative_path,
+                temporary_relative_path,
                 schema_sha256: table.schema_sha256.clone(),
-                entry_index: u32::try_from(index)?,
+                entry_index,
                 row_count: table.rows,
                 receipt: None,
             });

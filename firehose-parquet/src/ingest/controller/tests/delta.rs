@@ -17,7 +17,7 @@ use arrow::array::{Int64Array, TimestampMicrosecondArray};
 
 /// The fixture rows in Delta data file types, as `IngestionSession::flush`
 /// hands them to the controller.
-fn delta_data() -> HashMap<String, RecordBatch> {
+pub(super) fn delta_data() -> HashMap<String, RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("block_num", DataType::Int64, false),
         Field::new(
@@ -47,7 +47,7 @@ fn delta_data() -> HashMap<String, RecordBatch> {
         .collect()
 }
 
-fn delta_descriptor(root: &Path) -> StreamDescriptor {
+pub(super) fn delta_descriptor(root: &Path) -> StreamDescriptor {
     let mut descriptor = actual_descriptor(root);
     descriptor.tables = delta_data()
         .iter()
@@ -61,7 +61,11 @@ fn delta_descriptor(root: &Path) -> StreamDescriptor {
     descriptor
 }
 
-async fn delta_tables(root: &Path, descriptor: &StreamDescriptor, create: bool) -> DeltaTables {
+pub(super) async fn delta_tables(
+    root: &Path,
+    descriptor: &StreamDescriptor,
+    create: bool,
+) -> DeltaTables {
     let columns = delta_data()
         .iter()
         .map(|(table, batch)| {
@@ -101,7 +105,7 @@ async fn open_delta<'a>(
 }
 
 /// A fresh controller over freshly opened (never created) tables: a restart.
-async fn restart<'a>(
+pub(super) async fn restart<'a>(
     root: &Path,
     owner: &'a LocalOwnership,
     mirror: &'a Mirror,
@@ -113,7 +117,11 @@ async fn restart<'a>(
 
 /// Initializes a stream at `root`, creates its tables and makes its first
 /// commit (ordinals 1..=2) fail at `stage`, leaving the journal pending.
-async fn interrupted_first_commit(root: &Path, mirror: &Mirror, stage: Stage) -> StreamDescriptor {
+pub(super) async fn interrupted_first_commit(
+    root: &Path,
+    mirror: &Mirror,
+    stage: Stage,
+) -> StreamDescriptor {
     let descriptor = delta_descriptor(root);
     let owner = LocalOwnership::acquire(&[root.into()]).unwrap();
     initialize(root, &owner, &descriptor).await;
@@ -131,7 +139,10 @@ async fn interrupted_first_commit(root: &Path, mirror: &Mirror, stage: Stage) ->
     descriptor
 }
 
-async fn journal(root: &Path, owner: &LocalOwnership) -> (u64, Option<TransactionPhase>) {
+pub(super) async fn journal(
+    root: &Path,
+    owner: &LocalOwnership,
+) -> (u64, Option<TransactionPhase>) {
     let snapshot = TransactionStateStore::local(root, owner)
         .unwrap()
         .load()
@@ -144,7 +155,10 @@ async fn journal(root: &Path, owner: &LocalOwnership) -> (u64, Option<Transactio
 }
 
 /// Each table's version and `txn`, from a fresh handle.
-async fn logs(root: &Path, descriptor: &StreamDescriptor) -> BTreeMap<String, (u64, Option<i64>)> {
+pub(super) async fn logs(
+    root: &Path,
+    descriptor: &StreamDescriptor,
+) -> BTreeMap<String, (u64, Option<i64>)> {
     let tables = delta_tables(root, descriptor, false).await;
     let mut logs = BTreeMap::new();
     for table in ["blocks", "logs"] {
@@ -159,7 +173,7 @@ async fn logs(root: &Path, descriptor: &StreamDescriptor) -> BTreeMap<String, (u
     logs
 }
 
-fn expect(entries: &[(&str, u64, Option<i64>)]) -> BTreeMap<String, (u64, Option<i64>)> {
+pub(super) fn expect(entries: &[(&str, u64, Option<i64>)]) -> BTreeMap<String, (u64, Option<i64>)> {
     entries
         .iter()
         .map(|(table, version, txn)| (table.to_string(), (*version, *txn)))
@@ -167,7 +181,7 @@ fn expect(entries: &[(&str, u64, Option<i64>)]) -> BTreeMap<String, (u64, Option
 }
 
 /// The part files of `table`.
-fn table_parts(root: &Path, table: &str) -> Vec<PathBuf> {
+pub(super) fn table_parts(root: &Path, table: &str) -> Vec<PathBuf> {
     let root = fs::canonicalize(root).unwrap();
     data_files(&root)
         .into_iter()
@@ -176,7 +190,7 @@ fn table_parts(root: &Path, table: &str) -> Vec<PathBuf> {
 }
 
 /// Each table's active `add` paths, replayed from its JSON log.
-fn active(root: &Path, table: &str) -> Vec<String> {
+pub(super) fn active(root: &Path, table: &str) -> Vec<String> {
     let log = root.join(table).join("_delta_log");
     let mut versions: Vec<PathBuf> = fs::read_dir(&log)
         .unwrap()
@@ -205,7 +219,7 @@ fn active(root: &Path, table: &str) -> Vec<String> {
     files.into_iter().collect()
 }
 
-async fn commit_rows(
+pub(super) async fn commit_rows(
     controller: &mut TransactionController<'_, &Mirror>,
     batches: HashMap<String, RecordBatch>,
 ) -> Result<CommittedFlush> {

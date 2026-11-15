@@ -666,6 +666,30 @@ it lasts until the writer restarts.
   files the daily VACUUM deleted days before. A file whose tombstone expires
   first is untracked, and the weekly full VACUUM deletes it.
 
+### 4.2 Deferred commits of a backfill lane (#728)
+
+A [parallel backfill](../parallel-backfill.md) lane does not commit between
+Committed and the authority advance. Authority accepts the transaction and
+lists its parts as owed (`deferred`) in one write. A batch commits everything
+owed, one commit per table with `txn = O`, authority's ordinal, `blocks`
+last, then clears the list. `controller/tests/deferred.rs` covers each row.
+
+| Crash point | Durable state | Recovery before any Blocks request |
+|---|---|---|
+| Up to `CommittedPersisted` | as above | as above, without Delta commits |
+| `CommittedPersisted`, before `AuthorityAdvanced` | Committed; authority behind | Verify the parts, accept the transaction as owed, clear the journal, then commit the batch |
+| `AuthorityAdvanced` and later, no batch started | authority owes parts; no `txn` above the previous batch | Commit the batch |
+| Between two tables of a batch (`DeltaCommitted(i)`) | authority owes parts; some tables have `txn = O` | Read every table's `txn`; add to each table only the owed parts above it, so a table at `O` is skipped and its parts are not read |
+| A batch commit's PUT is ambiguous | a table's `txn` is `O` or less | As the row above; a same-`appId` conflict is resolved from the log (§3.5) |
+| All tables committed, before `DeferredSettled` | authority owes parts; all `txn = O` | No commit. Clear the list |
+| An owed part is missing or has another size | authority owes parts | Stop with evidence retained |
+
+Recovery checks an owed part's presence and size, not its bytes: the part was
+verified against its receipt before the transaction was accepted, and a batch
+may hold tens of gigabytes. A request completes (a lane becomes Complete)
+only with nothing owed. The list is absent from the record while empty, so
+v1.4.0 reads a lane that owes nothing and refuses one that owes parts.
+
 ## 5. Ownership (#636)
 
 What the fireparq owner still guards:

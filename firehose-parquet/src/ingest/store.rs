@@ -24,6 +24,16 @@ pub struct Versioned<T> {
     pub payload: T,
 }
 
+impl<T: Clone> Versioned<T> {
+    /// The same record at the same version.
+    pub(super) fn clone_versioned(&self) -> Self {
+        Self {
+            version: self.version.clone(),
+            payload: self.payload.clone(),
+        }
+    }
+}
+
 pub struct JournalSnapshot {
     pub authority: Option<Versioned<AuthorityState>>,
     pub pending: Option<Versioned<PendingTransaction>>,
@@ -257,6 +267,48 @@ impl<'a> TransactionStateStore<'a> {
         })
     }
 
+    /// [`Self::advance`] for a backfill lane: authority accepts the Committed
+    /// transaction and records its parts as owed to the Delta logs
+    /// ([`AuthorityState::deferred`]), in the same write.
+    pub async fn advance_deferred(
+        &self,
+        authority: &Versioned<AuthorityState>,
+        pending: &Versioned<PendingTransaction>,
+    ) -> Result<Versioned<AuthorityState>> {
+        self.require(ControlKey::Pending, &pending.version).await?;
+        let next = authority.payload.install_deferred(&pending.payload)?;
+        let version = self
+            .replace(ControlKey::State, &authority.version, &next)
+            .await?;
+        Ok(Versioned {
+            version,
+            payload: next,
+        })
+    }
+
+    /// The controller calls this once every deferred transaction of
+    /// `authority` is in the Delta logs: nothing is owed any more.
+    pub async fn settle_deferred(
+        &self,
+        authority: &Versioned<AuthorityState>,
+    ) -> Result<Versioned<AuthorityState>> {
+        let observed = self.load().await?;
+        if observed.pending.is_some() {
+            bail!("cannot settle deferred Delta commits while an ingestion journal remains");
+        }
+        if observed.authority.as_ref().map(|state| &state.version) != Some(&authority.version) {
+            bail!("authority changed before its deferred Delta commits were settled");
+        }
+        let next = authority.payload.settled();
+        let version = self
+            .replace(ControlKey::State, &authority.version, &next)
+            .await?;
+        Ok(Versioned {
+            version,
+            payload: next,
+        })
+    }
+
     /// Only the uniquely permitted controller calls this after proving clean
     /// stream completion and an exact fully acknowledged boundary. There are
     /// no data mutations in this transition, so the one authority CAS is enough.
@@ -272,6 +324,9 @@ impl<'a> TransactionStateStore<'a> {
         if observed.authority.as_ref().map(|state| &state.version) != Some(&authority.version) {
             bail!("authority changed before request completion");
         }
+        if !authority.payload.deferred.is_empty() {
+            bail!("cannot complete a request whose parts are not all in the Delta logs");
+        }
         let checkpoint = authority
             .payload
             .checkpoint
@@ -279,6 +334,7 @@ impl<'a> TransactionStateStore<'a> {
         let next = AuthorityState {
             descriptor: authority.payload.descriptor.clone(),
             checkpoint,
+            deferred: Vec::new(),
         };
         let version = self
             .replace(ControlKey::State, &authority.version, &next)

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod concurrency;
+mod deferred;
 mod delta;
 mod live_flush;
 mod native_upload;

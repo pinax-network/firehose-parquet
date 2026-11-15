@@ -925,6 +925,14 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 .unwrap_or(0),
             "stream stopped; discarded uncommitted buffers and retained the authoritative prefix"
         );
+            // A backfill lane that stops cleanly commits the flushes it still
+            // owes to the Delta logs (#728). After an error the next start
+            // does it instead.
+            if exit == StreamExit::Shutdown && self.setup.config.backfill_lane.is_some() {
+                if let Some(session) = self.session.as_mut() {
+                    session.settle().await?;
+                }
+            }
         } else if self.state.mapper.is_some() && self.has_buffered()? {
             let flush = self.prepare_flush(None)?;
             if let Some(session) = self.session.as_mut() {

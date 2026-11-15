@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use super::binding::{
     mirror_service, resolve_mirror_binding, resolve_output_identity, validate_runtime_bindings,
 };
-use super::controller::{CommittedFlush, TransactionController};
+use super::controller::{CommittedFlush, DeltaCommits, TransactionController};
 use super::frontier::AcceptedFrontier;
 use super::maintenance::IngestionTarget;
 use super::mirror::ProtectedMirror;
@@ -452,7 +452,15 @@ impl<'a> IngestionSession<'a> {
                 config.cache_control.as_deref().unwrap_or_default(),
             )?,
         };
-        let controller = TransactionController::open_reserved(
+        // A lane commits its flushes to the Delta logs in batches (#728):
+        // lanes share the logs, and nothing reads the dataset before the seal.
+        let commits = match config.backfill_lane {
+            Some(_) => DeltaCommits::Deferred {
+                transactions: config.lane_commit_flushes,
+            },
+            None => DeltaCommits::EveryTransaction,
+        };
+        let mut controller = TransactionController::open_reserved(
             states(&expected.output, ownership)?,
             parts,
             mirror,
@@ -460,8 +468,10 @@ impl<'a> IngestionSession<'a> {
             permit,
             Some(tables),
             config.flush_concurrency,
+            commits,
         )
         .await?;
+        record_delta_commits(metrics, &controller.take_settled());
         if let (Some(metrics), Some(tables)) = (metrics, controller.delta_tables()) {
             for table in tables.names() {
                 metrics
@@ -728,24 +738,8 @@ impl<'a> IngestionSession<'a> {
             )
             .await?;
         self.frontier.acknowledge(&prefix)?;
+        record_delta_commits(self.metrics, &committed.delta);
         if let Some(metrics) = self.metrics {
-            for commit in &committed.delta {
-                let labels = crate::metrics::TableLabels {
-                    table: commit.table.clone(),
-                };
-                metrics
-                    .delta_log_tail_commits
-                    .get_or_create(&labels)
-                    .set(i64::try_from(commit.tail_commits).unwrap_or(i64::MAX));
-                metrics
-                    .delta_commit_seconds
-                    .get_or_create(&labels)
-                    .observe(commit.elapsed.as_secs_f64());
-                metrics
-                    .delta_commit_retries_total
-                    .get_or_create(&labels)
-                    .inc_by(commit.retries);
-            }
             for table in &committed.tables {
                 let labels = crate::metrics::TableLabels {
                     table: table.table.clone(),
@@ -775,8 +769,48 @@ impl<'a> IngestionSession<'a> {
             .controller
             .complete_request(stop, &self.frontier, clean_stream_completed)
             .await?;
+        record_delta_commits(self.metrics, &self.controller.take_settled());
         self.failed = false;
         Ok(changed)
+    }
+
+    /// Before a clean stop: a backfill lane commits the flushes it still
+    /// owes to the Delta logs (#728), so that only a crash leaves published
+    /// parts out of them. A no-op for an ordinary dataset.
+    pub async fn settle(&mut self) -> Result<()> {
+        self.ready()?;
+        self.failed = true;
+        self.controller.settle().await?;
+        record_delta_commits(self.metrics, &self.controller.take_settled());
+        self.failed = false;
+        Ok(())
+    }
+}
+
+/// Export each Delta commit's duration, retries and log tail.
+fn record_delta_commits(
+    metrics: Option<&PipelineMetrics>,
+    commits: &[crate::delta::commit::TableCommit],
+) {
+    let Some(metrics) = metrics else {
+        return;
+    };
+    for commit in commits {
+        let labels = crate::metrics::TableLabels {
+            table: commit.table.clone(),
+        };
+        metrics
+            .delta_log_tail_commits
+            .get_or_create(&labels)
+            .set(i64::try_from(commit.tail_commits).unwrap_or(i64::MAX));
+        metrics
+            .delta_commit_seconds
+            .get_or_create(&labels)
+            .observe(commit.elapsed.as_secs_f64());
+        metrics
+            .delta_commit_retries_total
+            .get_or_create(&labels)
+            .inc_by(commit.retries);
     }
 }
 

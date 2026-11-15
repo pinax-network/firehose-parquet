@@ -21,6 +21,11 @@
 //! `appId` fails with `ConcurrentTransaction` instead of adding a second copy.
 //! Writers never checkpoint or clean up the log; the maintenance job does.
 //!
+//! A backfill lane defers these commits (#728): [`DeltaTables::commit_batch`]
+//! adds the parts of several accepted transactions in one commit per table,
+//! with the `txn` of the newest one, and [`DeltaTables::txn_versions`] tells
+//! its recovery which tables an interrupted batch already reached.
+//!
 //! Recovery (#643 L4, design §3.5 and §4) reads each table's `txn` for this
 //! stream at every start: [`DeltaTables::check_progress`] refuses a log
 //! ahead of authority and names the tables of a Committed transaction whose
@@ -47,7 +52,7 @@ use serde_json::{json, Value};
 
 use super::store::DeltaStore;
 use super::{create_table, open_table, DeltaIdentity, PARTITION_COLUMN};
-use crate::ingest::state::{PendingTransaction, TransactionPhase};
+use crate::ingest::state::{PendingTransaction, PlannedPart, TransactionPhase};
 
 /// The table that commits last in every transaction.
 pub const LAST_TABLE: &str = "blocks";
@@ -204,6 +209,43 @@ impl PartAdd {
     }
 }
 
+impl PartAdd {
+    /// The `add` of the journaled `part` in its table's directory `partition`
+    /// (`date=YYYY-MM-DD`), from its receipt.
+    pub fn of(part: &PlannedPart, partition: &str) -> Result<Self> {
+        let receipt = part
+            .receipt
+            .as_ref()
+            .context("a committed part has no receipt")?;
+        let date = partition
+            .strip_prefix(&format!("{PARTITION_COLUMN}="))
+            .context("a committed part has no date partition")?;
+        let path = part
+            .final_relative_path
+            .strip_prefix(&format!("{}/", part.table))
+            .context("a committed part lies outside its table")?;
+        super::stats::check_stats(&receipt.stats, part.row_count)?;
+        Self::new(
+            &part.table,
+            part.entry_index,
+            path,
+            date,
+            receipt.byte_size,
+            &receipt.stats,
+            receipt.modification_time,
+        )
+    }
+}
+
+/// The parts one commit adds to one table's log.
+struct TableAdds {
+    table: String,
+    /// Passed to [`CommitHooks::after`]: the table's position in the sorted
+    /// inventory, which every part of the table has.
+    entry_index: u32,
+    adds: Vec<Add>,
+}
+
 /// The Delta tables of one dataset, open for the lifetime of a `build`.
 pub struct DeltaTables {
     store: DeltaStore,
@@ -349,6 +391,17 @@ impl DeltaTables {
             .await?)
     }
 
+    /// The last `txn` version this stream committed to each table, read from
+    /// the logs at most `concurrency` at a time.
+    pub async fn txn_versions(&self, concurrency: usize) -> Result<BTreeMap<String, Option<i64>>> {
+        Ok(self
+            .txn_versions_of(self.names(), concurrency)
+            .await?
+            .into_iter()
+            .map(|(table, version)| (table.to_string(), version))
+            .collect())
+    }
+
     fn open_table(&self, table: &str) -> Result<&OpenTable> {
         self.tables
             .get(table)
@@ -358,7 +411,7 @@ impl DeltaTables {
     /// The `txn` version of this stream in each of `tables`, at most
     /// `concurrency` reads at a time. Each read stops at the newest commit
     /// holding this stream's `txn`, usually the last one.
-    async fn txn_versions<'t>(
+    async fn txn_versions_of<'t>(
         &self,
         tables: impl IntoIterator<Item = &'t str>,
         concurrency: usize,
@@ -411,7 +464,7 @@ impl DeltaTables {
             })
             .unwrap_or_default();
         let mut holding = BTreeSet::new();
-        for (table, txn) in self.txn_versions(self.names(), concurrency).await? {
+        for (table, txn) in self.txn_versions_of(self.names(), concurrency).await? {
             match txn {
                 Some(version) if Some(version) == last && with_parts.contains(table) => {
                     let open = self.open_table(table)?;
@@ -546,7 +599,7 @@ impl DeltaTables {
         &mut self,
         parts: Vec<PartAdd>,
         txn_version: i64,
-        mut metadata: HashMap<String, Value>,
+        metadata: HashMap<String, Value>,
         concurrency: usize,
         hooks: &CommitHooks<'_>,
         resolve_from_log: bool,
@@ -563,6 +616,76 @@ impl DeltaTables {
                 });
             }
         }
+        let tables = parts
+            .into_iter()
+            .map(|part| TableAdds {
+                table: part.table,
+                entry_index: part.entry_index,
+                adds: vec![part.add],
+            })
+            .collect();
+        self.commit_tables(
+            tables,
+            txn_version,
+            metadata,
+            concurrency,
+            hooks,
+            resolve_from_log,
+        )
+        .await
+    }
+
+    /// Commits the parts of several accepted transactions together (#728):
+    /// one commit per table that has any of `parts`, holding all of them and
+    /// `txn {appId, version: txn_version}`, the other tables first (at most
+    /// `concurrency` at a time) and [`LAST_TABLE`] last. `txn_version` is the
+    /// newest transaction's last ordinal, so a table's `txn` at or above a
+    /// part's ordinal means the table holds that part.
+    ///
+    /// With `resolve_from_log` (recovery of an interrupted batch), a commit
+    /// that loses to a winning commit of this stream counts as done when the
+    /// table's `txn` is then `txn_version`, as in [`Self::roll_forward`].
+    pub async fn commit_batch(
+        &mut self,
+        parts: Vec<PartAdd>,
+        txn_version: i64,
+        metadata: HashMap<String, Value>,
+        concurrency: usize,
+        hooks: &CommitHooks<'_>,
+        resolve_from_log: bool,
+    ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
+        let mut tables: BTreeMap<String, TableAdds> = BTreeMap::new();
+        for part in parts {
+            tables
+                .entry(part.table.clone())
+                .or_insert_with(|| TableAdds {
+                    table: part.table,
+                    entry_index: part.entry_index,
+                    adds: Vec::new(),
+                })
+                .adds
+                .push(part.add);
+        }
+        self.commit_tables(
+            tables.into_values().collect(),
+            txn_version,
+            metadata,
+            concurrency,
+            hooks,
+            resolve_from_log,
+        )
+        .await
+    }
+
+    async fn commit_tables(
+        &mut self,
+        parts: Vec<TableAdds>,
+        txn_version: i64,
+        mut metadata: HashMap<String, Value>,
+        concurrency: usize,
+        hooks: &CommitHooks<'_>,
+        resolve_from_log: bool,
+    ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
         metadata.insert("isBlindAppend".to_string(), Value::Bool(true));
         let app_id = self.app_id();
         let (last, others): (Vec<_>, Vec<_>) =
@@ -607,38 +730,17 @@ impl DeltaTables {
             .parts
             .iter()
             .map(|part| {
-                let receipt = part
-                    .receipt
-                    .as_ref()
-                    .context("a committed part has no receipt")?;
                 let plan = pending
                     .tables
                     .iter()
                     .find(|plan| plan.table == part.table)
                     .context("a committed part has no table plan")?;
-                let date = plan
-                    .partition
-                    .strip_prefix(&format!("{PARTITION_COLUMN}="))
-                    .context("a committed part has no date partition")?;
-                let path = part
-                    .final_relative_path
-                    .strip_prefix(&format!("{}/", part.table))
-                    .context("a committed part lies outside its table")?;
                 ensure!(
                     self.tables.contains_key(&part.table),
                     "`{}` is not a Delta table of this dataset",
                     part.table
                 );
-                super::stats::check_stats(&receipt.stats, part.row_count)?;
-                PartAdd::new(
-                    &part.table,
-                    part.entry_index,
-                    path,
-                    date,
-                    receipt.byte_size,
-                    &receipt.stats,
-                    receipt.modification_time,
-                )
+                PartAdd::of(part, &plan.partition)
             })
             .collect()
     }
@@ -700,7 +802,7 @@ async fn sync_log_tail(store: &DeltaStore, table: &str, checkpoint: Option<u64>)
 /// definite outcome.
 async fn run_bounded(
     context: &CommitContext<'_>,
-    queue: Vec<(&mut OpenTable, PartAdd)>,
+    queue: Vec<(&mut OpenTable, TableAdds)>,
     limit: usize,
 ) -> std::result::Result<Vec<TableCommit>, CommitFailure> {
     let mut queue = queue.into_iter();
@@ -737,13 +839,13 @@ async fn run_bounded(
 async fn commit_table(
     context: &CommitContext<'_>,
     open: &mut OpenTable,
-    add: PartAdd,
+    adds: TableAdds,
 ) -> std::result::Result<TableCommit, CommitFailure> {
-    let PartAdd {
+    let TableAdds {
         table,
         entry_index,
-        add,
-    } = add;
+        adds,
+    } = adds;
     let definite = |error: anyhow::Error| CommitFailure {
         error,
         unresolved: false,
@@ -765,7 +867,7 @@ async fn commit_table(
         definite(anyhow::Error::new(error).context(format!("Delta table `{table}` is not loaded")))
     })?;
     let committed = CommitBuilder::from(properties)
-        .with_actions(vec![Action::Add(add)])
+        .with_actions(adds.into_iter().map(Action::Add).collect())
         .build(Some(snapshot), open.table.log_store(), operation)
         .await;
     let (version, retries, found_in_log) = match committed {

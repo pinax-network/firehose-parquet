@@ -108,7 +108,7 @@ async fn lanes_share_the_tables_and_the_seal_leaves_an_ordinary_dataset() {
     assert!(refusal(solana).contains("differ from the ones the backfill was opened with"));
     other.release().await.unwrap();
 
-    // Both lanes are open at once and commit to the same tables in any order.
+    // Both lanes are open at once and fill the same tables in any order.
     let first_owner = lane_owner(&store, 100, 102).await;
     let second_owner = lane_owner(&store, 102, 104).await;
     let mut first = open(&lane(100, 102), &first_owner).await.unwrap();
@@ -117,8 +117,10 @@ async fn lanes_share_the_tables_and_the_seal_leaves_an_ordinary_dataset() {
     fill(&mut first, 100).await;
     fill(&mut first, 101).await;
     let last = fill(&mut second, 103).await;
-    // Ordinals are each lane's own, and so is its `txn`.
+    // Ordinals are each lane's own, and so is its `txn`. A lane commits its
+    // flushes to the Delta logs together (#728): so far it only owes them.
     assert_eq!(last.ordinal, 2);
+    assert!(last.delta.is_empty());
     let (first_app, second_app) = (
         first.delta_tables().unwrap().app_id(),
         second.delta_tables().unwrap().app_id(),
@@ -126,9 +128,15 @@ async fn lanes_share_the_tables_and_the_seal_leaves_an_ordinary_dataset() {
     assert_ne!(first_app, second_app);
     for session in [&first, &second] {
         let tables = session.delta_tables().unwrap();
-        assert_eq!(tables.txn_version("blocks").await.unwrap(), Some(2));
+        assert_eq!(tables.txn_version("blocks").await.unwrap(), None);
+        assert_eq!(session.authority().deferred.len(), 2);
     }
+    // Completing a lane commits what it owes first: one commit per table.
     assert!(first.complete_request(102, true).await.unwrap());
+    assert!(first.authority().deferred.is_empty());
+    let tables = first.delta_tables().unwrap();
+    assert_eq!(tables.txn_version("blocks").await.unwrap(), Some(2));
+    assert_eq!(tables.version("blocks").unwrap(), 1);
     drop(first);
     first_owner.release().await.unwrap();
 
@@ -173,8 +181,8 @@ async fn lanes_share_the_tables_and_the_seal_leaves_an_ordinary_dataset() {
     assert_eq!(fill(&mut live, 104).await.ordinal, 5);
     let tables = live.delta_tables().unwrap();
     assert_eq!(tables.txn_version("blocks").await.unwrap(), Some(5));
-    // Creation, four lane commits and one live commit.
-    assert_eq!(tables.version("blocks").unwrap(), 5);
+    // Creation, one commit per lane and one live commit.
+    assert_eq!(tables.version("blocks").unwrap(), 3);
     drop(live);
     owner.release().await.unwrap();
 
