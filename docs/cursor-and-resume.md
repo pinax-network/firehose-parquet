@@ -221,7 +221,10 @@ schemas and mapper epoch (which fixes the `date=YYYY-MM-DD` layout), identifier
 encoding,
 effective feature flags, output storage identity and mirror location. A mismatch
 stops before Blocks. Compression and flush thresholds may change without changing
-logical rows. Endpoint aliases do not relax storage-service binding.
+logical rows. Endpoint aliases do not relax storage-service binding. A dataset
+found at another root than the one it was created in (a copy or a move) is
+refused with the command that binds it there ([Relocating a
+dataset](#relocating-a-dataset)).
 
 Rerun with the same original start, or omit `--start-block` to use the stored
 origin. An already completed stop is a no-op after recovery and mirror repair;
@@ -336,6 +339,76 @@ Use a new empty output and absent mirror when changing the original range, schem
 or feature flags. Legacy random-name output has no proof relating all parts to
 its cursor, so this release provides no implicit adoption or override escape.
 Read-only dry-run behavior can still inspect legacy cursor defaults.
+
+## Relocating a dataset
+
+A protected dataset is bound to the root it was created in. The root, and the
+cursor mirror's location, are part of its stream descriptor, whose SHA-256 (the
+stream id) is in the head checkpoint of `.fireparq-ingest/state.json`, in the
+cursor mirror, in each Delta table's `fireparq.descriptor` and in the `txn`
+application id of its commits. A copy made with `cp -R` or `aws s3 sync` can be
+read at once, but `build` and `recovery recover` refuse it until
+`fireparq recovery rebind` (#635) binds it to its new root:
+
+1. Stop the dataset's writer and its maintenance job. `fireparq recovery status
+   <old root>` must report the owner `released` (S3) or `available` (local). A
+   [parallel backfill](parallel-backfill.md) is sealed, and extended by `build`
+   once, before it is moved.
+2. Copy the whole root, `.fireparq-ingest/` and `_fireparq/` included. Copying
+   a bucket root also copies the bucket's owner record
+   (`.fireparq-owner-v1.json`), released.
+3. Run `fireparq recovery rebind <new root> --from <old root>`.
+4. Start the writer (`--output`) and the maintenance job (`LAKE_ROOT`) at the
+   new root, and move readers there.
+5. Deleting the old root is a separate decision: a rebind only reads it.
+
+Before it writes anything, `recovery rebind` refuses unless:
+
+- both roots are local, or both are S3 on the same endpoint and region, and
+  neither is inside the other;
+- the old root is not owned (on local disk, the rebind holds its lock), and it
+  holds the same `state.json` (version and digest), no pending transaction, and
+  every Delta table at the same version as the copy. A writer or maintenance job
+  that ran after the copy makes it refuse: stop them and copy again;
+- the copy has no pending transaction, and each Delta log is exactly at its
+  authority: no table holds a later transaction of the stream, and `blocks`,
+  which commits last, holds the last one;
+- the cursor mirror, if any, is inside the old root. It moves to the same path
+  inside the new root, where `build --cursor` with the same relative path finds
+  it. A dataset whose mirror is elsewhere is not relocated.
+
+Ownership of the new root is held throughout, so a copy whose owner record was
+copied while held is refused too. The rebind then changes the copy only:
+
+1. `state.json`, by one conditional write, the commit point: the new binding,
+   and the head checkpoint identified under the new stream id, with the same
+   ordinal, cursor, routing and completed range;
+2. each Delta table, `blocks` last: one `SET TBLPROPERTIES` commit that changes
+   `fireparq.descriptor` and nothing else, with `txn` of the new stream at the
+   authority's ordinal and a `fireparq.rebind` record (the previous stream id
+   and the ordinal) in its `commitInfo`;
+3. the cursor mirror, by a conditional write.
+
+It prints a report without paths:
+
+```json
+{
+  "rebound_now": true,
+  "previous_stream_id": "<sha256>",
+  "stream_id": "<sha256>",
+  "ordinal": 812345,
+  "tables_updated": ["access_lists", "logs", "transactions", "blocks"],
+  "mirror": "repaired"
+}
+```
+
+A rebind that stops after its commit point is completed by running it again
+(`"rebound_now": false`); until then `build` refuses the copy ("belongs to
+another stream"). A rerun of a complete rebind changes nothing. Parts keep their
+file names, which hold the previous stream id; only a pending transaction's parts
+are read by name, and a rebind requires none. The tables keep their history. A
+sealed backfill's `backfill.json` and lane records keep the old binding:
+`backfill status` reads them, and `backfill seal` refuses at the new root.
 
 ## Graceful shutdown
 

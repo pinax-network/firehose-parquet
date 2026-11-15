@@ -1469,4 +1469,5 @@ async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappea
 
 mod backfill;
 mod delta;
+mod rebind;
 mod resume_cost;

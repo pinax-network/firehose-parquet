@@ -450,3 +450,28 @@ fn explicit_zstd_levels_bind_identity_and_reject_noncanonical_journals() {
         .is_err());
     }
 }
+
+#[test]
+fn an_authority_that_owes_delta_commits_is_not_rebound() {
+    let (authority, pending) = pending(1);
+    let receipt = PartReceipt::for_test(128, Digest::hash("bytes", &1).unwrap(), 1);
+    let committed = pending
+        .with_receipt(0, receipt.clone(), &authority.descriptor)
+        .unwrap()
+        .with_receipt(1, receipt, &authority.descriptor)
+        .unwrap()
+        .committed_after_verification(&authority.descriptor)
+        .unwrap();
+    let owing = authority.install_deferred(&committed).unwrap();
+    assert_eq!(owing.deferred.len(), 1);
+    let moved = StreamDescriptor {
+        output: StorageIdentity::Local {
+            canonical_root: "/tmp/dataset-v1".into(),
+        },
+        ..owing.descriptor.clone()
+    };
+    let refused = format!("{:#}", owing.rebound(moved.clone()).err().expect("refused"));
+    assert!(refused.contains("owes Delta commits"), "{refused}");
+    // Once its commits are in the logs, the same authority is rebound.
+    assert!(owing.settled().rebound(moved).unwrap().deferred.is_empty());
+}

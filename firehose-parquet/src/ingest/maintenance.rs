@@ -527,7 +527,7 @@ async fn recovery_tables(
     .await?;
     Ok(Some(tables))
 }
-fn state_store<'a>(
+pub(super) fn state_store<'a>(
     identity: &StorageIdentity,
     ownership: &'a DatasetOwnership,
 ) -> Result<TransactionStateStore<'a>> {
