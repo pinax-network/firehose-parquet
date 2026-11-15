@@ -113,7 +113,9 @@ Firehose and a loopback S3: concurrent lanes, a crashed lane, the refusals,
 the seal and a `build` that extends the sealed dataset. Its second test
 crashes a lane between two tables' commits and runs the maintenance job in
 every mode before and while the lane recovers. Its third runs a lane that
-commits every three flushes and dies inside the first such commit.
+commits every three flushes and dies inside the first such commit. Its fourth
+stops a lane with SIGTERM: the flushes it accepted reach the logs, a block it
+had only buffered is published nowhere, and its owner is released.
 `firehose-parquet/src/ingest/controller/tests/deferred.rs` interrupts a
 flush and a batch at every step.
 
