@@ -171,6 +171,61 @@ impl<'a> TransactionParts<'a> {
         Ok(())
     }
 
+    /// Check that each of `parts` (a final path relative to the dataset root
+    /// and its receipt's byte size) is still stored with that size, at most
+    /// `concurrency` at a time. Read-only: one metadata request per part.
+    ///
+    /// Recovery runs it before committing a lane's deferred parts (#728).
+    /// Each was verified against its receipt when it was published, so the
+    /// question left is whether it is still there. The error names every part
+    /// that is not.
+    pub async fn require_stored(&self, parts: &[(&str, u64)], concurrency: usize) -> Result<()> {
+        use futures::StreamExt;
+        let checks = parts.iter().map(|(path, byte_size)| async move {
+            let outcome = match self.stored_size(path).await {
+                Ok(Some(size)) if size == *byte_size => return None,
+                Ok(Some(size)) => format!("has {size} bytes, not its receipt's {byte_size}"),
+                Ok(None) => "is missing".to_string(),
+                Err(error) => format!("could not be checked ({error:#})"),
+            };
+            Some(format!("the part {path} {outcome}"))
+        });
+        let failures: Vec<String> = futures::stream::iter(checks)
+            .buffered(concurrency.max(1))
+            .filter_map(|failure| async move { failure })
+            .collect()
+            .await;
+        if !failures.is_empty() {
+            bail!("{}", failures.join("; "));
+        }
+        Ok(())
+    }
+
+    async fn stored_size(&self, relative: &str) -> Result<Option<u64>> {
+        match self {
+            Self::Local { root, owner, .. } => {
+                let path = local_path(root, owner, relative)?;
+                Ok(if exists_regular(&path)? {
+                    Some(
+                        fs::metadata(&path)
+                            .context("could not inspect an owned transaction file")?
+                            .len(),
+                    )
+                } else {
+                    None
+                })
+            }
+            Self::S3 { prefix, owner, .. } => {
+                let key = object_key(prefix, relative)?;
+                match tokio::time::timeout(REQUEST_TIMEOUT, owner.object_store().head(&key)).await {
+                    Ok(Ok(meta)) => Ok(Some(meta.size)),
+                    Ok(Err(object_store::Error::NotFound { .. })) => Ok(None),
+                    _ => bail!("could not establish whether a published remote part exists"),
+                }
+            }
+        }
+    }
+
     pub async fn rollback_writing(&self, pending: &PendingTransaction) -> Result<()> {
         if pending.phase != TransactionPhase::Writing {
             bail!("cannot roll back parts after all-table commit");

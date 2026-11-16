@@ -29,4 +29,16 @@ empty when the release is cut.
 
 ## Performance
 
+- **Backfill lanes commit to the Delta logs in batches (#728).** A lane
+  committed every flush to logs that all lanes share: ten lanes of the `base`
+  backfill lost 1.3 attempts per commit, spent most of their time committing
+  and failed at the 25-attempt limit. A lane now accepts each flush in its own
+  state and commits its files together, one commit per table: every
+  `--lane-commit-flushes` flushes (`LANE_COMMIT_FLUSHES`, default 64), when it
+  finishes, on SIGTERM and at every start. `backfill status` reports
+  `uncommitted_flushes`. Lanes of a backfill begun with v1.4.0 resume under
+  this release; do not go back, since v1.4.0 refuses the state of a lane that
+  owes files. Keep the weekly full VACUUM away from a lane stopped for 7 days
+  ([details](../parallel-backfill.md#until-the-seal)).
+
 ## Internal

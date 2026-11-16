@@ -10,11 +10,16 @@
 //!   once;
 //! - every lane commits to the same tables under its own `txn` application
 //!   id, and the tables carry one `fireparq.descriptor`, the dataset's;
+//! - a lane commits its flushes to the Delta logs together, not one commit
+//!   per flush, and a lane that died inside such a commit finishes it (the
+//!   third test);
+//! - a lane stopped by SIGTERM commits the flushes it accepted, publishes
+//!   nothing it had only buffered and releases its owner (the fourth test);
 //! - `seal` refuses until every lane is complete;
 //! - a lane that does not receive its first block fails;
 //! - a lane that died between two tables' commits recovers after the
-//!   maintenance job compacted, vacuumed and checkpointed the tables (the
-//!   second test);
+//!   maintenance job compacted, vacuumed and checkpointed the tables, with
+//!   the parts no log holds yet still in place (the second test);
 //! - the sealed dataset holds every block exactly once, `validate` passes
 //!   across the lanes, and a `build` continues from the stored cursor under
 //!   the dataset's own application id, refusing any other start.
@@ -24,6 +29,8 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tonic::codegen::{http, BoxFuture, Service};
 
@@ -63,7 +70,11 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
 /// Final blocks from the request's start block, or after its cursor, up to
 /// its inclusive stop block.
 #[derive(Clone)]
-struct Stream;
+struct Stream {
+    /// When not 0, the last block served: the stream then stays open and
+    /// sends nothing more.
+    stall_after: Arc<AtomicU64>,
+}
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
     type ResponseStream = std::pin::Pin<
@@ -84,13 +95,23 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
             }
         };
         // The chain begins at FIRST, whatever start is requested.
-        let responses: Vec<_> = (first.max(FIRST)..=request.stop_block_num.min(LAST))
+        let stall_after = self.stall_after.load(Ordering::SeqCst);
+        let last = match stall_after {
+            0 => request.stop_block_num.min(LAST),
+            stall_after => request.stop_block_num.min(LAST).min(stall_after),
+        };
+        let responses: Vec<_> = (first.max(FIRST)..=last)
             .map(|number| Ok(response(number)))
             .collect();
         Box::pin(async move {
-            Ok(tonic::Response::new(
-                Box::pin(futures::stream::iter(responses)) as Self::ResponseStream,
-            ))
+            let blocks = futures::stream::iter(responses);
+            Ok(tonic::Response::new(match stall_after {
+                0 => Box::pin(blocks) as Self::ResponseStream,
+                _ => Box::pin(futures::StreamExt::chain(
+                    blocks,
+                    futures::stream::pending(),
+                )),
+            }))
         })
     }
 }
@@ -169,6 +190,8 @@ struct Fixture {
     cwd: PathBuf,
     endpoint: String,
     s3: s3::Server,
+    /// The mock Firehose's [`Stream::stall_after`].
+    stall_after: Arc<AtomicU64>,
 }
 
 impl Fixture {
@@ -180,10 +203,14 @@ impl Fixture {
         let incoming = futures::stream::unfold(listener, |listener| async {
             Some((listener.accept().await.map(|(socket, _)| socket), listener))
         });
+        let stall_after = Arc::new(AtomicU64::new(0));
+        let stream = Stream {
+            stall_after: stall_after.clone(),
+        };
         let firehose = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(Info)
-                .add_service(Stream)
+                .add_service(stream)
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
@@ -199,7 +226,15 @@ impl Fixture {
         )
         .await
         .unwrap();
-        (Self { cwd, endpoint, s3 }, firehose)
+        (
+            Self {
+                cwd,
+                endpoint,
+                s3,
+                stall_after,
+            },
+            firehose,
+        )
     }
 
     /// One run of the maintenance job over `tables`; no table may fail.
@@ -383,6 +418,25 @@ async fn blocks_and_writers(root: &Path) -> (Vec<i64>, BTreeSet<String>) {
     (blocks, writers)
 }
 
+/// The commits of `table`'s log that lanes or writers made: those with a
+/// `txn`.
+fn data_commits(root: &Path, table: &str) -> usize {
+    common::delta_log(&root.join(table))
+        .values()
+        .filter(|actions| common::action(actions, "txn").is_some())
+        .count()
+}
+
+/// The lane starting at `start` in a `backfill status` report.
+fn lane_report(status: &Value, start: u64) -> &Value {
+    status["incomplete"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["start"] == start)
+        .unwrap_or_else(|| panic!("{status}"))
+}
+
 /// The one `fireparq.descriptor` every table of the dataset records.
 fn dataset_descriptor(root: &Path) -> String {
     let descriptors: BTreeSet<String> = common::delta_tables(root)
@@ -496,6 +550,11 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
         "one `txn` appId per lane: {writers:?}"
     );
     assert!(!writers.contains(&format!("fireparq:{descriptor}")));
+    // A lane commits its flushes together: one commit per lane here, where
+    // every block is a flush, and one more by the restart of the crashed
+    // lane for the flush it had journaled.
+    assert_eq!(data_commits(&copy, "blocks"), LANES.len() + 1);
+    assert_eq!(data_commits(&copy, "transactions"), LANES.len() + 1);
     assert!(
         !copy.join(".fireparq-ingest/state.json").exists(),
         "an unsealed dataset has no authority"
@@ -594,11 +653,12 @@ const MAINTENANCE: [&[(&str, &str)]; 3] = [
     &[("FULL_VACUUM", "1")],
 ];
 
-/// A lane dies between two tables' commits of one transaction. Before it is
+/// A lane dies between two tables' commits of its flushes. Before it is
 /// rerun, the maintenance job compacts, vacuums and checkpoints the shared
 /// tables in every mode, also while another lane writes. The lane's recovery
 /// must find its own `txn` in the rewritten logs: commit the tables that
-/// lack the transaction, and no table twice.
+/// lack its parts, and no table twice. The parts no log holds yet must
+/// survive every VACUUM meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
     let dir = tempfile::tempdir().unwrap();
@@ -607,8 +667,9 @@ async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
     succeed(fixture.open(3)).await;
 
     // The last lane fills 2023-11-15 with blocks 106 and 107. The middle
-    // lane then dies on its first block, 103 of the same date, once
-    // `transactions` has its commit: `blocks`, which commits last, has not.
+    // lane then accepts its three blocks of the same date and dies while
+    // committing them, once `transactions` has its commit: `blocks`, which
+    // commits last, has not.
     succeed(fixture.lane(LANES[2])).await;
     let mut crashed = fixture.lane(LANES[1]);
     crashed.env(
@@ -624,9 +685,19 @@ async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
     };
     assert_eq!(
         block_nums(copy.clone(), "transactions").await,
-        [103, 106, 107]
+        [103, 104, 105, 106, 107]
     );
     assert_eq!(block_nums(copy, "blocks").await, [106, 107]);
+    // The lane accepted every block and still owes them to the logs.
+    let status = fixture.status().await;
+    let lane = lane_report(&status, LANES[1].0);
+    assert_eq!(lane["last_block"], LANES[1].1 - 1, "{status}");
+    assert_eq!(lane["uncommitted_flushes"], 3, "{status}");
+    refused(
+        fixture.command(&["backfill", "seal", &root]),
+        "103-106 is running",
+    )
+    .await;
 
     // Maintenance in every mode: `OPTIMIZE_DATES=all` compacts the date all
     // lanes share, the crashed lane's committed part with it, and the lite
@@ -650,8 +721,9 @@ async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
     let first = first.await.unwrap();
     assert!(first.status.success(), "{}", text(&first));
 
-    // The crashed lane is released and rerun: it rolls its transaction
-    // forward into the compacted tables and finishes, beside the job.
+    // The crashed lane is released and rerun: it commits its parts to the
+    // tables that lack them, compacted meanwhile, and finishes, beside the
+    // job.
     fixture.release_lane(LANES[1]).await;
     let rerun = tokio::spawn(output(fixture.lane(LANES[1])));
     for mode in MAINTENANCE {
@@ -685,6 +757,223 @@ async fn a_crashed_lane_recovers_over_tables_the_maintenance_job_rewrote() {
         stored.sort_unstable();
         assert_eq!(stored, blocks, "{table}");
     }
+    succeed(fixture.command(&["validate", &format!("{root}/blocks"), "--cross-partition"])).await;
+    firehose.abort();
+}
+
+/// A lane of eight flushes that commits every three of them. Its first run
+/// dies inside the first batch, between two tables. The rerun finishes that
+/// batch from each table's `txn` and goes on: every block is in every table
+/// once, in three commits per table instead of eight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lane_commits_its_flushes_in_batches_and_finishes_one_it_died_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, firehose) = Fixture::start(dir.path()).await;
+    let root = fixture.output();
+    let lane = (FIRST, STOP);
+    succeed(fixture.open(STOP - FIRST)).await;
+    let batched = || {
+        let mut build = fixture.lane(lane);
+        build.args(["--lane-commit-flushes", "3"]);
+        build
+    };
+
+    let mut crashed = batched();
+    crashed.env(
+        "FIREPARQ_DEBUG_FAULT",
+        "crash-after-delta-commit:transactions",
+    );
+    assert!(!output(crashed).await.status.success());
+    let copy = fixture.local_copy();
+    let tables = common::delta_tables(&copy);
+    assert_eq!(
+        common::delta_counts(&copy, &tables).await["transactions"],
+        3
+    );
+    assert_eq!(common::delta_counts(&copy, &tables).await["blocks"], 0);
+    let status = fixture.status().await;
+    let report = lane_report(&status, FIRST);
+    assert_eq!(report["last_block"], FIRST + 2, "{status}");
+    assert_eq!(report["uncommitted_flushes"], 3, "{status}");
+
+    // A release that commits every flush cannot read this lane's state, so
+    // it cannot drop the parts the lane owes. Here: the lane's own rerun.
+    fixture.release_lane(lane).await;
+    succeed(batched()).await;
+    let status = fixture.status().await;
+    assert_eq!(status["complete"], 1, "{status}");
+
+    let copy = fixture.local_copy();
+    let (blocks, writers) = blocks_and_writers(&copy).await;
+    assert_eq!(blocks, (FIRST as i64..STOP as i64).collect::<Vec<_>>());
+    assert_eq!(writers.len(), 1, "{writers:?}");
+    let rows = common::delta_counts(&copy, &tables).await;
+    assert_eq!(rows["blocks"], STOP - FIRST);
+    assert_eq!(rows["transactions"], STOP - FIRST);
+    // Blocks 100..=102, then 103..=105, then 106 and 107 at the lane's end.
+    for table in ["blocks", "transactions"] {
+        assert_eq!(data_commits(&copy, table), 3, "{table}");
+    }
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(copy.join(format!(
+            ".fireparq-ingest/lanes/{}-{}/state.json",
+            lane.0, lane.1
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        state["payload"].get("deferred").is_none(),
+        "a complete lane owes nothing: {state}"
+    );
+
+    let sealed = fixture.json(&["backfill", "seal", &root]).await;
+    assert_eq!(sealed["sealed_now"], true, "{sealed}");
+    succeed(fixture.command(&["validate", &format!("{root}/blocks"), "--cross-partition"])).await;
+    firehose.abort();
+}
+
+/// A lane is stopped by SIGTERM with two flushes accepted and a fifth block
+/// only buffered. It commits the two flushes before it exits, publishes
+/// nothing of the buffered block, releases its owner and is not complete.
+/// The rerun continues after the last accepted block.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lane_stopped_by_sigterm_commits_what_it_accepted_and_is_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fixture, firehose) = Fixture::start(dir.path()).await;
+    let root = fixture.output();
+    let lane = (FIRST, STOP);
+    let lane_state = format!(
+        "{CHAIN}/.fireparq-ingest/lanes/{}-{}/state.json",
+        lane.0, lane.1
+    );
+    succeed(fixture.open(STOP - FIRST)).await;
+    // Two blocks a flush: 100 and 101, then 102 and 103. Block 104 arrives
+    // and stays in memory, since the stream then goes quiet.
+    let build = || {
+        let mut build = fixture.fireparq();
+        build
+            .args(["build", "--endpoint", &fixture.endpoint])
+            .args(["--block-type", "evm", "--flush-blocks", "2"])
+            .args(["--stream-idle-timeout-secs", "0", "--output", &root])
+            .args(["--start-block", &lane.0.to_string()])
+            .args(["--stop-block", &lane.1.to_string()]);
+        build
+    };
+    fixture.stall_after.store(FIRST + 4, Ordering::SeqCst);
+    let child = build()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let state = || -> Option<Value> {
+        let (_, bytes) = fixture
+            .s3
+            .objects(&lane_state)
+            .into_iter()
+            .find(|(key, _)| *key == lane_state)?;
+        serde_json::from_slice(&bytes).ok()
+    };
+    let accepted = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if let Some(state) = state() {
+                if state["payload"]["checkpoint"]["event"]["block_num"] == FIRST + 3 {
+                    break state;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the lane did not accept its second flush");
+    // Both flushes are accepted and owed; no log has them.
+    assert_eq!(
+        accepted["payload"]["deferred"].as_array().unwrap().len(),
+        2,
+        "{accepted}"
+    );
+    let status = fixture.status().await;
+    let report = lane_report(&status, FIRST);
+    assert_eq!(report["state"], "running", "{status}");
+    assert_eq!(report["uncommitted_flushes"], 2, "{status}");
+    assert_eq!(data_commits(&fixture.local_copy(), "blocks"), 0);
+
+    let pid = child.id().unwrap().to_string();
+    assert!(std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .unwrap()
+        .success());
+    let stopped = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
+        .await
+        .expect("the lane did not stop on SIGTERM")
+        .unwrap();
+    assert!(stopped.status.success(), "{}", text(&stopped));
+
+    // What it accepted is in every table's log, in one commit, and nothing
+    // is owed. The buffered block is nowhere: not in a log, not as a file,
+    // not in a journal.
+    let copy = fixture.local_copy();
+    let (blocks, _) = blocks_and_writers(&copy).await;
+    assert_eq!(blocks, (FIRST as i64..FIRST as i64 + 4).collect::<Vec<_>>());
+    for table in ["blocks", "transactions"] {
+        assert_eq!(data_commits(&copy, table), 1, "{table}");
+        let files = fixture
+            .s3
+            .objects(&format!("{CHAIN}/{table}/"))
+            .into_iter()
+            .filter(|(key, _)| key.ends_with(".parquet") && !key.contains("_delta_log"))
+            .count();
+        assert_eq!(files, 2, "{table}: one part per accepted flush");
+    }
+    let settled = state().unwrap();
+    assert!(settled["payload"].get("deferred").is_none(), "{settled}");
+    let checkpoint = &settled["payload"]["checkpoint"];
+    assert_eq!(checkpoint["event"]["block_num"], FIRST + 3);
+    assert!(checkpoint["completed_stop"].is_null(), "{settled}");
+    // A cleared journal slot is kept as a tombstone.
+    let journal: Value = serde_json::from_slice(
+        &std::fs::read(copy.join(format!(
+            ".fireparq-ingest/lanes/{}-{}/pending.json",
+            lane.0, lane.1
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal["deleted"], true, "a clean stop leaves no journal");
+
+    // The lane is released and not complete: it can be rerun at once, and
+    // the backfill cannot be sealed.
+    let status = fixture.status().await;
+    assert_eq!(
+        (&status["stopped"], &status["complete"]),
+        (&1.into(), &0.into())
+    );
+    let report = lane_report(&status, FIRST);
+    assert_eq!(report["owner"], "released", "{status}");
+    assert_eq!(report["last_block"], FIRST + 3, "{status}");
+    assert!(report.get("uncommitted_flushes").is_none(), "{status}");
+    let owner = fixture
+        .json(&["recovery", "status", &root, "--lane", "100-108"])
+        .await;
+    assert_eq!(owner["ownership"], "released", "{owner}");
+    refused(
+        fixture.command(&["backfill", "seal", &root]),
+        "100-108 stopped before its end",
+    )
+    .await;
+
+    // The rerun continues from block 104 and completes.
+    fixture.stall_after.store(0, Ordering::SeqCst);
+    succeed(build()).await;
+    let copy = fixture.local_copy();
+    let (blocks, writers) = blocks_and_writers(&copy).await;
+    assert_eq!(blocks, (FIRST as i64..STOP as i64).collect::<Vec<_>>());
+    assert_eq!(writers.len(), 1, "{writers:?}");
+    assert_eq!(data_commits(&copy, "blocks"), 2);
+    let sealed = fixture.json(&["backfill", "seal", &root]).await;
+    assert_eq!(sealed["sealed_now"], true, "{sealed}");
     succeed(fixture.command(&["validate", &format!("{root}/blocks"), "--cross-partition"])).await;
     firehose.abort();
 }

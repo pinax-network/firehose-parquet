@@ -128,6 +128,7 @@ fn sealing_names_the_lanes_that_block_it() {
         state,
         owner,
         last_block: None,
+        uncommitted_flushes: 0,
         ordinal: 4,
         last_event: Some(event(start + 3, 3)),
         unanchored: true,

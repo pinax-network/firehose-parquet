@@ -22,9 +22,21 @@
 //! uncertainty latch (design §3.5, decided in #643 L4): the conditional log
 //! PUT and the `txn` action resolve every arrival order to one copy at the
 //! next start, and nothing fireparq does ever deletes a log commit.
+//!
+//! A backfill lane defers its Delta commits ([`DeltaCommits::Deferred`],
+//! #728), because lanes that commit every flush to the same logs spend their
+//! time losing version numbers to one another. Authority accepts a Committed
+//! transaction and records its parts as owed in the same write
+//! (`AuthorityState::deferred`); the owed parts are then committed together,
+//! one commit per table with `txn = authority's ordinal`, `blocks` last, and
+//! the record is cleared. That happens once enough transactions are owed,
+//! before a request completes, when the lane stops cleanly, and at every
+//! start. A start reads each table's `txn` first and commits only the parts
+//! above it, so a batch interrupted between two tables adds every part once.
 
 use anyhow::{bail, ensure, Context, Result};
 use arrow::record_batch::RecordBatch;
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,12 +44,14 @@ use std::time::{Duration, Instant};
 use super::frontier::AcceptedFrontier;
 use super::parts::{writer_plan, TransactionParts};
 use super::state::{
-    AcceptedPrefix, AuthorityState, Digest, PartCompression, PendingTransaction, StreamDescriptor,
-    TablePlan, TransactionPhase,
+    AcceptedPrefix, AuthorityState, DeferredTransaction, Digest, PartCompression,
+    PendingTransaction, StreamDescriptor, TablePlan, TransactionPhase, MAX_DEFERRED_TRANSACTIONS,
 };
 use super::store::{TransactionStateStore, Versioned};
 use crate::config::{BlockMetadata, Compression, FlushConcurrency};
-use crate::delta::commit::{CommitFailure, CommitHooks, DeltaTables, TableCommit, UnknownOutcome};
+use crate::delta::commit::{
+    CommitFailure, CommitHooks, DeltaTables, PartAdd, TableCommit, UnknownOutcome,
+};
 
 mod lane;
 mod pipeline;
@@ -62,6 +76,45 @@ impl MirrorAction for super::mirror::ProtectedMirror<'_> {
     }
 }
 
+/// When a transaction's parts reach the Delta logs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeltaCommits {
+    /// Before authority accepts the transaction: an ordinary dataset, whose
+    /// readers see every flush.
+    EveryTransaction,
+    /// A backfill lane (#728): authority accepts the transaction and owes its
+    /// parts to the logs, which get them together once `transactions` are
+    /// owed (1 to [`MAX_DEFERRED_TRANSACTIONS`]).
+    Deferred { transactions: usize },
+}
+
+/// Serialized size of the owed parts at which a lane commits them whatever
+/// its flush count: the authority record that holds them stays far below
+/// its 4 MiB limit, also for a stream with hundreds of tables.
+const DEFERRED_BYTES_LIMIT: usize = 1024 * 1024;
+
+/// Whether a lane that commits `transactions` flushes together now owes
+/// enough to commit.
+fn owes_a_batch(deferred: &[DeferredTransaction], transactions: usize) -> Result<bool> {
+    if deferred.len() >= transactions {
+        return Ok(true);
+    }
+    let bytes = serde_json::to_vec(deferred).context("serializing deferred transactions")?;
+    Ok(bytes.len() >= DEFERRED_BYTES_LIMIT)
+}
+
+impl DeltaCommits {
+    fn validate(self) -> Result<()> {
+        if let Self::Deferred { transactions } = self {
+            ensure!(
+                (1..=MAX_DEFERRED_TRANSACTIONS).contains(&transactions),
+                "a lane commits between 1 and {MAX_DEFERRED_TRANSACTIONS} flushes together"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub struct TransactionController<'a, M: MirrorAction> {
     states: TransactionStateStore<'a>,
     parts: TransactionParts<'a>,
@@ -69,6 +122,10 @@ pub struct TransactionController<'a, M: MirrorAction> {
     mirror: M,
     failed: bool,
     concurrency: FlushConcurrency,
+    commits: DeltaCommits,
+    /// Deferred Delta commits made outside a flush (at open, before a request
+    /// completes, at a clean stop), until [`Self::take_settled`] reports them.
+    settled: Vec<TableCommit>,
     /// The dataset's Delta tables. `IngestionSession` always sets them, and
     /// `recovery recover` whenever a journal needs them; only controller unit
     /// tests of the #468 journal alone run without.
@@ -154,9 +211,46 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         concurrency: FlushConcurrency,
     ) -> Result<Self> {
         let session = parts.acquire_session()?;
-        Self::open_reserved(states, parts, mirror, expected, session, delta, concurrency).await
+        Self::open_reserved(
+            states,
+            parts,
+            mirror,
+            expected,
+            session,
+            delta,
+            concurrency,
+            DeltaCommits::EveryTransaction,
+        )
+        .await
     }
 
+    /// [`Self::open_with_delta`] for a backfill lane, which commits to the
+    /// Delta logs as `commits` says.
+    #[cfg(test)]
+    pub async fn open_lane(
+        states: TransactionStateStore<'a>,
+        parts: TransactionParts<'a>,
+        mirror: M,
+        expected: &StreamDescriptor,
+        delta: DeltaTables,
+        concurrency: FlushConcurrency,
+        commits: DeltaCommits,
+    ) -> Result<Self> {
+        let session = parts.acquire_session()?;
+        Self::open_reserved(
+            states,
+            parts,
+            mirror,
+            expected,
+            session,
+            Some(delta),
+            concurrency,
+            commits,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn open_reserved(
         states: TransactionStateStore<'a>,
         parts: TransactionParts<'a>,
@@ -165,9 +259,16 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         session: crate::dataset_lock::session::SessionPermit<'a>,
         mut delta: Option<DeltaTables>,
         concurrency: FlushConcurrency,
+        commits: DeltaCommits,
     ) -> Result<Self> {
         concurrency.validate()?;
+        commits.validate()?;
         expected.validate()?;
+        let deferring = commits != DeltaCommits::EveryTransaction;
+        ensure!(
+            !deferring || delta.is_some(),
+            "deferred Delta commits need the dataset's Delta tables"
+        );
         let snapshot = states.load().await?;
         let mut authority = snapshot.authority.context(
             "protected ingestion authority is absent; eligible-root initialization is required",
@@ -175,6 +276,12 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         if authority.payload.descriptor != *expected {
             return Err(stream_mismatch(&authority.payload.descriptor, expected));
         }
+        ensure!(
+            deferring || authority.payload.deferred.is_empty(),
+            "this dataset's authority holds parts that are not in the Delta logs yet, which only \
+             a parallel backfill lane commits; rerun `build` with the lane's --start-block and \
+             --stop-block"
+        );
         // A Committed transaction whose authority has not advanced yet: its
         // Delta commits may be incomplete.
         let behind = snapshot.pending.as_ref().filter(|pending| {
@@ -205,15 +312,32 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                 }
                 TransactionPhase::Committed => {
                     if authority.payload.checkpoint.id == pending.payload.predecessor {
-                        roll_forward(
-                            &parts,
-                            delta.as_mut(),
-                            &pending.payload,
-                            &uncommitted,
-                            concurrency.publications,
-                        )
-                        .await?;
-                        authority = states.advance(&authority, &pending).await?;
+                        if deferring {
+                            // The transaction joins the deferred ones, which
+                            // are committed below. Only the parts no log
+                            // holds are read: a release that committed every
+                            // flush may have reached some tables before it
+                            // stopped, and maintenance may have rewritten
+                            // those parts since.
+                            verify_uncommitted(
+                                &parts,
+                                &pending.payload,
+                                &uncommitted,
+                                concurrency.publications,
+                            )
+                            .await?;
+                            authority = states.advance_deferred(&authority, &pending).await?;
+                        } else {
+                            roll_forward(
+                                &parts,
+                                delta.as_mut(),
+                                &pending.payload,
+                                &uncommitted,
+                                concurrency.publications,
+                            )
+                            .await?;
+                            authority = states.advance(&authority, &pending).await?;
+                        }
                         checkpoint(Stage::RecoveryAuthorityAdvanced)?;
                     }
                     // Otherwise authority already reached the target, so every
@@ -230,6 +354,24 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         if !mirror_reconciled {
             mirror.reconcile(&authority.payload).await?;
         }
+        // Whatever an earlier run still owes the Delta logs, before any
+        // Blocks request: a batch it was interrupted in is finished from
+        // each table's `txn`.
+        let mut settled = Vec::new();
+        if !authority.payload.deferred.is_empty() {
+            let delta = delta
+                .as_mut()
+                .context("deferred Delta commits need the dataset's Delta tables")?;
+            (authority, settled) = commit_deferred(
+                &states,
+                &parts,
+                delta,
+                authority,
+                concurrency.publications,
+                true,
+            )
+            .await?;
+        }
         Ok(Self {
             states,
             parts,
@@ -237,9 +379,54 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             mirror,
             failed: false,
             concurrency,
+            commits,
+            settled,
             delta,
             _session: session,
         })
+    }
+
+    /// The deferred Delta commits made outside a flush since the last call.
+    pub fn take_settled(&mut self) -> Vec<TableCommit> {
+        std::mem::take(&mut self.settled)
+    }
+
+    /// Commits whatever is still owed to the Delta logs (#728). A lane calls
+    /// it when it stops cleanly before its end, so that only a crash leaves
+    /// published parts out of the logs. A no-op when nothing is owed.
+    pub async fn settle(&mut self) -> Result<()> {
+        if self.failed {
+            bail!("ingestion controller stopped after an unresolved operation; reopen through recovery");
+        }
+        self.failed = true;
+        let commits = self.settle_deferred().await?;
+        self.settled.extend(commits);
+        self.failed = false;
+        Ok(())
+    }
+
+    /// Commits every deferred transaction to the Delta logs and clears the
+    /// record. The caller has set `failed`: an error leaves the controller
+    /// poisoned, and the next start finishes the batch.
+    async fn settle_deferred(&mut self) -> Result<Vec<TableCommit>> {
+        if self.authority.payload.deferred.is_empty() {
+            return Ok(Vec::new());
+        }
+        let delta = self
+            .delta
+            .as_mut()
+            .context("deferred Delta commits need the dataset's Delta tables")?;
+        let (authority, commits) = commit_deferred(
+            &self.states,
+            &self.parts,
+            delta,
+            self.authority.clone_versioned(),
+            self.concurrency.publications,
+            false,
+        )
+        .await?;
+        self.authority = authority;
+        Ok(commits)
     }
 
     /// The dataset's Delta tables, when set.
@@ -287,6 +474,10 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             self.failed = false;
             return Ok(false);
         }
+        // A complete request has every part in the Delta logs: a complete
+        // lane is one `seal` can rely on.
+        let commits = self.settle_deferred().await?;
+        self.settled.extend(commits);
         self.authority = self.states.complete_request(&self.authority, stop).await?;
         checkpoint(Stage::CompletionAuthorityAdvanced)?;
         self.mirror.reconcile(&self.authority.payload).await?;
@@ -470,15 +661,33 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             .await?;
         checkpoint(Stage::CommittedPersisted)?;
         let delta_started = Instant::now();
-        let delta = self.commit_delta(&pending.payload).await?;
-        let delta_elapsed = delta_started.elapsed();
-        self.authority = self.states.advance(&self.authority, &pending).await?;
+        let (mut delta, mut delta_elapsed) = (Vec::new(), Duration::ZERO);
+        match self.commits {
+            DeltaCommits::EveryTransaction => {
+                delta = self.commit_delta(&pending.payload).await?;
+                delta_elapsed = delta_started.elapsed();
+                self.authority = self.states.advance(&self.authority, &pending).await?;
+            }
+            DeltaCommits::Deferred { .. } => {
+                self.authority = self
+                    .states
+                    .advance_deferred(&self.authority, &pending)
+                    .await?;
+            }
+        }
         checkpoint(Stage::AuthorityAdvanced)?;
         self.mirror.reconcile(&self.authority.payload).await?;
         checkpoint(Stage::MirrorReconciled)?;
         self.parts.cleanup_temporaries(&pending.payload)?;
         self.states.clear(&self.authority, &pending).await?;
         checkpoint(Stage::PendingCleared)?;
+        if let DeltaCommits::Deferred { transactions } = self.commits {
+            if owes_a_batch(&self.authority.payload.deferred, transactions)? {
+                let started = Instant::now();
+                delta = self.settle_deferred().await?;
+                delta_elapsed = started.elapsed();
+            }
+        }
         Ok((pending, work, delta, delta_elapsed))
     }
 
@@ -545,6 +754,133 @@ fn unresolved_note(pending: &PendingTransaction, failure: CommitFailure) -> anyh
     failure.error.context(
         "a Delta commit's outcome is unknown (it may have landed); the next start resolves it from the table's txn",
     )
+}
+
+/// Commits every deferred transaction of `authority` to the Delta logs, one
+/// commit per table with `txn = authority's ordinal`, `blocks` last, then
+/// clears the record (#728).
+///
+/// `recovering` is a start: an earlier run may have been interrupted in this
+/// batch, so each table's `txn` is read and only the parts above it are
+/// committed; those parts are checked to be stored still, and a commit that
+/// loses to a delayed copy of itself is resolved from the log. Otherwise
+/// this run has committed nothing of the batch, and every part is added.
+async fn commit_deferred(
+    states: &TransactionStateStore<'_>,
+    parts: &TransactionParts<'_>,
+    delta: &mut DeltaTables,
+    authority: Versioned<AuthorityState>,
+    concurrency: usize,
+    recovering: bool,
+) -> Result<(Versioned<AuthorityState>, Vec<TableCommit>)> {
+    let state = &authority.payload;
+    let ordinal = state.checkpoint.ordinal;
+    let txn = i64::try_from(ordinal)
+        .ok()
+        .context("authority's ordinal does not fit a Delta txn version")?;
+    let held = match recovering {
+        true => delta.txn_versions(concurrency).await?,
+        false => BTreeMap::new(),
+    };
+    let mut adds = Vec::new();
+    let mut stored = Vec::new();
+    for transaction in &state.deferred {
+        let planned = transaction.planned_parts(&state.descriptor)?;
+        for (part, deferred) in planned.iter().zip(&transaction.parts) {
+            let holds = held
+                .get(&part.table)
+                .copied()
+                .flatten()
+                .and_then(|version| u64::try_from(version).ok())
+                .is_some_and(|version| version >= transaction.last_ordinal);
+            if holds {
+                continue;
+            }
+            adds.push(PartAdd::of(part, &deferred.partition)?);
+            stored.push((part.final_relative_path.clone(), deferred.receipt.byte_size));
+        }
+    }
+    let first_ordinal = state.deferred.first().map(|first| first.first_ordinal);
+    tracing::info!(
+        transactions = state.deferred.len(),
+        parts = adds.len(),
+        first_ordinal,
+        last_ordinal = ordinal,
+        recovering,
+        "committing deferred parts to the Delta logs"
+    );
+    if recovering && !stored.is_empty() {
+        let stored: Vec<(&str, u64)> = stored
+            .iter()
+            .map(|(path, size)| (path.as_str(), *size))
+            .collect();
+        parts
+            .require_stored(&stored, concurrency)
+            .await
+            .map_err(|error| {
+                error.context(format!(
+                    "cannot commit this lane's deferred parts of ordinals {}..={ordinal} to the \
+                     Delta logs: a published part that no log references yet is gone or has \
+                     changed. Lite VACUUM never deletes such an untracked part, but a full \
+                     VACUUM whose retention is shorter than the time the lane was stopped, or \
+                     another cleanup, may have (docs/parallel-backfill.md). Nothing was \
+                     committed or changed, and the lane's state stays as evidence; backfill \
+                     into a new, empty output root",
+                    first_ordinal.unwrap_or(ordinal),
+                ))
+            })?;
+    }
+    let metadata = HashMap::from([
+        (
+            "fireparq.transactions".to_string(),
+            json!(state.deferred.len()),
+        ),
+        ("fireparq.firstOrdinal".to_string(), json!(first_ordinal)),
+        ("fireparq.lastOrdinal".to_string(), json!(ordinal)),
+    ]);
+    let commits = delta
+        .commit_batch(adds, txn, metadata, concurrency, &COMMIT_HOOKS, recovering)
+        .await
+        .map_err(|failure| {
+            if failure.unresolved {
+                tracing::warn!(
+                    last_ordinal = ordinal,
+                    "a deferred Delta commit has an unknown outcome; the parts stay owed, and \
+                     the next start reads each table's txn to commit only what did not land"
+                );
+            }
+            failure.error
+        })?;
+    checkpoint(Stage::DeltaCommittedAll)?;
+    let authority = states.settle_deferred(&authority).await?;
+    checkpoint(Stage::DeferredSettled)?;
+    Ok((authority, commits))
+}
+
+/// Verify the parts of the Committed transaction `pending` in the tables
+/// `uncommitted`, before a lane's recovery defers it. A missing or differing
+/// part stops recovery with the journal kept.
+async fn verify_uncommitted(
+    parts: &TransactionParts<'_>,
+    pending: &PendingTransaction,
+    uncommitted: &[String],
+    concurrency: usize,
+) -> Result<()> {
+    if uncommitted.is_empty() {
+        return Ok(());
+    }
+    parts
+        .verify_finals_of(pending, uncommitted, concurrency)
+        .await
+        .map_err(|error| {
+            error.context(format!(
+                "cannot recover the Committed transaction of ordinals {}..={}: a part no Delta \
+                 log references yet is gone or does not match the journal. Nothing was committed \
+                 or changed, and the journal and authority stay as evidence; backfill into a \
+                 new, empty output root",
+                pending.prefix.first_ordinal, pending.prefix.last_ordinal,
+            ))
+        })
 }
 
 /// Roll the Committed transaction `pending`, whose authority has not
@@ -747,8 +1083,11 @@ enum Stage {
     CommittedPersisted,
     /// A table's Delta commit is durable (its part's entry index).
     DeltaCommitted(u32),
-    /// Every Delta commit of the transaction is durable.
+    /// Every Delta commit of the transaction, or of a lane's deferred batch,
+    /// is durable.
     DeltaCommittedAll,
+    /// Authority no longer owes the deferred batch to the Delta logs.
+    DeferredSettled,
     AuthorityAdvanced,
     MirrorReconciled,
     PendingCleared,

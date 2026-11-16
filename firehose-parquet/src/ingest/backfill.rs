@@ -429,7 +429,8 @@ pub enum LaneState {
     Running,
     /// Started, not complete, and no worker owns it: rerun the lane.
     Stopped,
-    /// Complete up to the lane's stop, with nothing pending.
+    /// Complete up to the lane's stop, with nothing pending and every part
+    /// in the Delta logs.
     Complete,
 }
 
@@ -442,12 +443,21 @@ pub struct LaneReport {
     pub owner: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_block: Option<u64>,
+    /// Flushes the lane accepted whose parts are not in the Delta logs yet
+    /// (#728). A running lane commits them in batches; a stopped one at its
+    /// next start.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub uncommitted_flushes: usize,
     #[serde(skip)]
     ordinal: u64,
     #[serde(skip)]
     last_event: Option<EventIdentity>,
     #[serde(skip)]
     unanchored: bool,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 async fn inspect_lane(
@@ -493,6 +503,7 @@ async fn inspect_lane(
             },
             owner,
             last_block: None,
+            uncommitted_flushes: 0,
             ordinal: 0,
             last_event: None,
             unanchored: true,
@@ -504,10 +515,15 @@ async fn inspect_lane(
         "the state of backfill lane {} belongs to another stream",
         lane.name()
     );
+    let uncommitted_flushes = authority.deferred.len();
     let checkpoint = authority.checkpoint;
     let last_block = checkpoint.event.as_ref().map(|event| event.block_num);
-    let complete =
-        checkpoint.completed_stop == Some(stop) && last_block == Some(stop - 1) && !pending;
+    // A lane completes only after its last parts are in the Delta logs; the
+    // check here keeps `seal` from relying on that order alone.
+    let complete = checkpoint.completed_stop == Some(stop)
+        && last_block == Some(stop - 1)
+        && !pending
+        && uncommitted_flushes == 0;
     Ok(LaneReport {
         start,
         stop,
@@ -518,6 +534,7 @@ async fn inspect_lane(
         },
         owner,
         last_block,
+        uncommitted_flushes,
         ordinal: checkpoint.ordinal,
         unanchored: checkpoint.routing.anchor.is_none(),
         last_event: checkpoint.event,

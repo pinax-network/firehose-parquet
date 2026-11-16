@@ -23,6 +23,7 @@ pub use crate::config::DEFAULT_FLUSH_BYTES;
 use crate::config::{
     DEFAULT_FLUSH_ENCODE_CONCURRENCY, DEFAULT_FLUSH_INFLIGHT_BYTES, DEFAULT_FLUSH_MEMORY_BYTES,
     DEFAULT_FLUSH_PUBLISH_CONCURRENCY, DEFAULT_GRPC_MAX_MESSAGE_BYTES, DEFAULT_GRPC_WINDOW_BYTES,
+    DEFAULT_LANE_COMMIT_FLUSHES,
 };
 
 /// Transport options of the Firehose client used by `build`.
@@ -352,6 +353,19 @@ pub struct CommonArgs {
         help_heading = "Flush"
     )]
     pub flush_inflight_bytes: u64,
+
+    /// Flushes a parallel backfill lane commits to the Delta logs together
+    /// (1-256); a lane also commits when it finishes or stops. Other builds
+    /// commit every flush
+    #[arg(
+        long,
+        env = "LANE_COMMIT_FLUSHES",
+        default_value_t = DEFAULT_LANE_COMMIT_FLUSHES,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=256),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub lane_commit_flushes: usize,
 
     /// Log level: trace, debug, info, warn, error
     #[arg(
