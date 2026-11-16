@@ -1,6 +1,6 @@
 # firehose-parquet: unreleased
 
-Changes merged since [v1.5.0](v1.5.0.md). Fold this file into
+Changes merged since [v1.6.0](v1.6.0.md). Fold this file into
 `docs/releases/vX.Y.Z.md` when the next release is cut, then reset it to this
 template.
 
@@ -13,8 +13,6 @@ empty when the release is cut.
 ## Breaking changes
 
 ## New features
-
-- `fireparq maintenance` takes `OPTIMIZE=0`, which skips compaction. With `VACUUM=0` a run only checkpoints and cleans up the log, for frequent runs beside a compaction run that takes hours, as beside a parallel backfill ([Checkpoint-only runs](../delta-maintenance.md#checkpoint-only-runs)).
 
 ## Fixes
 
