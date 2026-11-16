@@ -64,6 +64,9 @@
 //!   commits use conditional puts (`If-None-Match: *`), and no request sends
 //!   `If-Match`; `SSL_CERT_FILE` names a private CA.
 //!   `AWS_S3_ALLOW_UNSAFE_RENAME` is refused.
+//! - `OPTIMIZE`: `0` skips OPTIMIZE (default `1`). With `VACUUM=0` the run
+//!   only checkpoints and cleans up the log: for frequent runs beside a
+//!   compaction run that takes hours.
 //! - `VACUUM`: `0` skips VACUUM (default `1`); refused with `FULL_VACUUM=1`.
 //!   For the frequent runs beside a daily VACUUM, when `VACUUM_RETENTION_HOURS`
 //!   is below the table's `delta.deletedFileRetentionDuration`.
@@ -355,6 +358,8 @@ pub struct Settings {
     /// `LAKE_ROOT` without a trailing `/`, or `s3://<LAKE_BUCKET>`.
     pub root: String,
     pub tables: Vec<String>,
+    /// `OPTIMIZE=0` skips step 1: with `VACUUM=0`, a checkpoint-only run.
+    pub optimize: bool,
     /// `VACUUM=0` skips step 2 (#702).
     pub vacuum: bool,
     pub full_vacuum: bool,
@@ -402,6 +407,7 @@ impl Settings {
                 return config(format!("not a table name: '{table}'"));
             }
         }
+        let optimize = flag(env, "OPTIMIZE", "1")?;
         let vacuum = flag(env, "VACUUM", "1")?;
         let full_vacuum = flag(env, "FULL_VACUUM", "0")?;
         if full_vacuum && !vacuum {
@@ -429,6 +435,7 @@ impl Settings {
         let mut settings = Self {
             root,
             tables,
+            optimize,
             vacuum,
             full_vacuum,
             dry_run,
@@ -821,12 +828,17 @@ async fn maintain(
         }
     };
     report.set("version_before", json!(table.version()));
-    let files = match active_files_per_date(&table) {
-        Ok(files) => files,
-        Err(error) => {
-            report.failed("open", &error);
-            return Outcome::Maintained(report.finish(started));
+    // OPTIMIZE=0 plans no date, so step 1 below does nothing.
+    let files = if settings.optimize {
+        match active_files_per_date(&table) {
+            Ok(files) => files,
+            Err(error) => {
+                report.failed("open", &error);
+                return Outcome::Maintained(report.finish(started));
+            }
         }
+    } else {
+        BTreeMap::new()
     };
 
     // 1. OPTIMIZE closed dates (or all, OPTIMIZE_DATES=all): concatenate
@@ -1081,6 +1093,7 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
         object(json!({
             "root": settings.root,
             "tables": settings.tables.len(),
+            "optimize": settings.optimize,
             "vacuum": settings.vacuum,
             "full_vacuum": settings.full_vacuum,
             "retention_hours": settings.retention_hours,
@@ -1093,19 +1106,24 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
     let mut failed: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut conflicts = 0;
-    let open_date = match open_date_of(&lake).await {
-        Ok(open_date) => open_date,
-        // No `blocks` yet: no date is closed, and its line says skipped.
-        Err(error) if is_missing_table(&error) => None,
-        // Without blocks no date is closed.
-        Err(error) => {
-            emit(
-                out,
-                "blocks_error",
-                object(json!({"error": settings.redact(&error.to_string())})),
-            );
-            failed.push("blocks".into());
-            None
+    // Only OPTIMIZE needs the open date: OPTIMIZE=0 doesn't read `blocks` for it.
+    let open_date = if !settings.optimize {
+        None
+    } else {
+        match open_date_of(&lake).await {
+            Ok(open_date) => open_date,
+            // No `blocks` yet: no date is closed, and its line says skipped.
+            Err(error) if is_missing_table(&error) => None,
+            // Without blocks no date is closed.
+            Err(error) => {
+                emit(
+                    out,
+                    "blocks_error",
+                    object(json!({"error": settings.redact(&error.to_string())})),
+                );
+                failed.push("blocks".into());
+                None
+            }
         }
     };
     for name in &settings.tables {
@@ -1237,6 +1255,22 @@ mod tests {
         assert!(!vacuum(Some("0")).unwrap());
         assert!(!vacuum(Some("false")).unwrap());
         assert!(vacuum(Some("sometimes")).is_err());
+    }
+
+    #[test]
+    fn optimize_is_on_unless_turned_off() {
+        let optimize = |value: Option<&str>| {
+            let mut env = BTreeMap::from([("LAKE_ROOT", "/lake"), ("LAKE_TABLES", "blocks")]);
+            if let Some(value) = value {
+                env.insert("OPTIMIZE", value);
+            }
+            let lookup = |name: &str| env.get(name).map(|value| value.to_string());
+            Settings::from_env(&lookup).map(|settings| settings.optimize)
+        };
+        assert!(optimize(None).unwrap());
+        assert!(optimize(Some("")).unwrap());
+        assert!(!optimize(Some("0")).unwrap());
+        assert!(optimize(Some("never")).is_err());
     }
 
     #[test]
