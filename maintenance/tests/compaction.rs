@@ -34,10 +34,22 @@ async fn create_logs(root: &Path) -> DeltaTable {
 
 /// A table with the columns of `logs`, under any name.
 async fn create_table(root: &Path, name: &str) -> DeltaTable {
+    create_table_with(root, name, Vec::new()).await
+}
+
+/// The same, with more table properties.
+async fn create_table_with(
+    root: &Path,
+    name: &str,
+    properties: Vec<(TableProperty, &str)>,
+) -> DeltaTable {
     let lake = Lake::local(root).unwrap();
     let table = DeltaTable::new(lake.log_store(name).unwrap());
-    table
-        .create()
+    let mut create = table.create();
+    for (property, value) in properties {
+        create = create.with_configuration_property(property, Some(value));
+    }
+    create
         .with_columns([
             StructField::new("block_num", DataType::Primitive(PrimitiveType::Long), false),
             StructField::new(
@@ -419,6 +431,14 @@ async fn optimize_off_checkpoints_and_compacts_nothing() {
         "both parts are still there"
     );
 
+    // A second run at the same version (two runs at once) checkpoints it again.
+    let (status, lines) = job(root, &[("OPTIMIZE", "0"), ("VACUUM", "0")]).await;
+    assert_eq!(status, 0, "{lines:?}");
+    assert_eq!(
+        table_line(&lines)["checkpoint_version"],
+        serde_json::json!(version)
+    );
+
     // A slower concurrent run may leave `_last_checkpoint` at an older
     // checkpoint: readers still load the newest version.
     let hint = root.join("logs/_delta_log/_last_checkpoint");
@@ -448,6 +468,45 @@ async fn optimize_off_checkpoints_and_compacts_nothing() {
         table_line(&lines)["dates_to_compact"],
         serde_json::json!([DAYS[0].0, DAYS[1].0])
     );
+    let (after, files, _) = date_rows(root, DAYS[0].0).await;
+    assert_eq!((after, files), (expected(&rows), 1));
+}
+
+#[tokio::test]
+async fn checkpoint_only_runs_keep_the_table_readable_after_log_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rows = writer_order(100, 120, 4);
+    // Every commit behind a checkpoint has expired at once.
+    let expired = vec![(TableProperty::LogRetentionDuration, "interval 0 seconds")];
+    let table = create_table_with(root, "logs", expired).await;
+    let table = write(table, &rows[..160], DAYS[0].1).await;
+    let table = write(table, &rows[160..320], DAYS[0].1).await;
+    let version = table.version().unwrap();
+    let commit = |version: u64| root.join(format!("logs/_delta_log/{version:020}.json"));
+    assert!(commit(0).exists() && commit(version).exists());
+
+    let (status, lines) = job(root, &[("OPTIMIZE", "0"), ("VACUUM", "0")]).await;
+    assert_eq!(status, 0, "{lines:?}");
+    assert!(
+        (0..version).all(|version| !commit(version).exists()),
+        "the log cleanup deletes the commits behind the checkpoint"
+    );
+    assert!(commit(version).exists(), "the checkpointed commit stays");
+    let (after, files, _) = date_rows(root, DAYS[0].0).await;
+    assert_eq!((after, files), (expected(&rows[..320]), 2));
+
+    // A writer appends on top of the checkpoint, and both kinds of run follow.
+    let mut table = DeltaTable::new(Lake::local(root).unwrap().log_store("logs").unwrap());
+    table.load().await.unwrap();
+    assert_eq!(table.version(), Some(version));
+    write(table, &rows[320..], DAYS[0].1).await;
+    let (status, lines) = job(root, &[("OPTIMIZE", "0"), ("VACUUM", "0")]).await;
+    assert_eq!(status, 0, "{lines:?}");
+    let (after, files, _) = date_rows(root, DAYS[0].0).await;
+    assert_eq!((after, files), (expected(&rows), 3));
+    let (status, lines) = job(root, &[("VACUUM", "0")]).await;
+    assert_eq!(status, 0, "{lines:?}");
     let (after, files, _) = date_rows(root, DAYS[0].0).await;
     assert_eq!((after, files), (expected(&rows), 1));
 }

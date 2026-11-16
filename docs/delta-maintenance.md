@@ -260,7 +260,16 @@ log, and commits nothing, so it conflicts with neither the writers nor the
 other run. When both runs checkpoint a table at once, the slower one may leave
 `_last_checkpoint` at the older checkpoint until the next run; readers list
 forward from it and still load the newest one
-(`optimize_off_checkpoints_and_compacts_nothing`).
+(`optimize_off_checkpoints_and_compacts_nothing`). Two runs at the same
+version write the same checkpoint twice.
+
+The log cleanup lists the table's whole `_delta_log/` on every run, and deletes
+only commits older than `delta.logRetentionDuration` that are behind a
+checkpoint no newer than the oldest commit still inside the retention. It
+doesn't read `_last_checkpoint`. A table stays readable and writable after it
+(`checkpoint_only_runs_keep_the_table_readable_after_log_cleanup`). Time one
+run before choosing the interval: each checkpoint loads the table's whole
+state.
 
 The full VACUUM refuses a retention below 168 hours (exit 2,
 `config_error`). When the settings the runs share set a shorter
