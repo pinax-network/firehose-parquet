@@ -35,7 +35,8 @@ For each table it runs, in order:
    carried. When a footer can't be read, the day is left for the next run
    (reported as an error) rather than compacted without its metadata. Days
    compacted by an earlier job keep no metadata until they are compacted
-   again.
+   again. `OPTIMIZE=0` skips this step
+   ([Checkpoint-only runs](#checkpoint-only-runs)).
 2. **VACUUM**, lite by default: it deletes only files that a `remove`
    tombstone older than the retention names, and never a part that `build`
    published but has not committed yet. A full VACUUM (`FULL_VACUUM=1`, run
@@ -67,7 +68,7 @@ Every step is idempotent: a failed or conflicting run changes nothing that
 the next run cannot finish, and the writer never notices. One JSON object per
 line goes to stdout:
 
-- `start`: `root`, `tables`, `vacuum`, `full_vacuum`, `retention_hours`,
+- `start`: `root`, `tables`, `optimize`, `vacuum`, `full_vacuum`, `retention_hours`,
   `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
   `version` (the binary's);
 - one line per table: `table` with `version_before`, `dates_to_compact`,
@@ -107,6 +108,7 @@ not apply to it. Requests use object_store's default retries.
 | `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | `false` | Plain HTTP; virtual-hosted instead of path-style requests |
 | `SSL_CERT_FILE` | system roots | A PEM bundle of the CAs to trust instead, for example with the RGW's private CA |
 | `AWS_S3_ALLOW_UNSAFE_RENAME` | | Refused: unsafe beside a running writer |
+| `OPTIMIZE` | `1` | `0` skips OPTIMIZE and doesn't read `blocks` for the open date (`open_date` is `null`). With `VACUUM=0` the run only checkpoints and cleans up the log ([Checkpoint-only runs](#checkpoint-only-runs)) |
 | `VACUUM` | `1` | `0` skips VACUUM: for the frequent runs beside a daily VACUUM, when `VACUUM_RETENTION_HOURS` is below the table's retention ([VACUUM retention and schedule](#vacuum-retention-and-schedule)). Refused with `FULL_VACUUM=1` |
 | `FULL_VACUUM` | `0` | `1` for the weekly full VACUUM |
 | `VACUUM_RETENTION_HOURS` | the table's 7 days | Lower only shortens how long readers of older snapshots find replaced files; a full VACUUM refuses less than 168 (override a lower shared value in its environment) |
@@ -242,6 +244,23 @@ safe while the daily run's retention plus its interval stays below it (24 h +
 24 h against 7 days). If the daily run fails for about five days in a row, a
 file it missed loses its tombstone, and the weekly full VACUUM deletes it as an
 untracked file.
+
+### Checkpoint-only runs
+
+A writer's commit time grows with a table's commits since its last checkpoint
+(`firehose_parquet_delta_log_tail_commits`; #728). A run only checkpoints a table
+after compacting it, and beside a [parallel backfill](parallel-backfill.md) a
+run can take hours: every lane's days count as closed and are compacted again
+as parts arrive. Tables then go thousands of commits without a checkpoint, and
+commits that took a few seconds take tens of seconds.
+
+Add a frequent run with `OPTIMIZE=0` and `VACUUM=0` beside the long one. It
+opens each table, writes a checkpoint at its current version and cleans up the
+log, and commits nothing, so it conflicts with neither the writers nor the
+other run. When both runs checkpoint a table at once, the slower one may leave
+`_last_checkpoint` at the older checkpoint until the next run; readers list
+forward from it and still load the newest one
+(`optimize_off_checkpoints_and_compacts_nothing`).
 
 The full VACUUM refuses a retention below 168 hours (exit 2,
 `config_error`). When the settings the runs share set a shorter

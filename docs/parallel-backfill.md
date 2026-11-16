@@ -76,9 +76,12 @@ existing dataset cannot be backfilled below its start.
   hands until it is sealed.
 - The [maintenance job](delta-maintenance.md) may run. It treats days a lane
   is still filling as closed and compacts them again as parts arrive, as
-  `OPTIMIZE_DATES=all` does. Lanes commit in batches, so the logs stay short
-  and the hourly checkpoint is enough. A day two lanes
-  share can be compacted before the earlier lane reaches it; the job then
+  `OPTIMIZE_DATES=all` does. Lanes commit in batches, which keeps the logs
+  shorter, but a run over a large backfill takes hours and checkpoints each
+  table once: add a frequent
+  [checkpoint-only run](delta-maintenance.md#checkpoint-only-runs)
+  (`OPTIMIZE=0`, `VACUUM=0`), or commit times grow with the log tail. A day
+  two lanes share can be compacted before the earlier lane reaches it; the job then
   sorts that day back into block order as a
   [repair](delta-maintenance.md#row-order), `OPTIMIZE_REPAIR_DATES` days per
   table and run (default 1), so allow about one such day per lane.
