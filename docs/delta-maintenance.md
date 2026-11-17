@@ -247,17 +247,17 @@ untracked file.
 
 ### Checkpoint-only runs
 
-A writer's commit time grows with a table's commits since its last checkpoint
-(`firehose_parquet_delta_log_tail_commits`; #728). A run only checkpoints a table
-after compacting it, and beside a [parallel backfill](parallel-backfill.md) a
-run can take hours: every lane's days count as closed and are compacted again
-as parts arrive. Tables then go thousands of commits without a checkpoint, and
-commits that took a few seconds take tens of seconds.
+A run only checkpoints a table after compacting it, and beside a
+[parallel backfill](parallel-backfill.md) a run can take hours: every lane's
+days count as closed and are compacted again as parts arrive. Tables then go
+thousands of commits without a checkpoint
+(`firehose_parquet_delta_log_tail_commits`; #728), and whatever opens one, a
+reader or a starting lane, reads every commit since the last checkpoint.
 
-Add a frequent run with `OPTIMIZE=0` and `VACUUM=0` beside the long one. It
-opens each table, writes a checkpoint at its current version and cleans up the
-log, and commits nothing, so it conflicts with neither the writers nor the
-other run. When both runs checkpoint a table at once, the slower one may leave
+Add a run with `OPTIMIZE=0` and `VACUUM=0` beside the long one to keep the
+tail short. It opens each table, writes a checkpoint at its current version
+and cleans up the log, and commits nothing, so it conflicts with neither the
+writers nor the other run. When both runs checkpoint a table at once, the slower one may leave
 `_last_checkpoint` at the older checkpoint until the next run; readers list
 forward from it and still load the newest one
 (`optimize_off_checkpoints_and_compacts_nothing`). Two runs at the same
@@ -270,6 +270,21 @@ doesn't read `_last_checkpoint`. A table stays readable and writable after it
 (`checkpoint_only_runs_keep_the_table_readable_after_log_cleanup`). Time one
 run before choosing the interval: each checkpoint loads the table's whole
 state.
+
+It does not make a backfill faster. One run beside each of two backfills
+(#732):
+
+| | 15 lanes | 10 lanes |
+|---|---|---|
+| Log tail of the busy tables | up to 4,929 commits, then 15 to 51 | up to 1,220, then 24 |
+| Mean commit time | 25.9 s, then 20.6 s | unchanged (`calls` 12.6 s, then 11.6 s) |
+| Most improved table | `access_lists` 50.7 s, then 26.3 s | none |
+| Blocks per second | unchanged | not measured |
+| Run time, 20 tables | 147 s, 6 to 16 s per busy table | 63 s, 5 to 7 s |
+
+Lanes commit in batches, there about once in 10 minutes, so commits were 5 to
+8% of a lane's time. The log tail explains only part of a slow commit; the
+rest is not explained yet.
 
 The full VACUUM refuses a retention below 168 hours (exit 2,
 `config_error`). When the settings the runs share set a shorter
