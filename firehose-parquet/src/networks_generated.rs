@@ -31,10 +31,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://basesepolia.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "blast-mainnet",
-        default_endpoint: "https://blast.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
         chain_name: "bsc",
         default_endpoint: "https://bsc.firehose.pinax.network:443",
     },
@@ -204,7 +200,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "avalanche",
     "base",
     "base-sepolia",
-    "blast-mainnet",
     "bsc",
     "btc",
     "celo",
