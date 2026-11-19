@@ -6,7 +6,7 @@ One file per chain family lists every table `fireparq` writes and every column w
 
 | Chain | `--block-type` | Tables | Byte encoding | Reference |
 |---|---|---|---|---|
-| EVM | `evm` | 20 (14 extended only) | `hex` | [evm.md](evm.md) |
+| EVM | `evm` | 22 (15 extended only) | `hex` | [evm.md](evm.md) |
 | Bitcoin | `bitcoin` | 4 | `hex` | [bitcoin.md](bitcoin.md) |
 | Solana | `solana` | 8 (1 votes only) | `base58` | [solana.md](solana.md) |
 | NEAR | `near` | 7 | `base58` | [near.md](near.md) |

@@ -58,3 +58,12 @@ coverage is still missing; synthetic unit tests cover that mapping.
 `blocks/tests/evm_golden.rs` checks this fixture like the first one (all
 configurations, both mapping entry points, canonical identity on every row),
 plus a targeted raw/output check of transaction 130.
+
+The retained payload additionally qualifies **1,909 ERC-20 transfers** and
+**801 native CALL/CREATE transfers**, independently counted with a standalone
+Rust protobuf wire reader. The golden test derives every transfer directly
+from the protobuf with explicit ABI checks and `BigUint` arithmetic, without
+calling the production decoder or decimal formatter. Its pinned first values
+are transaction 11's ERC-20 amount `3253195078445409763328` and transaction 0,
+call 7's native amount `89100000000000000` wei. These checks add coverage without
+changing the historical raw-table `expected.json`.

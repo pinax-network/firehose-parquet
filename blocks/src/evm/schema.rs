@@ -101,6 +101,27 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     Schema::new(fields)
 }
 
+/// Standard ERC-20 `Transfer(address,address,uint256)` receipt events.
+pub fn erc20_transfers_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields_with_encoding(encoding);
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("log_index", DataType::UInt32, false),
+        Field::new("block_index", DataType::UInt32, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("token_address", bd.clone(), false),
+        Field::new("from", bd.clone(), false),
+        Field::new("to", bd, false),
+        Field::new("value", DataType::Utf8, false),
+        Field::new("decoder_version", DataType::UInt32, false),
+    ]);
+    push_fork_step_field(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
 pub fn withdrawals_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields_with_encoding(encoding);
@@ -154,6 +175,26 @@ pub fn set_code_authorizations_schema(include_fork_step: bool, encoding: &Encode
 // ==========================================================================
 // Extended tables (EXTENDED detail level only)
 // ==========================================================================
+
+/// Positive native value transfers from committed CALL and CREATE traces.
+pub fn native_transfers_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields_with_encoding(encoding);
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
+        Field::new("call_type", enum_data_type(), false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("from", bd.clone(), false),
+        Field::new("to", bd, false),
+        Field::new("value", DataType::Utf8, false),
+        Field::new("decoder_version", DataType::UInt32, false),
+    ]);
+    push_fork_step_field(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
 
 pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
@@ -428,24 +469,27 @@ pub fn system_account_creations_schema(include_fork_step: bool, encoding: &Encod
 }
 
 /// Standard table names (available at BASE detail level).
-pub const BASE_TABLE_NAMES: [&str; 6] = [
+pub const BASE_TABLE_NAMES: [&str; 7] = [
     "blocks",
     "transactions",
     "logs",
+    "erc20_transfers",
     "withdrawals",
     "access_lists",
     "set_code_authorizations",
 ];
 
 /// Extended table names (available at EXTENDED detail level).
-pub const EXTENDED_TABLE_NAMES: [&str; 20] = [
+pub const EXTENDED_TABLE_NAMES: [&str; 22] = [
     "blocks",
     "transactions",
     "logs",
+    "erc20_transfers",
     "withdrawals",
     "access_lists",
     "set_code_authorizations",
     "calls",
+    "native_transfers",
     "balance_changes",
     "code_changes",
     "storage_changes",

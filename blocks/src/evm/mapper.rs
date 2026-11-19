@@ -1,6 +1,8 @@
 use super::decimal;
 use super::proto::eth;
 use super::schema;
+use super::transfer_builders::{Erc20TransfersBuilder, NativeTransfersBuilder};
+use super::transfers;
 use arrow::array::*;
 use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
@@ -228,11 +230,13 @@ pub struct EvmBlockMapper {
     blocks: EvmBlocksBuilder,
     transactions: EvmTransactionsBuilder,
     logs: EvmLogsBuilder,
+    erc20_transfers: Erc20TransfersBuilder,
     withdrawals: EvmWithdrawalsBuilder,
     access_lists: EvmAccessListsBuilder,
     set_code_authorizations: EvmSetCodeAuthorizationsBuilder,
     // Extended builders (transaction-scoped)
     calls: Option<EvmCallsBuilder>,
+    native_transfers: Option<NativeTransfersBuilder>,
     balance_changes: Option<EvmBalanceChangesBuilder>,
     code_changes: Option<EvmCodeChangesBuilder>,
     storage_changes: Option<EvmStorageChangesBuilder>,
@@ -251,10 +255,12 @@ pub struct EvmBlockMapper {
     blocks_schema: Schema,
     transactions_schema: Schema,
     logs_schema: Schema,
+    erc20_transfers_schema: Schema,
     withdrawals_schema: Schema,
     access_lists_schema: Schema,
     set_code_authorizations_schema: Schema,
     calls_schema: Schema,
+    native_transfers_schema: Schema,
     balance_changes_schema: Schema,
     code_changes_schema: Schema,
     storage_changes_schema: Schema,
@@ -285,6 +291,7 @@ impl EvmBlockMapper {
             blocks: EvmBlocksBuilder::new(ifs, enc),
             transactions: EvmTransactionsBuilder::new(ifs, enc),
             logs: EvmLogsBuilder::new(ifs, enc),
+            erc20_transfers: Erc20TransfersBuilder::new(ifs, enc),
             withdrawals: EvmWithdrawalsBuilder::new(ifs, enc),
             access_lists: EvmAccessListsBuilder::new(ifs, enc),
             set_code_authorizations: EvmSetCodeAuthorizationsBuilder::new(ifs, enc),
@@ -293,6 +300,7 @@ impl EvmBlockMapper {
             } else {
                 None
             },
+            native_transfers: extended.then(|| NativeTransfersBuilder::new(ifs, enc)),
             balance_changes: if extended {
                 Some(EvmBalanceChangesBuilder::new(ifs, enc))
             } else {
@@ -361,10 +369,12 @@ impl EvmBlockMapper {
             blocks_schema: schema::blocks_schema(ifs, enc),
             transactions_schema: schema::transactions_schema(ifs, enc),
             logs_schema: schema::logs_schema(ifs, enc),
+            erc20_transfers_schema: schema::erc20_transfers_schema(ifs, enc),
             withdrawals_schema: schema::withdrawals_schema(ifs, enc),
             access_lists_schema: schema::access_lists_schema(ifs, enc),
             set_code_authorizations_schema: schema::set_code_authorizations_schema(ifs, enc),
             calls_schema: schema::calls_schema(ifs, enc),
+            native_transfers_schema: schema::native_transfers_schema(ifs, enc),
             balance_changes_schema: schema::balance_changes_schema(ifs, enc),
             code_changes_schema: schema::code_changes_schema(ifs, enc),
             storage_changes_schema: schema::storage_changes_schema(ifs, enc),
@@ -602,6 +612,16 @@ impl EvmBlockMapper {
         if let Some(ref receipt) = tx.receipt {
             for log in &receipt.logs {
                 self.map_log(block_number, tx_hash, tx.index, log, identity, fork_step);
+            }
+        }
+
+        for transfer in transfers::erc20_transfers(tx) {
+            self.erc20_transfers
+                .append(block_number, tx, transfer, identity, fork_step);
+        }
+        if let Some(ref mut builder) = self.native_transfers {
+            for transfer in transfers::native_transfers(tx) {
+                builder.append(block_number, tx, transfer, identity, fork_step);
             }
         }
 
@@ -845,6 +865,10 @@ impl BlockMapper for EvmBlockMapper {
         );
         result.insert("logs".to_string(), self.logs.finish(&self.logs_schema)?);
         result.insert(
+            "erc20_transfers".to_string(),
+            self.erc20_transfers.finish(&self.erc20_transfers_schema)?,
+        );
+        result.insert(
             "withdrawals".to_string(),
             self.withdrawals.finish(&self.withdrawals_schema)?,
         );
@@ -859,6 +883,12 @@ impl BlockMapper for EvmBlockMapper {
         );
 
         if self.extended {
+            if let Some(ref mut b) = self.native_transfers {
+                result.insert(
+                    "native_transfers".to_string(),
+                    b.finish(&self.native_transfers_schema)?,
+                );
+            }
             if let Some(ref mut b) = self.calls {
                 result.insert("calls".to_string(), b.finish(&self.calls_schema)?);
             }
@@ -952,9 +982,13 @@ impl BlockMapper for EvmBlockMapper {
             .len()
             .max(self.transactions.canonical.len())
             .max(self.logs.canonical.len())
+            .max(self.erc20_transfers.canonical.len())
             .max(self.withdrawals.canonical.len())
             .max(self.access_lists.canonical.len())
             .max(self.set_code_authorizations.canonical.len());
+        if let Some(ref b) = self.native_transfers {
+            max = max.max(b.canonical.len());
+        }
         if let Some(ref b) = self.calls {
             max = max.max(b.canonical.len());
         }
@@ -1004,9 +1038,13 @@ impl BlockMapper for EvmBlockMapper {
         let mut total = self.blocks.canonical.len()
             + self.transactions.canonical.len()
             + self.logs.canonical.len()
+            + self.erc20_transfers.canonical.len()
             + self.withdrawals.canonical.len()
             + self.access_lists.canonical.len()
             + self.set_code_authorizations.canonical.len();
+        if let Some(ref b) = self.native_transfers {
+            total += b.canonical.len();
+        }
         if let Some(ref b) = self.calls {
             total += b.canonical.len();
         }
@@ -1130,6 +1168,7 @@ impl BlockMapper for EvmBlockMapper {
             ("blocks", blocks),
             ("transactions", transactions),
             ("logs", logs),
+            ("erc20_transfers", self.erc20_transfers.estimated_bytes()),
             ("withdrawals", self.withdrawals.estimated_bytes()),
             ("access_lists", self.access_lists.estimated_bytes()),
             (
@@ -1137,6 +1176,9 @@ impl BlockMapper for EvmBlockMapper {
                 self.set_code_authorizations.estimated_bytes(),
             ),
         ];
+        if let Some(ref b) = self.native_transfers {
+            tables.push(("native_transfers", b.estimated_bytes()));
+        }
         // calls (tx-level)
         macro_rules! est_calls {
             ($b:expr) => {
@@ -3407,9 +3449,9 @@ pub(crate) mod tests {
     #[test]
     fn test_table_names() {
         let mapper_base = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        assert_eq!(mapper_base.table_names().len(), 6);
+        assert_eq!(mapper_base.table_names().len(), 7);
         let mapper_ext = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        assert_eq!(mapper_ext.table_names().len(), 20);
+        assert_eq!(mapper_ext.table_names().len(), 22);
     }
 
     #[test]

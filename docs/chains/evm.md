@@ -2,6 +2,75 @@
 
 Semantics of the EVM tables beyond their columns, which the [EVM schema reference](../schemas/evm.md) lists. The failed-transaction flags are in [Failed transaction filtering](failed-transactions.md).
 
+## Decoded transfers
+
+EVM output includes `erc20_transfers` by default and `native_transfers` when
+extended tables are enabled (the default). They are derived in the same block
+mapping and protected all-table commit as the raw tables; no RPC or Substreams
+service is required.
+
+| Table | Source and coverage | Execution identity |
+|---|---|---|
+| `erc20_transfers` | Standard `Transfer(address,address,uint256)` receipt logs from successful transactions, at BASE or EXTENDED detail | `(block_id, block_index)`; `tx_hash`, `tx_index`, `log_index` and `ordinal` retain the source positions |
+| `native_transfers` | Positive native value in successful, non-reverted CALL/CREATE traces, including root and internal calls | `(block_id, tx_index, call_index)`; `ordinal` is the call's `begin_ordinal` |
+
+Both tables retain the canonical block columns, the configured byte encoding,
+exact decimal-string `value`, and `decoder_version = 1`. Values are raw integer
+units: token base units for ERC-20 and native base units (wei on Ethereum) for
+native transfers. Token decimals, symbols, metadata and USD prices are not
+inferred. Non-final streams carry `fork_step` and `stream_ordinal` and require
+the same [canonical live view](../non-final-streams.md) as raw tables.
+
+ERC-20 decoding reuses the shared
+[`substreams-abis` v2.0.0](https://github.com/pinax-network/substreams-abis/tree/v2.0.0)
+Transfer decoder through a borrowed Firehose-log adapter. The table accepts
+exactly three 32-byte topics, one 32-byte data word and canonical zero-padded
+address topics from a 20-byte contract address. Zero-value transfers and
+zero-address mint/burn events are retained. ERC-721's four-topic event, malformed
+events and nonstandard layouts are excluded. A matching event is evidence of
+the emitted transfer, not proof that the contract implements every ERC-20 rule.
+Receipt logs exclude reverted calls; failed transactions emit no transfer rows
+even when raw failed transactions are included.
+
+Native transfers require EXTENDED call data. `--without-extended` omits the
+table, and a BASE payload supplies no native transfer rows. CALLCODE,
+DELEGATECALL and STATICCALL do not move the apparent call value and are excluded.
+The root call is emitted once; the transaction value is not added again.
+Contract creation endowments are included. Fees, block rewards, withdrawals,
+selfdestruct payouts, system calls and chain-specific mint/burn operations are
+outside this table's coverage. Consult `balance_changes`,
+`system_balance_changes` and `withdrawals` for those state changes. An empty
+native transfer table is not evidence of zero activity when traces are absent.
+
+The shared
+[`substreams-evm-transfers`](https://github.com/pinax-network/substreams-evm-transfers)
+native projector currently preserves its existing production semantics, which
+omit internal CREATE values. Fireparq therefore extracts its documented
+CALL/CREATE scope directly from the already decoded Firehose calls. Its receipt
+ERC-20 scope also differs from the broader `erc20-events` projector's validated
+EXTENDED transaction and system-call evidence; these outputs should not be
+treated as interchangeable without matching the coverage.
+
+### Balances
+
+These transfer tables are not account-balance snapshots. Native state is already
+available as exact old/new values in `balance_changes` and
+`system_balance_changes`; include failed transactions and filter transaction
+changes with `persisted = true` when reconciling state. End-of-block observations
+also need the shared native-balance reducer's producer-specific ordering and
+persistence corrections; taking the largest ordinal alone is not sufficient
+for every EVM producer.
+
+[`substreams-evm-balances`](https://github.com/pinax-network/substreams-evm-balances)
+provides reusable native-balance and ERC-20-balance projectors. A future balance
+dataset can reuse those with explicit chain/producer qualification. Its ERC-20
+balances are inferred from transfer/event evidence and persisted storage, with
+gaps and possible incorrect or stale observations. Missing, computed, rebasing
+or unsupported storage must remain unknown.
+Summing Transfer events also cannot establish a universal current balance,
+especially when ingestion starts after genesis. This change does not add a
+balance snapshot or silently use inferred balances as confirmed state.
+
 ## Persistent state changes of failed transactions
 
 A failed EVM transaction still changes chain state: the sender pays for gas, the fee recipients are paid, and the sender's nonce goes up. Everything else it did is rolled back. So `balance_changes` and `nonce_changes` only reconcile with on-chain balances and nonces when failed transactions are included (the default) and rows with `persisted = false` are left out.

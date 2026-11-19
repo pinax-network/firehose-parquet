@@ -42,6 +42,19 @@ partition is the block's UTC day) and each selected value in its Delta type.
 It compares fixed expectations; it does not calculate its expected values using
 the mapper under test.
 
+### Transfer table qualification
+
+The same retained payload contains **190 ERC-20 transfers** and **115 native
+CALL/CREATE transfers** under the built-in decoder's documented rules. These
+totals were counted separately with a standalone Rust protobuf wire reader.
+`evm_golden.rs` independently derives every expected transfer from the retained
+protobuf, using explicit ABI checks and `BigUint` arithmetic rather than the
+production decoder or decimal formatter, then compares every derived column.
+The first ERC-20 row is transaction 0's USDT transfer of `399700000`; the first
+native row is transaction 2, call 1, with value `267080795608303` wei. Both exact
+amounts and source positions are pinned in the test. The historical
+`expected.json` for the 20 raw tables is unchanged.
+
 ### Re-pinned for Delta types (#643)
 
 The payloads are unchanged. `expected.json` changed in two ways: the values of

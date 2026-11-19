@@ -10,6 +10,7 @@ Generated from the `evm` mapper; do not edit by hand. Regenerate with `cargo run
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 - Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.
 - Extended tables are populated only from blocks at the EXTENDED detail level; the `system_*` tables hold block-level events without `tx_hash`.
+- `erc20_transfers` decodes standard receipt Transfer logs of successful transactions. `native_transfers` requires extended output and records successful, persisted, positive-value CALL/CREATE operations. These tables are not balance snapshots; see [EVM transfer coverage](../chains/evm.md#decoded-transfers).
 
 ## Tables
 
@@ -18,10 +19,12 @@ Generated from the `evm` mapper; do not edit by hand. Regenerate with `cargo run
 | [`blocks`](#blocks) | 31 | Always. |
 | [`transactions`](#transactions) | 35 | Always. |
 | [`logs`](#logs) | 19 | Always. |
+| [`erc20_transfers`](#erc20_transfers) | 18 | Always. |
 | [`withdrawals`](#withdrawals) | 12 | Always. |
 | [`access_lists`](#access_lists) | 13 | Always. |
 | [`set_code_authorizations`](#set_code_authorizations) | 19 | Always. |
 | [`calls`](#calls) | 30 | Extended output only: omitted with `--without-extended`. |
+| [`native_transfers`](#native_transfers) | 17 | Extended output only: omitted with `--without-extended`. |
 | [`balance_changes`](#balance_changes) | 18 | Extended output only: omitted with `--without-extended`. |
 | [`code_changes`](#code_changes) | 19 | Extended output only: omitted with `--without-extended`. |
 | [`storage_changes`](#storage_changes) | 18 | Extended output only: omitted with `--without-extended`. |
@@ -142,6 +145,33 @@ Generated from the `evm` mapper; do not edit by hand. Regenerate with `cargo run
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
+## `erc20_transfers`
+
+Standard ERC-20 Transfer receipt events, including zero-value transfers, mints and burns. ERC-721 and nonstandard event layouts are excluded.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_number` | `long` | no | |
+| `tx_hash` | `string` (hex) | no | |
+| `tx_index` | `long` | no | |
+| `log_index` | `long` | no | Firehose transaction-relative `Log.index` (guaranteed at EXTENDED detail). |
+| `block_index` | `long` | no | Receipt `Log.blockIndex`, the JSON-RPC logIndex. Use this for block-local identity at BASE detail. |
+| `ordinal` | `long` | no | |
+| `token_address` | `string` (hex) | no | |
+| `from` | `string` (hex) | no | |
+| `to` | `string` (hex) | no | |
+| `value` | `string` | no | Exact uint256 decimal string in raw token units; no decimals or metadata lookup. |
+| `decoder_version` | `long` | no | Version 1 of the receipt-transfer extraction contract. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
 ## `withdrawals`
 
 | Column | Type | Nullable | Description |
@@ -243,6 +273,34 @@ Extended output only: omitted with `--without-extended`.
 | `address_delegates_to` | `string` (hex) | yes | |
 | `begin_ordinal` | `long` | no | |
 | `end_ordinal` | `long` | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## `native_transfers`
+
+Extended output only: omitted with `--without-extended`.
+
+Positive native value moved by persisted CALL/CREATE operations of successful transactions, including the root call once. Requires EXTENDED traces. Fees, rewards, withdrawals, selfdestruct payouts and system calls are outside this table.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_number` | `long` | no | |
+| `tx_hash` | `string` (hex) | no | |
+| `tx_index` | `long` | no | |
+| `call_index` | `long` | no | |
+| `call_type` | `string` | no | |
+| `ordinal` | `long` | no | The source call's `begin_ordinal`; use `(tx_index, call_index)` for the transfer identity. |
+| `from` | `string` (hex) | no | |
+| `to` | `string` (hex) | no | |
+| `value` | `string` | no | Exact decimal string in the chain's native base unit (wei on Ethereum). |
+| `decoder_version` | `long` | no | Version 1 of the CALL/CREATE value-transfer extraction contract. |
 | `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
 | `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
@@ -594,10 +652,10 @@ The mapper builds Arrow types; every flush maps them onto the Delta types above 
 
 | Mapper Arrow type | Delta type | Conversion | Columns |
 |---|---|---|---|
-| `UInt64` | `long` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `block_num`; `parent_num`; `lib_num`; `number` (`blocks`); `gas_used` (`blocks`, `transactions`); `gas_limit` (`blocks`, `transactions`, `calls`, `system_calls`); `size` (`blocks`); `blob_gas_used` (`blocks`, `transactions`); `excess_blob_gas` (`blocks`); `stream_ordinal`; `block_number` (every table but `blocks`); `nonce` (`transactions`); `cumulative_gas_used` (`transactions`); `blob_gas` (`transactions`); `begin_ordinal` (`transactions`, `calls`, `system_calls`); `end_ordinal` (`transactions`, `calls`, `system_calls`); `ordinal` (`logs`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`, `system_balance_changes`, `system_code_changes`, `system_storage_changes`, `system_nonce_changes`, `system_gas_changes`, `system_account_creations`); `index` (`withdrawals`); `validator_index` (`withdrawals`); `gas_consumed` (`calls`, `system_calls`); `old_value` (`nonce_changes`, `gas_changes`, `system_nonce_changes`, `system_gas_changes`); `new_value` (`nonce_changes`, `gas_changes`, `system_nonce_changes`, `system_gas_changes`) |
+| `UInt64` | `long` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `block_num`; `parent_num`; `lib_num`; `number` (`blocks`); `gas_used` (`blocks`, `transactions`); `gas_limit` (`blocks`, `transactions`, `calls`, `system_calls`); `size` (`blocks`); `blob_gas_used` (`blocks`, `transactions`); `excess_blob_gas` (`blocks`); `stream_ordinal`; `block_number` (every table but `blocks`); `nonce` (`transactions`); `cumulative_gas_used` (`transactions`); `blob_gas` (`transactions`); `begin_ordinal` (`transactions`, `calls`, `system_calls`); `end_ordinal` (`transactions`, `calls`, `system_calls`); `ordinal` (`logs`, `erc20_transfers`, `native_transfers`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`, `system_balance_changes`, `system_code_changes`, `system_storage_changes`, `system_nonce_changes`, `system_gas_changes`, `system_account_creations`); `index` (`withdrawals`); `validator_index` (`withdrawals`); `gas_consumed` (`calls`, `system_calls`); `old_value` (`nonce_changes`, `gas_changes`, `system_nonce_changes`, `system_gas_changes`); `new_value` (`nonce_changes`, `gas_changes`, `system_nonce_changes`, `system_gas_changes`) |
 | `UInt64` | `decimal(20,0)` | exact: every 64-bit unsigned value fits (currency amounts, and values a sender or signer chooses without a range check) | `nonce` (`blocks`, `set_code_authorizations`); `amount_gwei` (`withdrawals`) |
-| `UInt32` | `long` | lossless | `num_transactions` (`blocks`); `index` (`transactions`); `tx_index` (`logs`, `access_lists`, `set_code_authorizations`, `calls`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`); `log_index` (`logs`); `block_index` (`logs`); `access_index` (`access_lists`); `authorization_index` (`set_code_authorizations`); `v` (`set_code_authorizations`); `call_index` (`calls`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`, `system_calls`, `system_balance_changes`, `system_code_changes`, `system_storage_changes`, `system_nonce_changes`, `system_gas_changes`, `system_account_creations`); `parent_index` (`calls`, `system_calls`); `depth` (`calls`, `system_calls`) |
-| `Dictionary(Int32, Utf8)` | `string` | the same labels; Parquet still dictionary-encodes the pages | `detail_level` (`blocks`); `type` (`transactions`); `status` (`transactions`); `call_type` (`calls`, `system_calls`); `reason` (`balance_changes`, `gas_changes`, `system_balance_changes`, `system_gas_changes`) |
+| `UInt32` | `long` | lossless | `num_transactions` (`blocks`); `index` (`transactions`); `tx_index` (`logs`, `erc20_transfers`, `access_lists`, `set_code_authorizations`, `calls`, `native_transfers`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`); `log_index` (`logs`, `erc20_transfers`); `block_index` (`logs`, `erc20_transfers`); `decoder_version` (`erc20_transfers`, `native_transfers`); `access_index` (`access_lists`); `authorization_index` (`set_code_authorizations`); `v` (`set_code_authorizations`); `call_index` (`calls`, `native_transfers`, `balance_changes`, `code_changes`, `storage_changes`, `nonce_changes`, `gas_changes`, `account_creations`, `system_calls`, `system_balance_changes`, `system_code_changes`, `system_storage_changes`, `system_nonce_changes`, `system_gas_changes`, `system_account_creations`); `parent_index` (`calls`, `system_calls`); `depth` (`calls`, `system_calls`) |
+| `Dictionary(Int32, Utf8)` | `string` | the same labels; Parquet still dictionary-encodes the pages | `detail_level` (`blocks`); `type` (`transactions`); `status` (`transactions`); `call_type` (`calls`, `native_transfers`, `system_calls`); `reason` (`balance_changes`, `gas_changes`, `system_balance_changes`, `system_gas_changes`) |
 | `Timestamp(Millisecond, "UTC")` | `timestamp` | the same instant, stored as `TIMESTAMP(MICROS, UTC)` (whole milliseconds) | `timestamp` |
 | `date` column (`Date32`) | partition column | stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files | `date` |
 
