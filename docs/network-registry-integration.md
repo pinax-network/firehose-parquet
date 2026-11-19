@@ -74,6 +74,7 @@ Current exclusions:
 
 | Network | Reason |
 |---|---|
+| `blast-mainnet` | Pinax retired the Firehose endpoint listed in the pinned v0.8.4 snapshot. Remove the exclusion when refreshing to a snapshot that includes the [upstream removal](https://github.com/graphprotocol/networks-registry/pull/265) (v0.8.10). |
 | `robinhood-sepolia` | `robsepolia.firehose.pinax.network` has no DNS record (2026-09-24) |
 
 ## Internal Pinax networks

@@ -21,10 +21,16 @@ const FALLBACK_PROVIDERS: &[(&str, &str)] = &[
 
 /// Networks whose registry endpoint is known to be broken. They get no built-in
 /// alias until the endpoint works again.
-const EXCLUDED_NETWORKS: &[(&str, &str)] = &[(
-    "robinhood-sepolia",
-    "robsepolia.firehose.pinax.network has no DNS record (checked 2026-09-24)",
-)];
+const EXCLUDED_NETWORKS: &[(&str, &str)] = &[
+    (
+        "blast-mainnet",
+        "Pinax retired its Blast Firehose; registry v0.8.10 removed the endpoint (2026-10-30)",
+    ),
+    (
+        "robinhood-sepolia",
+        "robsepolia.firehose.pinax.network has no DNS record (checked 2026-09-24)",
+    ),
+];
 
 /// Pinax-served Firehose networks that the registry does not list yet, as
 /// `(alias, endpoint, reason)`. Hand-maintained: each entry is a reviewed
@@ -372,6 +378,7 @@ mod tests {
     fn test_build_networks_skips_excluded_networks_and_sorts() {
         let built = registry_only(&[
             network("zora", &["zora.firehose.pinax.network:443"]),
+            network("blast-mainnet", &["blast.firehose.pinax.network:443"]),
             network(
                 "robinhood-sepolia",
                 &["robsepolia.firehose.pinax.network:443"],

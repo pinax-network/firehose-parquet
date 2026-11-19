@@ -217,9 +217,13 @@ mod tests {
 
     #[test]
     fn test_resolve_network_endpoint_removed_builtin_network() {
-        // `arbitrum-nova` was removed earlier; the rest were removed in #535
-        // because no registry provider serves them any more.
-        for name in ["arbitrum-nova", "fantom", "scroll", "telos"] {
+        for name in [
+            "arbitrum-nova",
+            "blast-mainnet",
+            "fantom",
+            "scroll",
+            "telos",
+        ] {
             let err = resolve_network_endpoint(name)
                 .expect_err("removed built-in network should no longer resolve");
             assert!(err

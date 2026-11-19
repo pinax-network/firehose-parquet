@@ -12,6 +12,11 @@ empty when the release is cut.
 
 ## Breaking changes
 
+- `fireparq build --network blast-mainnet` has been removed because Pinax retired
+  its Blast Firehose endpoint. To ingest from another Blast Firehose, pass its
+  URL with `--endpoint`. Existing Parquet files can still be read by path with
+  `fireparq inspect`. [Upstream registry change](https://github.com/graphprotocol/networks-registry/pull/265)
+
 ## New features
 
 ## Fixes
