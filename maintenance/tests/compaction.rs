@@ -1,8 +1,9 @@
 //! The compaction keeps the writer's row order (`fireparq_maintenance::compact`):
 //! a file an older compaction left out of order is sorted back into it, a
 //! file whose order can't be recovered is left alone, and repairs are spread
-//! over runs. The concatenation of real writer parts is checked beside a real
-//! `fireparq build` in `blocks/tests/delta_maintenance.rs`.
+//! over runs. Several dates at once (`OPTIMIZE_CONCURRENT_DATES`) compact each
+//! date once, as one at a time does. The concatenation of real writer parts is
+//! checked beside a real `fireparq build` in `blocks/tests/delta_maintenance.rs`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -18,12 +19,19 @@ use deltalake_core::parquet::file::reader::{FileReader, SerializedFileReader};
 use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::table::config::TablePropertiesExt as _;
 use deltalake_core::{DeltaTable, Path as ObjectPath, TableProperty};
-use fireparq_maintenance::compact::{date_files, ROW_ORDER_KEY, WRITER_ORDER};
+use fireparq_maintenance::compact::{date_files, ROW_ORDER_KEY, ROW_ORDER_TAG, WRITER_ORDER};
 use fireparq_maintenance::Lake;
 use serde_json::Value;
 
-/// 2026-09-20 and 2026-09-21, as days since the epoch.
-const DAYS: [(&str, i32); 2] = [("2026-09-20", 20_716), ("2026-09-21", 20_717)];
+/// 2026-09-20 to 2026-09-25, as days since the epoch.
+const DAYS: [(&str, i32); 6] = [
+    ("2026-09-20", 20_716),
+    ("2026-09-21", 20_717),
+    ("2026-09-22", 20_718),
+    ("2026-09-23", 20_719),
+    ("2026-09-24", 20_720),
+    ("2026-09-25", 20_721),
+];
 
 /// A `logs` row: its block, its `block_index`, and a payload naming both.
 type Row = (i64, i64);
@@ -110,7 +118,12 @@ fn scrambled(rows: &[Row], per_block: i64) -> Vec<Row> {
 /// Appends one data file of `rows`, in this order, to the day's partition, as
 /// the compaction writes and commits files (delta-rs's write operation would
 /// need DataFusion, which this crate doesn't link).
-async fn write(mut table: DeltaTable, rows: &[Row], day: i32) -> DeltaTable {
+async fn write(table: DeltaTable, rows: &[Row], day: i32) -> DeltaTable {
+    write_file(table, rows, day, false).await
+}
+
+/// The same; `ordered` tags the file as in writer order, as a writer part is.
+async fn write_file(mut table: DeltaTable, rows: &[Row], day: i32, ordered: bool) -> DeltaTable {
     let date = DAYS.iter().find(|(_, days)| *days == day).unwrap().0;
     // The data file holds no partition column.
     let data = batch(rows, day).project(&[0, 1, 2]).unwrap();
@@ -145,6 +158,12 @@ async fn write(mut table: DeltaTable, rows: &[Row], day: i32) -> DeltaTable {
         .into_iter()
         .map(|mut add| {
             add.partition_values = HashMap::from([("date".to_string(), Some(date.to_string()))]);
+            if ordered {
+                add.tags = Some(HashMap::from([(
+                    ROW_ORDER_TAG.to_string(),
+                    Some(WRITER_ORDER.to_string()),
+                )]));
+            }
             Action::Add(add)
         })
         .collect();
@@ -509,4 +528,242 @@ async fn checkpoint_only_runs_keep_the_table_readable_after_log_cleanup() {
     assert_eq!(status, 0, "{lines:?}");
     let (after, files, _) = date_rows(root, DAYS[0].0).await;
     assert_eq!((after, files), (expected(&rows), 1));
+}
+
+/// The keys of the `table` line, as they were before dates ran at once.
+const TABLE_KEYS: [&str; 14] = [
+    "checkpoint_version",
+    "compacted",
+    "conflicts",
+    "dates_to_compact",
+    "errors",
+    "event",
+    "open_date",
+    "repairs_deferred",
+    "repairs_unsupported",
+    "seconds",
+    "table",
+    "vacuum",
+    "version_after",
+    "version_before",
+];
+
+fn events<'a>(lines: &'a [Value], event: &str) -> Vec<&'a Value> {
+    lines.iter().filter(|line| line["event"] == event).collect()
+}
+
+/// The table line's `compacted` entries, by date.
+fn compacted_by_date(line: &Value) -> BTreeMap<String, Value> {
+    line["compacted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["date"].as_str().unwrap().to_string(), entry.clone()))
+        .collect()
+}
+
+/// The dates of the table's OPTIMIZE commits, one per commit, from its log.
+fn optimized_dates(root: &Path, name: &str) -> Vec<String> {
+    let mut dates = Vec::new();
+    for entry in std::fs::read_dir(root.join(name).join("_delta_log")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&path).unwrap().lines() {
+            let action: Value = serde_json::from_str(line).unwrap();
+            let info = &action["commitInfo"];
+            if info["operation"] != "OPTIMIZE" {
+                continue;
+            }
+            let predicate = info["operationParameters"]["predicate"].as_str().unwrap();
+            let predicate: Vec<String> = serde_json::from_str(predicate).unwrap();
+            let date = predicate[0]
+                .strip_prefix("date = '")
+                .and_then(|date| date.strip_suffix('\''))
+                .unwrap();
+            dates.push(date.to_string());
+        }
+    }
+    dates.sort();
+    dates
+}
+
+/// Six days of `logs`, each in its writer order: three tagged writer parts a
+/// day, but two days (the second and fifth) left out of order by an older
+/// compaction. Returns each day's rows.
+async fn six_days(root: &Path) -> Vec<Vec<Row>> {
+    let mut table = create_logs(root).await;
+    let mut days = Vec::new();
+    for (index, (_, day)) in DAYS.iter().enumerate() {
+        let rows = writer_order(100 + 40 * index as i64, 40, 4);
+        if index == 1 || index == 4 {
+            table = write(table, &scrambled(&rows, 4), *day).await;
+        } else {
+            for part in rows.chunks(rows.len() / 3 + 1) {
+                table = write_file(table, part, *day, true).await;
+            }
+        }
+        days.push(rows);
+    }
+    days
+}
+
+/// With four at once, the first four dates start from the same version, so
+/// three of their commits are rebased over the others'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dates_compacted_at_once_are_each_compacted_once_as_one_at_a_time() {
+    let mut runs = Vec::new();
+    for concurrent in ["1", "4"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let days = six_days(root).await;
+        let settings = [
+            ("OPTIMIZE_CONCURRENT_DATES", concurrent),
+            ("OPTIMIZE_REPAIR_DATES", "6"),
+        ];
+        let (status, lines) = job(root, &settings).await;
+        assert_eq!(status, 0, "{lines:?}");
+        assert_eq!(
+            lines[0]["optimize_concurrent_dates"],
+            concurrent.parse::<u64>().unwrap()
+        );
+        let line = table_line(&lines).clone();
+        assert_eq!(line["errors"], serde_json::json!([]), "{line}");
+        assert_eq!(line["conflicts"], serde_json::json!([]), "{line}");
+        let keys: Vec<&str> = line
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, TABLE_KEYS, "the table line is unchanged");
+
+        // Each date once, in one commit, with its rows in the writer's order.
+        let all: Vec<&str> = DAYS.iter().map(|(date, _)| *date).collect();
+        assert_eq!(line["dates_to_compact"], serde_json::json!(all), "{line}");
+        assert_eq!(optimized_dates(root, "logs"), all);
+        for ((date, _), rows) in DAYS.iter().zip(&days) {
+            let (after, files, ordered) = date_rows(root, date).await;
+            assert_eq!(after, expected(rows), "{date}");
+            assert_eq!(files, 1, "{date}");
+            assert!(ordered, "{date}");
+        }
+
+        // A `date` line per date, before the `table` line: its `compacted`
+        // entry, with the table and the seconds it took.
+        let compacted = compacted_by_date(&line);
+        assert_eq!(compacted.len(), DAYS.len(), "{line}");
+        let table_at = lines.iter().position(|line| line["event"] == "table");
+        let date_lines = events(&lines, "date");
+        assert_eq!(date_lines.len(), DAYS.len(), "{lines:?}");
+        for date_line in date_lines {
+            let at = lines.iter().position(|line| line == date_line);
+            assert!(at < table_at, "{lines:?}");
+            let mut fields = date_line.as_object().unwrap().clone();
+            assert_eq!(fields.remove("event").unwrap(), "date");
+            assert_eq!(fields.remove("table").unwrap(), "logs");
+            assert!(fields.remove("seconds").unwrap().as_f64().is_some());
+            let date = fields["date"].as_str().unwrap();
+            assert_eq!(Value::Object(fields.clone()), compacted[date]);
+        }
+        assert!(events(&lines, "date_error").is_empty(), "{lines:?}");
+
+        // A second run finds nothing to do and reports no date.
+        let (status, lines) = job(root, &settings).await;
+        assert_eq!(status, 0, "{lines:?}");
+        assert_eq!(
+            table_line(&lines)["dates_to_compact"],
+            serde_json::json!([])
+        );
+        assert!(events(&lines, "date").is_empty(), "{lines:?}");
+        runs.push(compacted);
+    }
+    assert_eq!(runs[0], runs[1], "the same compaction one date at a time");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_date_stops_no_other_and_repairs_keep_their_budget() {
+    let mut runs = Vec::new();
+    for concurrent in ["1", "4"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Four days out of order; the newest has two logs that tie on the key.
+        let days: Vec<Vec<Row>> = (0..4)
+            .map(|index| writer_order(100 + 40 * index, 40, 4))
+            .collect();
+        let mut table = create_logs(root).await;
+        for (index, rows) in days.iter().enumerate() {
+            let mut rows = scrambled(rows, 4);
+            if index == 3 {
+                let tie = rows.iter().position(|row| row.0 == 230).unwrap();
+                rows.insert(tie, rows[tie]);
+            }
+            table = write(table, &rows, DAYS[index].1).await;
+        }
+        let settings = [
+            ("OPTIMIZE_CONCURRENT_DATES", concurrent),
+            ("OPTIMIZE_REPAIR_DATES", "2"),
+        ];
+
+        // A dry run plans two repairs, the newest days, and compacts nothing.
+        let mut dry_run = settings.to_vec();
+        dry_run.push(("DRY_RUN", "1"));
+        let (status, lines) = job(root, &dry_run).await;
+        assert_eq!(status, 0, "{lines:?}");
+        let line = table_line(&lines);
+        assert_eq!(
+            line["dates_to_compact"],
+            serde_json::json!([DAYS[2].0, DAYS[3].0]),
+            "{line}"
+        );
+        assert_eq!(line["repairs_deferred"], 2, "{line}");
+        assert!(events(&lines, "date").is_empty(), "{lines:?}");
+
+        // The newest day fails and gives its repair turn back: the next two
+        // days are repaired, the oldest is left for a later run.
+        let (status, lines) = job(root, &settings).await;
+        assert_eq!(status, 1, "the tie fails the table: {lines:?}");
+        let line = table_line(&lines).clone();
+        let errors = line["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{line}");
+        assert!(errors[0]
+            .as_str()
+            .unwrap()
+            .contains("tie on the row-order key"));
+        assert_eq!(line["conflicts"], serde_json::json!([]), "{line}");
+        assert_eq!(line["repairs_deferred"], 1, "{line}");
+        assert_eq!(
+            line["dates_to_compact"],
+            serde_json::json!([DAYS[1].0, DAYS[2].0, DAYS[3].0]),
+            "{line}"
+        );
+        let failed = events(&lines, "date_error");
+        assert_eq!(failed.len(), 1, "{lines:?}");
+        assert_eq!(failed[0]["date"], DAYS[3].0);
+        assert_eq!(failed[0]["conflict"], false);
+        assert_eq!(failed[0]["error"], errors[0]);
+        let committed: Vec<&str> = events(&lines, "date")
+            .iter()
+            .map(|line| line["date"].as_str().unwrap())
+            .collect();
+        assert_eq!(committed.len(), 2, "{lines:?}");
+        assert_eq!(optimized_dates(root, "logs"), [DAYS[1].0, DAYS[2].0]);
+        for index in [1, 2] {
+            let (after, files, ordered) = date_rows(root, DAYS[index].0).await;
+            assert_eq!((after, files), (expected(&days[index]), 1));
+            assert!(ordered);
+        }
+        for index in [0, 3] {
+            assert!(!date_rows(root, DAYS[index].0).await.2, "left as it is");
+        }
+        let mut line = line;
+        for key in ["seconds", "version_after", "checkpoint_version"] {
+            line.as_object_mut().unwrap().remove(key);
+        }
+        let compacted = compacted_by_date(&line);
+        line.as_object_mut().unwrap().remove("compacted");
+        runs.push((line, compacted));
+    }
+    assert_eq!(runs[0], runs[1], "the same outcome one date at a time");
 }

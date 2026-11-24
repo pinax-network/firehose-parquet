@@ -987,6 +987,10 @@ additions ([Delta maintenance](../delta-maintenance.md) lists every setting):
   `delta.deletedFileRetentionDuration` is below that;
 - `OPTIMIZE_DATES=all`, which also compacts the open date, for a lake whose
   writer has stopped;
+- `OPTIMIZE_CONCURRENT_DATES` (default 1) compacts several dates of a table
+  at once, one commit each, handing each date out once within the run
+  (#737); a backlog is never split over several jobs, which would compact a
+  date twice and duplicate its rows (#717);
 - a full VACUUM never deletes a table's top-level `metadata/` directory, the
   Iceberg metadata of an Apache XTable sync, which delta-rs's full VACUUM
   takes for orphans: delta-rs plans it (a dry run), and the job deletes the
