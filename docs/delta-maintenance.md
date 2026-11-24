@@ -184,7 +184,9 @@ time.
   days go on.
 - A day compacts and commits from the table as it was when the day started,
   which holds all of its files: nothing else removes them. The table is
-  reloaded after each commit, and the next day starts from it.
+  reloaded after each commit, and again if a day commits while it loads; a
+  new day starts only from a table reloaded after every commit so far. Days
+  that finish during a reload are reported at once.
 - A repair takes one of the `OPTIMIZE_REPAIR_DATES` turns when it starts and
   gives it back if it fails, so no more repairs run or commit than that.
   Another day to repair waits for the turn meanwhile, so the same days are

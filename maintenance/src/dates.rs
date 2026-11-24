@@ -16,7 +16,9 @@
 //!   to the next run. A failed date stops no other. Each running date keeps
 //!   its snapshot's file list in memory (about 40 MB per 100,000 files).
 //! - After each commit the table is reloaded, as one date at a time does, and
-//!   the next date starts from it.
+//!   again if a date commits while it loads: a date starts only from a table
+//!   reloaded after every commit so far. The reload is of a clone, so the
+//!   dates that finish meanwhile are still reported at once.
 //! - A repair (`OPTIMIZE_REPAIR_DATES`) takes its turn when it starts and gives
 //!   it back if it fails, so repairs running and committed never exceed the
 //!   budget. A date to repair while every turn is taken by a running repair
@@ -28,10 +30,11 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::time::Instant;
 
-use deltalake_core::{DeltaTable, DeltaTableError};
+use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
 use futures::future::BoxFuture;
+use futures::FutureExt as _;
 use serde_json::json;
-use tokio::task::{Id, JoinSet};
+use tokio::task::{Id, JoinError, JoinSet};
 
 use crate::compact::{Bin, DateCompaction};
 use crate::{emit, object, seconds, Report};
@@ -146,11 +149,31 @@ impl Planner {
 pub(crate) type DateResult =
     Result<(DateCompaction, usize), (Option<&'static str>, DeltaTableError)>;
 
+/// Reloads a clone of the table: the dates that finish meanwhile are still
+/// reported.
+pub(crate) fn reload(mut table: DeltaTable) -> BoxFuture<'static, DeltaResult<DeltaTable>> {
+    async move {
+        table.update_state().await?;
+        Ok(table)
+    }
+    .boxed()
+}
+
+/// What [`compact_dates`] waits for.
+enum Event {
+    Finished(Result<(Id, DateResult), JoinError>),
+    Reloaded(DeltaResult<DeltaTable>),
+}
+
 /// Compacts the planner's dates, up to `concurrent` at once, each a task that
 /// `start` makes from the table as it is then. Each date is reported as soon
-/// as it is done: in the table's report, and on its own `date` or
-/// `date_error` line. A reload that fails after a commit starts no more
-/// dates, as with one date at a time; the running ones finish.
+/// as it is done, even while the table reloads: in the table's report, and on
+/// its own `date` or `date_error` line.
+///
+/// After a commit the table is reloaded (`reload`, of a clone), and again if a
+/// date commits while it loads: a date starts only from a table reloaded after
+/// every commit so far. A reload that fails starts no more dates, as with one
+/// date at a time; the running ones finish and are reported.
 pub(crate) async fn compact_dates(
     table: &mut DeltaTable,
     planner: &mut Planner,
@@ -158,20 +181,52 @@ pub(crate) async fn compact_dates(
     report: &mut Report<'_>,
     out: &mut dyn Write,
     mut start: impl FnMut(&DeltaTable, &str, Vec<Bin>) -> BoxFuture<'static, DateResult>,
+    mut reload: impl FnMut(DeltaTable) -> BoxFuture<'static, DeltaResult<DeltaTable>>,
 ) {
     let mut tasks = JoinSet::new();
     let mut running: HashMap<Id, (String, bool, Instant)> = HashMap::new();
-    let mut reloaded = true;
+    // The reload in flight, with the date whose commit it follows.
+    let mut reloading: Option<(String, BoxFuture<'static, DeltaResult<DeltaTable>>)> = None;
+    // The latest date committed since the table, or the reload in flight,
+    // started loading.
+    let mut unloaded: Option<String> = None;
+    let mut reload_failed = false;
     loop {
-        while reloaded && tasks.len() < concurrent.max(1) {
+        if reloading.is_none() && !reload_failed {
+            if let Some(date) = unloaded.take() {
+                reloading = Some((date, reload(table.clone())));
+            }
+        }
+        while reloading.is_none() && !reload_failed && tasks.len() < concurrent.max(1) {
             let Some(plan) = planner.next() else {
                 break;
             };
             let id = tasks.spawn(start(table, &plan.date, plan.bins)).id();
             running.insert(id, (plan.date, plan.repairing, Instant::now()));
         }
-        let Some(joined) = tasks.join_next_with_id().await else {
-            break;
+        let event = match &mut reloading {
+            None => match tasks.join_next_with_id().await {
+                Some(finished) => Event::Finished(finished),
+                None => break,
+            },
+            Some((_, reloaded)) => tokio::select! {
+                Some(finished) = tasks.join_next_with_id() => Event::Finished(finished),
+                result = reloaded => Event::Reloaded(result),
+            },
+        };
+        let joined = match event {
+            Event::Reloaded(result) => {
+                let (date, _) = reloading.take().expect("a reload in flight");
+                match result {
+                    Ok(reloaded) => *table = reloaded,
+                    Err(error) => {
+                        report.failed(&format!("optimize {date}: reload"), &error);
+                        reload_failed = true;
+                    }
+                }
+                continue;
+            }
+            Event::Finished(joined) => joined,
         };
         let (id, result) = match joined {
             Ok((id, result)) => (id, result),
@@ -197,12 +252,7 @@ pub(crate) async fn compact_dates(
                 line.insert("seconds".into(), json!(seconds(started)));
                 emit(out, "date", line);
                 report.compacted.push(compacted);
-                if reloaded {
-                    if let Err(error) = table.update_state().await {
-                        report.failed(&format!("optimize {date}: reload"), &error);
-                        reloaded = false;
-                    }
-                }
+                unloaded = Some(date);
             }
             Err((part, error)) => {
                 let step = match part {
@@ -222,7 +272,6 @@ mod tests {
     use std::time::Duration;
 
     use deltalake_core::kernel::{DataType, PrimitiveType, StructField};
-    use futures::FutureExt as _;
     use serde_json::{Map, Value};
 
     use super::*;
@@ -299,6 +348,23 @@ mod tests {
         most_repairs: u64,
     }
 
+    fn settings() -> Settings {
+        let env = BTreeMap::from([("LAKE_ROOT", "/lake"), ("LAKE_TABLES", "logs")]);
+        let lookup = |name: &str| env.get(name).map(|value| value.to_string());
+        Settings::from_env(&lookup).unwrap()
+    }
+
+    fn report(settings: &Settings) -> Report<'_> {
+        Report {
+            settings,
+            name: "logs",
+            fields: Map::new(),
+            compacted: Vec::new(),
+            conflicts: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
     async fn local_table(root: &std::path::Path) -> DeltaTable {
         let lake = Lake::local(root).unwrap();
         DeltaTable::new(lake.log_store("logs").unwrap())
@@ -319,17 +385,8 @@ mod tests {
     async fn dates_run_at_once_each_once_and_a_lost_race_stops_no_other() {
         let dir = tempfile::tempdir().unwrap();
         let mut table = local_table(dir.path()).await;
-        let env = BTreeMap::from([("LAKE_ROOT", "/lake"), ("LAKE_TABLES", "logs")]);
-        let lookup = |name: &str| env.get(name).map(|value| value.to_string());
-        let settings = Settings::from_env(&lookup).unwrap();
-        let mut report = Report {
-            settings: &settings,
-            name: "logs",
-            fields: Map::new(),
-            compacted: Vec::new(),
-            conflicts: Vec::new(),
-            errors: Vec::new(),
-        };
+        let settings = settings();
+        let mut report = report(&settings);
         let dates = [
             ("d8", false),
             ("d7", true),
@@ -379,7 +436,16 @@ mod tests {
             .boxed()
         };
         let mut out = Vec::new();
-        compact_dates(&mut table, &mut planner, 3, &mut report, &mut out, start).await;
+        compact_dates(
+            &mut table,
+            &mut planner,
+            3,
+            &mut report,
+            &mut out,
+            start,
+            reload,
+        )
+        .await;
 
         let seen = seen.lock().unwrap();
         let started: BTreeSet<_> = seen.started.iter().cloned().collect();
@@ -443,5 +509,154 @@ mod tests {
             "{:?}",
             report.errors
         );
+    }
+
+    /// Stdout that logs each line as soon as it is written: `<event> <date>`.
+    struct Lines {
+        log: Arc<Mutex<Vec<String>>>,
+        partial: Vec<u8>,
+    }
+
+    impl Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.partial.extend_from_slice(buf);
+            while let Some(end) = self.partial.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = self.partial.drain(..=end).collect();
+                let line: Value = serde_json::from_slice(&line).unwrap();
+                let (event, date) = (line["event"].as_str(), line["date"].as_str());
+                let entry = format!("{} {}", event.unwrap(), date.unwrap());
+                self.log.lock().unwrap().push(entry);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Three dates, two at once; d2 takes longer than d3.
+    fn two_at_once(
+        log: &Arc<Mutex<Vec<String>>>,
+    ) -> impl FnMut(&DeltaTable, &str, Vec<Bin>) -> BoxFuture<'static, DateResult> + '_ {
+        move |_: &DeltaTable, date: &str, _: Vec<Bin>| {
+            log.lock().unwrap().push(format!("start {date}"));
+            let wait = if date == "d2" { 100 } else { 10 };
+            async move {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                Ok((DateCompaction::default(), 0))
+            }
+            .boxed()
+        }
+    }
+
+    /// d2 commits while the table reloads after d3: its line is written at
+    /// once, and the table is reloaded again before d1 starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dates_are_reported_while_the_table_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut table = local_table(dir.path()).await;
+        let settings = settings();
+        let mut report = report(&settings);
+        let mut planner = Planner::new(
+            plans(&[("d3", false), ("d2", false), ("d1", false)]),
+            true,
+            0,
+        );
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let slow_reload = |table: DeltaTable| {
+            log.lock().unwrap().push("reload begins".to_string());
+            let log = Arc::clone(&log);
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                log.lock().unwrap().push("reload ends".to_string());
+                reload(table).await
+            }
+            .boxed()
+        };
+        let mut out = Lines {
+            log: Arc::clone(&log),
+            partial: Vec::new(),
+        };
+        let start = two_at_once(&log);
+        compact_dates(
+            &mut table,
+            &mut planner,
+            2,
+            &mut report,
+            &mut out,
+            start,
+            slow_reload,
+        )
+        .await;
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "start d3",
+                "start d2",
+                "date d3",
+                "reload begins",
+                "date d2",
+                "reload ends",
+                // d2 committed after that reload began.
+                "reload begins",
+                "reload ends",
+                "start d1",
+                "date d1",
+                "reload begins",
+                "reload ends",
+            ]
+        );
+        assert_eq!(report.compacted.len(), 3);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    /// A reload that fails starts no more dates; the running one finishes and
+    /// is reported.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_reload_starts_no_more_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut table = local_table(dir.path()).await;
+        let settings = settings();
+        let mut report = report(&settings);
+        let mut planner = Planner::new(
+            plans(&[("d3", false), ("d2", false), ("d1", false)]),
+            true,
+            0,
+        );
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let failing_reload = |_: DeltaTable| {
+            log.lock().unwrap().push("reload begins".to_string());
+            async { Err(DeltaTableError::Generic("the store is down".into())) }.boxed()
+        };
+        let mut out = Lines {
+            log: Arc::clone(&log),
+            partial: Vec::new(),
+        };
+        let start = two_at_once(&log);
+        compact_dates(
+            &mut table,
+            &mut planner,
+            2,
+            &mut report,
+            &mut out,
+            start,
+            failing_reload,
+        )
+        .await;
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "start d3",
+                "start d2",
+                "date d3",
+                "reload begins",
+                "date d2"
+            ]
+        );
+        assert_eq!(report.compacted.len(), 2);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        let error = &report.errors[0];
+        assert!(error.starts_with("optimize d3: reload: ") && error.contains("the store is down"));
     }
 }

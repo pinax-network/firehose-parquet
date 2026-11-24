@@ -1000,6 +1000,7 @@ async fn maintain(
             &mut report,
             out,
             start,
+            dates::reload,
         )
         .await;
     }
