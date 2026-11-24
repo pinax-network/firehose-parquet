@@ -670,6 +670,7 @@ Settings (environment variables):
   OPTIMIZE_ZSTD_LEVEL             Compression of compacted files (default 3)
   OPTIMIZE_REPAIR_DATES           Days per table a run sorts back into the writer's order (default 1)
   OPTIMIZE_REPAIR_WINDOW_BYTES    Decoded bytes a repair sorts at once (default 256 MiB)
+  OPTIMIZE_CONCURRENT_DATES       Days of a table compacted at once, one commit each (default 1, at most 64)
   DRY_RUN                         1 reports what would be compacted and deleted, and changes nothing
 
 Example:

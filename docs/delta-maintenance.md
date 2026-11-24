@@ -69,8 +69,14 @@ the next run cannot finish, and the writer never notices. One JSON object per
 line goes to stdout:
 
 - `start`: `root`, `tables`, `optimize`, `vacuum`, `full_vacuum`, `retention_hours`,
-  `optimize_dates`, `dry_run`, `deltalake` (the `deltalake-core` version) and
-  `version` (the binary's);
+  `optimize_dates`, `optimize_concurrent_dates`, `dry_run`, `deltalake` (the
+  `deltalake-core` version) and `version` (the binary's);
+- `date` as soon as a day's OPTIMIZE commits: `table`, `date`, `seconds`, and
+  its `compacted` entry's `files_removed`, `files_added`, `footer_keys`,
+  `rows` and `repaired_bins`; `date_error` as soon as a day fails or loses its
+  commit race: `table`, `date`, `seconds`, `conflict` (a lost race) and
+  `error`, as in the table's `conflicts` or `errors`. A run cut short by its
+  deadline has a line for every day it finished;
 - one line per table: `table` with `version_before`, `dates_to_compact`,
   `compacted` (`date`, `files_removed`, `files_added`, `rows`,
   `repaired_bins`: the bins sorted back into the writer's order, and
@@ -117,6 +123,7 @@ not apply to it. Requests use object_store's default retries.
 | `OPTIMIZE_ZSTD_LEVEL` | `3` | Compression of the compacted files |
 | `OPTIMIZE_REPAIR_DATES` | `1` | Days per table a run sorts back into the writer's order ([Row order](#row-order)); `0` repairs none. New days are only concatenated |
 | `OPTIMIZE_REPAIR_WINDOW_BYTES` | 256 MiB | Decoded bytes a repair sorts at once, at least 1 MiB; a 256 MiB window peaks at about 1.3 GiB on Ethereum `calls` |
+| `OPTIMIZE_CONCURRENT_DATES` | `1` | Days of a table compacted at once, each its own commit, 1 to 64 ([Several days at once](#several-days-at-once)); memory and CPUs grow with it |
 | `DRY_RUN` | `0` | `1` reports what would be compacted and deleted, and changes nothing |
 
 ## Row order
@@ -161,6 +168,37 @@ some blocks in pieces, and now and then a block's rows out of their order
 changed. From 1.0.6 the job repairs those days, `OPTIMIZE_REPAIR_DATES` per
 table per run, newest first. Delta and Parquet don't promise readers any row
 order: a query that needs one should still `ORDER BY` it.
+
+## Several days at once
+
+`OPTIMIZE_CONCURRENT_DATES=N` compacts up to N days of a table at once, each
+in its own task and its own commit, for a long backlog such as the days of a
+[parallel backfill](parallel-backfill.md). The default, 1, is one day at a
+time.
+
+- One planner per table hands out each day once, newest first. A file belongs
+  to one day, so the commits of two days never touch the same file. delta-rs
+  rebases a commit that loses the version race, as it rebases one over the
+  writer's; a day that still loses, or fails, is reported (`date_error`, and in
+  the table's `conflicts` or `errors`) and left to the next run, and the other
+  days go on.
+- A day compacts and commits from the table as it was when the day started,
+  which holds all of its files: nothing else removes them. The table is
+  reloaded after each commit, and again if a day commits while it loads; a
+  new day starts only from a table reloaded after every commit so far. Days
+  that finish during a reload are reported at once.
+- A repair takes one of the `OPTIMIZE_REPAIR_DATES` turns when it starts and
+  gives it back if it fails, so no more repairs run or commit than that.
+  Another day to repair waits for the turn meanwhile, so the same days are
+  repaired as one day at a time.
+- Split a table's backlog this way only, inside one run, never over several
+  jobs: two runs that compact the same day both commit and duplicate its rows
+  ([#717](https://github.com/pinax-network/firehose-parquet/issues/717)).
+- Memory and CPU grow with N. Each running day takes about one CPU and what one
+  day at a time takes (a concatenation stayed under 1 GiB on BSC and Base
+  `gas_changes` and `calls`; a repair window peaks at about 1.3 GiB on Ethereum
+  `calls`), plus its own copy of the table's file list, about 40 MB per 100,000
+  active files. Raise the job's CPUs and memory limit with N.
 
 ## Running the job
 
@@ -212,8 +250,9 @@ It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
   exact rows (DuckDB and delta-rs), that every file holds its rows in writer
   order, the `txn` versions and the file counts afterwards;
   `maintenance/tests/compaction.rs` checks that a file out of order is sorted
-  back into it (several windows), that a tie leaves it as it is, and that
-  repairs are spread over runs; `blocks/tests/maintenance_cli.rs` checks its
+  back into it (several windows), that a tie leaves it as it is, that
+  repairs are spread over runs, and that days compacted at once give what one
+  day at a time gives; `blocks/tests/maintenance_cli.rs` checks its
   configuration errors, exit statuses, redaction, skipped tables, and a full
   VACUUM that deletes old orphans but keeps `metadata/`.
 

@@ -54,6 +54,9 @@ data:
   # Days per table a run sorts back into the writer's row order (days an
   # OPTIMIZE up to 1.0.5 left out of it); new days are only concatenated.
   OPTIMIZE_REPAIR_DATES: "1"
+  # Days of a table compacted at once (default 1), for a long backlog: memory
+  # and CPU grow with it (docs/delta-maintenance.md, "Several days at once").
+  # OPTIMIZE_CONCURRENT_DATES: "4"
   # VACUUM_RETENTION_HOURS (default the table's 7 days): lower deletes replaced
   # files sooner, but then every run deletes them again until their tombstones
   # expire. With a lower value, set VACUUM=0 on the hourly job and VACUUM once a
