@@ -531,12 +531,16 @@ fn all_encodings() -> [EncodeBytes; 5] {
 }
 
 /// Every mapper option combination, as `(options, legacy positional args)`.
+/// `gas_changes` is always set (`--with-gas-changes`): the inventory every
+/// EVM dataset had before the setting existed, so the pinned digests below
+/// still hold it byte for byte.
 fn option_matrix() -> Vec<MapperOptions> {
     let mut options = Vec::new();
     for encode_bytes in all_encodings() {
         for bits in 0..32_u8 {
             options.push(MapperOptions {
                 extended: bits & 1 != 0,
+                gas_changes: true,
                 with_votes: bits & 2 != 0,
                 include_fork_step: bits & 4 != 0,
                 encode_bytes: encode_bytes.clone(),
@@ -799,6 +803,7 @@ async fn a_hypercore_derivation_version_change_alone_is_refused_on_resume() {
     let delta_types = kind.profile().delta_types();
     let mut mapper = kind.create_mapper(MapperOptions {
         extended: false,
+        gas_changes: false,
         with_votes: false,
         include_fork_step: false,
         encode_bytes: EncodeBytes::Hex,
@@ -890,6 +895,7 @@ fn decimal_columns_name_unsigned_columns_of_their_family() {
     for kind in ChainKind::ALL {
         let mut mapper = kind.create_mapper(MapperOptions {
             extended: true,
+            gas_changes: true,
             with_votes: true,
             include_fork_step: true,
             encode_bytes: EncodeBytes::Hex,
@@ -1026,6 +1032,43 @@ fn each_later_family_reproduces_its_own_pinned_digests() {
             delta_digest,
             "the {family} Delta data schema changed"
         );
+    }
+}
+
+/// With `gas_changes` every inventory is the pinned one (`option_matrix`).
+/// Without it, an EVM mapper with extended output declares exactly that
+/// inventory minus `gas_changes` and `system_gas_changes`, every other table
+/// with the same digest; every other mapper is unchanged.
+#[test]
+fn without_gas_changes_only_the_evm_gas_change_tables_leave_the_inventory() {
+    use firehose_parquet::ingest::{declare_inventory, EVM_GAS_CHANGE_TABLES};
+    for kind in ChainKind::ALL {
+        let types = kind.profile().delta_types();
+        for options in option_matrix() {
+            let inventory = |gas_changes: bool| {
+                let mut mapper = kind.create_mapper(MapperOptions {
+                    gas_changes,
+                    ..options.clone()
+                });
+                let names: Vec<String> = mapper
+                    .table_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let declared: Vec<&str> = names.iter().map(String::as_str).collect();
+                let tables =
+                    declare_inventory(&mapper.flush().unwrap(), &declared, &types).unwrap();
+                (names, tables)
+            };
+            let (mut names, mut tables) = inventory(true);
+            if kind == ChainKind::Evm && options.extended {
+                for table in EVM_GAS_CHANGE_TABLES {
+                    assert!(tables.remove(table).is_some(), "{options:?}: {table}");
+                }
+                names.retain(|name| !EVM_GAS_CHANGE_TABLES.contains(&name.as_str()));
+            }
+            assert_eq!(inventory(false), (names, tables), "{kind} {options:?}");
+        }
     }
 }
 

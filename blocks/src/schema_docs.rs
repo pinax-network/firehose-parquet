@@ -1810,6 +1810,8 @@ struct TableReference {
     extended_only: bool,
     /// Omitted with `--without-votes`.
     votes_only: bool,
+    /// Written only with `--with-gas-changes`.
+    gas_changes_only: bool,
     /// An earlier table with the same schema.
     same_as: Option<String>,
     /// Every column in file order, `fork_step` and `stream_ordinal` included.
@@ -1842,16 +1844,19 @@ impl TableReference {
 #[derive(Clone, Copy, Debug)]
 struct Toggles {
     extended: bool,
+    gas_changes: bool,
     with_votes: bool,
     include_failed_transactions: bool,
     synthetic_partition_routing: bool,
 }
 
 impl Toggles {
-    /// Production defaults: `--without-extended` and `--without-votes` unset.
+    /// Every table: `--without-extended` and `--without-votes` unset,
+    /// `--with-gas-changes` set.
     fn defaults(kind: ChainKind) -> Self {
         Self {
             extended: true,
+            gas_changes: true,
             with_votes: true,
             include_failed_transactions: kind.profile().failed_transactions_by_default,
             synthetic_partition_routing: false,
@@ -1861,6 +1866,7 @@ impl Toggles {
     fn options(self, include_fork_step: bool, encoding: &EncodeBytes) -> MapperOptions {
         MapperOptions {
             extended: self.extended,
+            gas_changes: self.gas_changes,
             with_votes: self.with_votes,
             include_fork_step,
             encode_bytes: encoding.clone(),
@@ -1925,35 +1931,49 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
         }
         .options(true, &encoding),
     )?;
+    let without_gas_changes = mapper_tables(
+        kind,
+        Toggles {
+            gas_changes: false,
+            ..defaults
+        }
+        .options(true, &encoding),
+    )?;
     let extended_only = |name: &str| !table_names(&without_extended).contains(&name);
     let votes_only = |name: &str| !table_names(&without_votes).contains(&name);
+    let gas_changes_only = |name: &str| !table_names(&without_gas_changes).contains(&name);
 
-    // Only `extended` and `with_votes` may change the set of tables, and no
-    // option may change a table's schema; otherwise this reference would
-    // misdescribe some configuration.
+    // Only `extended`, `gas_changes` and `with_votes` may change the set of
+    // tables, and no option may change a table's schema; otherwise this
+    // reference would misdescribe some configuration.
     for extended in [false, true] {
-        for with_votes in [false, true] {
-            for include_failed_transactions in [false, true] {
-                for synthetic_partition_routing in [false, true] {
-                    let toggles = Toggles {
-                        extended,
-                        with_votes,
-                        include_failed_transactions,
-                        synthetic_partition_routing,
-                    };
-                    let tables = mapper_tables(kind, toggles.options(true, &encoding))?;
-                    let expected: Tables = full
-                        .iter()
-                        .filter(|(name, _)| {
-                            (extended || !extended_only(name)) && (with_votes || !votes_only(name))
-                        })
-                        .cloned()
-                        .collect();
-                    ensure!(
-                        tables == expected,
-                        "{kind} {toggles:?}: tables or schemas differ from the documented \
-                         defaults; teach schema_docs to describe this option"
-                    );
+        for gas_changes in [false, true] {
+            for with_votes in [false, true] {
+                for include_failed_transactions in [false, true] {
+                    for synthetic_partition_routing in [false, true] {
+                        let toggles = Toggles {
+                            extended,
+                            gas_changes,
+                            with_votes,
+                            include_failed_transactions,
+                            synthetic_partition_routing,
+                        };
+                        let tables = mapper_tables(kind, toggles.options(true, &encoding))?;
+                        let expected: Tables = full
+                            .iter()
+                            .filter(|(name, _)| {
+                                (extended || !extended_only(name))
+                                    && (gas_changes || !gas_changes_only(name))
+                                    && (with_votes || !votes_only(name))
+                            })
+                            .cloned()
+                            .collect();
+                        ensure!(
+                            tables == expected,
+                            "{kind} {toggles:?}: tables or schemas differ from the documented \
+                             defaults; teach schema_docs to describe this option"
+                        );
+                    }
                 }
             }
         }
@@ -2082,6 +2102,7 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             name: name.clone(),
             extended_only: extended_only(name),
             votes_only: votes_only(name),
+            gas_changes_only: gas_changes_only(name),
             same_as: full[..index]
                 .iter()
                 .find(|(earlier_name, earlier)| {
@@ -2201,25 +2222,42 @@ fn escape_cell(text: &str) -> String {
 }
 
 fn table_condition(table: &TableReference) -> Option<&'static str> {
-    match (table.extended_only, table.votes_only) {
-        (false, false) => None,
-        (true, false) => Some("Extended output only: omitted with `--without-extended`."),
-        (false, true) => Some("Votes only: omitted with `--without-votes`."),
-        (true, true) => Some(
+    match (
+        table.extended_only,
+        table.votes_only,
+        table.gas_changes_only,
+    ) {
+        (false, false, false) => None,
+        (true, false, false) => Some("Extended output only: omitted with `--without-extended`."),
+        (false, true, false) => Some("Votes only: omitted with `--without-votes`."),
+        (true, true, false) => Some(
             "Extended output with votes only: omitted with `--without-extended` or \
              `--without-votes`.",
         ),
+        (true, false, true) => Some(
+            "Gas changes only: written only with `--with-gas-changes` (off by default), \
+             and omitted with `--without-extended`.",
+        ),
+        (_, _, true) => unreachable!("gas-change tables are EVM extended tables"),
     }
 }
 
-/// `20 (14 extended only)`.
+/// `20 (14 extended only, 2 with gas changes only)`.
 fn table_count_summary(reference: &ChainReference) -> String {
     let total = reference.tables.len();
     let extended = reference.tables.iter().filter(|t| t.extended_only).count();
     let votes = reference.tables.iter().filter(|t| t.votes_only).count();
+    let gas_changes = reference
+        .tables
+        .iter()
+        .filter(|t| t.gas_changes_only)
+        .count();
     let mut conditional = Vec::new();
     if extended > 0 {
         conditional.push(format!("{extended} extended only"));
+    }
+    if gas_changes > 0 {
+        conditional.push(format!("{gas_changes} with gas changes only"));
     }
     if votes > 0 {
         conditional.push(format!("{votes} votes only"));
@@ -2245,8 +2283,8 @@ fn render_index(references: &[ChainReference]) -> String {
          One file per chain family lists every table `fireparq` writes and every column \
          with its Delta type, nullability and, where the code documents it, a description, \
          then the chain's type mapping. The files are rendered from the production mappers \
-         (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with each chain's default \
-         options and byte encoding, mapped onto Delta types as every flush is \
+         (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with every table enabled \
+         and each chain's default byte encoding, mapped onto Delta types as every flush is \
          (`ChainProfile::delta_types`), so they match what the current build writes.\n\n",
     );
     out.push_str(
@@ -2326,7 +2364,9 @@ fn render_index(references: &[ChainReference]) -> String {
          `array<non-null T>` one whose items may not; `struct<name: T, ...>` spells out the \
          struct fields the same way. Nullable refers to the column itself.\n\
          - Conditional tables are marked: EVM extended tables are omitted with \
-         `--without-extended`, Solana `vote_transactions` with `--without-votes`. Every \
+         `--without-extended`, and EVM `gas_changes` and `system_gas_changes` are written \
+         only with `--with-gas-changes`; Solana `vote_transactions` is omitted with \
+         `--without-votes`. Every \
          other table is always part of the mapper's output; a table only gets files for \
          flushes in which it has rows.\n\n\
          ## Regenerating\n\n",
@@ -2722,20 +2762,27 @@ mod tests {
             let reference = chain_reference(kind).unwrap();
             let encoding = kind.default_bytes_encoding(false);
             for extended in [false, true] {
-                for with_votes in [false, true] {
-                    let toggles = Toggles {
-                        extended,
-                        with_votes,
-                        ..Toggles::defaults(kind)
-                    };
-                    let mapper = kind.create_mapper(toggles.options(false, &encoding));
-                    let rendered: Vec<&str> = reference
-                        .tables
-                        .iter()
-                        .filter(|t| (extended || !t.extended_only) && (with_votes || !t.votes_only))
-                        .map(|t| t.name.as_str())
-                        .collect();
-                    assert_eq!(rendered, mapper.table_names(), "{kind} {toggles:?}");
+                for gas_changes in [false, true] {
+                    for with_votes in [false, true] {
+                        let toggles = Toggles {
+                            extended,
+                            gas_changes,
+                            with_votes,
+                            ..Toggles::defaults(kind)
+                        };
+                        let mapper = kind.create_mapper(toggles.options(false, &encoding));
+                        let rendered: Vec<&str> = reference
+                            .tables
+                            .iter()
+                            .filter(|t| {
+                                (extended || !t.extended_only)
+                                    && (gas_changes || !t.gas_changes_only)
+                                    && (with_votes || !t.votes_only)
+                            })
+                            .map(|t| t.name.as_str())
+                            .collect();
+                        assert_eq!(rendered, mapper.table_names(), "{kind} {toggles:?}");
+                    }
                 }
             }
 
@@ -2780,6 +2827,10 @@ mod tests {
         assert_eq!(
             names(ChainKind::Evm, base),
             expect(&evm::schema::BASE_TABLE_NAMES)
+        );
+        assert_eq!(
+            names(ChainKind::Evm, |t| t.gas_changes_only),
+            expect(&evm::schema::GAS_CHANGE_TABLE_NAMES)
         );
         assert_eq!(
             names(ChainKind::Solana, all),

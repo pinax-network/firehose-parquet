@@ -1040,3 +1040,38 @@ fn abrupt_process_death_recovers_parts_and_checkpoint() {
             });
     }
 }
+
+/// An EVM stream that differs from authority's only in having both
+/// gas-change tables or neither is refused with `--with-gas-changes` named.
+/// Any other difference keeps the generic refusal.
+#[test]
+fn a_stream_differing_only_by_the_gas_change_tables_names_the_setting() {
+    use crate::ingest::state::{BlockFamily, EVM_GAS_CHANGE_TABLES};
+    let table = |name: &str| {
+        (
+            name.to_string(),
+            Digest::hash("schema-fixture", &name).unwrap(),
+        )
+    };
+    let without = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    let mut with = without.clone();
+    with.tables.extend(EVM_GAS_CHANGE_TABLES.map(table));
+    let refusal = |stored: &StreamDescriptor, expected: &StreamDescriptor| {
+        format!("{:#}", stream_mismatch(stored, expected))
+    };
+    assert_eq!(refusal(&with, &without), GAS_CHANGE_TABLES_REQUIRED);
+    assert_eq!(refusal(&without, &with), GAS_CHANGE_TABLES_ABSENT);
+
+    let mut one = without.clone();
+    one.tables.extend([table("gas_changes")]);
+    let mut other = without.clone();
+    other.include_failed_transactions = false;
+    for (stored, expected) in [(&with, &one), (&one, &without), (&with, &other)] {
+        assert_eq!(refusal(stored, expected), STREAM_MISMATCH);
+    }
+    let solana = |descriptor: &StreamDescriptor| StreamDescriptor {
+        family: BlockFamily::Solana,
+        ..descriptor.clone()
+    };
+    assert_eq!(refusal(&solana(&with), &solana(&without)), STREAM_MISMATCH);
+}

@@ -288,6 +288,10 @@ impl IngestionSetup {
             &endpoint_info,
             config.dry_run,
         );
+        if let Some(warning) = with_gas_changes_warning(block_type, extended, args.with_gas_changes)
+        {
+            warn!("{warning}");
+        }
 
         let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
         // Failed-transaction handling depends on the chain, so resolve it from the
@@ -321,6 +325,7 @@ impl IngestionSetup {
         info!(
             block_type = block_type.map_or("auto", ChainKind::label),
             extended,
+            with_gas_changes = args.with_gas_changes,
             with_votes,
             bytes_encoding = %initial_bytes_encoding_label,
             include_failed_transactions,

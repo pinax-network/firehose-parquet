@@ -16,6 +16,10 @@ pub const FORMAT_VERSION: u32 = 1;
 /// both are refused.
 pub const MAPPER_EPOCH: &str = "fireparq-mapping-v3";
 pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
+/// The EVM extended tables `build` declares only with `--with-gas-changes`:
+/// block version 5 of the EVM Firehose tracer records no gas changes. A
+/// stream's `tables` say whether it has them, so no descriptor field does.
+pub const EVM_GAS_CHANGE_TABLES: [&str; 2] = ["gas_changes", "system_gas_changes"];
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
 /// Flushes a backfill lane may hold before it commits them to the Delta logs

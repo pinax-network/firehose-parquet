@@ -13,7 +13,7 @@ For a failed or reverted transaction, `fireparq` writes:
 | `transactions` | the transaction, with `status` `FAILED` or `REVERTED` |
 | `logs` | none (failed transactions have no receipt logs) |
 | `calls` | every call (`status_failed` / `state_reverted` tell you what happened) |
-| `gas_changes` | every gas change (the gas was consumed and paid for) |
+| `gas_changes` | every gas change (the gas was consumed and paid for), with `--with-gas-changes` |
 | `balance_changes` | root-call changes with reason `GAS_BUY`, `GAS_REFUND`, `REWARD_TRANSACTION_FEE`, or `INCREASE_MINT` (OP Stack deposits keep their mint when they fail) |
 | `nonce_changes` | the sender's nonce increment (the root call's earliest nonce change), plus one per accepted EIP-7702 authorization |
 | `code_changes` | at most one per accepted EIP-7702 authorization (the delegation) |
@@ -92,6 +92,31 @@ FROM delta_scan('output/mainnet/logs');
 after filtering. Do not infer a transaction-local position from a default zero
 when the upstream source omits `Log.index` at a lower detail level.
 
+## Gas-change tables
+
+`gas_changes` and `system_gas_changes` are written only with
+`--with-gas-changes` (`WITH_GAS_CHANGES=true`), off by default. The EVM
+Firehose tracer no longer records gas changes (`evm-firehose-tracer-rs`
+v5.0.0), and `fireeth tools convert-to-v5` (firehose-ethereum v2.24.0) removes
+them from older blocks: block version 5 has none. Without the flag, the gas
+changes of older block versions are ignored.
+
+A dataset's tables are fixed when it is created, so the flag must match the
+dataset on every run:
+
+| Dataset | Run with | Otherwise `build` refuses to start with |
+|---|---|---|
+| Created with extended output by v1.5.1 or earlier, or with `--with-gas-changes` | `--with-gas-changes` | `this dataset has the EVM tables gas_changes and system_gas_changes, ...` |
+| Created without the flag | no flag | `this dataset has no EVM tables gas_changes and system_gas_changes, ...` |
+
+Before upgrading, set the flag on the writer of every dataset that has the two
+tables, and on the remaining lanes of a
+[parallel backfill](../parallel-backfill.md) opened by v1.5.1 or earlier. With
+it, the tables, schemas and digests are those of v1.5.1, so the dataset
+resumes as it is. There is no command yet to retire the two tables from an
+existing dataset. The maintenance job skips a table in `LAKE_TABLES` that does
+not exist, so one `LAKE_TABLES` list serves both kinds of dataset.
+
 ## Tables that can be empty
 
 `gas_changes` and `account_creations` are extended tables populated only from
@@ -105,12 +130,13 @@ a guarantee about every network, provider or block version.
   an empty table to conclude that no contracts or accounts were created.
 - `gas_changes` contains explicit upstream gas-change records. Missing rows do
   not mean zero gas usage; transaction/receipt gas fields provide separate data.
+  Block version 5 has none ([Gas-change tables](#gas-change-tables)).
 
 `build` creates every table of the stream at its first start, so a table
 without rows is an empty Delta table: `delta_scan` returns an empty relation,
 and the table has no data files or `date=` directories. With
 `--without-extended` the extended tables are not part of the stream and do
-not exist.
+not exist, nor do the gas-change tables without `--with-gas-changes`.
 
 ## Withdrawals, access lists and EIP-7702 authorizations
 

@@ -12,6 +12,8 @@ empty when the release is cut.
 
 ## Breaking changes
 
+- New EVM datasets no longer have `gas_changes` and `system_gas_changes`: block version 5 of the EVM Firehose tracer records no gas changes. `--with-gas-changes` (`WITH_GAS_CHANGES=true`) writes them as before, with the same schemas and digests. **Set it on every existing EVM dataset with extended output (writers and backfill lanes) before upgrading**; without it `build` refuses to start, naming the flag ([Gas-change tables](../chains/evm.md#gas-change-tables)).
+
 ## New features
 
 ## Fixes

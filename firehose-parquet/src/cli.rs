@@ -534,6 +534,20 @@ pub struct BuildArgs {
     )]
     pub without_extended: bool,
 
+    /// Write the EVM extended tables `gas_changes` and `system_gas_changes`.
+    ///
+    /// Off by default: block version 5 of the EVM Firehose tracer records no
+    /// gas changes. A dataset created without it has neither table. A dataset
+    /// that has them (EVM with extended output, created by v1.5.1 or earlier)
+    /// resumes only with this flag.
+    #[arg(
+        long,
+        env = "WITH_GAS_CHANGES",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub with_gas_changes: bool,
+
     /// Disable Solana `vote_transactions` output.
     #[arg(
         long,
