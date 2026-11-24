@@ -17,7 +17,7 @@ empty when the release is cut.
 ## New features
 
 - **`fireparq maintenance` compacts several days of a table at once:
-  `OPTIMIZE_CONCURRENT_DATES` (#737).** Each day is its own commit, and each is
+  `OPTIMIZE_CONCURRENT_DATES` (#737, #740).** Each day is its own commit, and each is
   handed out once within the run; never split a table's backlog over several
   jobs instead (#717). Each day is reported as soon as it commits or fails (new
   `date` and `date_error` lines); the `table` line is unchanged. Memory and CPU
