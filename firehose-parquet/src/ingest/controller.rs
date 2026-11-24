@@ -159,6 +159,12 @@ pub struct CommittedTable {
 /// Refusal of a request whose stream descriptor differs from authority's.
 pub(super) const STREAM_MISMATCH: &str = "existing authoritative stream differs from this request; use a new output root for changed semantics or bindings";
 
+/// Refusal of a request without `--with-gas-changes` at a dataset that has
+/// the EVM gas-change tables.
+pub(super) const GAS_CHANGE_TABLES_REQUIRED: &str = "this dataset has the EVM tables gas_changes and system_gas_changes, which build writes only with --with-gas-changes (WITH_GAS_CHANGES=true); set it on every run of this dataset";
+/// Refusal of a request with `--with-gas-changes` at a dataset without them.
+pub(super) const GAS_CHANGE_TABLES_ABSENT: &str = "this dataset has no EVM tables gas_changes and system_gas_changes; run it without --with-gas-changes (WITH_GAS_CHANGES)";
+
 /// The refusal of an authority whose stream differs from the request's. A
 /// dataset bound to another root than the requested one was copied or moved
 /// there, and the refusal names `fireparq recovery rebind` (#635).
@@ -172,7 +178,42 @@ pub(super) fn stream_mismatch(
             super::binding::rebind_hint(&stored.output, &expected.output)
         );
     }
+    if let Some(refusal) = gas_change_tables_mismatch(stored, expected) {
+        return anyhow::anyhow!("{refusal}");
+    }
     anyhow::anyhow!("{STREAM_MISMATCH}")
+}
+
+/// The refusal naming `--with-gas-changes` when two EVM streams differ only
+/// in that one has both [`super::state::EVM_GAS_CHANGE_TABLES`] and the
+/// other neither.
+pub(super) fn gas_change_tables_mismatch(
+    stored: &StreamDescriptor,
+    expected: &StreamDescriptor,
+) -> Option<&'static str> {
+    use super::state::{BlockFamily, EVM_GAS_CHANGE_TABLES};
+    let has = |descriptor: &StreamDescriptor, present: bool| {
+        EVM_GAS_CHANGE_TABLES
+            .iter()
+            .all(|table| descriptor.tables.contains_key(*table) == present)
+    };
+    let without = |descriptor: &StreamDescriptor| {
+        let mut descriptor = descriptor.clone();
+        descriptor
+            .tables
+            .retain(|table, _| !EVM_GAS_CHANGE_TABLES.contains(&table.as_str()));
+        descriptor
+    };
+    if stored.family != BlockFamily::Evm || without(stored) != without(expected) {
+        return None;
+    }
+    if has(stored, true) && has(expected, false) {
+        Some(GAS_CHANGE_TABLES_REQUIRED)
+    } else if has(stored, false) && has(expected, true) {
+        Some(GAS_CHANGE_TABLES_ABSENT)
+    } else {
+        None
+    }
 }
 
 impl<'a, M: MirrorAction> TransactionController<'a, M> {

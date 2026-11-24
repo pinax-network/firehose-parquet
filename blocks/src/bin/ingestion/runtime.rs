@@ -54,6 +54,7 @@ impl MapperState {
             current_file_metadata = metadata;
             Some(kind.create_mapper(MapperOptions {
                 extended: setup.extended,
+                gas_changes: args.with_gas_changes,
                 with_votes: setup.with_votes,
                 include_fork_step: !config.final_blocks_only,
                 encode_bytes,
@@ -482,6 +483,13 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.args.without_extended,
                 &self.setup.endpoint_info,
             );
+            if let Some(warning) = with_gas_changes_warning(
+                Some(detected),
+                self.state.extended,
+                self.args.with_gas_changes,
+            ) {
+                warn!("{warning}");
+            }
             if self.setup.failed_transactions_block_type != Some(detected) {
                 let (resolved, warnings) = resolve_include_failed_transactions(
                     Some(detected),
@@ -544,6 +552,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             );
             self.state.mapper = Some(detected.create_mapper(MapperOptions {
                 extended: self.state.extended,
+                gas_changes: self.args.with_gas_changes,
                 with_votes: self.setup.with_votes,
                 include_fork_step: !self.setup.config.final_blocks_only,
                 encode_bytes,

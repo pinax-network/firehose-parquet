@@ -510,6 +510,9 @@ pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
 pub struct MapperOptions {
     /// EVM extended tables.
     pub extended: bool,
+    /// EVM `gas_changes` and `system_gas_changes` (`--with-gas-changes`), with
+    /// `extended` only.
+    pub gas_changes: bool,
     /// Solana `vote_transactions`.
     pub with_votes: bool,
     /// Append the `fork_step` and `stream_ordinal` columns (non-final streams).
@@ -607,6 +610,7 @@ impl ChainKind {
     pub fn create_mapper(self, options: MapperOptions) -> Box<dyn BlockMapper> {
         let MapperOptions {
             extended,
+            gas_changes,
             with_votes,
             include_fork_step,
             encode_bytes,
@@ -614,12 +618,15 @@ impl ChainKind {
             include_failed_transactions,
         } = options;
         match self {
-            ChainKind::Evm => Box::new(EvmBlockMapper::new(
-                extended,
-                include_fork_step,
-                encode_bytes,
-                include_failed_transactions,
-            )),
+            ChainKind::Evm => Box::new(
+                EvmBlockMapper::new(
+                    extended,
+                    include_fork_step,
+                    encode_bytes,
+                    include_failed_transactions,
+                )
+                .with_gas_changes(gas_changes),
+            ),
             ChainKind::Bitcoin => {
                 Box::new(BitcoinBlockMapper::new(include_fork_step, encode_bytes))
             }

@@ -271,6 +271,8 @@ pub struct EvmBlockMapper {
 }
 
 impl EvmBlockMapper {
+    /// Every table of `extended`, the gas-change tables included; see
+    /// [`Self::with_gas_changes`].
     pub fn new(
         extended: bool,
         include_fork_step: bool,
@@ -379,6 +381,17 @@ impl EvmBlockMapper {
             system_gas_changes_schema: schema::system_gas_changes_schema(ifs, &encoding),
             system_account_creations_schema: schema::system_account_creations_schema(ifs, enc),
         }
+    }
+
+    /// Without `gas_changes`, neither [`schema::GAS_CHANGE_TABLE_NAMES`] table
+    /// is declared or written, and the gas changes of older block versions
+    /// are ignored. The other tables are unchanged.
+    pub fn with_gas_changes(mut self, gas_changes: bool) -> Self {
+        if !gas_changes {
+            self.gas_changes = None;
+            self.system_gas_changes = None;
+        }
+        self
     }
 
     fn map_evm_block(
@@ -1412,11 +1425,14 @@ impl BlockMapper for EvmBlockMapper {
     }
 
     fn table_names(&self) -> Vec<&str> {
-        if self.extended {
-            schema::EXTENDED_TABLE_NAMES.to_vec()
-        } else {
-            schema::BASE_TABLE_NAMES.to_vec()
+        if !self.extended {
+            return schema::BASE_TABLE_NAMES.to_vec();
         }
+        let gas_changes = self.gas_changes.is_some();
+        schema::EXTENDED_TABLE_NAMES
+            .into_iter()
+            .filter(|table| gas_changes || !schema::GAS_CHANGE_TABLE_NAMES.contains(table))
+            .collect()
     }
 }
 
@@ -4086,6 +4102,58 @@ pub(crate) mod tests {
             let values = u32_values(&batches[table], "call_index");
             assert!(!values.is_empty(), "{table}");
             assert!(values.iter().all(|v| *v == Some(5)), "{table}");
+        }
+    }
+
+    /// Without gas changes neither gas-change table is declared or written,
+    /// the block's gas changes are ignored, and every other table is the same
+    /// as with them.
+    #[test]
+    fn test_without_gas_changes_drops_only_the_gas_change_tables() {
+        let mut block = make_test_evm_block(403);
+        let mut failed = make_failed_set_code_tx();
+        failed.index = 1;
+        block.transaction_traces.push(failed);
+        let mut system_call = make_failed_set_code_tx().calls.remove(0);
+        system_call.index = 5;
+        block.system_calls = vec![system_call];
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let map = |extended: bool, gas_changes: bool| {
+            let mut mapper = EvmBlockMapper::new(extended, false, EncodeBytes::Hex, true)
+                .with_gas_changes(gas_changes);
+            let names: Vec<String> = mapper.table_names().iter().map(|n| n.to_string()).collect();
+            mapper
+                .map_block(
+                    &block_bytes,
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
+                .unwrap();
+            let batches = mapper.flush().unwrap();
+            let mut flushed: Vec<&String> = batches.keys().collect();
+            flushed.sort();
+            let mut declared: Vec<&String> = names.iter().collect();
+            declared.sort();
+            assert_eq!(flushed, declared, "extended={extended} gas={gas_changes}");
+            (names, batches)
+        };
+
+        let (all_names, mut all) = map(true, true);
+        assert_eq!(all_names, schema::EXTENDED_TABLE_NAMES);
+        let (names, batches) = map(true, false);
+        for table in schema::GAS_CHANGE_TABLE_NAMES {
+            assert!(all.remove(table).unwrap().num_rows() > 0, "{table}");
+        }
+        let expected: Vec<&String> = all_names
+            .iter()
+            .filter(|name| !schema::GAS_CHANGE_TABLE_NAMES.contains(&name.as_str()))
+            .collect();
+        assert_eq!(names.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(batches, all);
+
+        // Base output has no gas-change tables either way.
+        for gas_changes in [false, true] {
+            assert_eq!(map(false, gas_changes).0, schema::BASE_TABLE_NAMES);
         }
     }
 

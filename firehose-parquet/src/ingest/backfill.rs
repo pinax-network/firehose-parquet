@@ -319,8 +319,13 @@ pub(super) async fn session_plan(
                 "this dataset's backfill is sealed; its lanes are complete"
             );
             plan.require_lane(start, stop)?;
+            let planned = plan.lane_descriptor(start);
+            if let Some(refusal) = super::controller::gas_change_tables_mismatch(&planned, expected)
+            {
+                bail!("{refusal}");
+            }
             ensure!(
-                plan.lane_descriptor(start) == *expected,
+                planned == *expected,
                 "this lane's settings differ from the ones the backfill was opened with \
                  (chain, block type, encoding, feature flags, table schemas or storage); run \
                  every lane with the settings of `fireparq backfill open`"

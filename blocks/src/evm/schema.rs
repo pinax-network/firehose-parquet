@@ -437,7 +437,12 @@ pub const BASE_TABLE_NAMES: [&str; 6] = [
     "set_code_authorizations",
 ];
 
-/// Extended table names (available at EXTENDED detail level).
+/// Extended tables written only with `--with-gas-changes`: block version 5 of
+/// the EVM Firehose tracer records no gas changes.
+pub const GAS_CHANGE_TABLE_NAMES: [&str; 2] = firehose_parquet::ingest::EVM_GAS_CHANGE_TABLES;
+
+/// Extended table names (available at EXTENDED detail level), with
+/// [`GAS_CHANGE_TABLE_NAMES`].
 pub const EXTENDED_TABLE_NAMES: [&str; 20] = [
     "blocks",
     "transactions",

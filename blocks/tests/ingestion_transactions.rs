@@ -639,6 +639,62 @@ async fn protected_origin_mode_and_override_changes_are_refused_before_blocks() 
     server.assert_drained();
 }
 
+/// The EVM tables `gas_changes` and `system_gas_changes` are opt-in. A
+/// dataset that has them (`--with-gas-changes` declares exactly the inventory
+/// of every extended EVM dataset before the setting) resumes only with the
+/// flag, and one without them refuses it. Each refusal names the flag and
+/// comes before any Blocks request, with nothing changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gas_change_tables_resume_only_with_the_setting_the_dataset_was_created_with() {
+    for created_with in [true, false] {
+        let server = MockFirehose::start(
+            (100..103).map(|n| response(n, 3)).collect(),
+            vec![
+                Plan::complete("", 100, 101),
+                Plan::complete("fixture-101", 100, 102),
+            ],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = root(dir.path());
+        let build = |stop: u64, gas_changes: bool| {
+            let mut build = command(&server, dir.path(), 100, stop);
+            if gas_changes {
+                build.arg("--with-gas-changes");
+            }
+            build
+        };
+        success(build(102, created_with)).await;
+        let declared: Vec<String> = authority(&root)["descriptor"]["tables"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(declared.len(), if created_with { 20 } else { 18 });
+        for table in ["gas_changes", "system_gas_changes"] {
+            assert_eq!(declared.iter().any(|t| t == table), created_with, "{table}");
+            assert_eq!(root.join(table).exists(), created_with, "{table}");
+        }
+        let before = (authority(&root), parts(&root));
+
+        let refused = run(build(103, !created_with)).await;
+        assert!(!refused.status.success(), "{}", logs(&refused));
+        let expected = if created_with {
+            "set it on every run of this dataset"
+        } else {
+            "run it without --with-gas-changes"
+        };
+        assert!(logs(&refused).contains(expected), "{}", logs(&refused));
+        assert_eq!(server.calls(), 1);
+        assert_eq!((authority(&root), parts(&root)), before);
+
+        success(build(103, created_with)).await;
+        assert_eq!(block_numbers(&root), [100, 101, 102]);
+        server.assert_drained();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override() {
     let server = MockFirehose::start(vec![response(100, 3)], vec![]).await;
