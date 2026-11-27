@@ -1507,6 +1507,7 @@ dependencies = [
  "deltalake-core",
  "futures",
  "object_store 0.13.2",
+ "percent-encoding",
  "serde_json",
  "tempfile",
  "tokio",

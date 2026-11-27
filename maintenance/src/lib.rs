@@ -8,8 +8,10 @@
 //! (`deltalake-core` 1.0.0) for VACUUM, checkpoints and log cleanup, and its
 //! own compaction ([`compact`]), which keeps the writer's row order. It is safe
 //! beside a running `fireparq build`: fireparq's commits are blind appends that
-//! rebase over OPTIMIZE, and VACUUM follows the rule of design §4.1. Every step
-//! is idempotent, so a failed or conflicting run is simply repeated by the next
+//! rebase over OPTIMIZE, and VACUUM follows the rule of design §4.1. Two runs
+//! of one lake at once are safe too, if wasteful: of two compactions of a
+//! date, the second to commit is a conflict (#717, [`compact`]). Every step is
+//! idempotent, so a failed or conflicting run is simply repeated by the next
 //! one.
 //!
 //! For each table, in this order:
@@ -710,8 +712,10 @@ pub fn is_missing_table(error: &DeltaTableError) -> bool {
 
 /// A lost commit race: reported as a conflict and left to the next run.
 ///
-/// That is `VersionAlreadyExists`, `CommitConflict` or `MaxCommitAttempts`;
-/// with `max_retries(0)` every lost race is `MaxCommitAttempts`.
+/// That is `VersionAlreadyExists`, `CommitConflict` or `MaxCommitAttempts`.
+/// A compaction reports another compaction of its date as `CommitConflict`,
+/// and a race it still loses after [`compact::COMMIT_ATTEMPTS`] as
+/// `MaxCommitAttempts`.
 pub fn is_conflict(error: &DeltaTableError) -> bool {
     matches!(
         error,

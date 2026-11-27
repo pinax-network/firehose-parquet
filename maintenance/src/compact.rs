@@ -29,8 +29,23 @@
 //! [`ROW_ORDER_KEY`] in its footer. A bin's row count must equal its files'
 //! `numRecords`. A date's bins commit together as one OPTIMIZE, with
 //! `dataChange: false`, as delta-rs's does.
+//!
+//! The commit is never rebased over another compaction of the date (#717).
+//! delta-rs's conflict checker ignores `remove` actions with
+//! `dataChange: false`, so two compactions of one date from the same snapshot
+//! would both commit and duplicate its rows. Each attempt is therefore made
+//! with no delta-rs retry, and a lost race is resolved here
+//! ([`Compaction::run`]), from the commits that won it:
+//!
+//! - One that removes a file this compaction removes (another compaction of
+//!   the date), or that changes the table's metadata or protocol, is a
+//!   conflict. The compaction is dropped and its files deleted.
+//! - One that adds a file this compaction wrote is its own commit, whose
+//!   response was lost and whose request the S3 client sent again: committed.
+//! - Otherwise (a writer's append, another date's compaction) the commit is
+//!   tried again on top of them, at most [`COMMIT_ATTEMPTS`] times in all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
@@ -46,7 +61,9 @@ use deltalake_core::arrow::row::{OwnedRow, RowConverter, SortField};
 use deltalake_core::datafile::writer::{PartitionWriter, PartitionWriterConfig};
 use deltalake_core::kernel::engine::arrow_conversion::TryIntoArrow as _;
 use deltalake_core::kernel::schema::cast::cast_record_batch;
-use deltalake_core::kernel::transaction::{CommitBuilder, CommitProperties};
+use deltalake_core::kernel::transaction::{
+    CommitBuilder, CommitConflictError, CommitProperties, TransactionError,
+};
 use deltalake_core::kernel::{Action, Add, Remove};
 use deltalake_core::logstore::ObjectStoreRef;
 use deltalake_core::parquet::arrow::arrow_reader::{
@@ -88,6 +105,13 @@ const WRITER_PART_PREFIX: &str = "part-v1-";
 /// Rows per batch read and written.
 const BATCH_ROWS: usize = 8192;
 
+/// Attempts of a date's commit, each on top of the commits that won the one
+/// before: as many as delta-rs's default (15 retries).
+pub const COMMIT_ATTEMPTS: usize = 16;
+
+/// Log entries read at once after a lost race.
+const COMMIT_READS: usize = 16;
+
 const BLOCK_NUM: &str = "block_num";
 
 /// An active file of a date, from the log.
@@ -122,6 +146,86 @@ impl Bin {
 
 fn generic(message: String) -> DeltaTableError {
     DeltaTableError::Generic(message)
+}
+
+/// A failed commit of a date's compaction.
+enum Failed {
+    /// The log shows it never landed: its files can be deleted.
+    NotLanded(DeltaTableError),
+    /// It may have landed: its files stay.
+    Unknown(DeltaTableError),
+}
+
+/// An attempt with no delta-rs retry lost the version race: the table moved
+/// on before it, or its version was written first (`MaxCommitAttempts` with
+/// `max_retries(0)`, either way).
+fn lost_race(error: &DeltaTableError) -> bool {
+    matches!(
+        error,
+        DeltaTableError::VersionAlreadyExists(_)
+            | DeltaTableError::Transaction {
+                source: TransactionError::MaxCommitAttempts(_)
+                    | TransactionError::VersionAlreadyExists(_),
+            }
+    )
+}
+
+/// A path as the snapshot gives it: delta-rs writes a `remove` with the
+/// decoded path, and an `add` with the path it wrote.
+fn decoded_path(path: &str) -> String {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// What the commits that won a compaction's race did to it.
+#[derive(Debug)]
+enum Since {
+    /// Nothing it depends on: it can commit on top of them.
+    Clear,
+    /// One of them is its own commit.
+    Ours,
+    /// One removed a file it removes, or changed the table's metadata or
+    /// protocol.
+    Conflict(CommitConflictError),
+}
+
+/// Reads `won`, the log entries of the commits that won a compaction's race,
+/// against the decoded paths the compaction `removes` and `adds`.
+fn since(won: &[Bytes], removes: &HashSet<String>, adds: &HashSet<String>) -> DeltaResult<Since> {
+    let mut found = Since::Clear;
+    for entry in won {
+        for line in entry.split(|byte| *byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let action: Value = serde_json::from_slice(line)
+                .map_err(|error| generic(format!("reading a commit that won the race: {error}")))?;
+            let path = |kind: &str| {
+                action
+                    .get(kind)
+                    .and_then(|action| action.get("path"))
+                    .and_then(Value::as_str)
+                    .map(decoded_path)
+            };
+            if path("add").is_some_and(|path| adds.contains(&path)) {
+                return Ok(Since::Ours);
+            }
+            if !matches!(found, Since::Clear) {
+                continue;
+            }
+            if path("remove").is_some_and(|path| removes.contains(&path)) {
+                found = Since::Conflict(CommitConflictError::ConcurrentDeleteDelete);
+            } else if action.get("metaData").is_some() {
+                found = Since::Conflict(CommitConflictError::MetadataChanged);
+            } else if action.get("protocol").is_some() {
+                found = Since::Conflict(CommitConflictError::ProtocolChanged(
+                    "a commit that won the race changed the protocol".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn stats_block(stats: &Value, kind: &str) -> Option<i64> {
@@ -317,9 +421,12 @@ pub struct Compaction<'a> {
 impl Compaction<'_> {
     /// Rewrites `bins` (of [`plan`]) and commits them as one OPTIMIZE: all of
     /// them or none. When a bin fails, the files written for the bins before
-    /// it are deleted again, as nothing names them. A failed commit leaves its
-    /// files: a commit whose outcome is unknown may have landed, and an
-    /// orphan is only space, which the weekly full VACUUM reclaims.
+    /// it are deleted again, as nothing names them. So are the files of a
+    /// commit that the log shows never landed: one that lost to another
+    /// compaction of the date, or still lost after [`COMMIT_ATTEMPTS`] (see
+    /// the module documentation). Any other failed commit leaves its files:
+    /// its outcome is unknown, so it may have landed, and an orphan is only
+    /// space, which the weekly full VACUUM reclaims.
     pub async fn run(&self, bins: &[Bin]) -> DeltaResult<DateCompaction> {
         let mut outcome = DateCompaction::default();
         let mut actions = Vec::new();
@@ -346,22 +453,106 @@ impl Compaction<'_> {
             predicate: serde_json::to_string(&[format!("date = '{}'", self.date)]).ok(),
             target_size: i64::try_from(self.target.get()).unwrap_or(i64::MAX),
         };
-        CommitBuilder::from(self.commit.clone())
-            .with_actions(actions)
-            .with_app_metadata(HashMap::from([(
-                ROW_ORDER_KEY.to_string(),
-                json!(WRITER_ORDER),
-            )]))
-            .build(
-                Some(self.table.snapshot()?),
-                self.table.log_store(),
-                operation,
-            )
-            .await?;
-        Ok(outcome)
+        match self.commit(&actions, operation).await {
+            Ok(()) => Ok(outcome),
+            Err(Failed::NotLanded(error)) => {
+                self.delete_written(&actions).await;
+                Err(error)
+            }
+            Err(Failed::Unknown(error)) => Err(error),
+        }
     }
 
-    /// Deletes the files of `actions`' adds, written for a commit never tried.
+    /// Commits `actions`, each attempt with no delta-rs retry, on top of the
+    /// commits that won the attempt before as long as none of them conflicts
+    /// (see the module documentation).
+    async fn commit(&self, actions: &[Action], operation: DeltaOperation) -> Result<(), Failed> {
+        let paths = |removes: bool| -> HashSet<String> {
+            actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::Remove(remove) if removes => Some(decoded_path(&remove.path)),
+                    Action::Add(add) if !removes => Some(decoded_path(&add.path)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (removes, adds) = (paths(true), paths(false));
+        let log_store = self.table.log_store();
+        // The table the next attempt commits on: the date's, then a clone
+        // brought up to the commits that won.
+        let mut rebased: Option<DeltaTable> = None;
+        for attempt in 1..=COMMIT_ATTEMPTS {
+            let table = rebased.as_ref().unwrap_or(self.table);
+            let base = table.version().ok_or_else(|| {
+                Failed::NotLanded(generic(format!(
+                    "{} {}: no table version",
+                    self.name, self.date
+                )))
+            })?;
+            let snapshot = table.snapshot().map_err(Failed::NotLanded)?;
+            let result = CommitBuilder::from(self.commit.clone())
+                .with_max_retries(0)
+                .with_actions(actions.to_vec())
+                .with_app_metadata(HashMap::from([(
+                    ROW_ORDER_KEY.to_string(),
+                    json!(WRITER_ORDER),
+                )]))
+                .build(Some(snapshot), log_store.clone(), operation.clone())
+                .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error) if lost_race(&error) => {}
+                // Not a race: its outcome is unknown.
+                Err(error) => return Err(Failed::Unknown(error)),
+            }
+            // From here until the log says otherwise, this attempt may have
+            // landed (a PUT sent again after a lost response is refused as a
+            // version that exists).
+            let mut next = rebased.take().unwrap_or_else(|| self.table.clone());
+            next.update_incremental(None)
+                .await
+                .map_err(Failed::Unknown)?;
+            let latest = next.version().unwrap_or(base);
+            // A long repair can lose its first race to hundreds of commits.
+            let mut reads = futures::stream::iter(base + 1..=latest)
+                .map(|version| {
+                    let log_store = log_store.clone();
+                    async move { (version, log_store.read_commit_entry(version).await) }
+                })
+                .buffered(COMMIT_READS);
+            let mut won = Vec::new();
+            while let Some((version, entry)) = reads.next().await {
+                match entry.map_err(Failed::Unknown)? {
+                    Some(entry) => won.push(entry),
+                    None => {
+                        return Err(Failed::Unknown(generic(format!(
+                            "{} {}: commit {version} is not in the log",
+                            self.name, self.date
+                        ))))
+                    }
+                }
+            }
+            match since(&won, &removes, &adds).map_err(Failed::Unknown)? {
+                Since::Ours => return Ok(()),
+                Since::Conflict(conflict) => {
+                    return Err(Failed::NotLanded(DeltaTableError::Transaction {
+                        source: TransactionError::CommitConflict(conflict),
+                    }))
+                }
+                Since::Clear if attempt == COMMIT_ATTEMPTS => break,
+                Since::Clear => rebased = Some(next),
+            }
+        }
+        Err(Failed::NotLanded(DeltaTableError::Transaction {
+            source: TransactionError::MaxCommitAttempts(
+                i32::try_from(COMMIT_ATTEMPTS - 1).unwrap_or(i32::MAX),
+            ),
+        }))
+    }
+
+    /// Deletes the files of `actions`' adds, which no commit names: one never
+    /// tried, or one the log shows never landed.
     async fn delete_written(&self, actions: &[Action]) {
         let store = self.table.object_store();
         for action in actions {
@@ -865,5 +1056,83 @@ mod tests {
         let mut previous = None;
         let behind = [column(&[1, 1]), column(&[2, 1])];
         assert!(check_strictly_increasing(&behind, &mut previous, "logs").is_err());
+    }
+
+    /// The log entry of one commit, one action per line.
+    fn entry(actions: &[Value]) -> Bytes {
+        let lines: Vec<String> = actions.iter().map(Value::to_string).collect();
+        Bytes::from(lines.join("\n") + "\n")
+    }
+
+    fn set(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|path| path.to_string()).collect()
+    }
+
+    #[test]
+    fn a_lost_race_is_read_from_the_commits_that_won_it() {
+        let removes = set(&[
+            "date=2026-09-20/part-v1-a.parquet",
+            "date=2026-09-20/part-v1-b.parquet",
+        ]);
+        let adds = set(&["date=2026-09-20/part-00000-ours.zstd.parquet"]);
+        let info = json!({"commitInfo": {"operation": "WRITE"}});
+        let append = entry(&[
+            info.clone(),
+            json!({"add": {"path": "date=2026-09-21/part-v1-c.parquet", "dataChange": true}}),
+        ]);
+        let other_date = entry(&[
+            json!({"remove": {"path": "date=2026-09-19/part-v1-d.parquet", "dataChange": false}}),
+            json!({"add": {"path": "date=2026-09-19/part-00000-theirs.zstd.parquet", "dataChange": false}}),
+        ]);
+        // A writer's append and another date's compaction: commit on top.
+        let clear = since(&[append.clone(), other_date.clone()], &removes, &adds).unwrap();
+        assert!(matches!(clear, Since::Clear), "{clear:?}");
+
+        // Another compaction of the date, with `dataChange: false`, which
+        // delta-rs's checker ignores (#717); its paths percent-encoded.
+        let same_date = entry(&[
+            json!({"remove": {"path": "date%3D2026-09-20/part-v1-b.parquet", "dataChange": false}}),
+            json!({"add": {"path": "date=2026-09-20/part-00000-theirs.zstd.parquet", "dataChange": false}}),
+        ]);
+        let conflict = since(&[append.clone(), same_date.clone()], &removes, &adds).unwrap();
+        assert!(
+            matches!(
+                conflict,
+                Since::Conflict(CommitConflictError::ConcurrentDeleteDelete)
+            ),
+            "{conflict:?}"
+        );
+
+        // Its own commit, whose response was lost: committed, even when a
+        // compaction that removes the same files lands after it.
+        let ours = entry(&[
+            json!({"remove": {"path": "date=2026-09-20/part-v1-a.parquet", "dataChange": false}}),
+            json!({"add": {"path": "date=2026-09-20/part-00000-ours.zstd.parquet", "dataChange": false}}),
+        ]);
+        let landed = since(&[append.clone(), ours, same_date], &removes, &adds).unwrap();
+        assert!(matches!(landed, Since::Ours), "{landed:?}");
+
+        // A metadata or protocol change.
+        let metadata = entry(&[json!({"metaData": {"id": "x"}})]);
+        let changed = since(&[metadata], &removes, &adds).unwrap();
+        assert!(
+            matches!(
+                changed,
+                Since::Conflict(CommitConflictError::MetadataChanged)
+            ),
+            "{changed:?}"
+        );
+        let protocol = entry(&[json!({"protocol": {"minReaderVersion": 3}})]);
+        let changed = since(&[protocol], &removes, &adds).unwrap();
+        assert!(
+            matches!(
+                changed,
+                Since::Conflict(CommitConflictError::ProtocolChanged(_))
+            ),
+            "{changed:?}"
+        );
+
+        // A log entry that isn't JSON is an error, not a verdict.
+        assert!(since(&[Bytes::from_static(b"{not json\n")], &removes, &adds).is_err());
     }
 }
