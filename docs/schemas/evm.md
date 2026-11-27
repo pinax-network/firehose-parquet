@@ -26,15 +26,15 @@ Generated from the `evm` mapper; do not edit by hand. Regenerate with `cargo run
 | [`code_changes`](#code_changes) | 19 | Extended output only: omitted with `--without-extended`. |
 | [`storage_changes`](#storage_changes) | 18 | Extended output only: omitted with `--without-extended`. |
 | [`nonce_changes`](#nonce_changes) | 17 | Extended output only: omitted with `--without-extended`. |
-| [`gas_changes`](#gas_changes) | 16 | Extended output only: omitted with `--without-extended`. |
-| [`account_creations`](#account_creations) | 15 | Extended output only: omitted with `--without-extended`. |
+| [`gas_changes`](#gas_changes) | 16 | Gas changes only: written only with `--with-gas-changes` (off by default), and omitted with `--without-extended`. |
+| [`account_creations`](#account_creations) | 15 | Account creations only: written only with `--with-account-creations` (off by default), and omitted with `--without-extended`. |
 | [`system_calls`](#system_calls) | 28 | Extended output only: omitted with `--without-extended`. |
 | [`system_balance_changes`](#system_balance_changes) | 14 | Extended output only: omitted with `--without-extended`. |
 | [`system_code_changes`](#system_code_changes) | 15 | Extended output only: omitted with `--without-extended`. |
 | [`system_storage_changes`](#system_storage_changes) | 14 | Extended output only: omitted with `--without-extended`. |
-| [`system_nonce_changes`](#system_nonce_changes) | 13 | Extended output only: omitted with `--without-extended`. |
-| [`system_gas_changes`](#system_gas_changes) | 13 | Extended output only: omitted with `--without-extended`. |
-| [`system_account_creations`](#system_account_creations) | 11 | Extended output only: omitted with `--without-extended`. |
+| [`system_nonce_changes`](#system_nonce_changes) | 13 | System nonce changes only: written only with `--with-system-nonce-changes` (off by default), and omitted with `--without-extended`. |
+| [`system_gas_changes`](#system_gas_changes) | 13 | Gas changes only: written only with `--with-gas-changes` (off by default), and omitted with `--without-extended`. |
+| [`system_account_creations`](#system_account_creations) | 11 | Account creations only: written only with `--with-account-creations` (off by default), and omitted with `--without-extended`. |
 
 ## `blocks`
 
@@ -356,7 +356,7 @@ Extended output only: omitted with `--without-extended`.
 
 ## `gas_changes`
 
-Extended output only: omitted with `--without-extended`.
+Gas changes only: written only with `--with-gas-changes` (off by default), and omitted with `--without-extended`.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -381,7 +381,7 @@ Extended output only: omitted with `--without-extended`.
 
 ## `account_creations`
 
-Extended output only: omitted with `--without-extended`.
+Account creations only: written only with `--with-account-creations` (off by default), and omitted with `--without-extended`.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
@@ -520,7 +520,7 @@ System table: block-level events without `tx_hash`.
 
 ## `system_nonce_changes`
 
-Extended output only: omitted with `--without-extended`.
+System nonce changes only: written only with `--with-system-nonce-changes` (off by default), and omitted with `--without-extended`.
 
 System table: block-level events without `tx_hash`.
 
@@ -544,7 +544,7 @@ System table: block-level events without `tx_hash`.
 
 ## `system_gas_changes`
 
-Extended output only: omitted with `--without-extended`.
+Gas changes only: written only with `--with-gas-changes` (off by default), and omitted with `--without-extended`.
 
 System table: block-level events without `tx_hash`.
 
@@ -568,7 +568,7 @@ System table: block-level events without `tx_hash`.
 
 ## `system_account_creations`
 
-Extended output only: omitted with `--without-extended`.
+Account creations only: written only with `--with-account-creations` (off by default), and omitted with `--without-extended`.
 
 System table: block-level events without `tx_hash`.
 

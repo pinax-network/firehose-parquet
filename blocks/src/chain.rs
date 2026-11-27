@@ -27,6 +27,7 @@ use crate::beacon::mapper::BeaconBlockMapper;
 use crate::bitcoin::mapper::BitcoinBlockMapper;
 use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
+pub use crate::evm::schema::OptInTables;
 use crate::hypercore::mapper::HypercoreBlockMapper;
 use crate::near::mapper::NearBlockMapper;
 use crate::sec::mapper::SecBlockMapper;
@@ -510,6 +511,10 @@ pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
 pub struct MapperOptions {
     /// EVM extended tables.
     pub extended: bool,
+    /// The opt-in EVM extended tables (`--with-gas-changes`,
+    /// `--with-account-creations`, `--with-system-nonce-changes`), with
+    /// `extended` only.
+    pub opt_in_tables: OptInTables,
     /// Solana `vote_transactions`.
     pub with_votes: bool,
     /// Append the `fork_step` and `stream_ordinal` columns (non-final streams).
@@ -607,6 +612,7 @@ impl ChainKind {
     pub fn create_mapper(self, options: MapperOptions) -> Box<dyn BlockMapper> {
         let MapperOptions {
             extended,
+            opt_in_tables,
             with_votes,
             include_fork_step,
             encode_bytes,
@@ -614,12 +620,15 @@ impl ChainKind {
             include_failed_transactions,
         } = options;
         match self {
-            ChainKind::Evm => Box::new(EvmBlockMapper::new(
-                extended,
-                include_fork_step,
-                encode_bytes,
-                include_failed_transactions,
-            )),
+            ChainKind::Evm => Box::new(
+                EvmBlockMapper::new(
+                    extended,
+                    include_fork_step,
+                    encode_bytes,
+                    include_failed_transactions,
+                )
+                .with_opt_in_tables(opt_in_tables),
+            ),
             ChainKind::Bitcoin => {
                 Box::new(BitcoinBlockMapper::new(include_fork_step, encode_bytes))
             }

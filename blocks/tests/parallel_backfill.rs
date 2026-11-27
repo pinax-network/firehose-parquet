@@ -499,6 +499,17 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
         "has not started",
     )
     .await;
+    // The plan binds the default, without the opt-in EVM tables: a lane with
+    // one of their flags is refused, and the refusal names the flag.
+    for flag in [
+        "--with-gas-changes",
+        "--with-account-creations",
+        "--with-system-nonce-changes",
+    ] {
+        let mut lane = fixture.lane(LANES[1]);
+        lane.arg(flag);
+        refused(lane, &format!("run it without {flag}")).await;
+    }
 
     // The last two lanes run at the same time, into the same tables.
     let (second, third) = tokio::join!(
@@ -596,6 +607,9 @@ async fn lanes_fill_one_dataset_in_parallel_and_seal_into_an_ordinary_one() {
     // The sealed dataset is an ordinary one: its start is the backfill's, a
     // lane or any other start is refused, and the same range is complete.
     refused(fixture.lane(LANES[1]), "original start").await;
+    let mut gas_changes = fixture.lane((FIRST, STOP));
+    gas_changes.arg("--with-gas-changes");
+    refused(gas_changes, "run it without --with-gas-changes").await;
     succeed(fixture.lane((FIRST, STOP))).await;
 
     // An ordinary build extends it from the stored cursor, under the

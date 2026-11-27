@@ -22,4 +22,7 @@ pub use session::{
     declare_data_schemas, declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
     IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED, PRE_V1_DEFAULT_MIRROR,
 };
-pub use state::{BlockFamily, Digest, SOLANA_GENESIS_ROUTING_SECONDS};
+pub use state::{
+    BlockFamily, Digest, EvmOptInGroup, EVM_ACCOUNT_CREATION_TABLES, EVM_GAS_CHANGE_TABLES,
+    EVM_OPT_IN_TABLES, EVM_SYSTEM_NONCE_CHANGE_TABLES, SOLANA_GENESIS_ROUTING_SECONDS,
+};

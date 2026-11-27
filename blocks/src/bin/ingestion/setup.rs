@@ -288,6 +288,9 @@ impl IngestionSetup {
             &endpoint_info,
             config.dry_run,
         );
+        for warning in opt_in_tables_warnings(block_type, extended, opt_in_tables(args)) {
+            warn!("{warning}");
+        }
 
         let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
         // Failed-transaction handling depends on the chain, so resolve it from the
@@ -321,6 +324,9 @@ impl IngestionSetup {
         info!(
             block_type = block_type.map_or("auto", ChainKind::label),
             extended,
+            with_gas_changes = args.with_gas_changes,
+            with_account_creations = args.with_account_creations,
+            with_system_nonce_changes = args.with_system_nonce_changes,
             with_votes,
             bytes_encoding = %initial_bytes_encoding_label,
             include_failed_transactions,

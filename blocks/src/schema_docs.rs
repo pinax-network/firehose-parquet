@@ -23,9 +23,10 @@ use anyhow::{ensure, Context, Result};
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use firehose_parquet::delta::types::{Conversion, DecimalColumn, PARTITION_COLUMN};
 use firehose_parquet::encode::EncodeBytes;
+use firehose_parquet::ingest::EvmOptInGroup;
 use firehose_parquet::traits::timestamp_millis_utc_type;
 
-use crate::chain::{ChainKind, MapperOptions};
+use crate::chain::{ChainKind, MapperOptions, OptInTables};
 
 /// The command that rewrites `docs/schemas/`.
 pub const REGENERATE_COMMAND: &str = "cargo run -p blocks --example dump_schemas";
@@ -1810,6 +1811,8 @@ struct TableReference {
     extended_only: bool,
     /// Omitted with `--without-votes`.
     votes_only: bool,
+    /// The opt-in group whose flag writes it, such as `--with-gas-changes`.
+    opt_in: Option<EvmOptInGroup>,
     /// An earlier table with the same schema.
     same_as: Option<String>,
     /// Every column in file order, `fork_step` and `stream_ordinal` included.
@@ -1842,16 +1845,20 @@ impl TableReference {
 #[derive(Clone, Copy, Debug)]
 struct Toggles {
     extended: bool,
+    opt_in_tables: OptInTables,
     with_votes: bool,
     include_failed_transactions: bool,
     synthetic_partition_routing: bool,
 }
 
 impl Toggles {
-    /// Production defaults: `--without-extended` and `--without-votes` unset.
+    /// Every table: `--without-extended` and `--without-votes` unset, and
+    /// `--with-gas-changes`, `--with-account-creations` and
+    /// `--with-system-nonce-changes` set.
     fn defaults(kind: ChainKind) -> Self {
         Self {
             extended: true,
+            opt_in_tables: OptInTables::ALL,
             with_votes: true,
             include_failed_transactions: kind.profile().failed_transactions_by_default,
             synthetic_partition_routing: false,
@@ -1861,6 +1868,7 @@ impl Toggles {
     fn options(self, include_fork_step: bool, encoding: &EncodeBytes) -> MapperOptions {
         MapperOptions {
             extended: self.extended,
+            opt_in_tables: self.opt_in_tables,
             with_votes: self.with_votes,
             include_fork_step,
             encode_bytes: encoding.clone(),
@@ -1868,6 +1876,15 @@ impl Toggles {
             include_failed_transactions: self.include_failed_transactions,
         }
     }
+}
+
+/// Every selection of the opt-in EVM table groups.
+fn opt_in_selections() -> impl Iterator<Item = OptInTables> {
+    (0..8_u8).map(|bits| OptInTables {
+        gas_changes: bits & 1 != 0,
+        account_creations: bits & 2 != 0,
+        system_nonce_changes: bits & 4 != 0,
+    })
 }
 
 type Tables = Vec<(String, SchemaRef)>;
@@ -1927,33 +1944,51 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
     )?;
     let extended_only = |name: &str| !table_names(&without_extended).contains(&name);
     let votes_only = |name: &str| !table_names(&without_votes).contains(&name);
+    // The loop below checks that each group's flag selects exactly its
+    // tables.
+    let opt_in = |name: &str| {
+        (kind == ChainKind::Evm)
+            .then(|| {
+                OptInTables::ALL
+                    .groups()
+                    .into_iter()
+                    .map(|(group, _)| group)
+                    .find(|group| group.tables.contains(&name))
+            })
+            .flatten()
+    };
 
-    // Only `extended` and `with_votes` may change the set of tables, and no
-    // option may change a table's schema; otherwise this reference would
-    // misdescribe some configuration.
+    // Only `extended`, `opt_in_tables` and `with_votes` may change the set of
+    // tables, and no option may change a table's schema; otherwise this
+    // reference would misdescribe some configuration.
     for extended in [false, true] {
-        for with_votes in [false, true] {
-            for include_failed_transactions in [false, true] {
-                for synthetic_partition_routing in [false, true] {
-                    let toggles = Toggles {
-                        extended,
-                        with_votes,
-                        include_failed_transactions,
-                        synthetic_partition_routing,
-                    };
-                    let tables = mapper_tables(kind, toggles.options(true, &encoding))?;
-                    let expected: Tables = full
-                        .iter()
-                        .filter(|(name, _)| {
-                            (extended || !extended_only(name)) && (with_votes || !votes_only(name))
-                        })
-                        .cloned()
-                        .collect();
-                    ensure!(
-                        tables == expected,
-                        "{kind} {toggles:?}: tables or schemas differ from the documented \
-                         defaults; teach schema_docs to describe this option"
-                    );
+        for opt_in_tables in opt_in_selections() {
+            for with_votes in [false, true] {
+                for include_failed_transactions in [false, true] {
+                    for synthetic_partition_routing in [false, true] {
+                        let toggles = Toggles {
+                            extended,
+                            opt_in_tables,
+                            with_votes,
+                            include_failed_transactions,
+                            synthetic_partition_routing,
+                        };
+                        let tables = mapper_tables(kind, toggles.options(true, &encoding))?;
+                        let expected: Tables = full
+                            .iter()
+                            .filter(|(name, _)| {
+                                (extended || !extended_only(name))
+                                    && (opt_in(name).is_none() || opt_in_tables.declares(name))
+                                    && (with_votes || !votes_only(name))
+                            })
+                            .cloned()
+                            .collect();
+                        ensure!(
+                            tables == expected,
+                            "{kind} {toggles:?}: tables or schemas differ from the documented \
+                             defaults; teach schema_docs to describe this option"
+                        );
+                    }
                 }
             }
         }
@@ -2082,6 +2117,7 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             name: name.clone(),
             extended_only: extended_only(name),
             votes_only: votes_only(name),
+            opt_in: opt_in(name),
             same_as: full[..index]
                 .iter()
                 .find(|(earlier_name, earlier)| {
@@ -2200,26 +2236,47 @@ fn escape_cell(text: &str) -> String {
     text.replace('|', "\\|")
 }
 
-fn table_condition(table: &TableReference) -> Option<&'static str> {
-    match (table.extended_only, table.votes_only) {
-        (false, false) => None,
-        (true, false) => Some("Extended output only: omitted with `--without-extended`."),
-        (false, true) => Some("Votes only: omitted with `--without-votes`."),
-        (true, true) => Some(
+fn table_condition(table: &TableReference) -> Option<String> {
+    let text = match (table.extended_only, table.votes_only, table.opt_in) {
+        (false, false, None) => return None,
+        (true, false, None) => "Extended output only: omitted with `--without-extended`.",
+        (false, true, None) => "Votes only: omitted with `--without-votes`.",
+        (true, true, None) => {
             "Extended output with votes only: omitted with `--without-extended` or \
-             `--without-votes`.",
-        ),
-    }
+             `--without-votes`."
+        }
+        (true, false, Some(group)) => {
+            // `--with-gas-changes` → `Gas changes`.
+            let words = group.flag.trim_start_matches("--with-").replace('-', " ");
+            let mut label = words[..1].to_uppercase();
+            label.push_str(&words[1..]);
+            return Some(format!(
+                "{label} only: written only with `{}` (off by default), and omitted with \
+                 `--without-extended`.",
+                group.flag
+            ));
+        }
+        (_, _, Some(_)) => unreachable!("opt-in tables are EVM extended tables"),
+    };
+    Some(text.to_string())
 }
 
-/// `20 (14 extended only)`.
+/// `20 (14 extended only, 5 off by default)`.
 fn table_count_summary(reference: &ChainReference) -> String {
     let total = reference.tables.len();
     let extended = reference.tables.iter().filter(|t| t.extended_only).count();
     let votes = reference.tables.iter().filter(|t| t.votes_only).count();
+    let opt_in = reference
+        .tables
+        .iter()
+        .filter(|t| t.opt_in.is_some())
+        .count();
     let mut conditional = Vec::new();
     if extended > 0 {
         conditional.push(format!("{extended} extended only"));
+    }
+    if opt_in > 0 {
+        conditional.push(format!("{opt_in} off by default"));
     }
     if votes > 0 {
         conditional.push(format!("{votes} votes only"));
@@ -2245,8 +2302,8 @@ fn render_index(references: &[ChainReference]) -> String {
          One file per chain family lists every table `fireparq` writes and every column \
          with its Delta type, nullability and, where the code documents it, a description, \
          then the chain's type mapping. The files are rendered from the production mappers \
-         (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with each chain's default \
-         options and byte encoding, mapped onto Delta types as every flush is \
+         (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with every table enabled \
+         and each chain's default byte encoding, mapped onto Delta types as every flush is \
          (`ChainProfile::delta_types`), so they match what the current build writes.\n\n",
     );
     out.push_str(
@@ -2326,7 +2383,10 @@ fn render_index(references: &[ChainReference]) -> String {
          `array<non-null T>` one whose items may not; `struct<name: T, ...>` spells out the \
          struct fields the same way. Nullable refers to the column itself.\n\
          - Conditional tables are marked: EVM extended tables are omitted with \
-         `--without-extended`, Solana `vote_transactions` with `--without-votes`. Every \
+         `--without-extended`, and the EVM extended tables marked off by default are \
+         written only with their flag (`--with-gas-changes`, `--with-account-creations` or \
+         `--with-system-nonce-changes`); Solana `vote_transactions` is omitted with \
+         `--without-votes`. Every \
          other table is always part of the mapper's output; a table only gets files for \
          flushes in which it has rows.\n\n\
          ## Regenerating\n\n",
@@ -2425,7 +2485,7 @@ fn render_chain(reference: &ChainReference) -> String {
             out,
             "| [`{name}`](#{name}) | {} | {} |",
             table.column_count_without_non_final_columns(),
-            table_condition(table).unwrap_or("Always."),
+            table_condition(table).as_deref().unwrap_or("Always."),
             name = table.name,
         );
     }
@@ -2434,7 +2494,7 @@ fn render_chain(reference: &ChainReference) -> String {
         let _ = writeln!(out, "\n## `{}`\n", table.name);
         let mut paragraphs = Vec::new();
         if let Some(condition) = table_condition(table) {
-            paragraphs.push(condition.to_string());
+            paragraphs.push(condition);
         }
         if let Some(description) = table_description(kind, &table.name) {
             paragraphs.push(description.to_string());
@@ -2722,20 +2782,27 @@ mod tests {
             let reference = chain_reference(kind).unwrap();
             let encoding = kind.default_bytes_encoding(false);
             for extended in [false, true] {
-                for with_votes in [false, true] {
-                    let toggles = Toggles {
-                        extended,
-                        with_votes,
-                        ..Toggles::defaults(kind)
-                    };
-                    let mapper = kind.create_mapper(toggles.options(false, &encoding));
-                    let rendered: Vec<&str> = reference
-                        .tables
-                        .iter()
-                        .filter(|t| (extended || !t.extended_only) && (with_votes || !t.votes_only))
-                        .map(|t| t.name.as_str())
-                        .collect();
-                    assert_eq!(rendered, mapper.table_names(), "{kind} {toggles:?}");
+                for opt_in_tables in opt_in_selections() {
+                    for with_votes in [false, true] {
+                        let toggles = Toggles {
+                            extended,
+                            opt_in_tables,
+                            with_votes,
+                            ..Toggles::defaults(kind)
+                        };
+                        let mapper = kind.create_mapper(toggles.options(false, &encoding));
+                        let rendered: Vec<&str> = reference
+                            .tables
+                            .iter()
+                            .filter(|t| {
+                                (extended || !t.extended_only)
+                                    && (t.opt_in.is_none() || opt_in_tables.declares(&t.name))
+                                    && (with_votes || !t.votes_only)
+                            })
+                            .map(|t| t.name.as_str())
+                            .collect();
+                        assert_eq!(rendered, mapper.table_names(), "{kind} {toggles:?}");
+                    }
                 }
             }
 
@@ -2781,6 +2848,16 @@ mod tests {
             names(ChainKind::Evm, base),
             expect(&evm::schema::BASE_TABLE_NAMES)
         );
+        let evm = chain_reference(ChainKind::Evm).unwrap();
+        for (group, _) in OptInTables::ALL.groups() {
+            let opt_in: Vec<String> = evm
+                .tables
+                .iter()
+                .filter(|t| t.opt_in == Some(group))
+                .map(|t| t.name.clone())
+                .collect();
+            assert_eq!(opt_in, expect(group.tables), "{}", group.flag);
+        }
         assert_eq!(
             names(ChainKind::Solana, all),
             expect(&solana::schema::WITH_VOTES_TABLE_NAMES)

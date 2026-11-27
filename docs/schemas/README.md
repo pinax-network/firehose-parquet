@@ -2,11 +2,11 @@
 
 # Output schema reference
 
-One file per chain family lists every table `fireparq` writes and every column with its Delta type, nullability and, where the code documents it, a description, then the chain's type mapping. The files are rendered from the production mappers (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with each chain's default options and byte encoding, mapped onto Delta types as every flush is (`ChainProfile::delta_types`), so they match what the current build writes.
+One file per chain family lists every table `fireparq` writes and every column with its Delta type, nullability and, where the code documents it, a description, then the chain's type mapping. The files are rendered from the production mappers (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with every table enabled and each chain's default byte encoding, mapped onto Delta types as every flush is (`ChainProfile::delta_types`), so they match what the current build writes.
 
 | Chain | `--block-type` | Tables | Byte encoding | Reference |
 |---|---|---|---|---|
-| EVM | `evm` | 20 (14 extended only) | `hex` | [evm.md](evm.md) |
+| EVM | `evm` | 20 (14 extended only, 5 off by default) | `hex` | [evm.md](evm.md) |
 | Bitcoin | `bitcoin` | 4 | `hex` | [bitcoin.md](bitcoin.md) |
 | Solana | `solana` | 8 (1 votes only) | `base58` | [solana.md](solana.md) |
 | NEAR | `near` | 7 | `base58` | [near.md](near.md) |
@@ -28,7 +28,7 @@ One file per chain family lists every table `fireparq` writes and every column w
 - Byte encoding: binary values (hashes, addresses, keys) are written as text in the chain's encoding, fixed per chain (`ChainProfile` in `blocks/src/chain.rs`): in v1.0.0 for the families that existed then, and since its addition for a family added later. Their type is suffixed with the encoding, for example `string` (hex); other `string` columns hold chain-native text and do not depend on the encoding. `binary` columns hold raw bytes whatever the encoding.
 - Enum columns are `string` columns holding stable protobuf labels (the Parquet enum convention in `docs/repo-navigation.md`). The mappers build them as `Dictionary(Int32, Utf8)`, and Parquet still dictionary-encodes their pages.
 - Type notation: `array<T>` is a list whose items may be null, `array<non-null T>` one whose items may not; `struct<name: T, ...>` spells out the struct fields the same way. Nullable refers to the column itself.
-- Conditional tables are marked: EVM extended tables are omitted with `--without-extended`, Solana `vote_transactions` with `--without-votes`. Every other table is always part of the mapper's output; a table only gets files for flushes in which it has rows.
+- Conditional tables are marked: EVM extended tables are omitted with `--without-extended`, and the EVM extended tables marked off by default are written only with their flag (`--with-gas-changes`, `--with-account-creations` or `--with-system-nonce-changes`); Solana `vote_transactions` is omitted with `--without-votes`. Every other table is always part of the mapper's output; a table only gets files for flushes in which it has rows.
 
 ## Regenerating
 

@@ -126,9 +126,11 @@ struct Cli {
 
 `BuildArgs` flattens `CommonArgs` (connection, range, output, flush and AWS
 flags) and adds the chain flags (`--network`, `--block-type`,
-`--without-extended`, `--without-votes`, the failed-transaction flags and
-`--cursor-override`). `Commands::Build` runs `ingestion::run_ingestion` in
-`blocks/src/bin/ingestion/`. `Commands::Maintenance` has no flags of its own:
+`--without-extended`, `--with-gas-changes`, `--with-account-creations`,
+`--with-system-nonce-changes`, `--without-votes`, the
+failed-transaction flags and `--cursor-override`). `Commands::Build` runs
+`ingestion::run_ingestion` in `blocks/src/bin/ingestion/`.
+`Commands::Maintenance` has no flags of its own:
 it runs `fireparq_maintenance::run` (`maintenance/`), which reads its settings
 from the environment ([Delta maintenance](delta-maintenance.md)).
 `Commands::HypercoreReference` takes the arguments of

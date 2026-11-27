@@ -1040,3 +1040,84 @@ fn abrupt_process_death_recovers_parts_and_checkpoint() {
             });
     }
 }
+
+/// An EVM stream that differs from authority's only in having all the tables
+/// of an opt-in group or none of them is refused with each group's flag
+/// named. Any other difference keeps the generic refusal.
+#[test]
+fn a_stream_differing_only_by_opt_in_tables_names_the_settings() {
+    use crate::ingest::state::{
+        BlockFamily, EvmOptInGroup, EVM_ACCOUNT_CREATION_TABLES, EVM_GAS_CHANGE_TABLES,
+        EVM_OPT_IN_TABLES, EVM_SYSTEM_NONCE_CHANGE_TABLES,
+    };
+    let table = |name: &str| {
+        (
+            name.to_string(),
+            Digest::hash("schema-fixture", &name).unwrap(),
+        )
+    };
+    let without = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    let with_groups = |groups: &[EvmOptInGroup]| {
+        let mut with = without.clone();
+        with.tables
+            .extend(groups.iter().flat_map(|g| g.tables).map(|name| table(name)));
+        with
+    };
+    let refusal = |stored: &StreamDescriptor, expected: &StreamDescriptor| {
+        format!("{:#}", stream_mismatch(stored, expected))
+    };
+
+    // The refusals of v1.6.0, unchanged.
+    let gas = with_groups(&[EVM_GAS_CHANGE_TABLES]);
+    assert_eq!(
+        refusal(&gas, &without),
+        "this dataset has the EVM tables gas_changes and system_gas_changes, which build \
+         writes only with --with-gas-changes (WITH_GAS_CHANGES=true); set it on every run \
+         of this dataset"
+    );
+    assert_eq!(
+        refusal(&without, &gas),
+        "this dataset has no EVM tables gas_changes and system_gas_changes; run it without \
+         --with-gas-changes (WITH_GAS_CHANGES)"
+    );
+    let nonce = with_groups(&[EVM_SYSTEM_NONCE_CHANGE_TABLES]);
+    assert_eq!(
+        refusal(&without, &nonce),
+        "this dataset has no EVM table system_nonce_changes; run it without \
+         --with-system-nonce-changes (WITH_SYSTEM_NONCE_CHANGES)"
+    );
+
+    // A dataset with every table (extended output by v1.6.0 or earlier),
+    // resumed with only `--with-gas-changes`.
+    let all = with_groups(&EVM_OPT_IN_TABLES);
+    assert_eq!(
+        refusal(&all, &gas),
+        "this dataset has the EVM tables account_creations, system_account_creations and \
+         system_nonce_changes, which build writes only with --with-account-creations \
+         (WITH_ACCOUNT_CREATIONS=true) and --with-system-nonce-changes \
+         (WITH_SYSTEM_NONCE_CHANGES=true); set them on every run of this dataset"
+    );
+    // One group missing and another in excess.
+    let accounts = with_groups(&[EVM_ACCOUNT_CREATION_TABLES]);
+    assert_eq!(
+        refusal(&gas, &accounts),
+        "this dataset has the EVM tables gas_changes and system_gas_changes, which build \
+         writes only with --with-gas-changes (WITH_GAS_CHANGES=true); set it on every run \
+         of this dataset; this dataset has no EVM tables account_creations and \
+         system_account_creations; run it without --with-account-creations \
+         (WITH_ACCOUNT_CREATIONS)"
+    );
+
+    let mut one = without.clone();
+    one.tables.extend([table("gas_changes")]);
+    let mut other = without.clone();
+    other.include_failed_transactions = false;
+    for (stored, expected) in [(&gas, &one), (&one, &without), (&gas, &other)] {
+        assert_eq!(refusal(stored, expected), STREAM_MISMATCH);
+    }
+    let solana = |descriptor: &StreamDescriptor| StreamDescriptor {
+        family: BlockFamily::Solana,
+        ..descriptor.clone()
+    };
+    assert_eq!(refusal(&solana(&all), &solana(&without)), STREAM_MISMATCH);
+}
