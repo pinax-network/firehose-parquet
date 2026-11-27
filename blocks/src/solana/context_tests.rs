@@ -48,15 +48,7 @@ fn fixture(slot: u64) -> solana::Block {
     message.versioned = false;
     message.address_table_lookups.clear();
     message.account_keys[1] = VOTE_PROGRAM_ID.to_vec().into();
-    message.instructions[0].data =
-        bincode::serialize(&solana_vote_interface::instruction::VoteInstruction::Vote(
-            solana_vote_interface::state::Vote {
-                slots: vec![98, 99],
-                ..Default::default()
-            },
-        ))
-        .unwrap()
-        .into();
+    message.instructions[0].data = super::vote_payloads::vote(&[98, 99]).into();
     let mut failed_vote = vote.clone();
     failed_vote.meta.as_mut().unwrap().err = failed.meta.as_ref().unwrap().err.clone();
     let mut absent_transaction = success.clone();
