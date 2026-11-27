@@ -16,6 +16,8 @@ path = "src/lib.rs"
 deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls"] }
 # delta-rs's object_store major, as in `firehose-parquet`'s Delta log store.
 object_store = { version = "0.13.2", features = ["aws"] }
+# Decodes the paths of the commits a compaction lost its race to (#717).
+percent-encoding = "2"
 # The `Bytes` of the Parquet reader the compaction reads files with.
 bytes = "1"
 chrono = { version = "0.4", default-features = false }

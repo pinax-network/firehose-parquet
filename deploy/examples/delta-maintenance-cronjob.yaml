@@ -128,11 +128,11 @@ spec:
 # Weekly full VACUUM: also deletes untracked files older than the enforced
 # 168 h retention (files of a failed OPTIMIZE), but never a table's top-level
 # metadata/ (Iceberg metadata of an XTable sync). It runs half an hour away from
-# the hourly job, and must not overlap it: until #717 is fixed, two runs that
-# compact the same date at once both commit and duplicate that date's rows, and
-# `concurrencyPolicy: Forbid` only keeps one CronJob from overlapping itself.
-# Where an hourly run can last longer than the gap, widen it or suspend the
-# hourly job while this one runs.
+# the hourly job. `concurrencyPolicy: Forbid` only keeps one CronJob from
+# overlapping itself, but an overlap only wastes work: of two compactions of a
+# date, the second to commit is a conflict that keeps nothing (#717; every job
+# on the lake must run a release with that fix, see docs/delta-maintenance.md,
+# "Overlapping runs").
 apiVersion: batch/v1
 kind: CronJob
 metadata:

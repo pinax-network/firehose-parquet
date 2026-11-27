@@ -86,6 +86,14 @@ existing dataset cannot be backfilled below its start.
   sorts that day back into block order as a
   [repair](delta-maintenance.md#row-order), `OPTIMIZE_REPAIR_DATES` days per
   table and run (default 1), so allow about one such day per lane.
+- Several maintenance jobs may run at once, for example one compaction loop
+  per group of tables beside the checkpoint-only run, then one final
+  compaction per table after the seal. Jobs that compact the same table don't
+  duplicate rows: of two compactions of a day, the second to commit is a
+  conflict and keeps nothing. They only waste that work, so give each table
+  to one job. This holds only when every job that compacts the root runs a
+  release with #717's fix
+  ([Overlapping runs](delta-maintenance.md#overlapping-runs)).
 - The files a lane owes to the logs are untracked until its next commit. The
   lite VACUUM never deletes an untracked file. The weekly full VACUUM
   (`FULL_VACUUM=1`) deletes those older than its retention, at least 7 days:

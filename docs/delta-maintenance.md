@@ -94,9 +94,10 @@ line goes to stdout:
 
 The exit status is 0 when every table was maintained or skipped, 1 when a
 table failed, or 2 for a configuration error (a single `config_error` line,
-before any request). A conflict is a lost commit race only (delta-rs's commit
-conflict, too many commit attempts, or a version that already exists), left to
-the next run; any other commit error fails the table. Credentials are read from
+before any request). A conflict is a lost commit race only (another
+compaction of the same day, a metadata or protocol change, too many commit
+attempts, or a version that already exists), left to the next run; any other
+commit error fails the table. See [Overlapping runs](#overlapping-runs). Credentials are read from
 the environment and redacted from every error.
 
 On S3, log commits are conditional creates (`If-None-Match: *`), as the
@@ -177,11 +178,11 @@ in its own task and its own commit, for a long backlog such as the days of a
 time.
 
 - One planner per table hands out each day once, newest first. A file belongs
-  to one day, so the commits of two days never touch the same file. delta-rs
-  rebases a commit that loses the version race, as it rebases one over the
-  writer's; a day that still loses, or fails, is reported (`date_error`, and in
-  the table's `conflicts` or `errors`) and left to the next run, and the other
-  days go on.
+  to one day, so the commits of two days never touch the same file. A commit
+  that loses the version race to another day is tried again on top of it, as
+  on top of the writer's; a day that still loses, or fails, is reported
+  (`date_error`, and in the table's `conflicts` or `errors`) and left to the
+  next run, and the other days go on.
 - A day compacts and commits from the table as it was when the day started,
   which holds all of its files: nothing else removes them. The table is
   reloaded after each commit, and again if a day commits while it loads; a
@@ -191,14 +192,41 @@ time.
   gives it back if it fails, so no more repairs run or commit than that.
   Another day to repair waits for the turn meanwhile, so the same days are
   repaired as one day at a time.
-- Split a table's backlog this way only, inside one run, never over several
-  jobs: two runs that compact the same day both commit and duplicate its rows
-  ([#717](https://github.com/pinax-network/firehose-parquet/issues/717)).
+- Split a table's backlog this way, inside one run, rather than over several
+  jobs: two jobs that compact the same day waste the work of one of them
+  ([Overlapping runs](#overlapping-runs)).
 - Memory and CPU grow with N. Each running day takes about one CPU and what one
   day at a time takes (a concatenation stayed under 1 GiB on BSC and Base
   `gas_changes` and `calls`; a repair window peaks at about 1.3 GiB on Ethereum
   `calls`), plus its own copy of the table's file list, about 40 MB per 100,000
   active files. Raise the job's CPUs and memory limit with N.
+
+## Overlapping runs
+
+Two maintenance runs of one lake may overlap, for example the hourly job and
+the weekly full VACUUM, a run started by hand, or one compaction job per group
+of tables (#717):
+
+- Two compactions of the same day both write their files, but only the first
+  to commit keeps them. The second is a conflict (`conflict: true` on its
+  `date_error` line, and in the table's `conflicts`), so its run still exits
+  0. It commits nothing and deletes the files it wrote. Its work, up to a
+  whole day's rewrite, is lost, which is the only cost of an overlap.
+- A compaction commits with no delta-rs retry. When its commit loses the
+  version race, the job reads the commits that won it. A commit that removes
+  one of the day's files (another compaction of the day), or that changes the
+  table's metadata or protocol, is a conflict. A commit that adds a file this
+  compaction wrote is its own (the S3 client sent a commit again after losing
+  its response), and the day is committed. Otherwise (the writer's appends,
+  another day's compaction) the commit is tried again on top of them, up to 16
+  attempts in all.
+- delta-rs's own conflict checker ignores `remove` actions with
+  `dataChange: false`, which every OPTIMIZE writes. Up to v1.7.0 the job
+  relied on that checker, so two runs that compacted the same day both
+  committed and duplicated the day's rows. A lake is safe only once **every**
+  job that compacts it runs a version with this fix: when an older job loses
+  the race to a newer one, it still commits the day again. Retire or upgrade
+  the old jobs before letting runs overlap.
 
 ## Running the job
 
@@ -224,10 +252,9 @@ job (`scripts/delta_maintenance.py`).
 On Kubernetes,
 [`deploy/examples/delta-maintenance-cronjob.yaml`](../deploy/examples/delta-maintenance-cronjob.yaml)
 runs the writer's image with `args: ["maintenance"]` hourly (`17 * * * *`, `concurrencyPolicy: Forbid`) and a full VACUUM
-weekly. Never let two maintenance runs of one lake overlap: until
-[#717](https://github.com/pinax-network/firehose-parquet/issues/717) is fixed,
-two runs that compact the same date at once both commit and duplicate its rows,
-and `concurrencyPolicy: Forbid` covers only one CronJob. The example's `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
+weekly. `concurrencyPolicy: Forbid` covers only one CronJob; the two may
+overlap, which only wastes work ([Overlapping runs](#overlapping-runs)), so
+the example still schedules them half an hour apart. The example's `activeDeadlineSeconds` (3 h) leaves a run the time to repair a
 table's day, which commits all or nothing: on riv-dev1 the first run of 1.0.6
 took 6 min on eth, 35 min on Base and 90 min on BSC (`calls` alone 44 min).
 It runs as an unprivileged user with a read-only root filesystem and a `/tmp`
