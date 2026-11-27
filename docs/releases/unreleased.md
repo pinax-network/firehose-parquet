@@ -27,11 +27,13 @@ empty when the release is cut.
     and `backfill`, `recovery recover` and `recovery rebind` refuse it, each
     when it loads the dataset's state and before it writes a table or that
     state ("this dataset was written from Tron, which fireparq no longer
-    supports"). `recovery status` and `recovery release` still work on it,
-    `fireparq maintenance` still compacts, VACUUMs and checkpoints its tables
-    (it reads only their Delta logs), and `fireparq inspect` still reads its
-    files. Every Delta reader (DuckDB `delta_scan`, Polars `scan_delta`)
-    still reads its tables, whose schema is in
+    supports"). On S3 the refusal leaves the bucket's owner record released,
+    as any failure with no uncertain request does, so it needs no `recovery
+    release` afterwards. `recovery status` and `recovery release` still work
+    on it, `fireparq maintenance` still compacts, VACUUMs and checkpoints its
+    tables (it reads only their Delta logs), and `fireparq inspect` still
+    reads its files. Every Delta reader (DuckDB `delta_scan`, Polars
+    `scan_delta`) still reads its tables, whose schema is in
     [v1.7.0's docs](https://github.com/pinax-network/firehose-parquet/blob/v1.7.0/docs/schemas/tron.md).
     To keep writing one, stay on v1.7.0.
 

@@ -23,6 +23,10 @@
 //! refused by `build` and by a rebind without `--renamed`, both naming the
 //! flag; `recovery rebind --renamed` rebinds it, and it resumes, recovers and
 //! is maintained the same way, while nothing is written at the old name.
+//!
+//! A Tron dataset (#747) on the loopback bucket is refused by name by
+//! `build`, `recovery recover` and `recovery rebind`, and each refusal leaves
+//! the bucket's owner record released and the dataset unchanged.
 use firehose_protos::{eth, firehose};
 use prost::Message;
 use serde_json::Value;
@@ -623,4 +627,90 @@ async fn a_local_dataset_moved_with_mv_resumes_there_after_a_rebind_with_renamed
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dataset_whose_bucket_was_renamed_resumes_there_after_a_rebind_with_renamed() {
     a_renamed_dataset_resumes_under_its_new_name_after_a_rebind(true).await;
+}
+
+/// The bucket's owner record, as stored: one per bucket, at its root.
+fn owner(server: &s3::Server) -> Value {
+    let (_, bytes) = server.objects(".fireparq-owner-v1.json").pop().unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Rewrites `root`'s stored state as a Tron dataset's, as fireparq 1.7.0 or
+/// earlier wrote it from `--network tron`: `family` and `bytes_encoding` of
+/// its stream descriptor, with the record's checksum recomputed, so only the
+/// Tron check can refuse it.
+fn mark_as_tron(server: &s3::Server, root: &str) {
+    use sha2::{Digest, Sha256};
+    let key = format!("{root}/.fireparq-ingest/state.json");
+    let (_, bytes) = server.objects(&key).pop().unwrap();
+    let mut record: Value = serde_json::from_slice(&bytes).unwrap();
+    let descriptor = &mut record["payload"]["descriptor"];
+    descriptor["family"] = "tron".into();
+    descriptor["bytes_encoding"] = "tron_base58".into();
+    let checked = (
+        &record["format_version"],
+        &record["incarnation"],
+        &record["revision"],
+        &record["deleted"],
+        &record["payload"],
+    );
+    let digest = Sha256::digest(serde_json::to_vec(&checked).unwrap());
+    record["sha256"] = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into();
+    server.put(&key, serde_json::to_vec(&record).unwrap().into());
+}
+
+/// #747: a Tron dataset on S3 is refused by name by `build`, `recovery
+/// recover` and `recovery rebind`, and none of them keeps the bucket's owner
+/// record. `build` acquires it before it loads the state, so the refusal
+/// goes through the failure path, which releases an owner whose requests all
+/// had a definite outcome. Nothing under the dataset is written, and
+/// `recovery status` still reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tron_dataset_on_s3_is_refused_and_its_owner_record_released() {
+    let (_dir, cwd) = scratch();
+    let lake = Lake::new(true, &cwd).await;
+    let Lake::S3(server) = &lake else {
+        unreachable!()
+    };
+    build(&lake, &cwd, "chain", 103).await;
+    mark_as_tron(server, "chain");
+    lake.copy("chain", "chain-v1");
+    let (files, copy) = (lake.files("chain"), lake.files("chain-v1"));
+    let before = owner(server);
+    assert_eq!(before["state"], "released");
+
+    let refusal = "written from Tron, which fireparq no longer supports";
+    let refused = run(&lake, &cwd, "chain", 105).await;
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(text(&refused).contains(refusal), "{}", text(&refused));
+    assert!(
+        !text(&refused).contains("fireparq recovery release"),
+        "{}",
+        text(&refused)
+    );
+    // `build` took the record and released it.
+    let after = owner(server);
+    assert_eq!(after["state"], "released", "{after}");
+    assert!(
+        after["generation"].as_u64() > before["generation"].as_u64(),
+        "{before} {after}"
+    );
+
+    let (source, target) = (lake.output("chain"), lake.output("chain-v1"));
+    for args in [
+        vec!["recover", source.as_str()],
+        vec!["rebind", target.as_str(), "--from", source.as_str()],
+    ] {
+        let refused = refused_recovery(&lake, &cwd, &args).await;
+        assert!(refused.contains(refusal), "{args:?}: {refused}");
+        assert_eq!(owner(server)["state"], "released", "{args:?}: {refused}");
+    }
+    recovery(&lake, &cwd, &["status", &source]).await;
+    assert_eq!(owner(server)["state"], "released");
+    assert_eq!(lake.files("chain"), files);
+    assert_eq!(lake.files("chain-v1"), copy);
 }
