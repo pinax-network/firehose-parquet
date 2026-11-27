@@ -87,7 +87,7 @@ pub(crate) enum PreparedBody<'a> {
     /// `Filing.body` unset (never seen).
     Unset,
     /// `raw`: mapped onto `filings` (`raw_reason`, `raw_detail`) only.
-    Raw(&'a sec::RawFiling),
+    Raw,
     Ownership(&'a sec::OwnershipDocument, ownership::PreparedOwnership<'a>),
     Form13f(&'a sec::Form13fReport, form13f::PreparedForm13f<'a>),
     Beneficial(
@@ -182,7 +182,7 @@ fn prepare_filing<'a>(
     let envelope = envelope::prepare(&fc, filing, &mut issues).with_context(context)?;
     let body = match &filing.body {
         None => PreparedBody::Unset,
-        Some(Body::Raw(raw)) => PreparedBody::Raw(raw),
+        Some(Body::Raw(_)) => PreparedBody::Raw,
         Some(Body::Ownership(body)) => PreparedBody::Ownership(
             body,
             ownership::prepare(&fc, body, &mut issues).with_context(context)?,

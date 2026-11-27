@@ -1,5 +1,4 @@
 //! Preflight of `form144_notices`, `form144_securities_information`, `form144_securities_to_be_sold`, `form144_sales_past_3_months` (§3.19, §3.20, §3.21, §3.22).
-//! Owned by the `smallforms` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! Fallible only on the structural invariants of §4.7 (positions through
 //! `super::idx`); every typed value goes through `IssueSink::row`.

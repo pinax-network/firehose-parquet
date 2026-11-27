@@ -1,5 +1,4 @@
 //! Append phase of `ownership_documents`, `ownership_reporting_owners`, `ownership_transactions`, `ownership_holdings`, `ownership_footnotes` (§3.9, §3.10, §3.11, §3.12, §3.13).
-//! Owned by the `ownership` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

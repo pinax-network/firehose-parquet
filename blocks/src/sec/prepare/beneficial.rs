@@ -1,5 +1,4 @@
 //! Preflight of `beneficial_reports`, `beneficial_reporting_persons` (§3.17, §3.18).
-//! Owned by the `form13f-beneficial` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! Fallible only on the structural invariants of §4.7 (positions through
 //! `super::idx`); every typed value goes through `IssueSink::row`.

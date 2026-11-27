@@ -1,5 +1,4 @@
 //! Value tests of `form13f_reports`, `form13f_other_managers`, `form13f_holdings`, `beneficial_reports`, `beneficial_reporting_persons`.
-//! Owned by the `form13f-beneficial` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The fixtures mirror the §8.7 sample filings (real accessions, windows,
 //! acceptance times and values; long free text shortened). Every test that
@@ -2189,16 +2188,15 @@ fn fork_step_columns_come_last() {
 }
 
 // ---------------------------------------------------------------------------
-// Real data, local only
+// The real filings (golden fixture)
 // ---------------------------------------------------------------------------
 
-/// The §8.7 13F and 13D/G accessions in their real sample blocks.
-/// `cargo test -p blocks --lib sec::tests::form13f_beneficial::real -- --ignored`
+/// The §8.7 13F and 13D/G accessions in their real blocks of the golden
+/// fixture.
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_fixture_filings() {
-    let map_real = |day: &str, block_num: u64| {
-        let (identity, block) = fire::block(day, block_num);
+    let map_real = |block_num: u64| {
+        let (identity, block) = fixture::block(block_num);
         let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
         mapper
             .map_block(&block.encode_to_vec(), &identity, StreamEvent::default())
@@ -2212,7 +2210,7 @@ fn real_fixture_filings() {
             .collect()
     };
 
-    let b = map_real("2026-08-14", 2_977_836);
+    let b = map_real(2_977_836);
     let atairos = "0000950103-26-012367";
     let report = rows_of(&b, "form13f_reports", atairos)[0];
     let cell = |column: &str| b.cell("form13f_reports", column, report);
@@ -2230,14 +2228,14 @@ fn real_fixture_filings() {
         );
     }
 
-    let b = map_real("2014-08-11", 2_346_308);
+    let b = map_real(2_346_308);
     let report = rows_of(&b, "form13f_reports", "0000950123-14-008258")[0];
     assert_eq!(
         b.cell("form13f_reports", "value_multiplier_rule", report),
         "1000"
     );
 
-    let b = map_real("2014-08-11", 2_346_276);
+    let b = map_real(2_346_276);
     let notice = "0001323255-14-000015";
     let report = rows_of(&b, "form13f_reports", notice)[0];
     assert_eq!(
@@ -2250,27 +2248,27 @@ fn real_fixture_filings() {
         .collect();
     assert_eq!(kinds, ["cover", "cover"]);
 
-    let b = map_real("2026-08-14", 2_977_776);
+    let b = map_real(2_977_776);
     let kinds: Vec<String> = rows_of(&b, "form13f_other_managers", "0001811513-26-000014")
         .into_iter()
         .map(|row| b.cell("form13f_other_managers", "list_kind", row))
         .collect();
     assert_eq!(kinds, ["cover", "summary"]);
 
-    let b = map_real("2026-08-14", 2_977_896);
+    let b = map_real(2_977_896);
     assert_eq!(
         rows_of(&b, "form13f_holdings", "0001104659-26-097111").len(),
         1
     );
 
-    let b = map_real("2026-08-14", 2_977_880);
+    let b = map_real(2_977_880);
     let report = rows_of(&b, "form13f_reports", "0001595082-26-000063")[0];
     assert_eq!(
         b.cell("form13f_reports", "amendment_type", report),
         "NEW HOLDINGS"
     );
 
-    let b = map_real("2026-03-16", 2_956_129);
+    let b = map_real(2_956_129);
     let report = rows_of(&b, "beneficial_reports", "0000950103-26-003802")[0];
     let cell = |column: &str| b.cell("beneficial_reports", column, report);
     assert_eq!(cell("schedule_kind"), "13D");
@@ -2279,50 +2277,16 @@ fn real_fixture_filings() {
     );
     assert_eq!(cell("max_percent_of_class"), "18.700000000000");
 
-    let b = map_real("2026-08-14", 2_977_838);
+    let b = map_real(2_977_838);
     let report = rows_of(&b, "beneficial_reports", "0001172661-26-003444")[0];
     assert_eq!(
         b.cell("beneficial_reports", "previous_accession_number", report),
         "0001172661-26-002059"
     );
 
-    let b = map_real("2014-08-11", 2_346_252);
+    let b = map_real(2_346_252);
     let report = rows_of(&b, "beneficial_reports", "0001140361-14-031610")[0];
     let cell = |column: &str| b.cell("beneficial_reports", column, report);
     assert_eq!(cell("reporting_person_count"), "0");
     assert_eq!(cell("schedule_kind"), "13G");
-}
-
-/// This group's tables equal the prototype's on every sample day present
-/// locally, and none of them logs a `parse_issues` row (the prototype logs
-/// none for them either).
-/// `cargo test -p blocks --lib --release sec::tests::form13f_beneficial::matches -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn matches_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
-    for day in fire::DAYS {
-        if !fire::path(day).exists() {
-            continue;
-        }
-        let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-        let mut ours = 0;
-        let mut blocks = fire::blocks(day).peekable();
-        while let Some((identity, payload)) = blocks.next() {
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap();
-            if mapper.total_rows() < 500_000 && blocks.peek().is_some() {
-                continue;
-            }
-            let batches = Batches::new(mapper.flush().unwrap());
-            ours += batches
-                .column("parse_issues", "table_name")
-                .iter()
-                .filter(|table| TABLES.contains(&table.as_str()))
-                .count();
-        }
-        println!("{day}: {ours} parse_issues rows in this group's tables");
-        assert_eq!(ours, 0, "{day}");
-    }
 }

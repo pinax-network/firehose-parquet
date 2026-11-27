@@ -200,10 +200,6 @@ impl<C: Columns> Table<C> {
         append_fork_step(&mut self.fork_step, ctx.event);
         &mut self.cols
     }
-
-    pub(crate) fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
 }
 
 impl<C: Columns> SecTable for Table<C> {
@@ -421,10 +417,6 @@ impl I32 {
 }
 
 impl I64 {
-    pub(crate) fn val(&mut self, value: i64) {
-        self.0.append_value(value);
-    }
-
     pub(crate) fn opt(&mut self, value: Option<i64>) {
         self.0.append_option(value);
     }

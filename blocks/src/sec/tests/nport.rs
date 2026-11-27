@@ -1,11 +1,11 @@
 //! Value tests of `nport_reports`, `nport_monthly_returns`, `nport_monthly_activity`, `nport_holdings`, `nport_debt_reference_instruments`, `nport_debt_conversion_currencies`, `nport_derivatives`, `nport_derivative_swap_legs`, `nport_derivative_index_components`.
-//! Owned by the `nport` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
-//! The fixture tests mirror the N-PORT filings of final-spec §8.7 as prost
-//! structs (values copied from the 2026-08-28 sample, lists trimmed); the
-//! expected values are the prototype's (`proto/sec.duckdb`). Every table has at
-//! least one [`assert_full_row`], which names every column after [ID] + [FC] in
-//! schema order.
+//! The fixture tests mirror the N-PORT filings of §8.7 as prost structs
+//! (values copied from the 2026-08-28 sample, lists trimmed); the expected
+//! values are the reference prototype's, as in `blocks/tests/sec_golden.rs`.
+//! Every table has at least one [`assert_full_row`], which names every column
+//! after [ID] + [FC] in schema order. `real_fixture_filings_match_their_mirrors`
+//! checks the mirrors against the same filings in the golden fixture.
 
 use super::*;
 
@@ -2671,17 +2671,19 @@ fn fork_step_columns_follow_the_nport_columns() {
 }
 
 // ---------------------------------------------------------------------------
-// Real data (local only)
+// The real filings (golden fixture)
 // ---------------------------------------------------------------------------
 
-/// The mirrored prost structs above equal the real filings of the sample FIRE
-/// file, up to the documented trims.
-/// `cargo test -p blocks --lib sec::tests::nport::real_fixture -- --ignored --nocapture`
+/// The mirrored prost structs above equal the real filings of the golden
+/// fixture, up to the documented trims. The fixture trims some holding lists
+/// too (its README), so `kept` indexes its holdings: the mirror's, except for
+/// Vanguard, whose fixture keeps source holdings #0, #8 and #75 and whose
+/// mirror #0, #8 and #31, so only the first two are compared.
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_fixture_filings_match_their_mirrors() {
-    /// One §8.7 filing: its block, accession, mirror, the holdings the
-    /// mirror keeps and how many basket components it keeps.
+    /// One §8.7 filing: its block, accession, mirror, the fixture holdings
+    /// the mirror keeps (in its order) and how many basket components it
+    /// keeps.
     struct Case {
         block_num: u64,
         accession: &'static str,
@@ -2715,21 +2717,24 @@ fn real_fixture_filings_match_their_mirrors() {
             2_979_897,
             "0002048251-26-007523",
             fs_multi_strategy_basket,
-            &[26],
+            // Source holding #26.
+            &[0],
             Some(3),
         ),
         case(
             2_979_883,
             "0000910472-26-013496",
             catalyst_convertible,
-            &[6],
+            // Source holding #6.
+            &[0],
             None,
         ),
         case(
             2_979_913,
             "0000857490-26-000627",
             vanguard_international,
-            &[0, 8, 31],
+            // Source holdings #0 and #8.
+            &[0, 1],
             None,
         ),
         case(
@@ -2740,14 +2745,6 @@ fn real_fixture_filings_match_their_mirrors() {
             None,
         ),
     ];
-    let wanted: Vec<u64> = cases.iter().map(|case| case.block_num).collect();
-    let blocks: std::collections::HashMap<u64, sec::Block> = fire::blocks("2026-08-28")
-        .filter(|(identity, _)| wanted.contains(&identity.block_num))
-        .map(|(identity, payload)| {
-            let block = <sec::Block as Message>::decode(payload.as_slice()).unwrap();
-            (identity.block_num, block)
-        })
-        .collect();
     for Case {
         block_num,
         accession,
@@ -2756,7 +2753,7 @@ fn real_fixture_filings_match_their_mirrors() {
         components,
     } in cases
     {
-        let block = &blocks[&block_num];
+        let (_, block) = fixture::block(block_num);
         let filing = block
             .filings
             .iter()
@@ -2774,7 +2771,12 @@ fn real_fixture_filings_match_their_mirrors() {
                 }
             }
         }
-        let expected = mirror();
+        let mut expected = mirror();
+        if accession == "0000857490-26-000627" {
+            // Vanguard: source holding #31 is not in the fixture.
+            assert_eq!(expected.holdings.len(), 3);
+            expected.holdings.truncate(2);
+        }
         // Parts the mirrors leave out.
         if expected.fund_info.is_none() {
             trimmed.fund_info = None;
@@ -2789,82 +2791,4 @@ fn real_fixture_filings_match_their_mirrors() {
         }
         assert_eq!(trimmed, expected, "{accession}");
     }
-}
-
-/// Every column of every row of this group's tables equals the prototype's on
-/// the four sample days.
-/// `cargo test -p blocks --lib sec::tests::nport::nport_matches -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn nport_matches_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
-}
-
-/// The `parse_issues` rows of this group's tables equal the prototype's, in
-/// order (the other groups' rows are filtered out on both sides).
-/// `cargo test -p blocks --lib sec::tests::nport::nport_parse_issues -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn nport_parse_issues_match_the_prototype() {
-    use std::io::BufRead;
-    let mut total = 0usize;
-    let mut failures = Vec::new();
-    for day in fire::DAYS {
-        if !fire::path(day).exists() || !oracle::dir(day).exists() {
-            continue;
-        }
-        let path = oracle::dir(day).join("parse_issues.ndjson");
-        let file = std::fs::File::open(&path).unwrap();
-        let mut expected = std::io::BufReader::new(file)
-            .lines()
-            .map(|line| line.unwrap())
-            .filter(|line| line.contains("\"table_name\":\"nport_"))
-            .map(|line| serde_json::from_str::<serde_json::Value>(&line).unwrap());
-        let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-        let mut blocks = fire::blocks(day).peekable();
-        let mut rows = 0usize;
-        while let Some((identity, payload)) = blocks.next() {
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap();
-            if mapper.total_rows() < 500_000 && blocks.peek().is_some() {
-                continue;
-            }
-            let batches = mapper.flush().unwrap();
-            let batch = &batches["parse_issues"];
-            let schema = batch.schema();
-            let table = batch.column_by_name("table_name").unwrap();
-            for row in 0..batch.num_rows() {
-                let name = oracle::json_value(table.as_ref(), row);
-                if !name.as_str().unwrap_or("").starts_with("nport_") {
-                    continue;
-                }
-                rows += 1;
-                let actual: serde_json::Map<String, serde_json::Value> = schema
-                    .fields()
-                    .iter()
-                    .zip(batch.columns())
-                    .map(|(f, c)| (f.name().clone(), oracle::json_value(c.as_ref(), row)))
-                    .collect();
-                let actual = serde_json::Value::Object(actual);
-                match expected.next() {
-                    Some(e) if e == actual => {}
-                    other => {
-                        if failures.len() < 10 {
-                            failures
-                                .push(format!("{day} #{rows}: rust {actual} != oracle {other:?}"));
-                        }
-                    }
-                }
-            }
-        }
-        let left = expected.count();
-        println!("{day}: {rows} nport parse_issues rows, {left} oracle rows left");
-        if left > 0 {
-            failures.push(format!("{day}: {left} oracle rows not produced"));
-        }
-        total += rows;
-    }
-    println!("total {total} nport parse_issues rows");
-    assert!(failures.is_empty(), "{failures:#?}");
 }

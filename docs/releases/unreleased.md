@@ -50,6 +50,25 @@ empty when the release is cut.
   usual: help and the version print a stderr warning naming the file,
   `completions` stays silent. Every other command still fails on such a file
   before it reads or writes anything, as before.
+- **A SEC writer no longer stops on two disconnects in a quiet day (#711).**
+  `--reconnect-stall-timeout-secs` runs from the first failed reconnect until a
+  message arrives, so its generic 900 s ended a healthy SEC writer with
+  `reconnect stalled` when the stream dropped twice, 15 minutes apart, between
+  two daily bursts. A SEC build now defaults it to 129600 (36 hours, as
+  `--metrics-stale-after-secs`), when neither the flag nor
+  `RECONNECT_STALL_TIMEOUT_SECS` sets it; the `--reconnect-stall-timeout-secs 0`
+  workaround is no longer needed. The cap of 30 failed attempts without a
+  message still stops a dead endpoint after 10 to 31 minutes, and still counts
+  each disconnect of a quiet day: a gateway in front of firesec must not close
+  idle streams more often than about once an hour
+  ([SEC notes](../chains/sec.md)).
+- **The idle flush also runs while `build` reconnects (#711).** With
+  `--flush-idle-secs` (60 s for SEC), the rows of a burst were held until a new
+  stream when the endpoint went down right after it; they are now committed
+  once the stream has been quiet that long, reconnecting or not. A failed flush
+  ends the run, as during a stream.
+- **The idle-reconnect log prints `idle_for=120s` again (#711),** not
+  `idle_for=Some(120s)`, on every chain.
 
 - **The unmaintained `backoff` and `bincode` crates are replaced (#633).**
   Nothing changes for operators or data consumers; both advisories,
@@ -98,3 +117,12 @@ empty when the release is cut.
 ## Performance
 
 ## Internal
+
+- **SEC code cleanup (#711).** The SEC modules no longer allow dead code: the
+  unused helpers are removed or test-only. Comments no longer point to a local
+  `/tmp` specification or oracle. The 16 `#[ignore]`d tests that compared the
+  mapper with the prototype on local sample days are removed, since
+  `blocks/tests/sec_golden.rs` compares every column of every table with the
+  prototype's rows on the golden fixture. The eight that checked the tests'
+  mirrors against real filings now read those filings from the fixture and run
+  in CI.

@@ -307,46 +307,30 @@ fn filing_issues_are_keyed_and_flag_their_row() {
     assert_eq!(issues[1].index, [None, None, None]);
 }
 
-/// Real sample blocks: the filings of the deletion-notice window.
+/// The EDGAR deletion notice of golden-fixture window 2979792. The window
+/// holds the accession twice: the synthetic original, then the real notice.
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_deletion_notice_window() {
-    let (identity, block) = fire::block("2026-08-28", 2_979_792);
+    let (identity, block) = fixture::block(2_979_792);
     let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
     mapper
         .map_block(&block.encode_to_vec(), &identity, StreamEvent::default())
         .unwrap();
     let batches = Batches::new(mapper.flush().unwrap());
     let accessions = batches.column("filings", "accession_number");
-    let row = accessions
-        .iter()
-        .position(|a| a == "0002147005-26-000004")
-        .expect("deletion notice");
-    assert_eq!(batches.cell("filings", "is_deletion_notice", row), "true");
-    assert_eq!(batches.cell("filings", "raw_reason", row), "deletion");
-}
-
-/// The hub tables equal the prototype's on every sample day present locally.
-/// `cargo test -p blocks --lib sec::tests::hub::hub_matches -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn hub_matches_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &["blocks", "filings"], &[]);
-}
-
-/// Every `parse_issues` row equals the prototype's, in order, on every sample
-/// day present locally.
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn parse_issues_match_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &["parse_issues"], &[]);
-}
-
-/// All 43 tables equal the prototype's, row for row and column for column, on
-/// every sample day present locally (one mapping pass per day).
-/// `cargo test --release -p blocks --lib sec::tests::hub::all_tables -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn all_tables_match_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &crate::sec::schema::TABLE_NAMES, &[]);
+    let rows: Vec<usize> = (0..accessions.len())
+        .filter(|&row| accessions[row] == "0002147005-26-000004")
+        .collect();
+    let [original, notice] = rows[..] else {
+        panic!("two copies of the accession: {rows:?}");
+    };
+    assert_eq!(
+        batches.cell("filings", "is_deletion_notice", notice),
+        "true"
+    );
+    assert_eq!(batches.cell("filings", "raw_reason", notice), "deletion");
+    assert_eq!(
+        batches.cell("filings", "is_deletion_notice", original),
+        "false"
+    );
 }

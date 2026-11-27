@@ -23,23 +23,24 @@ needs more memory.
 
 **A live writer receives one burst a day.** firesec emits a feed day's 144 windows together once EDGAR publishes
 the daily dump (weekends and holidays as empty windows), then nothing until the next one, about a day later. The
-generic settings expect a block every few seconds, so a SEC build changes four defaults when neither flag nor
+generic settings expect a block every few seconds, so a SEC build changes five defaults when neither flag nor
 environment variable sets them ([CLI](../cli.md#family-defaults)). They apply when the family is known before
 streaming: with `--block-type sec`, or with `auto` when the endpoint's EndpointInfo names the chain `sec`. An `auto`
 build that recognizes SEC only from the first block keeps the generic defaults.
 
 | Setting | SEC default | Why |
 |---|---|---|
-| `--flush-idle-secs` | 60 | The size and interval triggers only run when a block arrives, and a burst replays history, which suspends the interval. Without this flush the end of each burst stays uncommitted, invisible to readers and lost on a restart, until the next feed day arrives. |
+| `--flush-idle-secs` | 60 | The size and interval triggers only run when a block arrives, and a burst replays history, which suspends the interval. Without this flush the end of each burst stays uncommitted, invisible to readers and lost on a restart, until the next feed day arrives. It also runs while the writer reconnects, so a burst is committed even when the endpoint goes down right after it. |
 | `--metrics-stale-after-secs` | 129600 (36 h) | `/ready` would otherwise fail 120 s after each burst, for most of the day. It now fails when a feed day is missing. |
 | `--stream-idle-timeout-secs` | 93600 (26 h) | The generic 120 s would reconnect about 700 times a day, each a `WARN` and a `grpc_reconnect` error count. HTTP/2 keepalive still detects a dead connection. |
+| `--reconnect-stall-timeout-secs` | 129600 (36 h) | Its timer runs from the first failed reconnect and resets only when a message arrives, so with the generic 900 s two disconnects 15 minutes apart in a quiet day stopped a healthy writer with `reconnect stalled` ([#711](https://github.com/pinax-network/firehose-parquet/issues/711)). It now gives up only when `/ready` already fails. |
 | `--grpc-max-message-bytes` | 536870912 (512 MiB) | See above. |
 
-`--reconnect-stall-timeout-secs` keeps its generic 900 s, and its timer resets only when a message arrives. On a
-quiet day, two disconnects 15 minutes apart therefore stop the writer with `reconnect stalled` even when the endpoint
-is healthy ([#711](https://github.com/pinax-network/firehose-parquet/issues/711)); it resumes from its output on
-restart. `--reconnect-stall-timeout-secs 0` avoids that exit and keeps the cap of 30 failed attempts without a
-message.
+The cap of 30 failed attempts without a message still applies, so a dead endpoint stops the writer after 10 to 31
+minutes of back-off, as on any chain; the writer resumes from its output on restart. The cap counts every
+disconnect of a quiet day, so 30 of them before the next burst also stop a healthy writer: a gateway in front of
+firesec must not close idle streams more often than about once an hour (Envoy's `stream_idle_timeout`, for one,
+defaults to 5 minutes).
 
 Alert on a writer down for more than a day as on any chain. Window 143 of a feed day reaches a final-only stream
 only with the next day's window 0, because firesec marks each window final when its successor exists.

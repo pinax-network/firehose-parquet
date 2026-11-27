@@ -179,8 +179,10 @@ pub async fn build_fixture_dataset(cwd: &Path, root: &Path) {
         "grpc_max_message_bytes 536870912",
         "flush_idle         60s",
         "stream_idle_timeout disabled",
+        "reconnect_stall_timeout 129600s",
         "applied the block family's build defaults to settings left unset",
-        "grpc_max_message_bytes=536870912 flush_idle_secs=60 metrics_stale_after_secs=129600",
+        "grpc_max_message_bytes=536870912 flush_idle_secs=60 \
+         reconnect_stall_timeout_secs=129600 metrics_stale_after_secs=129600",
     ] {
         assert!(logs.contains(expected), "{expected}\n{logs}");
     }

@@ -1,11 +1,9 @@
 //! Value tests of `npx_reports`, `npx_votes`, `npx_vote_records`, `npx_other_managers`, `ncen_reports`.
-//! Owned by the `funds` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The fixtures mirror the §8.7 sample filings field for field (prost structs,
 //! nothing read from disk); `real_fixtures_equal_their_mirrors` checks the
-//! mirrors against the real blocks locally, and `funds_match_the_prototype`
-//! compares every row of the five tables with the prototype on the four sample
-//! days.
+//! mirrors against the same filings in the golden fixture
+//! (`blocks/tests/fixtures/sec-v013/`).
 
 use super::*;
 
@@ -180,10 +178,8 @@ fn sample_filing(
     }
 }
 
-/// One §8.7 fixture: the sample day and block of the real filing, and its
-/// prost mirror.
+/// One §8.7 fixture: the block of the real filing, and its prost mirror.
 struct Fixture {
-    day: &'static str,
     block: u64,
     filing: sec::Filing,
 }
@@ -284,7 +280,6 @@ fn split_vote_fixture() -> Fixture {
         ],
     };
     Fixture {
-        day: "2026-08-28",
         block: 2_979_867,
         filing: sample_filing(
             2_979_867,
@@ -343,7 +338,6 @@ fn frequency_vote_fixture() -> Fixture {
         ],
     };
     Fixture {
-        day: "2026-08-28",
         block: 2_979_918,
         filing: sample_filing(
             2_979_918,
@@ -385,7 +379,6 @@ fn notice_report_fixture() -> Fixture {
         votes: Vec::new(),
     };
     Fixture {
-        day: "2026-03-16",
         block: 2_956_131,
         filing: sample_filing(
             2_956_131,
@@ -424,7 +417,6 @@ fn ncen_amendment_fixture() -> Fixture {
         ..Default::default()
     };
     Fixture {
-        day: "2026-03-16",
         block: 2_956_117,
         filing: sample_filing(
             2_956_117,
@@ -988,7 +980,6 @@ fn fund_report_cover_page_and_bool_kinds() {
         votes: Vec::new(),
     };
     let fixture = Fixture {
-        day: "",
         block: BLOCK_NUM,
         filing: filing("N-PX/A", Body::Npx(report)),
     };
@@ -1701,14 +1692,13 @@ fn ncen_series_registrant_and_date_issues() {
 }
 
 // ---------------------------------------------------------------------------
-// Real data (local only)
+// The real filings (golden fixture)
 // ---------------------------------------------------------------------------
 
-/// The prost mirrors above equal the real §8.7 filings on every column of this
-/// group's tables (the real filing mapped alone, as filing 0 of its window).
-/// `cargo test -p blocks --lib sec::tests::funds::real_fixtures -- --ignored --nocapture`
+/// The prost mirrors above equal the real §8.7 filings of the golden fixture
+/// on every column of this group's tables (the real filing mapped alone, as
+/// filing 0 of its window).
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_fixtures_equal_their_mirrors() {
     for fixture in [
         split_vote_fixture(),
@@ -1717,7 +1707,7 @@ fn real_fixtures_equal_their_mirrors() {
         ncen_amendment_fixture(),
     ] {
         let accession = &fixture.filing.accession_number;
-        let (_, block) = fire::block(fixture.day, fixture.block);
+        let (_, block) = fixture::block(fixture.block);
         let real = block
             .filings
             .into_iter()
@@ -1737,13 +1727,4 @@ fn real_fixtures_equal_their_mirrors() {
         }
         println!("{accession}: mirror equals the real filing");
     }
-}
-
-/// Every row and column of this group's tables equals the prototype's on the
-/// four sample days (`proto_map.py` NDJSON).
-/// `cargo test -p blocks --lib sec::tests::funds::funds_match -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn funds_match_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
 }

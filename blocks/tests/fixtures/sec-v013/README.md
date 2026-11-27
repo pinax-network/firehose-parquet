@@ -12,6 +12,8 @@ header and check it.
 - `sec_docs_sql.rs` serves the blocks from a mock Firehose to `fireparq build --block-type sec` and runs the SQL of
   [docs/chains/sec.md](../../../../docs/chains/sec.md) on the dataset.
 - `engine_compat.rs` re-homes their filings into its four test windows for the DuckDB and delta-rs read checks.
+- The SEC unit tests (`blocks/src/sec/tests/`, `fixture::block`) check their hand-written prost mirrors of these
+  filings against the blocks, and map some of them.
 
 ## Expectations
 

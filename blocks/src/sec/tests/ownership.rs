@@ -1,10 +1,9 @@
 //! Value tests of `ownership_documents`, `ownership_reporting_owners`, `ownership_transactions`, `ownership_holdings`, `ownership_footnotes`.
-//! Owned by the `ownership` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The fixtures mirror real 0.13.0 filings of the samples (§8.7) field for
-//! field; the `#[ignore]`d `real_*` tests check the mirrors against the local
-//! FIRE files, and `ownership_matches_the_prototype` compares every row of the
-//! four sample days with the prototype.
+//! field; the `real_*` tests check the mirrors against the same filings in the
+//! golden fixture (`blocks/tests/fixtures/sec-v013/`), whose every row
+//! `blocks/tests/sec_golden.rs` compares with the prototype's.
 
 use super::*;
 
@@ -1601,19 +1600,18 @@ fn positions_restart_per_filing() {
 }
 
 // ---------------------------------------------------------------------------
-// Real sample blocks (local only)
+// The real filings (golden fixture)
 // ---------------------------------------------------------------------------
 
 /// The prost mirrors are the real bodies, field for field.
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_bodies_equal_the_mirrors() {
     for (day, block_num, mirror) in [
         ("2026-08-14", JOINT_BLOCK, joint_form4()),
         ("2014-08-11", TZ_BLOCK, tz_form4a()),
         ("2026-03-16", REDISSEMINATED_BLOCK, redisseminated_form4()),
     ] {
-        let (_, block) = fire::block(day, block_num);
+        let (_, block) = fixture::block(block_num);
         let real = block
             .filings
             .iter()
@@ -1636,15 +1634,14 @@ fn real_bodies_equal_the_mirrors() {
 }
 
 /// The §8.7 ownership filings mapped from their real blocks: the same rows as
-/// the mirrors (at the filing's real position).
+/// the mirrors (at the filing's position in the fixture window).
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_fixture_filings_map_like_the_mirrors() {
     use arrow::array::{AsArray, BooleanArray};
 
     // Map the whole real block, then keep the rows of `accession` only.
     let only = |day: &str, block_num: u64, accession: &str| {
-        let (identity, block) = fire::block(day, block_num);
+        let (identity, block) = fixture::block(block_num);
         let position = block
             .filings
             .iter()
@@ -1680,91 +1677,4 @@ fn real_fixture_filings_map_like_the_mirrors() {
     let mut fc = TZ_FC;
     fc[0] = &position;
     assert_tz_form4a_rows(&batches, fc);
-}
-
-/// Every column of every row of this group's tables equals the prototype's
-/// (`proto_map.py`) on every sample day present locally.
-/// `cargo test -p blocks --lib sec::tests::ownership::ownership_matches -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn ownership_matches_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
-}
-
-/// This group's `parse_issues` rows equal the prototype's, in order and in
-/// every column, on every sample day present locally (the full-table check is
-/// `hub::parse_issues_match_the_prototype`, once every group has landed).
-/// `cargo test -p blocks --lib sec::tests::ownership::ownership_parse_issues -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn ownership_parse_issues_match_the_prototype() {
-    use serde_json::Value;
-    use std::io::BufRead;
-
-    let ours = |row: &serde_json::Map<String, Value>| {
-        row.get("table_name")
-            .and_then(Value::as_str)
-            .is_some_and(|table| TABLES.contains(&table))
-    };
-    for day in fire::DAYS {
-        if !fire::path(day).exists() || !oracle::dir(day).exists() {
-            println!("{day}: skipped (no local sample)");
-            continue;
-        }
-        let file = std::fs::File::open(oracle::dir(day).join("parse_issues.ndjson")).unwrap();
-        let expected: Vec<serde_json::Map<String, Value>> = std::io::BufReader::new(file)
-            .lines()
-            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-            .filter(|row| ours(row))
-            .collect();
-
-        let mut actual = Vec::new();
-        let mut drain = |mapper: &mut SecBlockMapper| {
-            let batches = mapper.flush().unwrap();
-            let batch = &batches["parse_issues"];
-            let schema = batch.schema();
-            for row in 0..batch.num_rows() {
-                let object: serde_json::Map<String, Value> = schema
-                    .fields()
-                    .iter()
-                    .zip(batch.columns())
-                    .map(|(field, column)| {
-                        (
-                            field.name().clone(),
-                            oracle::json_value(column.as_ref(), row),
-                        )
-                    })
-                    .collect();
-                if ours(&object) {
-                    actual.push(object);
-                }
-            }
-        };
-        let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-        for (identity, payload) in fire::blocks(day) {
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap_or_else(|e| panic!("{day} block {}: {e:#}", identity.block_num));
-            if mapper.total_rows() > 500_000 {
-                drain(&mut mapper);
-            }
-        }
-        drain(&mut mapper);
-
-        println!(
-            "{day}: rust {} ownership issues, prototype {}",
-            actual.len(),
-            expected.len()
-        );
-        assert_eq!(actual.len(), expected.len(), "{day}: issue count");
-        for (row, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-            for (column, value) in expected {
-                assert_eq!(
-                    actual.get(column),
-                    Some(value),
-                    "{day} issue {row}: {column}"
-                );
-            }
-        }
-    }
 }

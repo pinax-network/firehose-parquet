@@ -129,6 +129,9 @@ pub const DEFAULT_GRPC_MAX_MESSAGE_BYTES: u32 = 128 * 1024 * 1024;
 pub const DEFAULT_METRICS_STALE_AFTER_SECS: u64 = 120;
 /// Default stream idle timeout before a reconnect, in seconds.
 pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+/// Default reconnect stall timeout: seconds of failed reconnects without a
+/// stream message after which the stream gives up.
+pub const DEFAULT_RECONNECT_STALL_TIMEOUT_SECS: u64 = 900;
 
 /// Receive-side gRPC controls, shared by ingestion and partition probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,7 +379,7 @@ impl Default for Config {
             cache_control: None,
             metrics_port: None,
             stream_idle_timeout_secs: Some(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
-            reconnect_stall_timeout_secs: Some(900),
+            reconnect_stall_timeout_secs: Some(DEFAULT_RECONNECT_STALL_TIMEOUT_SECS),
             backfill_lane: None,
             lane_commit_flushes: DEFAULT_LANE_COMMIT_FLUSHES,
         }

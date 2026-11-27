@@ -423,12 +423,12 @@ fn test_defaults() {
     assert!(cli.common.aws.aws_endpoint_url.is_none());
     assert!(cli.common.s3_bucket.is_none());
     // Unset, so `build` can tell an explicit value from its family default;
-    // build_config applies the generic defaults (120 s, 128 MiB).
+    // build_config applies the generic defaults (120 s, 128 MiB, 900 s).
     assert_eq!(cli.common.stream_idle_timeout_secs, None);
     assert_eq!(cli.common.metrics_stale_after_secs, None);
     assert_eq!(cli.common.grpc.max_message_bytes, None);
     assert_eq!(cli.common.flush_idle_secs, None);
-    assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(900));
+    assert_eq!(cli.common.reconnect_stall_timeout_secs, None);
 }
 
 #[test]

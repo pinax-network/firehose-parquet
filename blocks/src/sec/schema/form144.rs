@@ -1,5 +1,6 @@
-//! Table specs generated from the final specification §3 (`final-spec.md`).
-//! Edit only to fix a divergence from the specification; regenerate
+//! Table specs: the columns, types and descriptions `docs/schemas/sec.md` is
+//! generated from (`§3.n` is the table's number in the design specification,
+//! see `super::super`). A change alters the schema: regenerate
 //! `docs/schemas/sec.md` and re-pin the chain schema digests afterwards.
 
 #[allow(unused_imports)]

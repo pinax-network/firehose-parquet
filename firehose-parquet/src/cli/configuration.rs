@@ -366,7 +366,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
                 .unwrap_or(crate::config::DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
         )
         .filter(|secs| *secs > 0),
-        reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs.filter(|secs| *secs > 0),
+        reconnect_stall_timeout_secs: Some(
+            args.reconnect_stall_timeout_secs
+                .unwrap_or(crate::config::DEFAULT_RECONNECT_STALL_TIMEOUT_SECS),
+        )
+        .filter(|secs| *secs > 0),
         backfill_lane: None,
         lane_commit_flushes: args.lane_commit_flushes,
     })

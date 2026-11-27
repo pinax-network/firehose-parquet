@@ -72,14 +72,6 @@ impl<'a> IssueSink<'a> {
     pub(crate) fn issues(&self) -> &[PreparedIssue<'a>] {
         &self.issues
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.issues.len()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.issues.is_empty()
-    }
 }
 
 /// The issue recorder of one row. Every helper maps `""` to `None` without an

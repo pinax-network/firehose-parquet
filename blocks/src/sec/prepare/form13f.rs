@@ -1,5 +1,4 @@
 //! Preflight of `form13f_reports`, `form13f_other_managers`, `form13f_holdings` (§3.14, §3.15, §3.16).
-//! Owned by the `form13f-beneficial` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! Fallible only on the structural invariants of §4.7 (positions through
 //! `super::idx`); every typed value goes through `IssueSink::row`.

@@ -305,7 +305,8 @@ impl FirehoseClient {
     /// [`Self::stream_blocks`], which also calls [`StreamHandler::quiet`] once
     /// the stream has delivered no message for `quiet_after`: once per quiet
     /// period, which the next message ends. Reconnects do not end it, and the
-    /// wait for the pending message continues after the call, so a quiet
+    /// call comes as well while reconnecting (connecting, the `Blocks` call,
+    /// back-off). The wait in progress continues after the call, so a quiet
     /// period never cancels a read. `None` never calls it.
     pub async fn stream_blocks_with_quiet<H: StreamHandler>(
         &self,
@@ -333,11 +334,7 @@ impl FirehoseClient {
         let mut last_block_num: Option<u64> = None;
         // Set once a bounded stream ended before its last requested block.
         let mut resumed_after_early_end = false;
-        // The quiet period starts with the call and restarts once each message
-        // is handled, so the handler's own work (a commit) is not quiet time.
-        let quiet_after = quiet_after.filter(|after| !after.is_zero());
-        let mut last_message = tokio::time::Instant::now();
-        let mut quiet_reported = false;
+        let mut quiet = QuietPeriod::new(quiet_after);
 
         loop {
             if shutdown.is_cancelled() {
@@ -345,7 +342,8 @@ impl FirehoseClient {
             }
             let mut blocks_this_connection = 0u64;
             let mut received_message = false;
-            let channel = match unless_shutdown(shutdown, self.connect()).await? {
+            let connected = quiet.await_unless_shutdown(shutdown, handler, self.connect());
+            let channel = match connected.await? {
                 Ok(ch) => ch,
                 Err(e) => {
                     let wait = reconnect.record_failure(Instant::now(), &e)?;
@@ -356,7 +354,10 @@ impl FirehoseClient {
                         "connection failed, retrying"
                     );
                     self.record_reconnect_metric();
-                    unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
+                    let backoff = tokio::time::sleep(wait);
+                    quiet
+                        .await_unless_shutdown(shutdown, handler, backoff)
+                        .await?;
                     continue;
                 }
             };
@@ -380,7 +381,8 @@ impl FirehoseClient {
 
             // Accepting the RPC is not progress: the back-off and the stall
             // timer are only reset once a message arrives.
-            let stream = match unless_shutdown(shutdown, client.blocks(request)).await? {
+            let accepted = quiet.await_unless_shutdown(shutdown, handler, client.blocks(request));
+            let stream = match accepted.await? {
                 Ok(resp) => resp.into_inner(),
                 Err(status) => {
                     self.fail_on_fatal_status(&status)?;
@@ -392,7 +394,10 @@ impl FirehoseClient {
                         "Blocks RPC failed, will retry"
                     );
                     self.record_reconnect_metric();
-                    unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
+                    let backoff = tokio::time::sleep(wait);
+                    quiet
+                        .await_unless_shutdown(shutdown, handler, backoff)
+                        .await?;
                     continue;
                 }
             };
@@ -400,33 +405,24 @@ impl FirehoseClient {
             let mut stream = stream;
 
             let session_end = loop {
-                let waiting_since = tokio::time::Instant::now();
-                let next_message = {
-                    let message = stream.message();
-                    tokio::pin!(message);
-                    loop {
-                        let idle_at = stream_idle_timeout.map(|timeout| waiting_since + timeout);
-                        let quiet_at = quiet_after
-                            .filter(|_| !quiet_reported)
-                            .map(|after| last_message + after);
+                // Only the idle timeout ends this wait without a message.
+                let idle = idle_timeout(tokio::time::Instant::now(), stream_idle_timeout);
+                let next_message = quiet
+                    .await_unless_shutdown(shutdown, handler, async {
                         tokio::select! {
                             biased;
-                            _ = shutdown.cancelled() => return Err(ShutdownRequested.into()),
-                            msg = &mut message => break Some(msg),
-                            _ = sleep_until_some(quiet_at) => {
-                                quiet_reported = true;
-                                debug!(quiet_for = ?quiet_after, "stream quiet");
-                                handler.quiet()?;
-                            }
-                            _ = sleep_until_some(idle_at) => break None,
+                            msg = stream.message() => Ok(msg),
+                            idle_for = idle => Err(idle_for),
                         }
+                    })
+                    .await?;
+                let next_message = match next_message {
+                    Ok(next_message) => next_message,
+                    Err(idle_for) => {
+                        warn!(?idle_for, "stream idle timeout reached, will reconnect");
+                        break SessionEnd::Idle;
                     }
                 };
-                let Some(next_message) = next_message else {
-                    warn!(idle_for = ?stream_idle_timeout, "stream idle timeout reached, will reconnect");
-                    break SessionEnd::Idle;
-                };
-                quiet_reported = false;
 
                 match next_message {
                     Ok(Some(resp)) => {
@@ -488,7 +484,7 @@ impl FirehoseClient {
                         }
 
                         cursor = Some(new_cursor.clone());
-                        last_message = tokio::time::Instant::now();
+                        quiet.restart();
                     }
                     Ok(None) => {
                         let stop_block = self.config.stop_block;
@@ -560,7 +556,10 @@ impl FirehoseClient {
                 )?,
                 SessionEnd::Failed(status) => reconnect.record_failure(Instant::now(), &status)?,
             };
-            unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
+            let backoff = tokio::time::sleep(wait);
+            quiet
+                .await_unless_shutdown(shutdown, handler, backoff)
+                .await?;
         }
     }
 
@@ -635,6 +634,73 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+/// Sleep for `timeout` from `since` and return it, or forever without one.
+async fn idle_timeout(since: tokio::time::Instant, timeout: Option<Duration>) -> Duration {
+    match timeout {
+        Some(timeout) => {
+            tokio::time::sleep_until(since + timeout).await;
+            timeout
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// The quiet period of [`FirehoseClient::stream_blocks_with_quiet`]. It
+/// starts with the call and restarts once each message is handled, so the
+/// handler's own work (a commit) is not quiet time; reconnecting does not
+/// restart it.
+struct QuietPeriod {
+    /// `None` (or zero) never calls [`StreamHandler::quiet`].
+    after: Option<Duration>,
+    since: tokio::time::Instant,
+    reported: bool,
+}
+
+impl QuietPeriod {
+    fn new(after: Option<Duration>) -> Self {
+        Self {
+            after: after.filter(|after| !after.is_zero()),
+            since: tokio::time::Instant::now(),
+            reported: false,
+        }
+    }
+
+    /// A message was handled: a new quiet period starts.
+    fn restart(&mut self) {
+        self.since = tokio::time::Instant::now();
+        self.reported = false;
+    }
+
+    /// Await `future`, unless `shutdown` is cancelled first
+    /// ([`unless_shutdown`]). When the quiet period passes meanwhile, call
+    /// `handler.quiet()` (once per period) and keep awaiting the same
+    /// `future`; an error from the handler ends the wait.
+    async fn await_unless_shutdown<T>(
+        &mut self,
+        shutdown: &CancellationToken,
+        handler: &mut impl StreamHandler,
+        future: impl std::future::Future<Output = T>,
+    ) -> Result<T> {
+        tokio::pin!(future);
+        loop {
+            let quiet_at = self
+                .after
+                .filter(|_| !self.reported)
+                .map(|after| self.since + after);
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Err(ShutdownRequested.into()),
+                output = &mut future => return Ok(output),
+                _ = sleep_until_some(quiet_at) => {
+                    self.reported = true;
+                    debug!(quiet_for = ?self.after, "stream quiet");
+                    handler.quiet()?;
+                }
+            }
+        }
     }
 }
 
@@ -1211,6 +1277,122 @@ mod tests {
         }
     }
 
+    /// Streams blocks 100 and 101, then fails the stream; every later
+    /// `Blocks` call fails: an endpoint that goes down after a burst.
+    #[derive(Clone, Default)]
+    struct DownAfterBurstService(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tonic::server::NamedService for DownAfterBurstService {
+        const NAME: &'static str = "sf.firehose.v2.Stream";
+    }
+
+    impl tonic::server::ServerStreamingService<firehose::Request> for DownAfterBurstService {
+        type Response = firehose::Response;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, Result<firehose::Response, tonic::Status>>;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<firehose::Request>) -> Self::Future {
+            let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if !first {
+                    return Err(tonic::Status::unavailable("endpoint down"));
+                }
+                let burst = futures::stream::iter([
+                    Ok(test_response(100)),
+                    Ok(test_response(101)),
+                    Err(tonic::Status::unavailable("node restart")),
+                ]);
+                Ok(tonic::Response::new(Box::pin(burst) as Self::ResponseStream))
+            })
+        }
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>>
+        for DownAfterBurstService
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let service = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.server_streaming(service, request).await)
+            })
+        }
+    }
+
+    /// #711: the quiet period also runs while reconnecting. Blocks 100 and
+    /// 101 arrive, the stream fails right after, and every reconnect fails:
+    /// the handler is told the stream is quiet during the reconnect back-off
+    /// (once, since no message starts a new period), before the stall timeout
+    /// ends the run. Before, the burst stayed unflushed until a new stream.
+    /// A failing quiet call ends the run with its error, as in a session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quiet_periods_also_pass_while_reconnecting() {
+        for fail_quiet in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(socket, _)| socket), listener))
+            });
+            let service = DownAfterBurstService::default();
+            let calls = std::sync::Arc::clone(&service.0);
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .unwrap();
+            });
+            let mut config = test_config(&endpoint);
+            config.start_block = Some(100);
+            config.stream_idle_timeout_secs = Some(30);
+            // Over within a few back-offs (0.5 s to 1.5 s, then longer).
+            config.reconnect_stall_timeout_secs = Some(2);
+            let client = FirehoseClient::new(config).unwrap();
+            let mut recorder = Recorder {
+                events: Vec::new(),
+                fail_quiet,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(20),
+                client.stream_blocks_with_quiet(
+                    None,
+                    &CancellationToken::new(),
+                    Some(Duration::from_millis(200)),
+                    &mut recorder,
+                ),
+            )
+            .await
+            .expect("the stall timeout must end the stream");
+            server.abort();
+            let _ = server.await;
+            let error = format!("{:#}", result.unwrap_err());
+            assert_eq!(recorder.events, ["100", "101", "quiet"], "{error}");
+            if fail_quiet {
+                assert!(error.contains("injected quiet flush failure"), "{error}");
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            } else {
+                assert!(error.contains("reconnect stalled"), "{error}");
+                assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn malformed_stream_identity_never_reaches_handler_or_checkpoint() {
         for invalid in [
@@ -1611,6 +1793,49 @@ mod tests {
         assert!(state.record_failure(t0, &"down").is_ok());
     }
 
+    /// #711: with the generic 900 s, a quiet SEC day (no message for about a
+    /// day) stopped a healthy writer on its second disconnect 15 minutes
+    /// after the first. SEC's 36 h stall timeout lets 29 disconnects an hour
+    /// apart pass, and the cap still stops a dead endpoint, whose attempts
+    /// fail one back-off after another, after 10 to 31 minutes.
+    #[test]
+    fn test_a_long_stall_timeout_survives_a_quiet_day_and_still_stops_a_dead_endpoint() {
+        let sec_stall = Some(Duration::from_secs(36 * 3600));
+        let t0 = Instant::now();
+
+        let mut generic = ReconnectState::new(Some(Duration::from_secs(900)));
+        generic.record_failure(t0, &"reset").unwrap();
+        let error = generic
+            .record_failure(t0 + Duration::from_secs(15 * 60), &"reset")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reconnect stalled"), "{error}");
+
+        let mut quiet_day = ReconnectState::new(sec_stall);
+        for hour in 0..MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS - 1 {
+            quiet_day
+                .record_failure(t0 + Duration::from_secs(hour * 3600), &"reset")
+                .unwrap();
+        }
+
+        let mut dead = ReconnectState::new(sec_stall);
+        let mut now = t0;
+        let error = loop {
+            match dead.record_failure(now, &"connection refused") {
+                Ok(wait) => now += wait,
+                Err(error) => break error.to_string(),
+            }
+        };
+        assert!(error.contains("30 consecutive failed attempts"), "{error}");
+        let elapsed = now - t0;
+        // 29 waits: 11 growing (85.5 s to 256.5 s in all), then 18 at the cap.
+        assert!(
+            elapsed >= Duration::from_secs(85 + 18 * 30)
+                && elapsed <= Duration::from_secs(257 + 18 * 90),
+            "{elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_clean_end_of_live_stream_reconnects() {
         assert_eq!(
@@ -1997,6 +2222,85 @@ mod tests {
         .await
         .expect("stream_blocks must return promptly after shutdown");
         (result, started.elapsed())
+    }
+
+    /// #711: the idle reconnect logs the timeout, `idle_for=1s`, as it did
+    /// before the SEC change made it `idle_for=Some(1s)`.
+    #[test]
+    fn idle_reconnect_logs_the_timeout_as_a_duration() {
+        // Tracing caches callsite interest process-wide (as in auth.rs):
+        // capture in a child process, isolated from concurrent tests.
+        const CHILD: &str = "FIREPARQ_IDLE_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "grpc::tests::idle_reconnect_logs_the_timeout_as_a_duration",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success()
+                    && String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+                "isolated log test failed: {}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(output.reopen().unwrap()))
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+        // One thread, so the server and the client log to this subscriber.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(socket, _)| socket), listener))
+            });
+            // Block 100, then silence.
+            let service = CancellationService {
+                scenario: CancellationScenario::Idle,
+                called: std::sync::Arc::new(tokio::sync::Notify::new()),
+            };
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .unwrap();
+            });
+            let mut config = test_config(&endpoint);
+            config.stream_idle_timeout_secs = Some(1);
+            let client = FirehoseClient::new(config).unwrap();
+            let shutdown = CancellationToken::new();
+            let canceller = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1700)).await;
+                canceller.cancel();
+            });
+            let result = client
+                .stream_blocks(None, &shutdown, |_, _, _, _, _| Ok(()))
+                .await;
+            assert!(is_shutdown_error(&result.unwrap_err()));
+            server.abort();
+        });
+        let log = std::fs::read_to_string(output.path()).unwrap();
+        assert!(
+            log.contains("stream idle timeout reached, will reconnect idle_for=1s"),
+            "{log}"
+        );
+        assert!(!log.contains("idle_for=Some"), "{log}");
     }
 
     #[tokio::test]
