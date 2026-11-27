@@ -12,7 +12,6 @@ One file per chain family lists every table `fireparq` writes and every column w
 | NEAR | `near` | 7 | `base58` | [near.md](near.md) |
 | Antelope | `antelope` | 4 | `hex_no_prefix` | [antelope.md](antelope.md) |
 | Cosmos | `cosmos` | 4 | `hex` | [cosmos.md](cosmos.md) |
-| Tron | `tron` | 6 | `tron_base58` | [tron.md](tron.md) |
 | Beacon | `beacon` | 13 | `hex` | [beacon.md](beacon.md) |
 | SEC EDGAR | `sec` | 43 | `hex` | [sec.md](sec.md) |
 | HyperCore | `hypercore` | 12 | `hex` | [hypercore.md](hypercore.md) |

@@ -71,7 +71,6 @@ fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
         EncodeBytes::Hex => "hex",
         EncodeBytes::HexNoPrefix => "hex_no_prefix",
         EncodeBytes::Base58 => "base58",
-        EncodeBytes::TronBase58 => "tron_base58",
     }
 }
 
@@ -86,32 +85,12 @@ fn block_id_encoding_to_bytes_encoding(encoding: &str) -> Option<EncodeBytes> {
     }
 }
 
-fn is_tron_style_chain_name(chain_name: &str) -> bool {
-    chain_name.eq_ignore_ascii_case("tron") || chain_name.eq_ignore_ascii_case("tron-evm")
-}
-
-fn metadata_has_tron_style_chain(state: &CursorState) -> bool {
-    state
-        .get_metadata("firehose-parquet.chain_name")
-        .map(is_tron_style_chain_name)
-        .unwrap_or(false)
-        || state
-            .get_metadata("firehose-parquet.chain_name_aliases")
-            .map(|aliases| aliases.split(',').any(is_tron_style_chain_name))
-            .unwrap_or(false)
-}
-
-fn block_type_default_bytes_encoding(
-    block_type: &str,
-    tron_style_evm_profile: bool,
-) -> Option<EncodeBytes> {
+fn block_type_default_bytes_encoding(block_type: &str) -> Option<EncodeBytes> {
     match block_type {
-        "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
         "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" | "hypercore" => Some(EncodeBytes::Hex),
         // Antelope output has always used unprefixed hex (`ChainProfile`).
         "antelope" => Some(EncodeBytes::HexNoPrefix),
         "solana" | "near" => Some(EncodeBytes::Base58),
-        "tron" => Some(EncodeBytes::TronBase58),
         _ => None,
     }
 }
@@ -122,12 +101,8 @@ fn block_type_default_bytes_encoding(
 /// stored block-id encoding hint, and finally defaults to hex when neither is
 /// available.
 fn resolve_auto_bytes_encoding(state: &CursorState) -> EncodeBytes {
-    let tron_style_evm_profile = metadata_has_tron_style_chain(state);
-
     if let Some(block_type) = state.get_metadata("firehose-parquet.block_type") {
-        if let Some(encoding) =
-            block_type_default_bytes_encoding(block_type, tron_style_evm_profile)
-        {
+        if let Some(encoding) = block_type_default_bytes_encoding(block_type) {
             return encoding;
         }
     }

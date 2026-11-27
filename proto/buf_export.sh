@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Pulls the latest proto definitions from the Buf Build Registry (https://buf.build)
-# and writes them as flat, single-file protos named after each block type. Three trees keep
-# their upstream import paths instead: Tron's core/*.proto, SEC's pinax/sec/v1/*.proto and
-# HyperCore's pinax/hypercore/v1/*.proto (with its package path and imports unchanged, so a
-# refresh is a plain copy).
+# and writes them as flat, single-file protos named after each block type. Two trees keep
+# their upstream import paths instead: SEC's pinax/sec/v1/*.proto and HyperCore's
+# pinax/hypercore/v1/*.proto (with its package path and imports unchanged, so a refresh is
+# a plain copy).
 #
 # Prerequisites:
 #   - buf CLI (https://buf.build/docs/installation)
@@ -53,17 +53,6 @@ echo "  ✓ antelope.proto"
 buf export buf.build/streamingfast/firehose-cosmos -o "$TMP_DIR/cosmos"
 cp "$TMP_DIR/cosmos/sf/cosmos/type/v2/block.proto" "$PROTO_DIR/cosmos.proto"
 echo "  ✓ cosmos.proto"
-
-
-# ── Tron ──────────────────────────────────────────────────
-buf export buf.build/streamingfast/firehose-tron -o "$TMP_DIR/tron"
-cp "$TMP_DIR/tron/sf/tron/type/v1/block.proto" "$PROTO_DIR/tron.proto"
-# Tron depends on core protocol protos
-mkdir -p "$PROTO_DIR/core"
-cp "$TMP_DIR/tron/core/Tron.proto"             "$PROTO_DIR/core/Tron.proto"
-cp "$TMP_DIR/tron/core/Discover.proto"          "$PROTO_DIR/core/Discover.proto"
-cp "$TMP_DIR/tron/core/common.proto"            "$PROTO_DIR/core/common.proto"
-echo "  ✓ tron.proto (+ core/)"
 
 # ── Beacon ────────────────────────────────────────────────
 buf export buf.build/pinax/firehose-beacon -o "$TMP_DIR/beacon"

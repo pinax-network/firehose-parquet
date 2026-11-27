@@ -515,7 +515,7 @@ pub struct BuildArgs {
 
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
-    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec, hypercore
+    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, beacon, sec, hypercore
     #[arg(
         long,
         env = "BLOCK_TYPE",

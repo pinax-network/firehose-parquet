@@ -227,7 +227,6 @@ fn full_size_blobs_remain_binary_in_every_encoding_and_after_flush() {
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ] {
         let block = beacon::Block {
             body: Some(beacon::block::Body::Deneb(beacon::DenebBody {

@@ -76,7 +76,6 @@ fn payloads_are_binary_and_indices_are_lists_under_every_identity_encoding() {
         EncodeBytes::Binary,
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
-        EncodeBytes::TronBase58,
     ] {
         for fork in [false, true] {
             let mut mapper = SolanaBlockMapper::new(true, fork, encoding.clone(), false, true);

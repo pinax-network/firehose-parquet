@@ -108,7 +108,6 @@ fn chain_title(kind: ChainKind) -> &'static str {
         ChainKind::Near => "NEAR",
         ChainKind::Antelope => "Antelope",
         ChainKind::Cosmos => "Cosmos",
-        ChainKind::Tron => "Tron",
         ChainKind::Beacon => "Beacon",
         ChainKind::Sec => "SEC EDGAR",
         ChainKind::Hypercore => "HyperCore",
@@ -121,11 +120,6 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
         ChainKind::Evm => &[
             "Extended tables are populated only from blocks at the EXTENDED detail level; \
              the `system_*` tables hold block-level events without `tx_hash`.",
-        ],
-        ChainKind::Tron => &[
-            "Hash columns (block, transaction and internal transaction hashes, `tx_trie_root` \
-             and log topics) are always lowercase hex without `0x`, whatever the encoding \
-             (`tron_reserved_encoding` in `blocks/src/tron/schema.rs`).",
         ],
         ChainKind::Bitcoin => &[
             "`outputs.value_sats` is a checked `long`, not a `decimal(20,0)`: consensus caps \
@@ -589,52 +583,6 @@ const COLUMN_DESCRIPTIONS: &[(ChainKind, &str, &str, &str)] = &[
         "state_changes",
         "storage_usage",
         "`AccountUpdate`: storage in bytes.",
-    ),
-    // Tron
-    (
-        ChainKind::Tron,
-        "transactions",
-        "expiration_ms",
-        "Transaction expiration time in unix milliseconds, named apart from the canonical \
-         block `timestamp` column. Raw `Int64` rather than a Timestamp type.",
-    ),
-    (
-        ChainKind::Tron,
-        "transactions",
-        "tx_timestamp_ms",
-        "Transaction creation time in unix milliseconds. Set by the sender and not validated \
-         on chain (0 and other units occur), so it stays raw `Int64` rather than a Timestamp \
-         type.",
-    ),
-    (
-        ChainKind::Tron,
-        "transactions",
-        "transaction_success",
-        "Transaction outcome (#550).",
-    ),
-    (
-        ChainKind::Tron,
-        "logs",
-        "transaction_success",
-        PARENT_TRANSACTION_OUTCOME,
-    ),
-    (
-        ChainKind::Tron,
-        "internal_transactions",
-        "transaction_success",
-        PARENT_TRANSACTION_OUTCOME,
-    ),
-    (
-        ChainKind::Tron,
-        "contracts",
-        "transaction_success",
-        PARENT_TRANSACTION_OUTCOME,
-    ),
-    (
-        ChainKind::Tron,
-        "internal_call_values",
-        "transaction_success",
-        PARENT_TRANSACTION_OUTCOME,
     ),
     // Beacon
     (
@@ -1798,8 +1746,6 @@ fn check_descriptions(references: &[ChainReference]) -> Result<()> {
 struct ChainReference {
     kind: ChainKind,
     encoding: EncodeBytes,
-    /// The encoding on Tron-style endpoints, when it differs from `encoding`.
-    tron_style_encoding: Option<EncodeBytes>,
     tables: Vec<TableReference>,
     /// `ChainProfile::decimal_columns`.
     decimal_columns: &'static [DecimalColumn],
@@ -1922,7 +1868,7 @@ fn table_names(tables: &Tables) -> Vec<&str> {
 fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
     let profile = kind.profile();
     let types = profile.delta_types();
-    let encoding = kind.default_bytes_encoding(false);
+    let encoding = kind.default_bytes_encoding();
     let defaults = Toggles::defaults(kind);
 
     let full = mapper_tables(kind, defaults.options(true, &encoding))?;
@@ -1993,18 +1939,6 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             }
         }
     }
-
-    let tron_style = kind.default_bytes_encoding(true);
-    let tron_style_encoding = if tron_style == encoding {
-        None
-    } else {
-        let tables = mapper_tables(kind, defaults.options(true, &tron_style))?;
-        ensure!(
-            tables == full,
-            "{kind}: the Tron-style encoding {tron_style:?} changes the Arrow schema"
-        );
-        Some(tron_style)
-    };
 
     let final_only = mapper_tables(kind, defaults.options(false, &encoding))?;
     let binary = mapper_tables(kind, defaults.options(true, &EncodeBytes::Binary))?;
@@ -2132,7 +2066,6 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
     Ok(ChainReference {
         kind,
         encoding,
-        tron_style_encoding,
         tables,
         decimal_columns: profile.decimal_columns,
     })
@@ -2148,7 +2081,6 @@ fn encoding_label(encoding: &EncodeBytes) -> &'static str {
         EncodeBytes::Hex => "hex",
         EncodeBytes::HexNoPrefix => "hex_no_prefix",
         EncodeBytes::Base58 => "base58",
-        EncodeBytes::TronBase58 => "tron_base58",
     }
 }
 
@@ -2164,7 +2096,6 @@ fn encoding_fixed_since(kind: ChainKind) -> &'static str {
         | ChainKind::Near
         | ChainKind::Antelope
         | ChainKind::Cosmos
-        | ChainKind::Tron
         | ChainKind::Beacon => "in v1.0.0",
         ChainKind::Sec => "since `--block-type sec` was added",
         ChainKind::Hypercore => "since `--block-type hypercore` was added",
@@ -2177,10 +2108,6 @@ fn encoding_description(encoding: &EncodeBytes) -> &'static str {
         EncodeBytes::Hex => "lowercase hex with a `0x` prefix",
         EncodeBytes::HexNoPrefix => "lowercase hex without a `0x` prefix",
         EncodeBytes::Base58 => "Base58",
-        EncodeBytes::TronBase58 => {
-            "Tron Base58Check for 20- and 21-byte values such as addresses, lowercase hex \
-             without `0x` for other lengths"
-        }
     }
 }
 
@@ -2424,15 +2351,6 @@ fn render_chain(reference: &ChainReference) -> String {
         encoding_description(&reference.encoding),
         encoding_fixed_since(kind)
     );
-    if let Some(tron_style) = &reference.tron_style_encoding {
-        let _ = write!(
-            out,
-            " Tron-style endpoints (`tron`, `tron-evm` chain names) use `{}` ({}) instead, \
-             with the same types.",
-            encoding_label(tron_style),
-            encoding_description(tron_style)
-        );
-    }
     out.push('\n');
     // In order of first appearance: `block_id` makes `string` first.
     let mut encoded_types: Vec<String> = Vec::new();
@@ -2668,7 +2586,7 @@ fn render_mapping(reference: &ChainReference, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana, tron};
+    use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana};
 
     /// The first line where `committed` and `rendered` differ, for the failure message.
     fn first_difference(committed: &str, rendered: &str) -> String {
@@ -2780,7 +2698,7 @@ mod tests {
         let docs = render_all().expect("render the schema reference");
         for kind in ChainKind::ALL {
             let reference = chain_reference(kind).unwrap();
-            let encoding = kind.default_bytes_encoding(false);
+            let encoding = kind.default_bytes_encoding();
             for extended in [false, true] {
                 for opt_in_tables in opt_in_selections() {
                     for with_votes in [false, true] {
@@ -2873,7 +2791,6 @@ mod tests {
             (ChainKind::Cosmos, &cosmos::schema::TABLE_NAMES[..]),
             (ChainKind::Hypercore, &hypercore::schema::TABLE_NAMES[..]),
             (ChainKind::Near, &near::schema::TABLE_NAMES[..]),
-            (ChainKind::Tron, &tron::schema::TABLE_NAMES[..]),
             (ChainKind::Sec, &sec::schema::TABLE_NAMES[..]),
         ] {
             assert_eq!(names(kind, all), expect(constants), "{kind}");

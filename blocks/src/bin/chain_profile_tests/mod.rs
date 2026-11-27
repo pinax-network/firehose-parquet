@@ -6,6 +6,8 @@
 //! auto-detection decisions from `ingestion/{setup,runtime}.rs`. They are
 //! oracles only: every test compares the current helpers with them over
 //! requested types, endpoint metadata, cursor metadata and flag combinations.
+//! Tron, removed with Tron support (#747), is taken out of both, as each
+//! "Tron removed" comment marks.
 
 use crate::*;
 use firehose_parquet::networks::KNOWN_NETWORK_NAMES;
@@ -173,7 +175,7 @@ mod legacy {
             "near" => BlockFamily::Near,
             "antelope" => BlockFamily::Antelope,
             "cosmos" => BlockFamily::Cosmos,
-            "tron" => BlockFamily::Tron,
+            // Tron removed (#747).
             "beacon" => BlockFamily::Beacon,
             // post-#526 families: sec, hypercore
             "sec" => BlockFamily::Sec,
@@ -195,8 +197,7 @@ mod legacy {
             Ok("antelope".to_string())
         } else if type_url.contains("cosmos") {
             Ok("cosmos".to_string())
-        } else if type_url.contains("tron") {
-            Ok("tron".to_string())
+        // Tron removed (#747).
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
         } else if type_url.contains("pinax.sec.") {
@@ -218,16 +219,9 @@ mod legacy {
         matches!(block_type, "solana" | "near" | "beacon")
     }
 
-    pub(crate) fn output_encoding_policy(
-        block_type: &str,
-        tron_style_evm_profile: bool,
-    ) -> Option<OutputEncodingPolicy> {
+    // Tron removed (#747): the `tron_style_evm_profile` and `tron` arms.
+    pub(crate) fn output_encoding_policy(block_type: &str) -> Option<OutputEncodingPolicy> {
         match block_type {
-            "evm" if tron_style_evm_profile => Some(OutputEncodingPolicy {
-                bytes_encoding: EncodeBytes::TronBase58,
-                block_id_encoding: "hex_no_prefix",
-                allow_endpoint_block_id_hint: false,
-            }),
             "evm" | "bitcoin" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
                 bytes_encoding: EncodeBytes::Hex,
                 block_id_encoding: "hex_0x",
@@ -243,11 +237,6 @@ mod legacy {
                 block_id_encoding: "base58",
                 allow_endpoint_block_id_hint: false,
             }),
-            "tron" => Some(OutputEncodingPolicy {
-                bytes_encoding: EncodeBytes::TronBase58,
-                block_id_encoding: "hex_no_prefix",
-                allow_endpoint_block_id_hint: false,
-            }),
             // post-#526 families: sec, hypercore
             "sec" | "hypercore" => Some(OutputEncodingPolicy {
                 bytes_encoding: EncodeBytes::Hex,
@@ -261,10 +250,9 @@ mod legacy {
     pub(crate) fn resolve_auto_encode_bytes(
         block_type: Option<&str>,
         endpoint_info: &Option<EndpointInfo>,
-        tron_style_evm_profile: bool,
     ) -> EncodeBytes {
         if let Some(block_type) = block_type {
-            if let Some(policy) = output_encoding_policy(block_type, tron_style_evm_profile) {
+            if let Some(policy) = output_encoding_policy(block_type) {
                 if policy.allow_endpoint_block_id_hint {
                     return endpoint_info
                         .as_ref()
@@ -361,10 +349,8 @@ mod legacy {
             );
         }
 
+        // Tron removed (#747): the exact `tron-evm` and the `tron` checks.
         for candidate in candidates {
-            if candidate.eq_ignore_ascii_case("tron-evm") {
-                return Some("evm");
-            }
             // post-#526 family: sec (exact name only)
             if candidate == "sec" {
                 return Some("sec");
@@ -386,9 +372,6 @@ mod legacy {
             }
             if candidate.contains("cosmos") {
                 return Some("cosmos");
-            }
-            if candidate.contains("tron") {
-                return Some("tron");
             }
             if candidate.contains("hypercore") {
                 return Some("hypercore");
@@ -575,7 +558,6 @@ mod legacy_inline {
         if !dry_run && block_type != "evm" {
             extended = false;
         }
-        let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(endpoint_info);
         let initial_block_type = if block_type != "auto" {
             Some(block_type)
         } else {
@@ -591,11 +573,8 @@ mod legacy_inline {
             existing_cursor_state,
             cursor_override,
         );
-        let initial_bytes_encoding = legacy::resolve_auto_encode_bytes(
-            initial_block_type,
-            endpoint_info,
-            tron_style_evm_profile,
-        );
+        let initial_bytes_encoding =
+            legacy::resolve_auto_encode_bytes(initial_block_type, endpoint_info);
         SetupDecisions {
             solana_chain,
             antelope_chain,
@@ -628,14 +607,13 @@ mod legacy_inline {
     }
 }
 
-const LABELS: [&str; 10] = [
+const LABELS: [&str; 9] = [
     "evm",
     "bitcoin",
     "solana",
     "near",
     "antelope",
     "cosmos",
-    "tron",
     "beacon",
     "sec",
     "hypercore",
@@ -859,9 +837,8 @@ fn pre_stream_setup_decisions_match_legacy_string_resolution() {
                         expected.include_failed_transactions,
                         "{context}"
                     );
-                    let tron_style = endpoint_uses_tron_style_evm_profile(endpoint_info);
                     assert_eq!(
-                        resolve_auto_encode_bytes(initial, endpoint_info, tron_style),
+                        resolve_auto_encode_bytes(initial, endpoint_info),
                         expected.initial_bytes_encoding,
                         "{context}"
                     );
@@ -963,10 +940,9 @@ fn auto_detected_family_decisions_match_legacy() {
                     );
                 }
             }
-            let tron_style = endpoint_uses_tron_style_evm_profile(endpoint_info);
             assert_eq!(
-                resolve_auto_encode_bytes(Some(detected), endpoint_info, tron_style),
-                legacy::resolve_auto_encode_bytes(Some(&label), endpoint_info, tron_style)
+                resolve_auto_encode_bytes(Some(detected), endpoint_info),
+                legacy::resolve_auto_encode_bytes(Some(&label), endpoint_info)
             );
         }
         assert_eq!(
@@ -1001,7 +977,6 @@ fn table_and_cursor_file_metadata_match_legacy() {
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ];
     for endpoint_info in endpoints.iter().step_by(3) {
         for (label, requested) in requested_types() {

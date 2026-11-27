@@ -62,15 +62,6 @@ pub mod sf {
         }
     }
 
-    pub mod tron {
-        #[path = ""]
-        pub mod r#type {
-            pub mod v1 {
-                include!(concat!(env!("OUT_DIR"), "/sf.tron.r#type.v1.rs"));
-            }
-        }
-    }
-
     pub mod beacon {
         #[path = ""]
         pub mod r#type {
@@ -104,11 +95,6 @@ pub mod cosmos_sdk {
     }
 }
 
-// Tron protocol types
-pub mod protocol {
-    include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
-}
-
 // Convenience aliases
 pub use cosmos_sdk::tx::v1beta1 as cosmos_tx;
 pub use pinax::hypercore::v1 as hypercore;
@@ -121,4 +107,3 @@ pub use sf::ethereum::r#type::v2 as eth;
 pub use sf::firehose::v2 as firehose;
 pub use sf::near::r#type::v1 as near;
 pub use sf::solana::r#type::v1 as solana;
-pub use sf::tron::r#type::v1 as tron;

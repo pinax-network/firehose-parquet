@@ -178,6 +178,9 @@ pub enum BlockFamily {
     Near,
     Antelope,
     Cosmos,
+    /// Retired with Tron support (#747). Kept only so that a stored Tron
+    /// descriptor still decodes and [`StreamDescriptor::validate`] refuses it
+    /// by name; no mapper produces it.
     Tron,
     Beacon,
     Sec,
@@ -274,6 +277,13 @@ impl StreamDescriptor {
         if self.format_version != FORMAT_VERSION {
             bail!("unsupported ingestion format or semantic mapper epoch");
         }
+        if self.family == BlockFamily::Tron || self.bytes_encoding == "tron_base58" {
+            bail!(
+                "this dataset was written from Tron, which fireparq no longer supports \
+                 (#747): it cannot resume, backfill, recover or rebind it. Its Delta \
+                 tables stay readable by any Delta reader"
+            );
+        }
         if self.mapper_epoch != MAPPER_EPOCH {
             bail!(
                 "this protected dataset was created with semantic mapper epoch `{}`; this \
@@ -287,7 +297,7 @@ impl StreamDescriptor {
         validate_identifier(&self.chain)?;
         if !matches!(
             self.bytes_encoding.as_str(),
-            "binary" | "hex" | "hex_no_prefix" | "base58" | "tron_base58"
+            "binary" | "hex" | "hex_no_prefix" | "base58"
         ) {
             bail!("unsupported semantic byte encoding");
         }

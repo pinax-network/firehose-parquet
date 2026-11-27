@@ -43,8 +43,7 @@ use crate::hypercore::mapper::HypercoreBlockMapper;
 use crate::near::mapper::NearBlockMapper;
 use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
-use crate::tron::mapper::TronBlockMapper;
-use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana, tron};
+use crate::{antelope, beacon, bitcoin, cosmos, evm, hypercore, near, sec, solana};
 
 const BLOCK_NUM: u64 = 100;
 const TIMESTAMP: i64 = 1_700_000_000;
@@ -64,7 +63,6 @@ fn all_encodings() -> Vec<EncodeBytes> {
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ];
     // Exhaustive on purpose: a new variant stops this compiling, as a reminder
     // to add it to the list above.
@@ -73,8 +71,7 @@ fn all_encodings() -> Vec<EncodeBytes> {
             EncodeBytes::Binary
             | EncodeBytes::Hex
             | EncodeBytes::HexNoPrefix
-            | EncodeBytes::Base58
-            | EncodeBytes::TronBase58 => {}
+            | EncodeBytes::Base58 => {}
         }
     }
     encodings
@@ -295,12 +292,6 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             ],
         ),
         Case::new(
-            ChainKind::Tron,
-            "tron",
-            TronBlockMapper::new(fork_step, enc(), true),
-            vec![tron::mapper::tests::make_test_block(BLOCK_NUM).encode_to_vec()],
-        ),
-        Case::new(
             ChainKind::Hypercore,
             "hypercore",
             HypercoreBlockMapper::new(fork_step, enc()),
@@ -426,7 +417,6 @@ fn expected_table_count() -> usize {
         + cosmos::schema::TABLE_NAMES.len()
         + near::schema::TABLE_NAMES.len()
         + sec::schema::TABLE_NAMES.len()
-        + tron::schema::TABLE_NAMES.len()
         + hypercore::schema::TABLE_NAMES.len()
         + evm::schema::BASE_TABLE_NAMES.len()
         + evm::schema::EXTENDED_TABLE_NAMES.len()

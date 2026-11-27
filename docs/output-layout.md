@@ -136,11 +136,9 @@ The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so 
 | `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. `receipt_actions.args` is raw `binary` under every encoding. |
 | `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
-| `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
 | `beacon` | `hex_0x` | `hex` | `hex` | Block roots and other binary identifiers are `0x`-prefixed hex. |
 | `sec` | `decimal` | — | `raw_xml`: `binary` | `block_id` and `parent_id` are the decimal 10-minute window numbers, written verbatim (`"2979867"`) under every encoding, not hashes. SEC has no hash or address bytes: `filing_raw_xml.raw_xml` is raw `binary` under every encoding. See [SEC notes](chains/sec.md#block-model). |
 | `hypercore` | `decimal` | `hex` | `hex` | `block_id` and `parent_id` are the decimal block number as text (the Firehose block id; HyperCore has no block hash), written verbatim under every encoding. Hashes, addresses and client order ids are `0x`-prefixed hex; `fills.builder` is the delivered `0x` string. |
-| `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
 
 ## Parquet file metadata
 

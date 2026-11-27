@@ -1,6 +1,8 @@
 //! Equivalence of the chain profiles with the string-based helpers they
 //! replaced (#526). The `legacy` module holds verbatim copies of the
 //! pre-#526 `blocks/src/bin/main.rs` functions; they exist only as oracles.
+//! Later families are appended and marked "post-#526"; Tron, removed with
+//! Tron support (#747), is taken out of them the same way.
 
 use super::*;
 use arrow::datatypes::Schema;
@@ -13,7 +15,8 @@ mod legacy {
     use anyhow::{anyhow, Result};
     use firehose_parquet::grpc::EndpointInfo;
 
-    // Post-#526 families are appended explicitly: sec, hypercore.
+    // Post-#526 families are appended explicitly: sec, hypercore. Tron was
+    // removed (#747).
     pub const BLOCK_TYPES: &[&str] = &[
         "auto",
         "evm",
@@ -22,23 +25,18 @@ mod legacy {
         "near",
         "antelope",
         "cosmos",
-        "tron",
         "beacon",
         "sec",
         "hypercore",
     ];
 
-    pub fn output_encoding_policy_bytes(
-        block_type: &str,
-        tron_style_evm_profile: bool,
-    ) -> Option<EncodeBytes> {
+    // Tron removed (#747): its `tron_style_evm_profile` and `tron` arms.
+    pub fn output_encoding_policy_bytes(block_type: &str) -> Option<EncodeBytes> {
         match block_type {
-            "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
             // post-#526 families: sec, hypercore
             "evm" | "bitcoin" | "cosmos" | "beacon" | "sec" | "hypercore" => Some(EncodeBytes::Hex),
             "antelope" => Some(EncodeBytes::HexNoPrefix),
             "solana" | "near" => Some(EncodeBytes::Base58),
-            "tron" => Some(EncodeBytes::TronBase58),
             _ => None,
         }
     }
@@ -59,10 +57,8 @@ mod legacy {
             );
         }
 
+        // Tron removed (#747): the exact `tron-evm` and the `tron` checks.
         for candidate in candidates {
-            if candidate.eq_ignore_ascii_case("tron-evm") {
-                return Some("evm");
-            }
             // post-#526 family: sec (exact name only)
             if candidate == "sec" {
                 return Some("sec");
@@ -85,9 +81,6 @@ mod legacy {
             if candidate.contains("cosmos") {
                 return Some("cosmos");
             }
-            if candidate.contains("tron") {
-                return Some("tron");
-            }
             if candidate.contains("hypercore") {
                 return Some("hypercore");
             }
@@ -108,7 +101,7 @@ mod legacy {
             "near" => BlockFamily::Near,
             "antelope" => BlockFamily::Antelope,
             "cosmos" => BlockFamily::Cosmos,
-            "tron" => BlockFamily::Tron,
+            // Tron removed (#747).
             "beacon" => BlockFamily::Beacon,
             // post-#526 families: sec, hypercore
             "sec" => BlockFamily::Sec,
@@ -130,8 +123,7 @@ mod legacy {
             Ok("antelope".to_string())
         } else if type_url.contains("cosmos") {
             Ok("cosmos".to_string())
-        } else if type_url.contains("tron") {
-            Ok("tron".to_string())
+        // Tron removed (#747).
         } else if type_url.contains("beacon") {
             Ok("beacon".to_string())
         } else if type_url.contains("pinax.sec.") {
@@ -222,11 +214,7 @@ mod legacy {
                 encode_bytes,
                 include_failed_transactions,
             ))),
-            "tron" => Ok(Box::new(TronBlockMapper::new(
-                include_fork_step,
-                encode_bytes,
-                include_failed_transactions,
-            ))),
+            // Tron removed (#747).
             "beacon" => Ok(Box::new(BeaconBlockMapper::new(
                 include_fork_step,
                 encode_bytes,
@@ -509,24 +497,21 @@ fn profile_facts_match_the_legacy_string_checks() {
             "{label}"
         );
         assert_eq!(profile.type_url_marker, profile.type_url_marker.trim());
-        for tron_style in [false, true] {
-            assert_eq!(
-                Some(kind.default_bytes_encoding(tron_style)),
-                legacy::output_encoding_policy_bytes(label, tron_style),
-                "{label} tron_style={tron_style}"
-            );
-        }
+        assert_eq!(
+            Some(kind.default_bytes_encoding()),
+            legacy::output_encoding_policy_bytes(label),
+            "{label}"
+        );
     }
     assert!(legacy::protected_block_family("auto").is_err());
 }
 
-fn all_encodings() -> [EncodeBytes; 5] {
+fn all_encodings() -> [EncodeBytes; 4] {
     [
         EncodeBytes::Binary,
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ]
 }
 
@@ -564,14 +549,12 @@ fn inventory_lines(
 }
 
 /// Columns appended since the pre-#550 baseline: the #550 parent-outcome
-/// columns on Tron, Antelope and NEAR tables, and #507's NEAR
-/// `receipts.success_receipt_id`. Solana's `transaction_success` predates #550
-/// (#607) and is not listed.
+/// columns on Antelope and NEAR tables (and on Tron's, until #747), and
+/// #507's NEAR `receipts.success_receipt_id`. Solana's `transaction_success`
+/// predates #550 (#607) and is not listed.
 fn appended_columns(kind: ChainKind, table: &str) -> &'static [&'static str] {
     match (kind, table) {
         (ChainKind::Near, "receipts") => &["success_receipt_id"],
-        (ChainKind::Tron, "blocks") => &[],
-        (ChainKind::Tron, _) => &["transaction_success"],
         (ChainKind::Antelope, "transactions") => &["transaction_success"],
         (ChainKind::Antelope, "actions" | "db_ops") => {
             &["transaction_status", "transaction_success"]
@@ -649,9 +632,9 @@ fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -
     schema_digest_where(|_| true, |_| true, project)
 }
 
-/// The eight families that existed when the historical digests were pinned.
-/// Families added later (sec, hypercore) are left out, so those pins stay
-/// byte-identical.
+/// The families that existed when the historical digests were pinned, less
+/// Tron (removed in #747). Families added later (sec, hypercore) are left
+/// out, so those pins stay byte-identical.
 fn pre_sec_family(kind: ChainKind) -> bool {
     !matches!(kind, ChainKind::Sec | ChainKind::Hypercore)
 }
@@ -721,7 +704,7 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 }
 
 /// SHA-256 over every family's table inventory and complete Arrow schemas for
-/// all 160 option/encoding combinations of each of the ten families. Update
+/// all 128 option/encoding combinations of each of the nine families. Update
 /// the pinned value only for an intentional schema change, and record that
 /// change.
 #[test]
@@ -736,8 +719,9 @@ fn every_mapper_schema_matches_the_pinned_digest() {
 /// `fork_step`). The pinned value was produced by the same loop on origin/main
 /// `081dea5`, before `stream_ordinal`: adding it left every final-only schema,
 /// and so every final-only protected table digest, byte-identical. It covers
-/// the eight families of that commit; later families (sec, hypercore) are left
-/// out (`HYPERCORE_SCHEMA_DIGEST` pins HyperCore).
+/// the eight families of that commit, seven since Tron was removed (#747);
+/// later families (sec, hypercore) are left out (`HYPERCORE_SCHEMA_DIGEST` pins
+/// HyperCore).
 #[test]
 fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
     assert_eq!(
@@ -754,8 +738,8 @@ fn final_only_schemas_match_the_pinned_pre_stream_ordinal_digest() {
 /// schema of every family and option is exactly the pre-#550 schema, except the
 /// restructured NEAR `state_changes`, which both sides leave out. The pinned value was produced by
 /// the same loop, with the same table left out, on origin/main `8462692` (after
-/// #526, before #550). It covers the eight families of that commit; later
-/// families (sec, hypercore) are left out.
+/// #526, before #550). It covers the eight families of that commit, seven since
+/// Tron was removed (#747); later families (sec, hypercore) are left out.
 #[test]
 fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
@@ -939,7 +923,7 @@ fn decimal_columns_name_unsigned_columns_of_their_family() {
     assert!(ChainKind::Bitcoin.profile().decimal_columns.is_empty());
 }
 
-/// SHA-256 over every family's Delta data file schemas (#643) for all 160
+/// SHA-256 over every family's Delta data file schemas (#643) for all 128
 /// option/encoding combinations of each family: the mapper schemas above, mapped by each
 /// profile's `delta_types()`. Update the pinned value only for an intentional
 /// change of a Delta column type, and record that change.
@@ -957,7 +941,7 @@ fn every_delta_data_schema_matches_the_pinned_digest() {
 }
 
 /// Adding a family must leave every other family's schemas unchanged (#711).
-/// The eight families that predate SEC and HyperCore still reproduce, byte
+/// The families that predate SEC and HyperCore still reproduce, byte
 /// for byte, the `CURRENT_SCHEMA_DIGEST` and `DELTA_DATA_SCHEMA_DIGEST` pinned
 /// on origin/main `daf64a9`, the last commit before either was added, so a
 /// later re-pin of the all-family digests cannot hide a change to them.
@@ -989,7 +973,7 @@ fn pre_sec_families_reproduce_their_pre_sec_digests() {
 }
 
 /// SEC and HyperCore, the families added after `daf64a9`, each pin their own
-/// mapper and Delta data schema digests over all 160 option/encoding
+/// mapper and Delta data schema digests over all 128 option/encoding
 /// combinations, so a re-pin of the all-family digests for another family
 /// cannot hide a change to either (#711); `HYPERCORE_SCHEMA_DIGEST` covers
 /// only `hex`. Pinned when #710 was merged into #709: there, the eight older
@@ -1097,42 +1081,49 @@ fn without_opt_in_tables_only_their_evm_tables_leave_the_inventory() {
     }
 }
 
+// Re-pinned when Tron was removed (#747): every value below but
+// `HYPERCORE_SCHEMA_DIGEST` (hex only, unchanged) is the same loop on origin/main
+// `73408fc`, the last commit with Tron, where every earlier pin still held, with
+// the Tron family and the `tron_base58` encoding filtered out. Removing Tron
+// changed no other family's schema. The notes on the tests above describe each
+// pin as it was before that filter.
+
 const DELTA_DATA_SCHEMA_DIGEST: &str =
-    "8f172021f35d62a4d78139a13214320b0c5bc5a96c0166bd734145b9f5d9a7c1";
+    "ae207956f1c9d3f3696ef7ec8a777f6ba64c53c49f79eee9a69aa545cdfb71f5";
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "4e8870c8d0a2eb74f8519f10bc95e2343ef0a6b9642be1a33c57d5dbcb90f85e";
+    "c680c6724a1a06626a3f8e0dc9d51c014fbb79327ee0b548c05c54465fbbbde4";
 
 const FINAL_ONLY_SCHEMA_DIGEST: &str =
-    "f0a9665b2393efc4723936ec7920a8ac6f2e1e8f9ac84911f35e599d35edba0a";
+    "045d560fd52a7f1ad6b0efce5d77cae4de32be72872b2ee821b6ba2b27137553";
 
 const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
-    "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";
+    "1cb7ca05c545f18f06c7f6962748aa111d672d08e3ff1d3782342f98aee4c26c";
 
 /// `CURRENT_SCHEMA_DIGEST` on origin/main `daf64a9`, before SEC and HyperCore.
 const PRE_SEC_SCHEMA_DIGEST: &str =
-    "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
+    "c0f553872ab10a1b2ec18e7ffd51ba7d32c7e7eff163932ace27deb2a4240470";
 
 /// `DELTA_DATA_SCHEMA_DIGEST` on origin/main `daf64a9`, before SEC and HyperCore.
 const PRE_SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
-    "98b767b5b0469e6f49df5c5ce61b55aee7089a2760a0c1db315bbd0e32ff7406";
+    "2fb37f57bb66550ca7b60a6dd54121a142a0942c7e52b008d6e2c62c397b7c3f";
 
 /// The HyperCore schemas (`docs/chains/hypercore.md`), derivation version 1.
 const HYPERCORE_SCHEMA_DIGEST: &str =
     "d648e61190297aa2e10fdcf325c8a4db179d06de433caa1024aef9a3703ab9e2";
 
 /// The SEC mapper schemas (`docs/chains/sec.md`), every option and encoding.
-const SEC_SCHEMA_DIGEST: &str = "b7b21a1fb722b904a5beaf2ccb5e94b1f7224da9b03cfcb81fb1f54dea797c62";
+const SEC_SCHEMA_DIGEST: &str = "9734f075a67b15a2e3ab8dfc6ec6651c24dc962d7d8fd3b89c7aa7a15781849c";
 
 /// The SEC Delta data schemas, every option and encoding.
 const SEC_DELTA_DATA_SCHEMA_DIGEST: &str =
-    "1af12c1327ee58787ab4da6d05ec2ee9d0f5920ecfae13ab80fa03dbb0c2a6ae";
+    "4662a271524f8e5c07534116b7f890385db20a7a9da36c55c3f3ffa5b49c8332";
 
 /// The HyperCore mapper schemas, derivation version 1, every option and
 /// encoding (`HYPERCORE_SCHEMA_DIGEST` covers only `hex`).
 const HYPERCORE_ALL_OPTIONS_SCHEMA_DIGEST: &str =
-    "da80db4ec48a13dc1be20a3cb98c15f639070514f504979658446158a0174d55";
+    "1363b56f6d361253ea55ffe71a472181cbaff81857d9f1b7f2dcd9e4268a584d";
 
 /// The HyperCore Delta data schemas, every option and encoding.
 const HYPERCORE_DELTA_DATA_SCHEMA_DIGEST: &str =
-    "0c0e784a31d74b41b1163814b8cb6ae99fcb03816e45c92732119b3550d65740";
+    "97bce327b93eb4766318054edb636c3df10fbe7d751b13a2c254fcb7dc3f0b93";

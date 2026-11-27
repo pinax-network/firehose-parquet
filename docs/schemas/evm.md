@@ -5,7 +5,7 @@
 Generated from the `evm` mapper; do not edit by hand. Regenerate with `cargo run -p blocks --example dump_schemas` (see [README](README.md) for the conventions).
 
 - Block type: `--block-type evm`.
-- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0. Tron-style endpoints (`tron`, `tron-evm` chain names) use `tron_base58` (Tron Base58Check for 20- and 21-byte values such as addresses, lowercase hex without `0x` for other lengths) instead, with the same types.
+- Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
 - Columns typed `string` (hex) or `array<string>` (hex) hold binary values written as text in that encoding.
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 - Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.

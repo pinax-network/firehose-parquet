@@ -20,7 +20,6 @@ vacuums and checkpoints them beside the writer.
 | `solana` | `solana-mainnet-beta` → `solana.firehose.pinax.network:443` | [Solana schema](docs/schemas/solana.md) | [Solana notes](docs/chains/solana.md). `--without-votes` drops `vote_transactions` |
 | `bitcoin` | `btc` → `bitcoin.firehose.pinax.network:443` | [Bitcoin schema](docs/schemas/bitcoin.md) | [Bitcoin notes](docs/chains/bitcoin.md) |
 | `beacon` | `mainnet-cl` → `eth-cl.firehose.pinax.network:443` | [Beacon schema](docs/schemas/beacon.md) | [Beacon notes](docs/chains/beacon.md) (fork coverage) |
-| `tron` | no built-in name; `--endpoint` of a Tron Firehose | [Tron schema](docs/schemas/tron.md) | [Tron notes](docs/chains/tron.md) |
 | `cosmos` | no built-in name; `--endpoint https://mainnet.injective.streamingfast.io:443` | [Cosmos schema](docs/schemas/cosmos.md) | [Cosmos notes](docs/chains/cosmos.md) |
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
 | `near` | no built-in name; `--endpoint` of a NEAR Firehose (StreamingFast's no longer resolves) | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
@@ -33,7 +32,7 @@ The generated [schema reference](docs/schemas/README.md) lists every table,
 column, Delta type and nullability. The [chain notes](docs/chains/README.md)
 explain semantics, joins and queries. Select columns by name, not position: the
 non-final `fork_step` and `stream_ordinal` are not always the last columns,
-because later additions follow them on several Solana, Antelope, NEAR and Tron
+because later additions follow them on several Solana, Antelope and NEAR
 tables.
 
 ## Features
@@ -155,7 +154,7 @@ the maintenance CronJobs.
 | | [Partition vocabulary](docs/partition-vocabulary.md) | The `date=YYYY-MM-DD` key, and the layouts and commands it replaced |
 | Chain-specific notes | [Chain notes](docs/chains/README.md) | Index of the chain pages |
 | | [Failed transaction filtering](docs/chains/failed-transactions.md) | Flags, failure conditions and outcome columns per chain |
-| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Tron](docs/chains/tron.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |
+| | [EVM](docs/chains/evm.md), [Solana](docs/chains/solana.md), [Bitcoin](docs/chains/bitcoin.md), [Beacon](docs/chains/beacon.md), [Cosmos](docs/chains/cosmos.md), [Antelope](docs/chains/antelope.md), [NEAR](docs/chains/near.md), [SEC](docs/chains/sec.md), [HyperCore](docs/chains/hypercore.md) | Joins, ordering and example queries per chain |
 | Operations | [Recommended deployment](docs/deployment.md) | Final-only lake, one writer per network, settings and alerts |
 | | [Cursor and resume](docs/cursor-and-resume.md) | Output authority, crash recovery, S3 cursors, ownership, shutdown |
 | | [Parallel backfill](docs/parallel-backfill.md) | `fireparq backfill`: fill a new dataset's history with one `build` per block range, then seal it |

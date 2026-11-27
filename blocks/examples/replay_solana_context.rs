@@ -61,7 +61,6 @@ fn main() -> Result<()> {
         ("base58", EncodeBytes::Base58),
         ("hex", EncodeBytes::Hex),
         ("hex_no_prefix", EncodeBytes::HexNoPrefix),
-        ("tron_base58", EncodeBytes::TronBase58),
     ] {
         for include_failed in [false, true] {
             for with_votes in [false, true] {
