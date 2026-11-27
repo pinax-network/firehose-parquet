@@ -159,12 +159,6 @@ pub struct CommittedTable {
 /// Refusal of a request whose stream descriptor differs from authority's.
 pub(super) const STREAM_MISMATCH: &str = "existing authoritative stream differs from this request; use a new output root for changed semantics or bindings";
 
-/// Refusal of a request without `--with-gas-changes` at a dataset that has
-/// the EVM gas-change tables.
-pub(super) const GAS_CHANGE_TABLES_REQUIRED: &str = "this dataset has the EVM tables gas_changes and system_gas_changes, which build writes only with --with-gas-changes (WITH_GAS_CHANGES=true); set it on every run of this dataset";
-/// Refusal of a request with `--with-gas-changes` at a dataset without them.
-pub(super) const GAS_CHANGE_TABLES_ABSENT: &str = "this dataset has no EVM tables gas_changes and system_gas_changes; run it without --with-gas-changes (WITH_GAS_CHANGES)";
-
 /// The refusal of an authority whose stream differs from the request's. A
 /// dataset bound to another root than the requested one was copied or moved
 /// there, and the refusal names `fireparq recovery rebind` (#635).
@@ -178,41 +172,91 @@ pub(super) fn stream_mismatch(
             super::binding::rebind_hint(&stored.output, &expected.output)
         );
     }
-    if let Some(refusal) = gas_change_tables_mismatch(stored, expected) {
+    if let Some(refusal) = opt_in_tables_mismatch(stored, expected) {
         return anyhow::anyhow!("{refusal}");
     }
     anyhow::anyhow!("{STREAM_MISMATCH}")
 }
 
-/// The refusal naming `--with-gas-changes` when two EVM streams differ only
-/// in that one has both [`super::state::EVM_GAS_CHANGE_TABLES`] and the
-/// other neither.
-pub(super) fn gas_change_tables_mismatch(
+/// The refusal naming each opt-in flag, such as `--with-gas-changes`, when two
+/// EVM streams differ only in that one has all the tables of a group of
+/// [`super::state::EVM_OPT_IN_TABLES`] and the other none of them.
+pub(super) fn opt_in_tables_mismatch(
     stored: &StreamDescriptor,
     expected: &StreamDescriptor,
-) -> Option<&'static str> {
-    use super::state::{BlockFamily, EVM_GAS_CHANGE_TABLES};
-    let has = |descriptor: &StreamDescriptor, present: bool| {
-        EVM_GAS_CHANGE_TABLES
-            .iter()
-            .all(|table| descriptor.tables.contains_key(*table) == present)
-    };
+) -> Option<String> {
+    use super::state::{BlockFamily, EVM_OPT_IN_TABLES};
+    let opt_in = |table: &str| EVM_OPT_IN_TABLES.iter().any(|g| g.tables.contains(&table));
     let without = |descriptor: &StreamDescriptor| {
         let mut descriptor = descriptor.clone();
-        descriptor
-            .tables
-            .retain(|table, _| !EVM_GAS_CHANGE_TABLES.contains(&table.as_str()));
+        descriptor.tables.retain(|table, _| !opt_in(table));
         descriptor
     };
     if stored.family != BlockFamily::Evm || without(stored) != without(expected) {
         return None;
     }
-    if has(stored, true) && has(expected, false) {
-        Some(GAS_CHANGE_TABLES_REQUIRED)
-    } else if has(stored, false) && has(expected, true) {
-        Some(GAS_CHANGE_TABLES_ABSENT)
-    } else {
-        None
+    // Whether a stream has every table of a group, none, or (never from
+    // `build`) only some.
+    let has = |descriptor: &StreamDescriptor, tables: &[&str]| {
+        let present = tables
+            .iter()
+            .filter(|table| descriptor.tables.contains_key(**table))
+            .count();
+        match present {
+            0 => Some(false),
+            n if n == tables.len() => Some(true),
+            _ => None,
+        }
+    };
+    let (mut required, mut absent) = (Vec::new(), Vec::new());
+    for group in &EVM_OPT_IN_TABLES {
+        match (has(stored, group.tables)?, has(expected, group.tables)?) {
+            (true, false) => required.push(group),
+            (false, true) => absent.push(group),
+            _ => {}
+        }
+    }
+    let tables = |groups: &[&super::state::EvmOptInGroup]| {
+        let tables: Vec<&str> = groups.iter().flat_map(|g| g.tables).copied().collect();
+        let noun = if tables.len() == 1 { "table" } else { "tables" };
+        format!("{noun} {}", english_list(&tables))
+    };
+    let flags = |groups: &[&super::state::EvmOptInGroup], value: &str| {
+        let flags: Vec<String> = groups
+            .iter()
+            .map(|g| format!("{} ({}{value})", g.flag, g.env))
+            .collect();
+        english_list(&flags)
+    };
+    let mut refusals = Vec::new();
+    if !required.is_empty() {
+        let it = if required.len() == 1 { "it" } else { "them" };
+        refusals.push(format!(
+            "this dataset has the EVM {}, which build writes only with {}; set {it} on every \
+             run of this dataset",
+            tables(&required),
+            flags(&required, "=true")
+        ));
+    }
+    if !absent.is_empty() {
+        refusals.push(format!(
+            "this dataset has no EVM {}; run it without {}",
+            tables(&absent),
+            flags(&absent, "")
+        ));
+    }
+    (!refusals.is_empty()).then(|| refusals.join("; "))
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn english_list<T: AsRef<str>>(items: &[T]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.as_ref().to_string(),
+        [rest @ .., last] => {
+            let rest: Vec<&str> = rest.iter().map(AsRef::as_ref).collect();
+            format!("{} and {}", rest.join(", "), last.as_ref())
+        }
     }
 }
 

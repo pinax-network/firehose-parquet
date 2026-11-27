@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use blocks::chain::{ChainKind, ChainProfile, ExtendedOutput, MapperOptions};
+use blocks::chain::{ChainKind, ChainProfile, ExtendedOutput, MapperOptions, OptInTables};
 
 #[cfg(test)]
 mod chain_profile_tests;
@@ -59,8 +59,6 @@ const WITHOUT_EXTENDED_WARNING: &str =
     "--without-extended had no effect because extended output is not supported for this chain";
 const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
     "--without-votes had no effect because vote_transactions are only available for Solana";
-const WITH_GAS_CHANGES_WARNING: &str =
-    "--with-gas-changes had no effect because gas_changes and system_gas_changes are EVM extended tables";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -1445,15 +1443,44 @@ fn resolve_detected_extended(
     }
 }
 
-/// `--with-gas-changes` only selects tables of an EVM mapper with extended
-/// output; for a known family without them it is warned about.
-fn with_gas_changes_warning(
+/// The opt-in EVM extended tables that `--with-gas-changes`,
+/// `--with-account-creations` and `--with-system-nonce-changes` select.
+fn opt_in_tables(args: &BuildArgs) -> OptInTables {
+    OptInTables {
+        gas_changes: args.with_gas_changes,
+        account_creations: args.with_account_creations,
+        system_nonce_changes: args.with_system_nonce_changes,
+    }
+}
+
+/// The opt-in table flags only select tables of an EVM mapper with extended
+/// output. For a known family without them, each flag that is set gets a
+/// warning.
+fn opt_in_tables_warnings(
     block_type: Option<ChainKind>,
     extended: bool,
-    with_gas_changes: bool,
-) -> Option<&'static str> {
-    (with_gas_changes && block_type.is_some_and(|kind| kind != ChainKind::Evm || !extended))
-        .then_some(WITH_GAS_CHANGES_WARNING)
+    tables: OptInTables,
+) -> Vec<String> {
+    if !block_type.is_some_and(|kind| kind != ChainKind::Evm || !extended) {
+        return Vec::new();
+    }
+    tables
+        .groups()
+        .into_iter()
+        .filter(|(_, selected)| *selected)
+        .map(|(group, _)| {
+            let verb = if group.tables.len() == 1 {
+                "is an EVM extended table"
+            } else {
+                "are EVM extended tables"
+            };
+            format!(
+                "{} had no effect because {} {verb}",
+                group.flag,
+                group.tables.join(" and ")
+            )
+        })
+        .collect()
 }
 
 fn without_extended_warning_message() -> &'static str {
@@ -1668,7 +1695,11 @@ mod tests {
                     for feature in [false, true] {
                         let mut mapper = family.create_mapper(MapperOptions {
                             extended: feature,
-                            gas_changes: feature,
+                            opt_in_tables: if feature {
+                                OptInTables::ALL
+                            } else {
+                                OptInTables::default()
+                            },
                             with_votes: feature,
                             include_fork_step: fork_steps,
                             encode_bytes: encoding.clone(),
@@ -2265,6 +2296,8 @@ mod tests {
         if let Some(Commands::Build(build_args)) = cli.command {
             assert!(!build_args.without_extended);
             assert!(!build_args.with_gas_changes);
+            assert!(!build_args.with_account_creations);
+            assert!(!build_args.with_system_nonce_changes);
             assert!(!build_args.without_votes);
             assert_eq!(build_args.block_type, "evm");
         } else {
@@ -2295,35 +2328,78 @@ mod tests {
     }
 
     #[test]
-    fn test_build_subcommand_accepts_with_gas_changes() {
+    fn test_build_subcommand_accepts_the_opt_in_table_flags() {
         let cli = Cli::parse_from([
             "fireparq",
             "build",
             "--network",
             "mainnet",
             "--with-gas-changes",
+            "--with-account-creations",
+            "--with-system-nonce-changes",
         ]);
         let Some(Commands::Build(build_args)) = cli.command else {
             panic!("expected Commands::Build");
         };
-        assert!(build_args.with_gas_changes);
+        assert_eq!(opt_in_tables(&build_args), OptInTables::ALL);
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--with-account-creations",
+        ]);
+        let Some(Commands::Build(build_args)) = cli.command else {
+            panic!("expected Commands::Build");
+        };
+        assert_eq!(
+            opt_in_tables(&build_args),
+            OptInTables {
+                account_creations: true,
+                ..OptInTables::default()
+            }
+        );
     }
 
     #[test]
-    fn test_with_gas_changes_warns_only_where_it_has_no_effect() {
+    fn test_opt_in_table_flags_warn_only_where_they_have_no_effect() {
+        let warnings = [
+            "--with-gas-changes had no effect because gas_changes and system_gas_changes are \
+             EVM extended tables",
+            "--with-account-creations had no effect because account_creations and \
+             system_account_creations are EVM extended tables",
+            "--with-system-nonce-changes had no effect because system_nonce_changes is an EVM \
+             extended table",
+        ];
+        let none: Vec<String> = Vec::new();
         assert_eq!(
-            with_gas_changes_warning(Some(ChainKind::Evm), true, true),
-            None
+            opt_in_tables_warnings(Some(ChainKind::Evm), true, OptInTables::ALL),
+            none
         );
         // Dry-run `auto` warns once the family is detected.
-        assert_eq!(with_gas_changes_warning(None, true, true), None);
+        assert_eq!(opt_in_tables_warnings(None, true, OptInTables::ALL), none);
         for kind in ChainKind::ALL {
             for extended in [false, true] {
-                assert_eq!(with_gas_changes_warning(Some(kind), extended, false), None);
+                assert_eq!(
+                    opt_in_tables_warnings(Some(kind), extended, OptInTables::default()),
+                    none
+                );
                 if kind != ChainKind::Evm || !extended {
                     assert_eq!(
-                        with_gas_changes_warning(Some(kind), extended, true),
-                        Some(WITH_GAS_CHANGES_WARNING),
+                        opt_in_tables_warnings(Some(kind), extended, OptInTables::ALL),
+                        warnings,
+                        "{kind} extended={extended}"
+                    );
+                    assert_eq!(
+                        opt_in_tables_warnings(
+                            Some(kind),
+                            extended,
+                            OptInTables {
+                                system_nonce_changes: true,
+                                ..OptInTables::default()
+                            }
+                        ),
+                        [warnings[2]],
                         "{kind} extended={extended}"
                     );
                 }
@@ -4014,7 +4090,7 @@ mod tests {
         for kind in ChainKind::ALL {
             let mut mapper = kind.create_mapper(MapperOptions {
                 extended: false,
-                gas_changes: false,
+                opt_in_tables: OptInTables::default(),
                 with_votes: false,
                 include_fork_step: false,
                 encode_bytes: kind.default_bytes_encoding(false),

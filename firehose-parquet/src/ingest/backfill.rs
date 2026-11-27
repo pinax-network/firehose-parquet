@@ -320,8 +320,7 @@ pub(super) async fn session_plan(
             );
             plan.require_lane(start, stop)?;
             let planned = plan.lane_descriptor(start);
-            if let Some(refusal) = super::controller::gas_change_tables_mismatch(&planned, expected)
-            {
+            if let Some(refusal) = super::controller::opt_in_tables_mismatch(&planned, expected) {
                 bail!("{refusal}");
             }
             ensure!(

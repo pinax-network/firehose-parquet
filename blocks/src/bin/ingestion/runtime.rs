@@ -54,7 +54,7 @@ impl MapperState {
             current_file_metadata = metadata;
             Some(kind.create_mapper(MapperOptions {
                 extended: setup.extended,
-                gas_changes: args.with_gas_changes,
+                opt_in_tables: opt_in_tables(args),
                 with_votes: setup.with_votes,
                 include_fork_step: !config.final_blocks_only,
                 encode_bytes,
@@ -483,10 +483,10 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.args.without_extended,
                 &self.setup.endpoint_info,
             );
-            if let Some(warning) = with_gas_changes_warning(
+            for warning in opt_in_tables_warnings(
                 Some(detected),
                 self.state.extended,
-                self.args.with_gas_changes,
+                opt_in_tables(self.args),
             ) {
                 warn!("{warning}");
             }
@@ -552,7 +552,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             );
             self.state.mapper = Some(detected.create_mapper(MapperOptions {
                 extended: self.state.extended,
-                gas_changes: self.args.with_gas_changes,
+                opt_in_tables: opt_in_tables(self.args),
                 with_votes: self.setup.with_votes,
                 include_fork_step: !self.setup.config.final_blocks_only,
                 encode_bytes,

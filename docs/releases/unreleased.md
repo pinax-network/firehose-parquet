@@ -12,6 +12,24 @@ empty when the release is cut.
 
 ## Breaking changes
 
+- **New EVM datasets no longer have `account_creations`,
+  `system_account_creations` or `system_nonce_changes` (#PR).** Current EVM
+  Firehose blocks never fill them. Block version 4 and later record no account
+  creations, and system calls change no nonce. On the public lake,
+  `account_creations` has no rows after Pectra on Ethereum mainnet or after
+  Pascal on BSC, and none on Base; the two system tables never had one.
+  `--with-account-creations` (`WITH_ACCOUNT_CREATIONS=true`) and
+  `--with-system-nonce-changes` (`WITH_SYSTEM_NONCE_CHANGES=true`) write them
+  as before, with the same schemas and digests, like `--with-gas-changes`
+  (#738). **Set both on every existing EVM dataset with extended output
+  (writers and backfill lanes) before upgrading.** Without them, `build`
+  refuses to start and names each missing flag, before any Blocks request.
+  v1.6.0 ignores both variables, so they can be set before the upgrade. New
+  EVM datasets with extended output have 15 tables
+  ([Opt-in tables](../chains/evm.md#opt-in-tables)).
+- **Rollback:** v1.6.0 always declares these three tables, so it refuses an
+  EVM dataset created without them.
+
 ## New features
 
 ## Fixes

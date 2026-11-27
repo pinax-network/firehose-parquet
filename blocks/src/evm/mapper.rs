@@ -271,8 +271,8 @@ pub struct EvmBlockMapper {
 }
 
 impl EvmBlockMapper {
-    /// Every table of `extended`, the gas-change tables included; see
-    /// [`Self::with_gas_changes`].
+    /// Every table of `extended`, the opt-in tables included; see
+    /// [`Self::with_opt_in_tables`].
     pub fn new(
         extended: bool,
         include_fork_step: bool,
@@ -383,15 +383,32 @@ impl EvmBlockMapper {
         }
     }
 
-    /// Without `gas_changes`, neither [`schema::GAS_CHANGE_TABLE_NAMES`] table
-    /// is declared or written, and the gas changes of older block versions
-    /// are ignored. The other tables are unchanged.
-    pub fn with_gas_changes(mut self, gas_changes: bool) -> Self {
-        if !gas_changes {
+    /// The tables of each group `tables` leaves out are neither declared nor
+    /// written, and the matching records of older block versions (gas
+    /// changes, account creations) are ignored. The other tables are
+    /// unchanged.
+    pub fn with_opt_in_tables(mut self, tables: schema::OptInTables) -> Self {
+        if !tables.gas_changes {
             self.gas_changes = None;
             self.system_gas_changes = None;
         }
+        if !tables.account_creations {
+            self.account_creations = None;
+            self.system_account_creations = None;
+        }
+        if !tables.system_nonce_changes {
+            self.system_nonce_changes = None;
+        }
         self
+    }
+
+    /// The groups whose tables this mapper declares.
+    fn opt_in_tables(&self) -> schema::OptInTables {
+        schema::OptInTables {
+            gas_changes: self.gas_changes.is_some(),
+            account_creations: self.account_creations.is_some(),
+            system_nonce_changes: self.system_nonce_changes.is_some(),
+        }
     }
 
     fn map_evm_block(
@@ -1428,10 +1445,10 @@ impl BlockMapper for EvmBlockMapper {
         if !self.extended {
             return schema::BASE_TABLE_NAMES.to_vec();
         }
-        let gas_changes = self.gas_changes.is_some();
+        let tables = self.opt_in_tables();
         schema::EXTENDED_TABLE_NAMES
             .into_iter()
-            .filter(|table| gas_changes || !schema::GAS_CHANGE_TABLE_NAMES.contains(table))
+            .filter(|table| tables.declares(table))
             .collect()
     }
 }
@@ -4105,12 +4122,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// Without gas changes neither gas-change table is declared or written,
-    /// the block's gas changes are ignored, and every other table is the same
+    /// Without an opt-in group, none of its tables is declared or written, the
+    /// block's records for them are ignored, and every other table is the same
     /// as with them.
     #[test]
-    fn test_without_gas_changes_drops_only_the_gas_change_tables() {
+    fn test_without_opt_in_tables_drops_only_those_tables() {
+        use schema::OptInTables;
         let mut block = make_test_evm_block(403);
+        #[allow(deprecated)]
+        {
+            block.transaction_traces[0].calls[0].account_creations = vec![eth::AccountCreation {
+                account: vec![0x0e; 20].into(),
+                ordinal: 4,
+            }];
+        }
         let mut failed = make_failed_set_code_tx();
         failed.index = 1;
         block.transaction_traces.push(failed);
@@ -4118,9 +4143,9 @@ pub(crate) mod tests {
         system_call.index = 5;
         block.system_calls = vec![system_call];
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let map = |extended: bool, gas_changes: bool| {
+        let map = |extended: bool, tables: OptInTables| {
             let mut mapper = EvmBlockMapper::new(extended, false, EncodeBytes::Hex, true)
-                .with_gas_changes(gas_changes);
+                .with_opt_in_tables(tables);
             let names: Vec<String> = mapper.table_names().iter().map(|n| n.to_string()).collect();
             mapper
                 .map_block(
@@ -4134,26 +4159,74 @@ pub(crate) mod tests {
             flushed.sort();
             let mut declared: Vec<&String> = names.iter().collect();
             declared.sort();
-            assert_eq!(flushed, declared, "extended={extended} gas={gas_changes}");
+            assert_eq!(flushed, declared, "extended={extended} {tables:?}");
             (names, batches)
         };
 
-        let (all_names, mut all) = map(true, true);
+        let (all_names, all) = map(true, OptInTables::ALL);
         assert_eq!(all_names, schema::EXTENDED_TABLE_NAMES);
-        let (names, batches) = map(true, false);
-        for table in schema::GAS_CHANGE_TABLE_NAMES {
-            assert!(all.remove(table).unwrap().num_rows() > 0, "{table}");
+        // The fixture has rows in every opt-in table, so dropping one drops
+        // data.
+        for (group, _) in OptInTables::ALL.groups() {
+            for table in group.tables {
+                assert!(all[*table].num_rows() > 0, "{table}");
+            }
         }
-        let expected: Vec<&String> = all_names
-            .iter()
-            .filter(|name| !schema::GAS_CHANGE_TABLE_NAMES.contains(&name.as_str()))
-            .collect();
-        assert_eq!(names.iter().collect::<Vec<_>>(), expected);
-        assert_eq!(batches, all);
+        for selection in [
+            OptInTables {
+                gas_changes: false,
+                ..OptInTables::ALL
+            },
+            OptInTables {
+                account_creations: false,
+                ..OptInTables::ALL
+            },
+            OptInTables {
+                system_nonce_changes: false,
+                ..OptInTables::ALL
+            },
+            OptInTables::default(),
+        ] {
+            let (names, batches) = map(true, selection);
+            let expected: Vec<&String> = all_names
+                .iter()
+                .filter(|name| selection.declares(name))
+                .collect();
+            assert_eq!(names.iter().collect::<Vec<_>>(), expected, "{selection:?}");
+            let mut kept = all.clone();
+            kept.retain(|name, _| selection.declares(name));
+            assert_eq!(batches, kept, "{selection:?}");
+        }
+        assert_eq!(
+            map(true, OptInTables::default()).0.len(),
+            schema::EXTENDED_TABLE_NAMES.len() - 5
+        );
 
-        // Base output has no gas-change tables either way.
-        for gas_changes in [false, true] {
-            assert_eq!(map(false, gas_changes).0, schema::BASE_TABLE_NAMES);
+        // Base output has no opt-in tables either way.
+        for tables in [OptInTables::default(), OptInTables::ALL] {
+            assert_eq!(map(false, tables).0, schema::BASE_TABLE_NAMES);
+        }
+    }
+
+    /// [`schema::OptInTables::groups`] lists every group of
+    /// [`firehose_parquet::ingest::EVM_OPT_IN_TABLES`], in order, and each
+    /// group's tables are extended tables.
+    #[test]
+    fn test_opt_in_table_groups_match_the_stream_groups() {
+        let groups: Vec<_> = schema::OptInTables::ALL
+            .groups()
+            .into_iter()
+            .map(|(group, selected)| {
+                assert!(selected);
+                group
+            })
+            .collect();
+        assert_eq!(groups, firehose_parquet::ingest::EVM_OPT_IN_TABLES);
+        for group in groups {
+            for table in group.tables {
+                assert!(schema::EXTENDED_TABLE_NAMES.contains(table), "{table}");
+                assert!(!schema::BASE_TABLE_NAMES.contains(table), "{table}");
+            }
         }
     }
 

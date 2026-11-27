@@ -92,51 +92,87 @@ FROM delta_scan('output/mainnet/logs');
 after filtering. Do not infer a transaction-local position from a default zero
 when the upstream source omits `Log.index` at a lower detail level.
 
-## Gas-change tables
+## Opt-in tables
 
-`gas_changes` and `system_gas_changes` are written only with
-`--with-gas-changes` (`WITH_GAS_CHANGES=true`), off by default. The EVM
-Firehose tracer no longer records gas changes (`evm-firehose-tracer-rs`
-v5.0.0), and `fireeth tools convert-to-v5` (firehose-ethereum v2.24.0) removes
-them from older blocks: block version 5 has none. Without the flag, the gas
-changes of older block versions are ignored.
+Five extended tables are written only with a flag, off by default, because
+current EVM Firehose blocks never fill them:
 
-A dataset's tables are fixed when it is created, so the flag must match the
+| Tables | Flag | Why current blocks have none |
+|---|---|---|
+| `gas_changes`, `system_gas_changes` | `--with-gas-changes` (`WITH_GAS_CHANGES=true`) | [Gas-change tables](#gas-change-tables) |
+| `account_creations`, `system_account_creations` | `--with-account-creations` (`WITH_ACCOUNT_CREATIONS=true`) | [Account-creation tables](#account-creation-tables) |
+| `system_nonce_changes` | `--with-system-nonce-changes` (`WITH_SYSTEM_NONCE_CHANGES=true`) | [System nonce changes](#system-nonce-changes) |
+
+Without its flag, a group's tables are neither declared nor written, and the
+matching records of older block versions are ignored.
+
+A dataset's tables are fixed when it is created, so the flags must match the
 dataset on every run:
 
 | Dataset | Run with | Otherwise `build` refuses to start with |
 |---|---|---|
-| Created with extended output by v1.5.1 or earlier, or with `--with-gas-changes` | `--with-gas-changes` | `this dataset has the EVM tables gas_changes and system_gas_changes, ...` |
-| Created without the flag | no flag | `this dataset has no EVM tables gas_changes and system_gas_changes, ...` |
+| Created with extended output by v1.5.1 or earlier | all three flags | `this dataset has the EVM tables ..., which build writes only with ...; set them on every run of this dataset` |
+| Created with extended output by v1.6.0 | `--with-account-creations` and `--with-system-nonce-changes`, plus `--with-gas-changes` if it was created with it | the same, naming each missing flag |
+| Created by a later version | the flags it was created with | the same for a missing flag, or `this dataset has no EVM tables ...; run it without ...` for one it was not created with |
 
-Before upgrading, set the flag on the writer of every dataset that has the two
-tables, and on the remaining lanes of a
-[parallel backfill](../parallel-backfill.md) opened by v1.5.1 or earlier. With
-it, the tables, schemas and digests are those of v1.5.1, so the dataset
-resumes as it is. There is no command yet to retire the two tables from an
-existing dataset. The maintenance job skips a table in `LAKE_TABLES` that does
-not exist, so one `LAKE_TABLES` list serves both kinds of dataset.
+The refusal names every flag that differs, before any Blocks request. Before
+upgrading, set the flags on the writer of every dataset that has the tables,
+and on the remaining lanes of a [parallel backfill](../parallel-backfill.md)
+opened by an earlier version. With them, the tables, schemas and digests are
+those of v1.6.0, so the dataset resumes as it is. There is no command yet to
+retire the tables from an existing dataset: they stay empty Delta tables, and
+deleting one breaks the dataset, because `build` refuses a declared table that
+is missing once rows were accepted. The maintenance job skips a table in
+`LAKE_TABLES` that does not exist, so one `LAKE_TABLES` list serves every kind
+of dataset.
+
+### Gas-change tables
+
+The EVM Firehose tracer no longer records gas changes (`evm-firehose-tracer-rs`
+v5.0.0), and `fireeth tools convert-to-v5` (firehose-ethereum v2.24.0) removes
+them from older blocks: block version 5 has none. `gas_changes` contains
+explicit upstream gas-change records. Missing rows do not mean zero gas usage;
+transaction and receipt gas fields provide separate data.
+
+### Account-creation tables
+
+`Call.account_creations` is deprecated upstream: the checked-in Ethereum
+protobuf says account-creation records are unsupported from block version 4.
+On the public lake of 2026-11-27, the last row is at block 22,431,083 on
+Ethereum mainnet, the last version 3 block before Pectra (Pinax's Firehose
+serves Pectra's first block, 22,431,084, as version 4). The last row on BSC is
+at block 47,618,306 (Pascal), and Base has none. Do not use an empty or missing table to conclude
+that no contracts or accounts were created.
+
+### System nonce changes
+
+System calls (EIP-4788, EIP-2935, EIP-7002, EIP-7251) run from the system
+address without changing a nonce. `system_nonce_changes` had no rows on
+Ethereum mainnet, BSC or Base on 2026-11-27, nor did
+`system_account_creations`.
 
 ## Tables that can be empty
-
-`gas_changes` and `account_creations` are extended tables populated only from
-upstream call arrays. A sampled range can contain no rows even when transactions
-and calls are present. The September 2026 audit's Ethereum mainnet block-version-5
-samples contained no rows for either table; this is a bounded observation, not
-a guarantee about every network, provider or block version.
-
-- `account_creations` is deprecated upstream: the checked-in Ethereum protobuf
-  says account-creation records are unsupported from block version 4. Do not use
-  an empty table to conclude that no contracts or accounts were created.
-- `gas_changes` contains explicit upstream gas-change records. Missing rows do
-  not mean zero gas usage; transaction/receipt gas fields provide separate data.
-  Block version 5 has none ([Gas-change tables](#gas-change-tables)).
 
 `build` creates every table of the stream at its first start, so a table
 without rows is an empty Delta table: `delta_scan` returns an empty relation,
 and the table has no data files or `date=` directories. With
 `--without-extended` the extended tables are not part of the stream and do
-not exist, nor do the gas-change tables without `--with-gas-changes`.
+not exist, nor do the [opt-in tables](#opt-in-tables) without their flags.
+
+Some tables stay empty, or start late, because of the chain or its Firehose
+blocks:
+
+- `withdrawals`: chains without beacon-chain withdrawals (BSC, and OP Stack
+  chains such as Base) have none. On Ethereum mainnet, Pinax's Firehose blocks
+  before block 25,740,000 (block versions 3 and 4) lack `Block.withdrawals`,
+  so the table starts there (#742). `system_balance_changes` rows with reason
+  `WITHDRAWAL` cover every withdrawal since Shanghai, without the withdrawal
+  and validator indexes.
+- `system_balance_changes`: OP Stack chains have no block rewards or
+  withdrawals.
+- `system_code_changes`: only hard forks that rewrite system contracts (on BSC
+  and OP Stack chains) write it; Ethereum mainnet has none.
+- The opt-in tables of a dataset created with their flags.
 
 ## Withdrawals, access lists and EIP-7702 authorizations
 
