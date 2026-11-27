@@ -108,14 +108,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://megaeth.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "near-mainnet",
-        default_endpoint: "https://mainnet.near.streamingfast.io:443",
-    },
-    BuiltinNetwork {
-        chain_name: "near-testnet",
-        default_endpoint: "https://testnet.near.streamingfast.io:443",
-    },
-    BuiltinNetwork {
         chain_name: "optimism",
         default_endpoint: "https://optimism.firehose.pinax.network:443",
     },
@@ -219,8 +211,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "mainnet-cl",
     "matic",
     "megaeth",
-    "near-mainnet",
-    "near-testnet",
     "optimism",
     "optimism-sepolia",
     "polygon-amoy",

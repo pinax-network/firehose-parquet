@@ -63,8 +63,6 @@ Current fallbacks, all verified by streaming blocks with a StreamingFast-compati
 
 | Alias | Endpoint | Reason |
 |---|---|---|
-| `near-mainnet` | `mainnet.near.streamingfast.io:443` | Pinax no longer serves NEAR |
-| `near-testnet` | `testnet.near.streamingfast.io:443` | Pinax no longer serves NEAR |
 | `tron` | `mainnet.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 | `tron-evm` | `mainnet-evm.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 
@@ -75,6 +73,7 @@ Current exclusions:
 | Network | Reason |
 |---|---|
 | `blast-mainnet` | Pinax retired the Firehose endpoint listed in the pinned v0.8.4 snapshot. Remove the exclusion when refreshing to a snapshot that includes the [upstream removal](https://github.com/graphprotocol/networks-registry/pull/265) (v0.8.10). |
+| `near-mainnet`, `near-testnet` | StreamingFast's `mainnet.near.streamingfast.io` and `testnet.near.streamingfast.io`, listed in the pinned v0.8.4 snapshot, have no DNS record (2026-11-27); they were fallbacks from #535 until then. Registry v0.9.0 lists no NEAR Firehose endpoint, so the exclusions can go when refreshing to it. |
 | `robinhood-sepolia` | `robsepolia.firehose.pinax.network` has no DNS record (2026-09-24) |
 
 ## Internal Pinax networks

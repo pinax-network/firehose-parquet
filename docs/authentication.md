@@ -18,7 +18,7 @@ through `--endpoint https://hypercore.firehose.pinax.network:443`.
 
 ```bash
 export PINAX_API_KEY=your-pinax-api-key
-# For near-mainnet, near-testnet, tron, or tron-evm:
+# For tron or tron-evm:
 export STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token
 ```
 

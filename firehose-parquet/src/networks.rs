@@ -221,6 +221,8 @@ mod tests {
             "arbitrum-nova",
             "blast-mainnet",
             "fantom",
+            "near-mainnet",
+            "near-testnet",
             "scroll",
             "telos",
         ] {

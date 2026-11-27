@@ -23,7 +23,7 @@ vacuums and checkpoints them beside the writer.
 | `tron` | `tron` → `mainnet.tron.streamingfast.io:443` | [Tron schema](docs/schemas/tron.md) | [Tron notes](docs/chains/tron.md) |
 | `cosmos` | no built-in name; `--endpoint https://mainnet.injective.streamingfast.io:443` | [Cosmos schema](docs/schemas/cosmos.md) | [Cosmos notes](docs/chains/cosmos.md) |
 | `antelope` | `eos` → `eos.firehose.pinax.network:443` | [Antelope schema](docs/schemas/antelope.md) | [Antelope notes](docs/chains/antelope.md) |
-| `near` | `near-mainnet` → `mainnet.near.streamingfast.io:443` | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
+| `near` | no built-in name; `--endpoint` of a NEAR Firehose (StreamingFast's no longer resolves) | [NEAR schema](docs/schemas/near.md) | [NEAR notes](docs/chains/near.md) |
 | `sec` | no built-in name; `--endpoint` of a firesec ≥ 0.13.0 Firehose (SEC EDGAR filings, one block per 10-minute window) | [SEC schema](docs/schemas/sec.md) | [SEC notes](docs/chains/sec.md): shipped views, `parse_issues`, 13F units |
 | `hypercore` | `hypercore` → `hypercore.firehose.pinax.network:443` (Pinax-served, not in the networks registry); data from block 846903317 (2026-01-01), the default start; earlier starts are refused | [HyperCore schema](docs/schemas/hypercore.md) | [HyperCore notes](docs/chains/hypercore.md): twelve tables by product family, `decimal(38,10)` amounts, decimal block ids, the data origin, views and cookbook |
 

@@ -13,8 +13,6 @@ const DEFAULT_PROVIDER: &str = "pinax.network";
 /// streaming blocks with a StreamingFast-compatible token (#535). The default provider
 /// still wins if the registry lists it again.
 const FALLBACK_PROVIDERS: &[(&str, &str)] = &[
-    ("near-mainnet", "streamingfast.io"),
-    ("near-testnet", "streamingfast.io"),
     ("tron", "streamingfast.io"),
     ("tron-evm", "streamingfast.io"),
 ];
@@ -25,6 +23,14 @@ const EXCLUDED_NETWORKS: &[(&str, &str)] = &[
     (
         "blast-mainnet",
         "Pinax retired its Blast Firehose; registry v0.8.10 removed the endpoint (2026-10-30)",
+    ),
+    (
+        "near-mainnet",
+        "mainnet.near.streamingfast.io has no DNS record (checked 2026-11-27); the registry lists no NEAR Firehose endpoint any more",
+    ),
+    (
+        "near-testnet",
+        "testnet.near.streamingfast.io has no DNS record (checked 2026-11-27); the registry lists no NEAR Firehose endpoint any more",
     ),
     (
         "robinhood-sepolia",

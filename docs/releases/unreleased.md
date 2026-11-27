@@ -29,10 +29,16 @@ empty when the release is cut.
   ([Opt-in tables](../chains/evm.md#opt-in-tables)).
 - **Rollback:** v1.6.0 always declares these three tables, so it refuses an
   EVM dataset created without them.
-- `fireparq build --network blast-mainnet` has been removed because Pinax retired
-  its Blast Firehose endpoint. To ingest from another Blast Firehose, pass its
-  URL with `--endpoint`. Existing Parquet files can still be read by path with
-  `fireparq inspect`. [Upstream registry change](https://github.com/graphprotocol/networks-registry/pull/265)
+- **`--network blast-mainnet`, `near-mainnet` and `near-testnet` are removed
+  (#735).** Their Firehose hosts no longer resolve. Pinax retired its Blast
+  Firehose ([registry change](https://github.com/graphprotocol/networks-registry/pull/265)),
+  and StreamingFast's NEAR hosts (`mainnet.near.streamingfast.io`,
+  `testnet.near.streamingfast.io`) have no DNS record (checked 2026-11-27);
+  the current registry lists no NEAR Firehose endpoint. To ingest from
+  another Firehose for these chains, pass its URL with `--endpoint` and select
+  its credential ([Authentication](../authentication.md)).
+  Existing Parquet files and datasets still read by path (`fireparq
+  inspect`), and NEAR blocks still decode.
 
 ## New features
 
