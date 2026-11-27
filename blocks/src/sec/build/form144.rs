@@ -1,5 +1,4 @@
 //! Append phase of `form144_notices`, `form144_securities_information`, `form144_securities_to_be_sold`, `form144_sales_past_3_months` (§3.19, §3.20, §3.21, §3.22).
-//! Owned by the `smallforms` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

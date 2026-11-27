@@ -1,9 +1,8 @@
 //! Value tests of `form144_notices`, `form144_securities_information`, `form144_securities_to_be_sold`, `form144_sales_past_3_months`, `form_d_notices`, `form_d_co_issuers`, `form_d_related_persons`, `form_d_sales_recipients`, `form_c_notices`, `form_c_co_issuers`.
-//! Owned by the `smallforms` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The fixture bodies mirror the §8.7 sample filings exactly
-//! ([`fixture_bodies_equal_the_real_filings`] checks them against the local
-//! FIRE files); the expected values are the prototype's rows for them.
+//! ([`fixture_bodies_equal_the_real_filings`] checks them against the golden
+//! fixture); the expected values are the prototype's rows for them.
 
 use super::*;
 use crate::sec::build::ADDRESS_FIELDS;
@@ -2332,215 +2331,32 @@ fn smallforms_rows_follow_their_filings_across_blocks() {
 }
 
 // ---------------------------------------------------------------------------
-// Real data (local only)
+// The real filings (golden fixture)
 // ---------------------------------------------------------------------------
 
-/// The fixture bodies are exact copies of the sample filings.
-/// `cargo test -p blocks --lib sec::tests::smallforms::fixture_bodies -- --ignored`
+/// The fixture bodies are exact copies of the sample filings, as the golden
+/// fixture holds them.
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn fixture_bodies_equal_the_real_filings() {
-    let cases: [(&str, u64, &str, Body); 6] = [
+    let cases: [(u64, &str, Body); 6] = [
+        (2_956_120, HALLIBURTON, Body::Form144(halliburton_144())),
+        (2_956_154, MOHAWK, Body::Form144(mohawk_144())),
+        (2_956_120, INVESTCORP, Body::FormD(investcorp_form_d())),
+        (2_956_120, JS_VENTURE, Body::FormD(js_venture_form_d())),
+        (2_977_781, KOKOPELLI, Body::FormC(kokopelli_form_c())),
         (
-            "2026-03-16",
-            2_956_120,
-            HALLIBURTON,
-            Body::Form144(halliburton_144()),
-        ),
-        ("2026-03-16", 2_956_154, MOHAWK, Body::Form144(mohawk_144())),
-        (
-            "2026-03-16",
-            2_956_120,
-            INVESTCORP,
-            Body::FormD(investcorp_form_d()),
-        ),
-        (
-            "2026-03-16",
-            2_956_120,
-            JS_VENTURE,
-            Body::FormD(js_venture_form_d()),
-        ),
-        (
-            "2026-08-14",
-            2_977_781,
-            KOKOPELLI,
-            Body::FormC(kokopelli_form_c()),
-        ),
-        (
-            "2026-08-14",
             2_977_899,
             CLASSIC_COFFEE,
             Body::FormC(classic_coffee_form_c()),
         ),
     ];
-    for (day, block_num, accession, body) in cases {
-        if !fire::path(day).exists() {
-            println!("skipping {day}: no local sample");
-            continue;
-        }
-        let (_, block) = fire::block(day, block_num);
+    for (block_num, accession, body) in cases {
+        let (_, block) = fixture::block(block_num);
         let real = block
             .filings
             .iter()
             .find(|f| f.accession_number == accession)
             .unwrap_or_else(|| panic!("{accession} not in block {block_num}"));
         assert_eq!(real.body.as_ref(), Some(&body), "{accession}");
-    }
-}
-
-/// Every column of every row of this group's tables on the four sample days
-/// equals the prototype (`proto_map.py`). `form_c_co_issuers.filer_cik` has no
-/// oracle value (critic fix C9) and is reported as absent.
-/// `cargo test -p blocks --lib sec::tests::smallforms::smallforms_match -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn smallforms_match_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
-}
-
-/// `form_c_co_issuers.filer_cik` (critic fix C9, absent from the oracle) equals
-/// the prototype's `filer_cik` of the parent `form_c_notices` row, on every
-/// sample co-issuer.
-/// `cargo test -p blocks --lib sec::tests::smallforms::form_c_co_issuer_filer_cik -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn form_c_co_issuer_filer_cik_matches_the_prototype_parent() {
-    use std::collections::BTreeMap;
-    use std::io::BufRead;
-    let read = |day: &str, table: &str| -> Vec<serde_json::Value> {
-        let path = oracle::dir(day).join(format!("{table}.ndjson"));
-        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-        std::io::BufReader::new(file)
-            .lines()
-            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-            .collect()
-    };
-    let mut checked = 0;
-    for day in fire::DAYS {
-        if !fire::path(day).exists() || !oracle::dir(day).exists() {
-            println!("skipping {day}: no local sample");
-            continue;
-        }
-        let key = |row: &serde_json::Value| {
-            (
-                row["block_num"].as_u64().unwrap(),
-                row["filing_index"].as_u64().unwrap(),
-            )
-        };
-        let parents: BTreeMap<(u64, u64), String> = read(day, "form_c_notices")
-            .iter()
-            .map(|row| {
-                (
-                    key(row),
-                    row["filer_cik"].as_str().unwrap_or("NULL").to_string(),
-                )
-            })
-            .collect();
-        let children = read(day, "form_c_co_issuers");
-        let blocks: std::collections::BTreeSet<u64> =
-            children.iter().map(|row| key(row).0).collect();
-        let mut expected: Vec<String> = children
-            .iter()
-            .map(|row| format!("{:?} {}", key(row), parents[&key(row)]))
-            .collect();
-        let mut actual = Vec::new();
-        for (identity, payload) in
-            fire::blocks(day).filter(|(id, _)| blocks.contains(&id.block_num))
-        {
-            let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap();
-            let b = Batches::new(mapper.flush().unwrap());
-            let table = "form_c_co_issuers";
-            for row in 0..b.rows(table) {
-                let filing_index: u64 = b.cell(table, "filing_index", row).parse().unwrap();
-                actual.push(format!(
-                    "{:?} {}",
-                    (identity.block_num, filing_index),
-                    b.cell(table, "filer_cik", row)
-                ));
-            }
-        }
-        expected.sort();
-        actual.sort();
-        println!("{day}: {} co-issuers: {actual:?}", actual.len());
-        assert_eq!(actual, expected, "{day}");
-        checked += actual.len();
-    }
-    println!("{checked} co-issuer rows checked");
-}
-
-/// The `parse_issues` rows of this group's tables equal the prototype's on the
-/// four sample days (none: the samples have no issue in these tables).
-/// `cargo test -p blocks --lib sec::tests::smallforms::smallforms_parse_issues -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn smallforms_parse_issues_match_the_prototype() {
-    use std::io::BufRead;
-    for day in fire::DAYS {
-        if !fire::path(day).exists() || !oracle::dir(day).exists() {
-            println!("skipping {day}: no local sample");
-            continue;
-        }
-        let path = oracle::dir(day).join("parse_issues.ndjson");
-        let file = std::fs::File::open(&path).unwrap();
-        let expected: Vec<String> = std::io::BufReader::new(file)
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap())
-            .filter(|row| TABLES.contains(&row["table_name"].as_str().unwrap()))
-            .map(|row| {
-                format!(
-                    "{} {} {}.{} [{},{},{}] {} {}",
-                    row["block_num"],
-                    row["filing_index"],
-                    row["table_name"].as_str().unwrap(),
-                    row["column_name"].as_str().unwrap(),
-                    row["index_1"],
-                    row["index_2"],
-                    row["index_3"],
-                    row["raw_value"].as_str().unwrap(),
-                    row["issue"].as_str().unwrap()
-                )
-            })
-            .collect();
-        let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-        let mut actual = Vec::new();
-        let mut blocks = fire::blocks(day).peekable();
-        while let Some((identity, payload)) = blocks.next() {
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap_or_else(|e| panic!("{day} block {}: {e:#}", identity.block_num));
-            if mapper.total_rows() < 500_000 && blocks.peek().is_some() {
-                continue;
-            }
-            let b = Batches::new(mapper.flush().unwrap());
-            for issue in b.issues() {
-                if !TABLES.contains(&issue.table.as_str()) {
-                    continue;
-                }
-                let index: Vec<String> = issue
-                    .index
-                    .iter()
-                    .map(|i| i.map_or_else(|| s("null"), |i| i.to_string()))
-                    .collect();
-                actual.push(format!(
-                    "{} {} {}.{} [{}] {} {}",
-                    issue.block_num,
-                    issue.filing_index.unwrap(),
-                    issue.table,
-                    issue.column,
-                    index.join(","),
-                    issue.raw,
-                    issue.issue
-                ));
-            }
-        }
-        println!(
-            "{day}: {} rust issue rows, {} prototype issue rows in this group's tables",
-            actual.len(),
-            expected.len()
-        );
-        assert_eq!(actual, expected, "{day}");
     }
 }

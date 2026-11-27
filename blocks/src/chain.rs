@@ -122,6 +122,10 @@ pub struct BuildDefaults {
     pub flush_idle_secs: Option<u64>,
     /// `--stream-idle-timeout-secs`.
     pub stream_idle_timeout_secs: Option<u64>,
+    /// `--reconnect-stall-timeout-secs`. Its timer runs from the first failed
+    /// reconnect until a message arrives, so a family whose stream is quiet
+    /// for longer than the generic 900 s needs at least its quiet period here.
+    pub reconnect_stall_timeout_secs: Option<u64>,
     /// `--metrics-stale-after-secs`.
     pub metrics_stale_after_secs: Option<u64>,
 }
@@ -132,6 +136,7 @@ impl BuildDefaults {
         grpc_max_message_bytes: None,
         flush_idle_secs: None,
         stream_idle_timeout_secs: None,
+        reconnect_stall_timeout_secs: None,
         metrics_stale_after_secs: None,
     };
 }
@@ -150,6 +155,12 @@ const SEC_BUILD_DEFAULTS: BuildDefaults = BuildDefaults {
     // feed day plus firesec's hourly poll and margin). HTTP/2 keepalive still
     // detects a dead connection within a minute.
     stream_idle_timeout_secs: Some(26 * 3600),
+    // Only a message resets the stall timer, so the generic 900 s stopped a
+    // healthy writer on two disconnects 15 minutes apart in a quiet day
+    // (#711). Give up reconnecting only when `/ready` already fails: no
+    // message for 36 hours. The cap of 30 failed attempts without a message
+    // still stops a dead endpoint, after 10 to 31 minutes of back-off.
+    reconnect_stall_timeout_secs: Some(36 * 3600),
     // `/ready` fails only when a whole feed day is missing (36 hours).
     metrics_stale_after_secs: Some(36 * 3600),
 };

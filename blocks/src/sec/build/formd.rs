@@ -1,5 +1,4 @@
 //! Append phase of `form_d_notices`, `form_d_co_issuers`, `form_d_related_persons`, `form_d_sales_recipients` (§3.32, §3.33, §3.34, §3.35).
-//! Owned by the `smallforms` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

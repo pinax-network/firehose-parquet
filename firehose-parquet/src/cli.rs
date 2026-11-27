@@ -403,11 +403,11 @@ pub struct CommonArgs {
     )]
     pub stream_idle_timeout_secs: Option<u64>,
 
-    /// Exit with an error if reconnecting continuously for N seconds (0 disables)
+    /// Exit with an error if reconnecting continuously for N seconds (0 disables; default 900;
+    /// 129600, 36 hours, for `build --block-type sec`, a daily feed)
     #[arg(
         long,
         env = "RECONNECT_STALL_TIMEOUT_SECS",
-        default_value = "900",
         hide_env_values = true,
         help_heading = "Connection"
     )]

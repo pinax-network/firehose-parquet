@@ -94,7 +94,7 @@ rather than the default workflow:
 |---|---|
 | `--cursor-override` | Read-only `--dry-run` only: ignore legacy cursor defaults or an unreadable cursor. A real `build` rejects it, even at a new root; protected output never rewinds, so use a new empty root for changed semantics |
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120, or 93600 for `--block-type sec`; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
-| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
+| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900, or 129600 for `--block-type sec`; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds, so it must exceed the longest quiet period of the stream: with 900 s, two disconnects 15 minutes apart in a silence stop the run. |
 
 ### Receive transport
 
@@ -292,9 +292,10 @@ at the head of what its server has. Use it for feeds that arrive in bursts.
 It is off by default, and 60 for `--block-type sec`, whose feed is one burst
 of 144 windows per EDGAR feed day followed by about a day of silence
 ([SEC notes](chains/sec.md)). One quiet period flushes at most once; the next
-message starts a new one. It is not attempted while `build` reconnects: it
-waits for the new stream and then flushes at once if the stream has been quiet
-long enough.
+message starts a new one, and a reconnect does not. The quiet period keeps
+running while `build` reconnects (connecting, the `Blocks` call, back-off), so
+the rows of a burst are committed even when the endpoint stays unreachable
+after it; a flush that fails ends the run, as during a stream.
 
 ### Day boundaries and missing timestamps
 
@@ -314,11 +315,12 @@ the initial span and updated whenever a real block timestamp is observed.
 ## Family defaults
 
 `build --block-type sec` (or `auto` when the endpoint's EndpointInfo names the
-chain `sec`) changes four defaults, each only when neither the flag nor its
+chain `sec`) changes five defaults, each only when neither the flag nor its
 environment variable is set, and logs `applied the block family's build
 defaults to settings left unset` with the values:
 `--grpc-max-message-bytes 536870912`, `--flush-idle-secs 60`,
-`--stream-idle-timeout-secs 93600` (26 hours) and
+`--stream-idle-timeout-secs 93600` (26 hours),
+`--reconnect-stall-timeout-secs 129600` (36 hours) and
 `--metrics-stale-after-secs 129600` (36 hours). They follow the family known
 before streaming: an `auto` build that recognizes SEC only from the first
 block's type URL keeps the generic defaults, as does every other family.

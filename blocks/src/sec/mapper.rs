@@ -75,7 +75,7 @@ impl SecBlockMapper {
             self.hub.append_filing(&ctx, fc, filing, &p.filing);
             self.envelope.append(&ctx, fc, filing, &p.envelope);
             match &p.body {
-                PreparedBody::Unset | PreparedBody::Raw(_) => {}
+                PreparedBody::Unset | PreparedBody::Raw => {}
                 PreparedBody::Ownership(body, b) => self.ownership.append(&ctx, fc, body, b),
                 PreparedBody::Form13f(body, b) => self.form13f.append(&ctx, fc, body, b),
                 PreparedBody::Beneficial(body, b) => self.beneficial.append(&ctx, fc, body, b),

@@ -7,24 +7,27 @@
 //! - `prepare`: the fallible preflight of a block; `build`: the infallible
 //!   append into one typed builder per table.
 //! - `mapper`: [`mapper::SecBlockMapper`].
+//!
+//! Comments cite the design specification this module was written from by
+//! section (`§n`). It is not in the repository; what it specified is:
+//! - §2–§3, the tables: `schema`, from which `docs/schemas/sec.md` is
+//!   generated;
+//! - §4, value parsing and `parse_issues`: the `parse` and `issues` docs and
+//!   `docs/chains/sec.md` ("Value semantics");
+//! - §1 and §8, principles and implementation rules: stated where cited.
+//!   The §8.7 sample filings, which the unit tests mirror, are blocks of
+//!   `blocks/tests/fixtures/sec-v013/` (its README lists them).
 
 pub mod mapper;
 pub mod proto;
 pub mod schema;
 
-// Scaffolding: the shared helpers are used by the per-form modules as they
-// land. Remove these allowances at integration.
-#[allow(dead_code)]
 pub(crate) mod build;
-#[allow(dead_code)]
 pub(crate) mod issues;
-#[allow(dead_code)]
 pub(crate) mod parse;
-#[allow(dead_code)]
 pub(crate) mod prepare;
 
 #[cfg(test)]
 mod parse_tests;
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) mod tests;

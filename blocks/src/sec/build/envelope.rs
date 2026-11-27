@@ -1,5 +1,4 @@
 //! Append phase of `filing_raw_xml`, `filing_parties`, `filing_documents`, `filing_series`, `filing_series_classes`, `filing_signatures` (§3.3, §3.4, §3.5, §3.6, §3.7, §3.8).
-//! Owned by the `envelope` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

@@ -201,6 +201,13 @@ pub(super) fn apply_family_build_defaults(
         config.stream_idle_timeout_secs = Some(secs).filter(|secs| *secs > 0);
         applied.push(format!("stream_idle_timeout_secs={secs}"));
     }
+    if let (None, Some(secs)) = (
+        common.reconnect_stall_timeout_secs,
+        defaults.reconnect_stall_timeout_secs,
+    ) {
+        config.reconnect_stall_timeout_secs = Some(secs).filter(|secs| *secs > 0);
+        applied.push(format!("reconnect_stall_timeout_secs={secs}"));
+    }
     let stale_after = match (
         common.metrics_stale_after_secs,
         defaults.metrics_stale_after_secs,
@@ -531,6 +538,7 @@ mod family_defaults_tests {
         assert!(config.grpc.max_message_bytes as u64 > 143_854_065);
         assert_eq!(config.flush_idle_secs, Some(60));
         assert_eq!(config.stream_idle_timeout_secs, Some(93_600));
+        assert_eq!(config.reconnect_stall_timeout_secs, Some(129_600));
         assert_eq!(stale_after, 129_600);
         assert_eq!(
             applied,
@@ -538,6 +546,7 @@ mod family_defaults_tests {
                 "grpc_max_message_bytes=536870912",
                 "flush_idle_secs=60",
                 "stream_idle_timeout_secs=93600",
+                "reconnect_stall_timeout_secs=129600",
                 "metrics_stale_after_secs=129600"
             ]
         );
@@ -551,6 +560,8 @@ mod family_defaults_tests {
                 "0",
                 "--stream-idle-timeout-secs",
                 "0",
+                "--reconnect-stall-timeout-secs",
+                "0",
                 "--metrics-stale-after-secs",
                 "120",
             ],
@@ -559,8 +570,39 @@ mod family_defaults_tests {
         assert_eq!(config.grpc.max_message_bytes, 134_217_728);
         assert_eq!(config.flush_idle_secs, None);
         assert_eq!(config.stream_idle_timeout_secs, None);
+        assert_eq!(config.reconnect_stall_timeout_secs, None);
         assert_eq!(stale_after, 120);
         assert!(applied.is_empty(), "{applied:?}");
+        let (config, _, applied) = resolve(
+            &["--reconnect-stall-timeout-secs", "900"],
+            Some(ChainKind::Sec),
+        );
+        assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
+        assert!(!applied
+            .iter()
+            .any(|setting| setting.starts_with("reconnect_stall")));
+    }
+
+    /// #711: the stall timer runs from the first failed reconnect until a
+    /// message arrives, so a family whose stream may stay quiet up to its idle
+    /// timeout must not give up reconnecting sooner, or a healthy writer stops
+    /// on two disconnects in one quiet period.
+    #[test]
+    fn a_raised_idle_timeout_comes_with_a_stall_timeout_at_least_as_long() {
+        for kind in ChainKind::ALL {
+            let defaults = kind.profile().build_defaults;
+            let Some(idle) = defaults.stream_idle_timeout_secs else {
+                continue;
+            };
+            let stall = defaults
+                .reconnect_stall_timeout_secs
+                .unwrap_or(firehose_parquet::config::DEFAULT_RECONNECT_STALL_TIMEOUT_SECS);
+            assert!(stall >= idle, "{kind:?}: stall {stall} s < idle {idle} s");
+            assert!(
+                stall <= defaults.metrics_stale_after_secs.unwrap_or(u64::MAX),
+                "{kind:?}: the writer keeps reconnecting after /ready fails"
+            );
+        }
     }
 
     #[test]
@@ -578,6 +620,7 @@ mod family_defaults_tests {
             );
             assert_eq!(config.flush_idle_secs, None);
             assert_eq!(config.stream_idle_timeout_secs, Some(120));
+            assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
             assert_eq!(stale_after, 120);
             assert!(applied.is_empty(), "{family:?}: {applied:?}");
         }

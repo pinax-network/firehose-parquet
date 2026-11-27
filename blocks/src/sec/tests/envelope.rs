@@ -1,10 +1,8 @@
 //! Value tests of `filing_raw_xml`, `filing_parties`, `filing_documents`, `filing_series`, `filing_series_classes`, `filing_signatures`.
-//! Owned by the `envelope` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
-//! The fixtures mirror real 0.13.0 filings of the four sample days (final-spec
-//! §8.7 accessions; values copied verbatim from the samples, lists trimmed).
-//! The `#[ignore]`d tests at the end compare every row with the prototype on
-//! the local sample files.
+//! The fixtures mirror real 0.13.0 filings of the four sample days (§8.7
+//! accessions; values copied verbatim from the samples, lists trimmed). The
+//! test at the end maps one of them from the golden fixture.
 
 use super::*;
 
@@ -1238,16 +1236,14 @@ fn envelope_issues_follow_the_filings_row_in_table_order() {
 }
 
 // ---------------------------------------------------------------------------
-// Real data (local only)
+// The real filing (golden fixture)
 // ---------------------------------------------------------------------------
 
 /// The §8.7 2014 Form 4/A on its real block: envelope rows and the
 /// `tz_dropped` signature date.
-/// `cargo test -p blocks --lib sec::tests::envelope::real_ -- --ignored --nocapture`
 #[test]
-#[ignore = "local: needs /tmp/sec-fireparq/fire-v013"]
 fn real_2014_form4_envelope() {
-    let (identity, block) = fire::block("2014-08-11", 2_346_291);
+    let (identity, block) = fixture::block(2_346_291);
     let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
     mapper
         .map_block(&block.encode_to_vec(), &identity, StreamEvent::default())
@@ -1311,79 +1307,4 @@ fn real_2014_form4_envelope() {
             "tz_dropped"
         )
     );
-}
-
-/// The envelope tables equal the prototype's on every sample day present
-/// locally (every column of every row).
-/// `cargo test -p blocks --lib sec::tests::envelope::envelope_matches -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn envelope_matches_the_prototype() {
-    oracle::assert_matches(&fire::DAYS, &TABLES, &[]);
-}
-
-/// The `parse_issues` rows of the envelope tables equal the prototype's, in
-/// order (the full `parse_issues` comparison needs every group).
-/// `cargo test -p blocks --lib sec::tests::envelope::envelope_parse_issues -- --ignored --nocapture`
-#[test]
-#[ignore = "local: needs the sample FIRE files and the prototype NDJSON"]
-fn envelope_parse_issues_match_the_prototype() {
-    use std::io::BufRead;
-
-    let ours = |row: &serde_json::Value| {
-        row["table_name"]
-            .as_str()
-            .is_some_and(|table| TABLES.contains(&table))
-    };
-    for day in fire::DAYS {
-        if !fire::path(day).exists() || !oracle::dir(day).exists() {
-            continue;
-        }
-        let mut rust = Vec::new();
-        let mut mapper = SecBlockMapper::new(false, EncodeBytes::Hex);
-        let mut collect = |mapper: &mut SecBlockMapper| {
-            let batches = mapper.flush().unwrap();
-            let batch = &batches["parse_issues"];
-            let schema = batch.schema();
-            for row in 0..batch.num_rows() {
-                let value: serde_json::Map<String, serde_json::Value> = schema
-                    .fields()
-                    .iter()
-                    .zip(batch.columns())
-                    .map(|(field, column)| {
-                        (
-                            field.name().clone(),
-                            oracle::json_value(column.as_ref(), row),
-                        )
-                    })
-                    .collect();
-                let value = serde_json::Value::Object(value);
-                if ours(&value) {
-                    rust.push(value);
-                }
-            }
-        };
-        for (identity, payload) in fire::blocks(day) {
-            mapper
-                .map_block_bytes(payload.into(), &identity, StreamEvent::default())
-                .unwrap();
-            if mapper.total_rows() > 500_000 {
-                collect(&mut mapper);
-            }
-        }
-        collect(&mut mapper);
-
-        let file = std::fs::File::open(oracle::dir(day).join("parse_issues.ndjson")).unwrap();
-        let expected: Vec<serde_json::Value> = std::io::BufReader::new(file)
-            .lines()
-            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-            .filter(|row| ours(row))
-            .collect();
-        println!(
-            "{day}: envelope parse_issues rust {} oracle {}",
-            rust.len(),
-            expected.len()
-        );
-        assert_eq!(rust, expected, "{day}");
-    }
 }

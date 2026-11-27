@@ -1,5 +1,4 @@
 //! Append phase of `ncen_reports` (§3.40).
-//! Owned by the `funds` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

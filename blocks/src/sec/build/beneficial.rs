@@ -1,5 +1,4 @@
 //! Append phase of `beneficial_reports`, `beneficial_reporting_persons` (§3.17, §3.18).
-//! Owned by the `form13f-beneficial` group: see `/tmp/sec-fireparq/impl/contracts.md`.
 //!
 //! The column structs below are generated from `super::super::schema` and checked
 //! against it on construction; edit them only together with the schema.

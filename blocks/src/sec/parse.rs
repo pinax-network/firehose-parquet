@@ -42,6 +42,7 @@ pub enum IssueKind {
 }
 
 impl IssueKind {
+    #[cfg(test)]
     pub const ALL: [IssueKind; 6] = [
         IssueKind::Unparseable,
         IssueKind::Sentinel,
@@ -114,6 +115,7 @@ pub enum Family {
 }
 
 impl Family {
+    #[cfg(test)]
     pub const ALL: [Family; 5] = [
         Family::M2,
         Family::Q6,
@@ -321,7 +323,8 @@ pub fn calendar(days: i32) -> Option<(i32, u8, u8)> {
     Some((date.year(), date.month() as u8, date.day()))
 }
 
-/// ISO `YYYY-MM-DD` of a `Date32` value (for messages and tests).
+/// ISO `YYYY-MM-DD` of a `Date32` value, for tests.
+#[cfg(test)]
 pub fn iso_date(days: i32) -> Option<String> {
     let (year, month, day) = calendar(days)?;
     Some(format!("{year:04}-{month:02}-{day:02}"))
@@ -548,7 +551,8 @@ pub fn month_end_back(days: i32, months_back: u32) -> Option<i32> {
 }
 
 /// The canonical text of a mantissa at `scale` (`-12.500000`), as DuckDB prints
-/// a `DECIMAL(38, scale)`.
+/// a `DECIMAL(38, scale)`, for tests.
+#[cfg(test)]
 pub fn decimal_string(mantissa: i128, scale: u8) -> String {
     let digits = mantissa.unsigned_abs().to_string();
     let sign = if mantissa < 0 { "-" } else { "" };
