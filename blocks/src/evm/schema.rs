@@ -1,5 +1,9 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
+use firehose_parquet::ingest::{
+    EvmOptInGroup, EVM_ACCOUNT_CREATION_TABLES, EVM_GAS_CHANGE_TABLES,
+    EVM_SYSTEM_NONCE_CHANGE_TABLES,
+};
 use firehose_parquet::traits::{
     canonical_fields_with_encoding, enum_data_type, push_fork_step_field,
 };
@@ -437,12 +441,50 @@ pub const BASE_TABLE_NAMES: [&str; 6] = [
     "set_code_authorizations",
 ];
 
-/// Extended tables written only with `--with-gas-changes`: block version 5 of
-/// the EVM Firehose tracer records no gas changes.
-pub const GAS_CHANGE_TABLE_NAMES: [&str; 2] = firehose_parquet::ingest::EVM_GAS_CHANGE_TABLES;
+/// Which opt-in groups of extended tables a mapper declares
+/// ([`firehose_parquet::ingest::EVM_OPT_IN_TABLES`]): `--with-gas-changes`,
+/// `--with-account-creations` and `--with-system-nonce-changes`. Current EVM
+/// Firehose blocks fill none of these tables. The default selects none.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OptInTables {
+    /// `gas_changes` and `system_gas_changes`.
+    pub gas_changes: bool,
+    /// `account_creations` and `system_account_creations`.
+    pub account_creations: bool,
+    /// `system_nonce_changes`.
+    pub system_nonce_changes: bool,
+}
 
-/// Extended table names (available at EXTENDED detail level), with
-/// [`GAS_CHANGE_TABLE_NAMES`].
+impl OptInTables {
+    /// Every group: the inventory of extended output by v1.6.0 or earlier,
+    /// [`EXTENDED_TABLE_NAMES`].
+    pub const ALL: Self = Self {
+        gas_changes: true,
+        account_creations: true,
+        system_nonce_changes: true,
+    };
+
+    /// Each group with whether it is selected, in the order of
+    /// [`firehose_parquet::ingest::EVM_OPT_IN_TABLES`].
+    pub fn groups(self) -> [(EvmOptInGroup, bool); 3] {
+        [
+            (EVM_GAS_CHANGE_TABLES, self.gas_changes),
+            (EVM_ACCOUNT_CREATION_TABLES, self.account_creations),
+            (EVM_SYSTEM_NONCE_CHANGE_TABLES, self.system_nonce_changes),
+        ]
+    }
+
+    /// Whether an extended mapper declares `table`: it is in no group left
+    /// out.
+    pub fn declares(self, table: &str) -> bool {
+        self.groups()
+            .iter()
+            .all(|(group, selected)| *selected || !group.tables.contains(&table))
+    }
+}
+
+/// Extended table names (available at EXTENDED detail level), every
+/// [`OptInTables`] group included.
 pub const EXTENDED_TABLE_NAMES: [&str; 20] = [
     "blocks",
     "transactions",

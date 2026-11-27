@@ -16,7 +16,7 @@ vacuums and checkpoints them beside the writer.
 
 | `--block-type` | Example `--network` → endpoint | Tables, columns and types | Notes |
 |---|---|---|---|
-| `evm` | `mainnet` → `eth.firehose.pinax.network:443` | [EVM schema](docs/schemas/evm.md) | [EVM notes](docs/chains/evm.md). `--without-extended` drops the call, state-change and `system_*` tables; `gas_changes` and `system_gas_changes` need `--with-gas-changes` |
+| `evm` | `mainnet` → `eth.firehose.pinax.network:443` | [EVM schema](docs/schemas/evm.md) | [EVM notes](docs/chains/evm.md). `--without-extended` drops the call, state-change and `system_*` tables; five tables current blocks never fill are opt-in: `--with-gas-changes`, `--with-account-creations` and `--with-system-nonce-changes` ([opt-in tables](docs/chains/evm.md#opt-in-tables)) |
 | `solana` | `solana-mainnet-beta` → `solana.firehose.pinax.network:443` | [Solana schema](docs/schemas/solana.md) | [Solana notes](docs/chains/solana.md). `--without-votes` drops `vote_transactions` |
 | `bitcoin` | `btc` → `bitcoin.firehose.pinax.network:443` | [Bitcoin schema](docs/schemas/bitcoin.md) | [Bitcoin notes](docs/chains/bitcoin.md) |
 | `beacon` | `mainnet-cl` → `eth-cl.firehose.pinax.network:443` | [Beacon schema](docs/schemas/beacon.md) | [Beacon notes](docs/chains/beacon.md) (fork coverage) |

@@ -548,6 +548,35 @@ pub struct BuildArgs {
     )]
     pub with_gas_changes: bool,
 
+    /// Write the EVM extended tables `account_creations` and
+    /// `system_account_creations`.
+    ///
+    /// Off by default: EVM Firehose blocks of version 4 and later record no
+    /// account creations. A dataset created without it has neither table. A
+    /// dataset that has them (EVM with extended output, created by v1.6.0 or
+    /// earlier) resumes only with this flag.
+    #[arg(
+        long,
+        env = "WITH_ACCOUNT_CREATIONS",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub with_account_creations: bool,
+
+    /// Write the EVM extended table `system_nonce_changes`.
+    ///
+    /// Off by default: system calls run from the system address without
+    /// changing a nonce. A dataset created without it has no such table. A
+    /// dataset that has it (EVM with extended output, created by v1.6.0 or
+    /// earlier) resumes only with this flag.
+    #[arg(
+        long,
+        env = "WITH_SYSTEM_NONCE_CHANGES",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub with_system_nonce_changes: bool,
+
     /// Disable Solana `vote_transactions` output.
     #[arg(
         long,
