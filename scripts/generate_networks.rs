@@ -5,26 +5,38 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-/// Provider whose Firehose endpoint a built-in alias uses when the registry lists one.
+/// The only provider whose Firehose endpoint a built-in alias uses. A network
+/// the registry lists only with another provider's endpoint gets no alias.
 const DEFAULT_PROVIDER: &str = "pinax.network";
-
-/// Networks the default provider no longer serves, kept on another Firehose
-/// provider that the registry lists for them. Each entry was checked live by
-/// streaming blocks with a StreamingFast-compatible token (#535). The default provider
-/// still wins if the registry lists it again.
-const FALLBACK_PROVIDERS: &[(&str, &str)] = &[
-    ("near-mainnet", "streamingfast.io"),
-    ("near-testnet", "streamingfast.io"),
-    ("tron", "streamingfast.io"),
-    ("tron-evm", "streamingfast.io"),
-];
 
 /// Networks whose registry endpoint is known to be broken. They get no built-in
 /// alias until the endpoint works again.
-const EXCLUDED_NETWORKS: &[(&str, &str)] = &[(
-    "robinhood-sepolia",
-    "robsepolia.firehose.pinax.network has no DNS record (checked 2026-09-24)",
-)];
+const EXCLUDED_NETWORKS: &[(&str, &str)] = &[
+    (
+        "blast-mainnet",
+        "Pinax retired its Blast Firehose; registry v0.8.10 removed the endpoint (2026-10-30)",
+    ),
+    (
+        "near-mainnet",
+        "mainnet.near.streamingfast.io has no DNS record (checked 2026-11-27); the registry lists no NEAR Firehose endpoint any more",
+    ),
+    (
+        "near-testnet",
+        "testnet.near.streamingfast.io has no DNS record (checked 2026-11-27); the registry lists no NEAR Firehose endpoint any more",
+    ),
+    (
+        "robinhood-sepolia",
+        "robsepolia.firehose.pinax.network has no DNS record (checked 2026-09-24)",
+    ),
+    (
+        "tron",
+        "Pinax does not serve or support Tron (decided 2026-11-27); it was a StreamingFast fallback from #535 until then",
+    ),
+    (
+        "tron-evm",
+        "Pinax does not serve or support Tron (decided 2026-11-27); it was a StreamingFast fallback from #535 until then",
+    ),
+];
 
 /// Pinax-served Firehose networks that the registry does not list yet, as
 /// `(alias, endpoint, reason)`. Hand-maintained: each entry is a reviewed
@@ -32,8 +44,7 @@ const EXCLUDED_NETWORKS: &[(&str, &str)] = &[(
 /// They are appended to the registry's aliases. When a registry snapshot
 /// lists the same name:
 ///
-/// - with an endpoint the provider policy accepts (its pinax.network endpoint,
-///   or the `FALLBACK_PROVIDERS` provider), the registry entry wins and the
+/// - with its pinax.network endpoint, the registry entry wins and the
 ///   generator warns until the entry is dropped from this list;
 /// - without such an endpoint, the internal entry is kept and the generator
 ///   warns that it needs review (its reason no longer holds).
@@ -105,11 +116,6 @@ fn main() -> Result<()> {
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
-    for (network, provider) in FALLBACK_PROVIDERS {
-        if !built.iter().any(|b| b.chain_name == *network) {
-            eprintln!("warning: fallback network `{network}` has no `{provider}` Firehose endpoint in the registry");
-        }
-    }
 
     let rendered = render(&built, &snapshot_label(&registry));
     fs::write(&output, rendered)
@@ -122,7 +128,7 @@ fn main() -> Result<()> {
 /// The registry's aliases plus the `internal` ones, sorted by name, and a
 /// warning for every internal entry that conflicts with the registry: the
 /// registry gives the same name an alias (the registry entry wins), lists the
-/// same name without an endpoint the provider policy accepts (the internal
+/// same name without a pinax.network endpoint (the internal
 /// entry is kept), or gives another name the same endpoint host (both are kept).
 fn build_networks(
     networks: &[RegistryNetwork],
@@ -148,7 +154,7 @@ fn build_networks(
             eprintln!("skipping `{chain_name}`: {reason}");
             continue;
         }
-        if let Some(endpoint) = select_endpoint(&chain_name, network) {
+        if let Some(endpoint) = provider_endpoint(network, DEFAULT_PROVIDER) {
             built.push(BuiltNetwork {
                 chain_name,
                 default_endpoint: endpoint,
@@ -170,7 +176,7 @@ fn build_networks(
         }
         if registry_names.contains(*alias) {
             warnings.push(format!(
-                "internal network `{alias}` is now in the registry without a Firehose endpoint the provider policy accepts; the internal entry is kept, review `{alias}` in PINAX_NETWORKS (its reason says the registry does not list it)"
+                "internal network `{alias}` is now in the registry without a pinax.network Firehose endpoint; the internal entry is kept, review `{alias}` in PINAX_NETWORKS (its reason says the registry does not list it)"
             ));
         }
         let host = endpoint_host(endpoint);
@@ -192,17 +198,6 @@ fn build_networks(
 
     built.sort_by(|a, b| a.chain_name.cmp(&b.chain_name));
     Ok((built, warnings))
-}
-
-/// Picks the default provider's endpoint, or the fallback provider's endpoint
-/// for networks listed in `FALLBACK_PROVIDERS`.
-fn select_endpoint(chain_name: &str, network: &RegistryNetwork) -> Option<String> {
-    provider_endpoint(network, DEFAULT_PROVIDER).or_else(|| {
-        FALLBACK_PROVIDERS
-            .iter()
-            .find(|(name, _)| *name == chain_name)
-            .and_then(|(_, provider)| provider_endpoint(network, provider))
-    })
 }
 
 fn provider_endpoint(network: &RegistryNetwork, provider: &str) -> Option<String> {
@@ -357,14 +352,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_networks_uses_fallback_provider_only_for_listed_networks() {
+    fn test_build_networks_gives_no_alias_to_another_providers_endpoint() {
         let built = registry_only(&[
-            network("tron", &["mainnet.tron.streamingfast.io:443"]),
             network("monad", &["mainnet.monad.streamingfast.io:443"]),
+            network("arc", &["arc.firehose.pinax.network:443"]),
         ]);
         assert_eq!(
             endpoints(&built),
-            vec![("tron", "https://mainnet.tron.streamingfast.io:443")]
+            vec![("arc", "https://arc.firehose.pinax.network:443")]
         );
     }
 
@@ -372,6 +367,8 @@ mod tests {
     fn test_build_networks_skips_excluded_networks_and_sorts() {
         let built = registry_only(&[
             network("zora", &["zora.firehose.pinax.network:443"]),
+            network("blast-mainnet", &["blast.firehose.pinax.network:443"]),
+            network("tron", &["tron.firehose.pinax.network:443"]),
             network(
                 "robinhood-sepolia",
                 &["robsepolia.firehose.pinax.network:443"],
@@ -470,7 +467,7 @@ mod tests {
         assert_eq!(
             warnings,
             vec![
-                "internal network `hypercore` is now in the registry without a Firehose endpoint the provider policy accepts; the internal entry is kept, review `hypercore` in PINAX_NETWORKS (its reason says the registry does not list it)"
+                "internal network `hypercore` is now in the registry without a pinax.network Firehose endpoint; the internal entry is kept, review `hypercore` in PINAX_NETWORKS (its reason says the registry does not list it)"
             ]
         );
     }
@@ -535,9 +532,8 @@ mod tests {
             assert!(host.ends_with(".pinax.network"), "{alias}: {endpoint}");
             assert!(!reason.trim().is_empty(), "{alias}: a reason is required");
             assert!(
-                !EXCLUDED_NETWORKS.iter().any(|(name, _)| name == alias)
-                    && !FALLBACK_PROVIDERS.iter().any(|(name, _)| name == alias),
-                "{alias} is also a registry policy entry"
+                !EXCLUDED_NETWORKS.iter().any(|(name, _)| name == alias),
+                "{alias} is also a registry exclusion"
             );
             names.push(*alias);
         }

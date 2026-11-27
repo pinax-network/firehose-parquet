@@ -2148,8 +2148,6 @@ mod tests {
         let credentials: BTreeSet<&str> = firehose_parquet::auth::PINAX_API_KEY_ENV_VARS
             .iter()
             .chain(firehose_parquet::auth::PINAX_API_TOKEN_ENV_VARS)
-            .chain(firehose_parquet::auth::STREAMINGFAST_API_KEY_ENV_VARS)
-            .chain(firehose_parquet::auth::STREAMINGFAST_API_TOKEN_ENV_VARS)
             .copied()
             .collect();
         for name in &credentials {

@@ -147,7 +147,10 @@ mod tests {
             normalize_network_for_env("solana/mainnet beta"),
             "SOLANA_MAINNET_BETA"
         );
-        assert_eq!(normalize_network_for_env("  tron.evm  "), "TRON_EVM");
+        assert_eq!(
+            normalize_network_for_env("  arbitrum.one  "),
+            "ARBITRUM_ONE"
+        );
     }
 
     #[test]
@@ -156,8 +159,6 @@ mod tests {
         unsafe {
             std::env::remove_var("FIREHOSE_ENDPOINT_MAINNET");
             std::env::remove_var("FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA");
-            std::env::remove_var("FIREHOSE_ENDPOINT_TRON");
-            std::env::remove_var("FIREHOSE_ENDPOINT_TRONEVM");
         }
 
         let mainnet = resolve_network_endpoint("mainnet").expect("mainnet should resolve");
@@ -170,19 +171,6 @@ mod tests {
         assert_eq!(solana.chain_name, "solana-mainnet-beta");
         assert_eq!(solana.endpoint, "https://solana.firehose.pinax.network:443");
         assert_eq!(solana.source, EndpointSource::Builtin);
-
-        let tron = resolve_network_endpoint("tron").expect("tron should resolve");
-        assert_eq!(tron.chain_name, "tron");
-        assert_eq!(tron.endpoint, "https://mainnet.tron.streamingfast.io:443");
-        assert_eq!(tron.source, EndpointSource::Builtin);
-
-        let tronevm = resolve_network_endpoint("tron-evm").expect("tron-evm should resolve");
-        assert_eq!(tronevm.chain_name, "tron-evm");
-        assert_eq!(
-            tronevm.endpoint,
-            "https://mainnet-evm.tron.streamingfast.io:443"
-        );
-        assert_eq!(tronevm.source, EndpointSource::Builtin);
     }
 
     #[test]
@@ -217,9 +205,17 @@ mod tests {
 
     #[test]
     fn test_resolve_network_endpoint_removed_builtin_network() {
-        // `arbitrum-nova` was removed earlier; the rest were removed in #535
-        // because no registry provider serves them any more.
-        for name in ["arbitrum-nova", "fantom", "scroll", "telos"] {
+        for name in [
+            "arbitrum-nova",
+            "blast-mainnet",
+            "fantom",
+            "near-mainnet",
+            "near-testnet",
+            "scroll",
+            "telos",
+            "tron",
+            "tron-evm",
+        ] {
             let err = resolve_network_endpoint(name)
                 .expect_err("removed built-in network should no longer resolve");
             assert!(err

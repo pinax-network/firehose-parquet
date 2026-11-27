@@ -31,10 +31,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://basesepolia.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "blast-mainnet",
-        default_endpoint: "https://blast.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
         chain_name: "bsc",
         default_endpoint: "https://bsc.firehose.pinax.network:443",
     },
@@ -112,14 +108,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://megaeth.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "near-mainnet",
-        default_endpoint: "https://mainnet.near.streamingfast.io:443",
-    },
-    BuiltinNetwork {
-        chain_name: "near-testnet",
-        default_endpoint: "https://testnet.near.streamingfast.io:443",
-    },
-    BuiltinNetwork {
         chain_name: "optimism",
         default_endpoint: "https://optimism.firehose.pinax.network:443",
     },
@@ -164,14 +152,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://tempo.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "tron",
-        default_endpoint: "https://mainnet.tron.streamingfast.io:443",
-    },
-    BuiltinNetwork {
-        chain_name: "tron-evm",
-        default_endpoint: "https://mainnet-evm.tron.streamingfast.io:443",
-    },
-    BuiltinNetwork {
         chain_name: "unichain",
         default_endpoint: "https://unichain.firehose.pinax.network:443",
     },
@@ -204,7 +184,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "avalanche",
     "base",
     "base-sepolia",
-    "blast-mainnet",
     "bsc",
     "btc",
     "celo",
@@ -224,8 +203,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "mainnet-cl",
     "matic",
     "megaeth",
-    "near-mainnet",
-    "near-testnet",
     "optimism",
     "optimism-sepolia",
     "polygon-amoy",
@@ -237,8 +214,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "soneium",
     "soneium-testnet",
     "tempo",
-    "tron",
-    "tron-evm",
     "unichain",
     "unichain-testnet",
     "wax",

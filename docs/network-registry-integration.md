@@ -1,6 +1,6 @@
 # Network Registry Integration
 
-This note covers how the built-in `--network` aliases are generated from The Graph networks registry and a short internal list of Pinax-served networks the registry does not list yet, which provider each alias uses, and how the aliases are kept from going stale. It started as the recommendation for issue #218; #535 added the provider fallback and the endpoint check.
+This note covers how the built-in `--network` aliases are generated from The Graph networks registry and a short internal list of Pinax-served networks the registry does not list yet, which provider each alias uses, and how the aliases are kept from going stale. It started as the recommendation for issue #218; #535 added the endpoint check, and a provider fallback that #735 removed.
 
 ## Recommendation
 
@@ -35,7 +35,7 @@ Use a one-off generator to turn a locally downloaded registry snapshot into `fir
    cargo run -p firehose-parquet --bin generate-networks -- TheGraphNetworksRegistry.json
    ```
 
-   The generator prints a `warning:` line for every `PINAX_NETWORKS` entry that now conflicts with the registry: the registry lists the same name, or gives another name the same endpoint host (see [Internal Pinax networks](#internal-pinax-networks)). It also warns for every fallback network the registry no longer lists with its fallback provider.
+   The generator prints a `warning:` line for every `PINAX_NETWORKS` entry that now conflicts with the registry: the registry lists the same name, or gives another name the same endpoint host (see [Internal Pinax networks](#internal-pinax-networks)).
 
 3. Check that every generated endpoint answers:
 
@@ -52,29 +52,20 @@ Explicit `FIREHOSE_ENDPOINT_*` overrides still take precedence over the generate
 The generator (`scripts/generate_networks.rs`) picks one endpoint per registry network:
 
 1. The registry's `pinax.network` Firehose endpoint, when it lists one (`DEFAULT_PROVIDER`).
-2. Otherwise, for networks in `FALLBACK_PROVIDERS` only, the endpoint of the provider named there.
-3. Otherwise, the network gets no alias.
+2. Otherwise, the network gets no alias, even when the registry lists another provider's endpoint.
 
-Networks in `EXCLUDED_NETWORKS` are skipped even though the registry lists an endpoint for them, because that endpoint is known to be broken. Each entry records the reason and the date it was checked.
+Networks in `EXCLUDED_NETWORKS` are skipped even though the registry lists an endpoint for them, because that endpoint is known to be broken or Pinax does not support the network. Each entry records the reason and the date it was checked or decided.
 
-The fallback list is explicit on purpose. New registry networks served only by another provider are not added automatically, and an alias never switches provider without a reviewed change to the generator.
-
-Current fallbacks, all verified by streaming blocks with a StreamingFast-compatible token on 2026-09-24 (#535):
-
-| Alias | Endpoint | Reason |
-|---|---|---|
-| `near-mainnet` | `mainnet.near.streamingfast.io:443` | Pinax no longer serves NEAR |
-| `near-testnet` | `testnet.near.streamingfast.io:443` | Pinax no longer serves NEAR |
-| `tron` | `mainnet.tron.streamingfast.io:443` | Pinax no longer serves Tron |
-| `tron-evm` | `mainnet-evm.tron.streamingfast.io:443` | Pinax no longer serves Tron |
-
-StreamingFast endpoints need a credential that StreamingFast accepts, for example a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. Since #562, legacy `SUBSTREAMS_*` variables are Pinax-only defaults; custom endpoints require explicit credential selectors. See [Authentication](authentication.md).
+Every built-in alias is therefore a Pinax endpoint, and only built-in Pinax hosts receive credentials without a selector. Another provider's Firehose is reached with `--endpoint` and an explicit credential selector ([Authentication](authentication.md)). Until #735, `FALLBACK_PROVIDERS` kept `near-mainnet`, `near-testnet`, `tron` and `tron-evm` on StreamingFast endpoints (#535), which received the `STREAMINGFAST_*` credentials without a selector; #735 removed the four aliases, and the fallback and those credentials with them.
 
 Current exclusions:
 
 | Network | Reason |
 |---|---|
+| `blast-mainnet` | Pinax retired the Firehose endpoint listed in the pinned v0.8.4 snapshot. Remove the exclusion when refreshing to a snapshot that includes the [upstream removal](https://github.com/graphprotocol/networks-registry/pull/265) (v0.8.10). |
+| `near-mainnet`, `near-testnet` | StreamingFast's `mainnet.near.streamingfast.io` and `testnet.near.streamingfast.io`, listed in the pinned v0.8.4 snapshot, have no DNS record (2026-11-27); they were fallbacks from #535 until then. Registry v0.9.0 lists no NEAR Firehose endpoint, so the exclusions can go when refreshing to it. |
 | `robinhood-sepolia` | `robsepolia.firehose.pinax.network` has no DNS record (2026-09-24) |
+| `tron`, `tron-evm` | Pinax does not serve or support Tron (decided 2026-11-27). The pinned v0.8.4 snapshot lists only StreamingFast's endpoints (`mainnet.tron.streamingfast.io`, `mainnet-evm.tron.streamingfast.io`), which were fallbacks from #535 until then. Keep the exclusions when refreshing. |
 
 ## Internal Pinax networks
 
@@ -82,10 +73,10 @@ Pinax serves some Firehose networks that The Graph networks registry does not li
 
 Policy:
 
-- **Pinax-served only.** An entry is a `https://<host>.pinax.network:443` endpoint that Pinax serves. A unit test of the generator checks the form, a normalized alias, a nonempty reason and that the alias is not also a fallback or exclusion.
+- **Pinax-served only.** An entry is a `https://<host>.pinax.network:443` endpoint that Pinax serves. A unit test of the generator checks the form, a normalized alias, a nonempty reason and that the alias is not also an exclusion.
 - **Reviewed additions.** An entry is added in a reviewed change, after its endpoint answers `scripts/check_network_endpoints.sh` and a stream with a Pinax key returns blocks. The reason says what the network is and why the registry does not list it.
 - **Removed once the registry lists it.** The generator compares each entry with the snapshot and warns on a conflict:
-  - **The registry lists the same name with an endpoint the provider policy accepts** (its `pinax.network` endpoint, or the `FALLBACK_PROVIDERS` provider). The registry entry wins, and the warning names the registry's endpoint and says to drop the entry from `PINAX_NETWORKS`. Drop it in the same change. If the registry's endpoint differs from the internal one, the alias is re-pointed: say so in `docs/releases/unreleased.md`.
+  - **The registry lists the same name with its `pinax.network` endpoint.** The registry entry wins, and the warning names the registry's endpoint and says to drop the entry from `PINAX_NETWORKS`. Drop it in the same change. If the registry's endpoint differs from the internal one, the alias is re-pointed: say so in `docs/releases/unreleased.md`.
   - **The registry lists the same name without such an endpoint** (for example only another provider's). The internal entry is kept, so the alias keeps working, and the warning says to review it: its reason no longer holds. Update the reason, and keep the entry until the registry lists the network's `pinax.network` endpoint.
   - **A registry network under another name has the same endpoint host.** Both aliases are kept, and the warning says to drop the internal entry or confirm that both aliases are intended. Dropping it removes the internal alias, a breaking change for its users.
 
@@ -103,11 +94,11 @@ A network whose known data starts later than its endpoint's first streamable blo
 
 The `Network endpoints` workflow (`.github/workflows/network-endpoints.yml`) runs the script weekly, on demand, and on pull requests that touch the generated registry or the script. It is separate from `ci.yml`, so `cargo test` never depends on the network.
 
-When the check fails: refresh the registry snapshot and regenerate. If the registry still lists the broken endpoint, verify another provider it lists and add a `FALLBACK_PROVIDERS` entry, or add an `EXCLUDED_NETWORKS` entry. A failing internal network is fixed or removed in `PINAX_NETWORKS`. A removed alias is a breaking change for its users.
+When the check fails: refresh the registry snapshot and regenerate. If the registry still lists the broken endpoint, add an `EXCLUDED_NETWORKS` entry. A failing internal network is fixed or removed in `PINAX_NETWORKS`. A removed alias is a breaking change for its users.
 
 ## What should not happen
 
 - No runtime fetch during normal CLI startup
 - No silent endpoint drift caused by external registry changes
-- No automatic provider selection beyond the explicit fallback list
+- No alias on another provider's endpoint
 - No alias outside the registry except the reviewed `PINAX_NETWORKS` entries

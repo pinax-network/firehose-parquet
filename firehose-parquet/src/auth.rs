@@ -7,30 +7,21 @@ use tracing::{info, warn};
 pub const PINAX_API_KEY_ENV_VARS: &[&str] = &["PINAX_API_KEY", "SUBSTREAMS_API_KEY"];
 /// Ambient bearer token variables for built-in Pinax hosts, in priority order.
 pub const PINAX_API_TOKEN_ENV_VARS: &[&str] = &["PINAX_API_TOKEN", "SUBSTREAMS_API_TOKEN"];
-/// Ambient API key variables for built-in StreamingFast hosts.
-pub const STREAMINGFAST_API_KEY_ENV_VARS: &[&str] = &["STREAMINGFAST_API_KEY"];
-/// Ambient bearer token variables for built-in StreamingFast hosts.
-pub const STREAMINGFAST_API_TOKEN_ENV_VARS: &[&str] = &["STREAMINGFAST_API_TOKEN"];
 
 /// Why an explicitly selected credential deserves a startup warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExplicitScopeWarning {
     /// A Pinax (or legacy `SUBSTREAMS_*`) credential leaves Pinax, for example
-    /// a global `API_KEY_ENVVAR=SUBSTREAMS_API_KEY` reaching StreamingFast.
+    /// a global `API_KEY_ENVVAR=SUBSTREAMS_API_KEY` reaching another provider.
     PinaxCredentialToOtherHost,
     /// Any other explicitly selected credential reaches a non-Pinax host.
     CredentialToNonPinaxHost,
 }
 
 /// Explicit selectors bypass provider scoping (#562), so an explicitly selected
-/// credential sent to a non-Pinax host is logged. A provider-scoped
-/// StreamingFast name sent to a StreamingFast host is its normal destination.
+/// credential sent to a non-Pinax host is logged.
 fn explicit_scope_warning(provider: &str, name: &str) -> Option<ExplicitScopeWarning> {
-    let streamingfast_name = STREAMINGFAST_API_KEY_ENV_VARS
-        .iter()
-        .chain(STREAMINGFAST_API_TOKEN_ENV_VARS)
-        .any(|candidate| *candidate == name);
-    if provider == "pinax" || (provider == "streamingfast" && streamingfast_name) {
+    if provider == "pinax" {
         return None;
     }
     let pinax_name = PINAX_API_KEY_ENV_VARS
@@ -51,7 +42,7 @@ pub struct EndpointCredentials {
 }
 
 /// Explicit env-var selectors authorize that credential for this endpoint.
-/// Otherwise, only known HTTPS provider hosts receive ambient credentials.
+/// Otherwise, only built-in Pinax hosts over HTTPS receive ambient credentials.
 pub fn resolve_credentials(
     endpoint: &str,
     api_key_envvar: Option<&str>,
@@ -86,18 +77,12 @@ pub(crate) fn resolve_with(
         && !uri.authority().is_some_and(|a| a.as_str().contains('@'));
     let provider = if secure && known_host && host.ends_with(".pinax.network") {
         "pinax"
-    } else if secure && known_host && host.ends_with(".streamingfast.io") {
-        "streamingfast"
     } else {
         "custom"
     };
 
     let (key_defaults, token_defaults): (&[&str], &[&str]) = match provider {
         "pinax" => (PINAX_API_KEY_ENV_VARS, PINAX_API_TOKEN_ENV_VARS),
-        "streamingfast" => (
-            STREAMINGFAST_API_KEY_ENV_VARS,
-            STREAMINGFAST_API_TOKEN_ENV_VARS,
-        ),
         _ => (&[], &[]),
     };
     let select = |explicit: Option<&str>, defaults: &[&str]| {
@@ -163,7 +148,8 @@ mod tests {
     use super::*;
 
     const PINAX: &str = "https://eth.firehose.pinax.network:443";
-    const STREAMINGFAST: &str = "https://mainnet.tron.streamingfast.io:443";
+    /// Another provider's host: no built-in alias uses it.
+    const STREAMINGFAST: &str = "https://mainnet.injective.streamingfast.io:443";
     /// A built-in alias from the internal `PINAX_NETWORKS` list, not the registry.
     const HYPERCORE: &str = "https://hypercore.firehose.pinax.network:443";
 
@@ -181,17 +167,11 @@ mod tests {
     #[test]
     fn scopes_ambient_credentials_to_each_builtin_destination() {
         for network in crate::networks_generated::GENERATED_NETWORKS {
-            let credentials = resolve_with(network.default_endpoint, None, None, read).unwrap();
-            if network.default_endpoint.contains(".pinax.network") {
-                assert_eq!(credentials.api_key.as_deref(), Some("pinax-key"));
-                assert_eq!(credentials.jwt_token.as_deref(), Some("pinax-token"));
-            } else {
-                assert_eq!(credentials.api_key, None);
-                assert_eq!(
-                    credentials.jwt_token.as_deref(),
-                    Some("streamingfast-token")
-                );
-            }
+            let endpoint = network.default_endpoint;
+            assert!(endpoint.contains(".pinax.network"), "{endpoint}");
+            let credentials = resolve_with(endpoint, None, None, read).unwrap();
+            assert_eq!(credentials.api_key.as_deref(), Some("pinax-key"));
+            assert_eq!(credentials.jwt_token.as_deref(), Some("pinax-token"));
         }
     }
 
@@ -228,7 +208,9 @@ mod tests {
             "https://eth.firehose.pinax.network:65536",
             "https://eth.firehose.pinax.network.evil.example",
             "https://unknown.firehose.pinax.network",
-            "https://mainnet.tron.streamingfast.io.evil.example",
+            // STREAMINGFAST_API_TOKEN is set, but no built-in alias is a
+            // StreamingFast host: it goes only where a selector sends it.
+            STREAMINGFAST,
             "https://eth.firehose.pinax.network@evil.example",
             "https://evil.example@eth.firehose.pinax.network",
             "http://localhost:9000",
@@ -287,10 +269,10 @@ mod tests {
             .with_writer(std::sync::Mutex::new(output.reopen().unwrap()))
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            resolve_with(STREAMINGFAST, None, None, read).unwrap();
+            resolve_with(STREAMINGFAST, None, Some("STREAMINGFAST_API_TOKEN"), read).unwrap();
         });
         let log = std::fs::read_to_string(output.path()).unwrap();
-        assert!(log.contains("mainnet.tron.streamingfast.io"));
+        assert!(log.contains("mainnet.injective.streamingfast.io"));
         assert!(log.contains("STREAMINGFAST_API_TOKEN"));
         assert!(log.contains("api_key_envvar=\"none\""));
         for secret in [
@@ -314,11 +296,6 @@ mod tests {
             "PINAX_API_TOKEN",
         ] {
             assert_eq!(
-                explicit_scope_warning("streamingfast", name),
-                Some(PinaxCredentialToOtherHost),
-                "{name}"
-            );
-            assert_eq!(
                 explicit_scope_warning("custom", name),
                 Some(PinaxCredentialToOtherHost),
                 "{name}"
@@ -330,15 +307,7 @@ mod tests {
             Some(CredentialToNonPinaxHost)
         );
         assert_eq!(
-            explicit_scope_warning("streamingfast", "INTERNAL_FIREHOSE_API_KEY"),
-            Some(CredentialToNonPinaxHost)
-        );
-        assert_eq!(
             explicit_scope_warning("pinax", "INTERNAL_FIREHOSE_API_KEY"),
-            None
-        );
-        assert_eq!(
-            explicit_scope_warning("streamingfast", "STREAMINGFAST_API_TOKEN"),
             None
         );
         assert_eq!(
@@ -394,7 +363,7 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("envvar=\"SUBSTREAMS_API_KEY\""), "{log}");
-        assert!(log.contains("mainnet.tron.streamingfast.io"), "{log}");
+        assert!(log.contains("mainnet.injective.streamingfast.io"), "{log}");
         assert!(!log.contains("legacy-key"), "{log}");
 
         let (_, log) = capture(

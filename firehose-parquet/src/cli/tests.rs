@@ -1313,10 +1313,22 @@ fn test_credentials_are_selected_from_resolved_endpoint_and_explicit_flags() {
     let _legacy = EnvVarGuard::set("SUBSTREAMS_API_KEY", "legacy-test-key");
     let _sf_key = EnvVarGuard::remove("STREAMINGFAST_API_KEY");
     let _sf_token = EnvVarGuard::set("STREAMINGFAST_API_TOKEN", "sf-test-token");
+    // No built-in alias is a StreamingFast host: STREAMINGFAST_API_TOKEN goes
+    // only where a selector sends it.
     let cli = parse(&[
         "test-cli",
         "--endpoint",
-        "https://mainnet.tron.streamingfast.io",
+        "https://mainnet.injective.streamingfast.io",
+    ]);
+    let config = build_config(&cli.common).unwrap();
+    assert_eq!(config.api_key, None);
+    assert_eq!(config.jwt_token, None);
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://mainnet.injective.streamingfast.io",
+        "--api-token-envvar",
+        "STREAMINGFAST_API_TOKEN",
     ]);
     let config = build_config(&cli.common).unwrap();
     assert_eq!(config.api_key, None);
