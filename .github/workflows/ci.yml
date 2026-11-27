@@ -56,13 +56,14 @@ jobs:
       # FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
       - name: Install DuckDB CLI
         env:
-          DUCKDB_VERSION: v1.5.5
-          DUCKDB_SHA256: 08c0ca117111fcede14239d0093792352befdc174218c344d232c13279643d05
+          DUCKDB_VERSION: v2.0.1
+          DUCKDB_SHA256: b676268be4d39e4e41a904442c9796c9914e645cc085c7505f048f2c992b5eca
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/duckdb.zip" \
-            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
-          echo "${DUCKDB_SHA256}  $RUNNER_TEMP/duckdb.zip" | sha256sum --check
-          unzip -q "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP/duckdb"
+          curl -fsSL -o "$RUNNER_TEMP/duckdb.tar.gz" \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb-cli-linux-amd64.tar.gz"
+          echo "${DUCKDB_SHA256}  $RUNNER_TEMP/duckdb.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          tar -xzf "$RUNNER_TEMP/duckdb.tar.gz" -C "$RUNNER_TEMP/duckdb"
           "$RUNNER_TEMP/duckdb/duckdb" -version
           echo "FIREPARQ_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
           echo "FIREPARQ_REQUIRE_DUCKDB=1" >> "$GITHUB_ENV"
@@ -75,14 +76,14 @@ jobs:
       # build, this step fails: record the new checksum and version here.
       - name: Install the DuckDB delta extension
         env:
-          DELTA_EXTENSION_VERSION: 45c4087
-          DELTA_EXTENSION_SHA256: c8ce674cd61a395d88f2759e191186ab496714058f3fcf55ee86338780af90e9
+          DELTA_EXTENSION_VERSION: f41762b37b
+          DELTA_EXTENSION_SHA256: cb4b3a1f43a2a9d9fb57cfdfc587fbdc0895a1041ad255533eb56dc047a2e2c5
         run: |
           curl -fsSL -o "$RUNNER_TEMP/delta.duckdb_extension.gz" \
-            "https://extensions.duckdb.org/v1.5.5/linux_amd64/delta.duckdb_extension.gz"
+            "https://extensions.duckdb.org/v2.0.1/linux_amd64/delta.duckdb_extension.gz"
           echo "${DELTA_EXTENSION_SHA256}  $RUNNER_TEMP/delta.duckdb_extension.gz" | sha256sum --check
           gunzip "$RUNNER_TEMP/delta.duckdb_extension.gz"
-          "$FIREPARQ_DUCKDB" -c "SET extension_directory = '$RUNNER_TEMP/duckdb-extensions';
+          "$FIREPARQ_DUCKDB" -c "SET extension_directories = ['$RUNNER_TEMP/duckdb-extensions'];
             INSTALL '$RUNNER_TEMP/delta.duckdb_extension'; LOAD delta;
             SELECT extension_name, extension_version, install_mode
             FROM duckdb_extensions() WHERE extension_name = 'delta';"

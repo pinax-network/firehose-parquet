@@ -840,9 +840,12 @@ fn scanning_files(profile: &Value) -> Option<String> {
     if let Some(files) = profile["extra_info"]["Scanning Files"].as_str() {
         return Some(files.to_string());
     }
-    profile["children"]
-        .as_array()?
+    // DuckDB 1.5 nests the plan's operators in `children`; 2.0 starts the
+    // profile with an `operator` list.
+    ["children", "operator"]
         .iter()
+        .filter_map(|key| profile[*key].as_array())
+        .flatten()
         .find_map(scanning_files)
 }
 
@@ -889,7 +892,7 @@ fn check_duckdb(
              CAST(regexp_extract(fireparq_data_file, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
              AS partition_mismatches{minimums} \
            FROM {scan}; \
-         PRAGMA enable_profiling = 'json'; SET profiling_output = '{}'; \
+         SET enable_profiling = 'json'; SET profiling_output = '{}'; \
          SELECT 'pruned' AS q, count(*) AS n FROM delta_scan('{location}') WHERE date = DATE '{DAY}'; \
          PRAGMA disable_profiling;",
         profile.display()
@@ -2098,7 +2101,7 @@ fn reading_tables_documents_every_checked_family_and_type() {
 ///
 /// ```sh
 /// FIREPARQ_RGW_ENDPOINT=https://rgw.example.org FIREPARQ_RGW_BUCKET=ethereum-mainnet \
-/// FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 \
+/// FIREPARQ_DUCKDB=/path/to/duckdb-2.0.1 \
 /// cargo test -p blocks --test engine_compat anonymous -- --nocapture
 /// ```
 ///
@@ -2208,7 +2211,7 @@ async fn anonymous_reads_of_a_public_deployment_bucket() {
         "{secret} \
          SELECT 'types' AS q, column_name, column_type \
            FROM (DESCRIBE SELECT * FROM delta_scan('{root}/blocks')); \
-         PRAGMA enable_profiling = 'json'; SET profiling_output = '{}'; \
+         SET enable_profiling = 'json'; SET profiling_output = '{}'; \
          SELECT 'blocks' AS q, count(*) AS n, min(block_num) AS first, max(block_num) AS last \
            FROM delta_scan('{root}/blocks') WHERE date = DATE '{day}'; \
          PRAGMA disable_profiling; \

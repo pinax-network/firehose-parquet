@@ -15,7 +15,7 @@ cargo test -p blocks --example refresh_evm_golden --example refresh_sec_golden -
 # The HyperLiquid reference job: the crate, then the real binary (its views and
 # joins in DuckDB, its S3 traffic on the loopback endpoint)
 cargo test -p fireparq-reference --locked
-FIREPARQ_DUCKDB=/path/to/duckdb-1.5.5 cargo test -p blocks --locked \
+FIREPARQ_DUCKDB=/path/to/duckdb-2.0.1 cargo test -p blocks --locked \
   --test hypercore_reference_cli --test hypercore_reference_s3 --test engine_compat
 
 # Build release (`fireparq`, the maintenance and reference jobs included)
@@ -28,9 +28,9 @@ cargo install --path blocks
 The build needs the Rust toolchain of `rust-toolchain.toml` (1.98) and `protoc`
 on `PATH`. All code is Rust; building and testing need no Python, and nothing
 links DataFusion (CI checks both). The DuckDB tests use the DuckDB CLI when it
-is installed (`FIREPARQ_DUCKDB`, else `duckdb` on `PATH`, 1.5 or later; required
-in CI by `FIREPARQ_REQUIRE_DUCKDB`), and the Delta maintenance tests run
-`fireparq maintenance` of the binary under test.
+is installed (`FIREPARQ_DUCKDB`, else `duckdb` on `PATH`, 1.5 or later; CI
+pins 2.0.1 and requires it with `FIREPARQ_REQUIRE_DUCKDB`), and the Delta
+maintenance tests run `fireparq maintenance` of the binary under test.
 [Repository navigation](repo-navigation.md#build-run-and-ci-anchors) lists the
 CI pins and the focused test commands.
 
