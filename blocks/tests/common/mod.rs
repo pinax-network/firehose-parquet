@@ -44,6 +44,12 @@ pub mod info;
 
 /// The DuckDB CLI, or `None` locally when it is missing.
 pub fn duckdb_cli() -> Option<PathBuf> {
+    duckdb_cli_and_version().map(|(cli, _)| cli)
+}
+
+/// The DuckDB CLI and its `(major, minor)` version, or `None` locally when
+/// it is missing or older than 1.5.
+fn duckdb_cli_and_version() -> Option<(PathBuf, (u32, u32))> {
     let candidate = std::env::var_os("FIREPARQ_DUCKDB")
         .map(PathBuf::from)
         .or_else(|| {
@@ -69,9 +75,10 @@ pub fn duckdb_cli() -> Option<PathBuf> {
         return None;
     };
     // The checks read Delta tables with S3 checkpoints and `EXPLAIN ANALYZE`
-    // file counts, which need DuckDB 1.5 (CI pins 1.5.5). An older local CLI
+    // file counts, which need DuckDB 1.5 (CI pins 2.0.0). An older local CLI
     // is skipped rather than failed; a required one must be new enough.
-    if duckdb_version(&version) < Some((1, 5)) {
+    let parsed = duckdb_version(&version);
+    if parsed < Some((1, 5)) {
         assert!(
             !required,
             "FIREPARQ_REQUIRE_DUCKDB is set but {candidate:?} is {}; 1.5 or later is required",
@@ -83,10 +90,11 @@ pub fn duckdb_cli() -> Option<PathBuf> {
         );
         return None;
     }
-    Some(candidate)
+    Some((candidate, parsed?))
 }
 
-/// `(major, minor)` from `duckdb -version` output such as `v1.5.5 3b7c56d…`.
+/// `(major, minor)` from `duckdb -version` output such as `v1.5.5 3b7c56d…` or
+/// `v2.0.1 (Cyanoptera) 8d78114e90`.
 fn duckdb_version(output: &str) -> Option<(u32, u32)> {
     let mut parts = output.trim().trim_start_matches('v').split(['.', ' ']);
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
@@ -125,6 +133,9 @@ pub struct DuckDb {
     /// DuckDB 1.5 refuses to install or load extensions without a home
     /// directory, and every session runs with a cleared environment.
     home: PathBuf,
+    /// The CLI's major version: DuckDB 2.0 replaces the `extension_directory`
+    /// setting with the list `extension_directories`.
+    major: u32,
     pub version: String,
     pub delta_version: String,
 }
@@ -132,7 +143,7 @@ pub struct DuckDb {
 impl DuckDb {
     /// The DuckDB CLI, if available, with `delta` installed and loadable.
     pub fn open(cwd: &Path) -> Option<Self> {
-        let cli = duckdb_cli()?;
+        let (cli, (major, _)) = duckdb_cli_and_version()?;
         let extensions = std::env::var_os("FIREPARQ_DUCKDB_EXTENSION_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| cwd.join("duckdb-extensions"));
@@ -143,6 +154,7 @@ impl DuckDb {
             cwd: cwd.to_path_buf(),
             extensions,
             home,
+            major,
             version: String::new(),
             delta_version: String::new(),
         };
@@ -163,11 +175,21 @@ impl DuckDb {
         Some(duckdb)
     }
 
+    /// DuckDB 2.0 still accepts `extension_directory`, but prints its
+    /// deprecation warning on stdout, inside the `-json` output, and 1.5 has
+    /// no `extension_directories`.
     fn setup(&self) -> String {
+        let extensions = if self.major >= 2 {
+            format!(
+                "SET extension_directories = ['{}'];",
+                self.extensions.display()
+            )
+        } else {
+            format!("SET extension_directory = '{}';", self.extensions.display())
+        };
         format!(
-            "SET home_directory = '{}'; SET extension_directory = '{}';",
-            self.home.display(),
-            self.extensions.display()
+            "SET home_directory = '{}'; {extensions}",
+            self.home.display()
         )
     }
 

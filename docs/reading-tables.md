@@ -10,7 +10,7 @@ files. DuckDB (its
 and prune by it.
 
 ```sql
--- DuckDB 1.5.5, from a local dataset root
+-- DuckDB 2.0.1, from a local dataset root
 INSTALL delta; LOAD delta;
 -- Rows, blocks and days of one table
 SELECT count(*) AS rows, min(block_num) AS first_block, max(block_num) AS last_block,
@@ -145,8 +145,8 @@ WHERE date = DATE '2026-09-25';
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
 non-final), Solana, SEC and HyperCore output with a mock Firehose, writes a checkpoint of
 every table, and reads every table through its Delta log
-(`blocks/tests/engine_compat.rs`) with the DuckDB 1.5.5 CLI and its `delta`
-extension `45c4087` (both checksum-verified), and with delta-rs itself
+(`blocks/tests/engine_compat.rs`) with the DuckDB 2.0.1 CLI and its `delta`
+extension `f41762b37b` (both checksum-verified), and with delta-rs itself
 (`deltalake-core` 1.0.0: each snapshot's schema, active files and partition
 pruning, then the rows of those files). Polars' `scan_delta` reads through
 delta-rs the same way, so the delta-rs reads cover it; CI installs no Python,
