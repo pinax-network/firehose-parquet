@@ -24,6 +24,9 @@ fn message<T>(result: Result<T>) -> String {
     format!("{:#}", result.err().expect("refused"))
 }
 
+const COPIED: Relocation = Relocation::Copied;
+const RENAMED: Relocation = Relocation::Renamed;
+
 #[test]
 fn prefixes_nest_on_path_segments_and_the_bucket_root_holds_every_prefix() {
     assert!(nested("", "eth"));
@@ -40,10 +43,10 @@ fn roots_pair_on_one_kind_of_storage_and_one_service_without_overlap() {
     let dir = tempfile::tempdir().unwrap();
     let local = |name: &str| root(dir.path().join(name).to_str().unwrap());
 
-    check_roots(&root("s3://eth-v1-datasets"), &root("s3://eth")).unwrap();
-    check_roots(&root("s3://data/eth-v1"), &root("s3://data/eth")).unwrap();
-    check_roots(&root("s3://other/eth"), &root("s3://data/eth")).unwrap();
-    check_roots(&local("eth-v1"), &local("eth")).unwrap();
+    check_roots(&root("s3://eth-v1-datasets"), &root("s3://eth"), COPIED).unwrap();
+    check_roots(&root("s3://data/eth-v1"), &root("s3://data/eth"), COPIED).unwrap();
+    check_roots(&root("s3://other/eth"), &root("s3://data/eth"), COPIED).unwrap();
+    check_roots(&local("eth-v1"), &local("eth"), COPIED).unwrap();
 
     for (to, from) in [
         (root("s3://data/eth/v1"), root("s3://data/eth")),
@@ -51,10 +54,10 @@ fn roots_pair_on_one_kind_of_storage_and_one_service_without_overlap() {
         (local("eth/v1"), local("eth")),
         (local("eth"), local("eth/v1")),
     ] {
-        let refused = message(check_roots(&to, &from));
+        let refused = message(check_roots(&to, &from, COPIED));
         assert!(refused.contains("overlap"), "{refused}");
     }
-    let refused = message(check_roots(&local("eth"), &root("s3://data/eth")));
+    let refused = message(check_roots(&local("eth"), &root("s3://data/eth"), COPIED));
     assert!(refused.contains("different kinds of storage"), "{refused}");
 
     // Another endpoint or region is another service.
@@ -63,8 +66,47 @@ fn roots_pair_on_one_kind_of_storage_and_one_service_without_overlap() {
         unreachable!()
     };
     *service = Digest::hash("s3-service-v1", &"elsewhere").unwrap();
-    let refused = message(check_roots(&root("s3://eth-v1-datasets"), &elsewhere));
+    let refused = message(check_roots(
+        &root("s3://eth-v1-datasets"),
+        &elsewhere,
+        COPIED,
+    ));
     assert!(refused.contains("different S3 services"), "{refused}");
+    let refused = message(check_roots(
+        &root("s3://eth-v1-datasets"),
+        &elsewhere,
+        RENAMED,
+    ));
+    assert!(refused.contains("different S3 services"), "{refused}");
+}
+
+#[test]
+fn a_renamed_s3_root_is_its_prefix_in_another_bucket_and_a_local_root_any_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = |name: &str| root(dir.path().join(name).to_str().unwrap());
+
+    check_roots(&root("s3://eth-v1-datasets"), &root("s3://eth"), RENAMED).unwrap();
+    check_roots(&root("s3://other/eth"), &root("s3://data/eth"), RENAMED).unwrap();
+    check_roots(&local("eth-v1"), &local("eth"), RENAMED).unwrap();
+    check_roots(&local("datasets/eth"), &local("eth"), RENAMED).unwrap();
+
+    // A bucket rename keeps every key: no other prefix, and no other root
+    // in the same bucket, which only a copy reaches.
+    for (to, from) in [
+        (root("s3://data/eth-v1"), root("s3://data/eth")),
+        (root("s3://other/eth-v1"), root("s3://data/eth")),
+        (root("s3://eth-v1-datasets/eth"), root("s3://eth")),
+        (root("s3://eth-v1-datasets"), root("s3://data/eth")),
+    ] {
+        let refused = message(check_roots(&to, &from, RENAMED));
+        assert!(refused.contains("with its bucket renamed"), "{refused}");
+        check_roots(&to, &from, COPIED).unwrap();
+    }
+    // Overlap and kinds of storage are refused as for a copy.
+    let refused = message(check_roots(&local("eth/v1"), &local("eth"), RENAMED));
+    assert!(refused.contains("overlap"), "{refused}");
+    let refused = message(check_roots(&local("eth"), &root("s3://eth"), RENAMED));
+    assert!(refused.contains("different kinds of storage"), "{refused}");
 }
 
 fn bound(root: &Root, mirror: MirrorBinding) -> StreamDescriptor {
@@ -227,7 +269,8 @@ fn the_binding_refusal_names_both_roots_and_the_rebind_or_the_service() {
     let hint = super::super::binding::rebind_hint(&bound, &root("s3://eth-v1-datasets").identity);
     assert!(
         hint.contains("bound to s3://eth, not to s3://eth-v1-datasets")
-            && hint.contains("fireparq recovery rebind s3://eth-v1-datasets --from s3://eth"),
+            && hint.contains("fireparq recovery rebind s3://eth-v1-datasets --from s3://eth")
+            && hint.contains("with --renamed if s3://eth was renamed to it in place"),
         "{hint}"
     );
     let mut elsewhere = root("s3://eth").identity;

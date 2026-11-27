@@ -38,7 +38,9 @@ pub enum RecoveryCommands {
     /// complete, then rewrites only the copy's binding: `state.json`, each
     /// Delta table's `fireparq.descriptor` and the cursor mirror. --from is
     /// only read, and a rerun completes an interrupted rebind. Both roots are
-    /// local, or S3 on the same endpoint (docs/cursor-and-resume.md).
+    /// local, or S3 on the same endpoint (docs/cursor-and-resume.md). With
+    /// --renamed, --from was renamed to PATH in place (a bucket rename,
+    /// `mv`) and must hold nothing of the dataset any more.
     Rebind(RecoveryRebindArgs),
 }
 
@@ -110,6 +112,12 @@ pub struct RecoveryRebindArgs {
     /// endpoint. It is only read.
     #[arg(long)]
     pub from: String,
+    /// --from was renamed to PATH in place by its storage service (a bucket
+    /// rename, `mv`), not copied: nothing is left there to compare the
+    /// dataset with, and the rebind requires that nothing of it is. A
+    /// renamed S3 root keeps its prefix in another bucket.
+    #[arg(long)]
+    pub renamed: bool,
 }
 
 impl std::fmt::Debug for RecoveryRebindArgs {
@@ -179,9 +187,18 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
                     remote_path(path)?;
                 }
             }
-            let rebound =
-                crate::ingest::rebind::rebind(&args.storage.path, &args.from, &args.storage.aws())
-                    .await?;
+            let relocation = if args.renamed {
+                crate::ingest::rebind::Relocation::Renamed
+            } else {
+                crate::ingest::rebind::Relocation::Copied
+            };
+            let rebound = crate::ingest::rebind::rebind(
+                &args.storage.path,
+                &args.from,
+                relocation,
+                &args.storage.aws(),
+            )
+            .await?;
             println!("{}", serde_json::to_string_pretty(&rebound)?);
             return Ok(());
         }

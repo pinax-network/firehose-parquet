@@ -348,7 +348,9 @@ stream id) is in the head checkpoint of `.fireparq-ingest/state.json`, in the
 cursor mirror, in each Delta table's `fireparq.descriptor` and in the `txn`
 application id of its commits. A copy made with `cp -R` or `aws s3 sync` can be
 read at once, but `build` and `recovery recover` refuse it until
-`fireparq recovery rebind` (#635) binds it to its new root:
+`fireparq recovery rebind` (#635) binds it to its new root. A root renamed in
+place (`mv`, a bucket rename) is rebound with `--renamed`
+([below](#renamed-in-place)). A copy:
 
 1. Stop the dataset's writer and its maintenance job. `fireparq recovery status
    <old root>` must report the owner `released` (S3) or `available` (local). A
@@ -409,6 +411,45 @@ file names, which hold the previous stream id; only a pending transaction's part
 are read by name, and a rebind requires none. The tables keep their history. A
 sealed backfill's `backfill.json` and lane records keep the old binding:
 `backfill status` reads them, and `backfill seal` refuses at the new root.
+
+### Renamed in place
+
+A storage service that renames a root in place moves no data: a local `mv` on
+one filesystem, or a bucket rename such as Ceph RGW's `radosgw-admin bucket
+link --bucket=<old> --bucket-new-name=<new> --uid=<owner>`. Afterwards nothing
+is left at the old root, so there is no source to compare with, and `recovery
+rebind` without `--renamed` refuses ("holds no ingestion state"). The dataset
+at the new root is the one that was at the old root, so it can be neither torn
+nor stale, and `--renamed` replaces that comparison:
+
+1. Stop the dataset's writer and its maintenance job, as for a copy: `fireparq
+   recovery status <old root>` must report the owner `released` (S3) or
+   `available` (local).
+2. Rename the root. On S3 only a bucket is renamed. The new root is the same
+   prefix in the new bucket: `s3://eth` becomes `s3://eth-v1-datasets`, and
+   `s3://data/eth` becomes `s3://data-v1/eth`.
+3. Run `fireparq recovery rebind <new root> --from <old root> --renamed`.
+4. Start the writer and the maintenance job at the new root, and move readers
+   there, as for a copy.
+
+With `--renamed`, `recovery rebind` refuses unless nothing of the dataset is
+left at the old root. A local root must no longer exist, not even as an empty
+directory or a link. On S3 the old bucket must hold no owner record, and the
+old root no `state.json` and no pending journal: a renamed bucket no longer
+exists, so every read there finds nothing. Anything left there means the dataset was copied, not renamed,
+and its rebind runs without `--renamed`. On S3, `--renamed` also refuses a new
+root in the same bucket or at another prefix: a bucket rename reaches neither.
+Every other check, every write and the report are the same as for a copy, and
+the old root is only read. A rerun completes an interrupted rebind, with or
+without `--renamed`.
+
+Use `--renamed` only for a rename by the storage service. A copy is rebound
+while its source still holds the dataset. Deleting the source first and then
+rebinding the copy with `--renamed` skips the only check that the copy is
+complete and untorn. A rebind changes only what fireparq binds. Anything else
+that names the old root stays the operator's to move: on S3, the bucket's own
+policy and any user policies that name it, and the readers' paths, such as
+Iceberg metadata, whose locations are absolute.
 
 ## Graceful shutdown
 
