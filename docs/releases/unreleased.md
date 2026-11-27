@@ -70,6 +70,20 @@ empty when the release is cut.
 - **The idle-reconnect log prints `idle_for=120s` again (#711),** not
   `idle_for=Some(120s)`, on every chain.
 
+- **The unmaintained `backoff` and `bincode` crates are replaced (#633).**
+  Nothing changes for operators or data consumers; both advisories,
+  RUSTSEC-2025-0012 and RUSTSEC-2025-0141, are no longer ignored in
+  `deny.toml`.
+  - The gRPC reconnect back-off is in-tree code with `backoff` 0.4's
+    schedule as fireparq used it: 1 s, times 1.5 per attempt up to 60 s,
+    each delay drawn from ±50 % of the interval, reset by a stream message.
+  - The Solana vote filter decodes the Vote-program instruction itself, so
+    `bincode` and `solana-vote-interface` leave the dependency tree (with
+    `backoff`, 31 packages leave `Cargo.lock`). Before the switch, the new
+    decoder agreed with the old one on 93 million generated and mutated
+    payloads; `vote_transactions` and the other Solana tables are unchanged
+    ([record](../audit/501-solana-vote-classification.md#decoder-without-bincode-633-2026-11-27)).
+
 ## Performance
 
 ## Internal

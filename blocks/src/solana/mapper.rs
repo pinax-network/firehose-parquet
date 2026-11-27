@@ -1204,33 +1204,14 @@ impl AccountLookupsBuilder {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::vote::payloads;
     use super::super::vote::VOTE_PROGRAM_ID;
     use super::*;
-    use solana_vote_interface::{
-        instruction::VoteInstruction,
-        state::{TowerSync, Vote, VoteAuthorize, VoteStateUpdate},
-    };
 
+    /// The eight simple votes (`Vote` … `TowerSyncSwitch`) for slots 98 and
+    /// 99, as the Vote program encodes them (`vote/tests.rs` pins the bytes).
     fn vote_payloads() -> Vec<Vec<u8>> {
-        let vote = Vote {
-            slots: vec![98, 99],
-            ..Default::default()
-        };
-        let update = VoteStateUpdate::from(vec![(98, 2), (99, 1)]);
-        let tower = TowerSync::from(vec![(98, 2), (99, 1)]);
-        [
-            VoteInstruction::Vote(vote.clone()),
-            VoteInstruction::VoteSwitch(vote, Default::default()),
-            VoteInstruction::UpdateVoteState(update.clone()),
-            VoteInstruction::UpdateVoteStateSwitch(update.clone(), Default::default()),
-            VoteInstruction::CompactUpdateVoteState(update.clone()),
-            VoteInstruction::CompactUpdateVoteStateSwitch(update, Default::default()),
-            VoteInstruction::TowerSync(tower.clone()),
-            VoteInstruction::TowerSyncSwitch(tower, Default::default()),
-        ]
-        .into_iter()
-        .map(|vote| bincode::serialize(&vote).unwrap())
-        .collect()
+        payloads::fixture_votes()
     }
 
     fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
@@ -1737,16 +1718,10 @@ pub(crate) mod tests {
     #[test]
     fn test_vote_program_administration_and_mentions_retain_all_activity() {
         // Single-instruction administrative calls defeat a program-only simple-vote check.
-        for instruction in [
-            VoteInstruction::Withdraw(42),
-            VoteInstruction::Authorize(Default::default(), VoteAuthorize::Voter),
-            VoteInstruction::AuthorizeChecked(VoteAuthorize::Withdrawer),
-            VoteInstruction::UpdateValidatorIdentity,
-            VoteInstruction::UpdateCommission(5),
-            VoteInstruction::InitializeAccount(Default::default()),
-        ] {
-            let block = block_with_vote_payload(bincode::serialize(&instruction).unwrap());
-            assert_vote_activity_retained(&format!("{instruction:?}"), &block);
+        let administrative = payloads::administrative();
+        for (instruction, data) in &administrative {
+            let block = block_with_vote_payload(data.clone());
+            assert_vote_activity_retained(instruction, &block);
         }
         let mut mixed = block_with_vote_payload(vote_payloads().remove(0));
         let message = mixed.transactions[0]
@@ -1764,9 +1739,11 @@ pub(crate) mod tests {
         });
         assert_vote_activity_retained("vote plus another instruction", &mixed);
 
-        let mut create = block_with_vote_payload(
-            bincode::serialize(&VoteInstruction::InitializeAccount(Default::default())).unwrap(),
-        );
+        let (_, initialize) = administrative
+            .into_iter()
+            .find(|(instruction, _)| *instruction == "InitializeAccount")
+            .unwrap();
+        let mut create = block_with_vote_payload(initialize);
         let message = create.transactions[0]
             .transaction
             .as_mut()
@@ -1822,10 +1799,7 @@ pub(crate) mod tests {
             ("trailing byte", trailing),
             ("oversized", vec![0; 1233]),
             ("unbounded slot count", huge_length),
-            (
-                "empty vote",
-                bincode::serialize(&VoteInstruction::Vote(Vote::default())).unwrap(),
-            ),
+            ("empty vote", payloads::vote(&[])),
         ] {
             assert_vote_activity_retained(label, &block_with_vote_payload(data));
         }

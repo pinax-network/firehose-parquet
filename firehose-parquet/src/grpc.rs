@@ -2,8 +2,7 @@ use crate::config::Config;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
-use backoff::backoff::Backoff;
-use backoff::ExponentialBackoffBuilder;
+use backoff::ReconnectBackoff;
 use firehose_protos::firehose;
 use std::time::{Duration, Instant};
 use tonic::metadata::{Ascii, MetadataValue};
@@ -15,6 +14,7 @@ pub use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod auth_tests;
+mod backoff;
 #[cfg(test)]
 mod transport_tests;
 
@@ -726,7 +726,7 @@ const MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS: u64 = 30;
 /// grow the back-off, run the stall timer and count toward
 /// [`MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS`].
 struct ReconnectState {
-    backoff: backoff::ExponentialBackoff,
+    backoff: ReconnectBackoff,
     stall_timeout: Option<Duration>,
     stall_started_at: Option<Instant>,
     failed_attempts: u64,
@@ -735,11 +735,8 @@ struct ReconnectState {
 impl ReconnectState {
     fn new(stall_timeout: Option<Duration>) -> Self {
         Self {
-            backoff: ExponentialBackoffBuilder::default()
-                .with_initial_interval(Duration::from_secs(1))
-                .with_max_interval(Duration::from_secs(60))
-                .with_max_elapsed_time(None) // limits are enforced here
-                .build(),
+            // It never runs out: the limits are enforced here.
+            backoff: ReconnectBackoff::new(),
             stall_timeout,
             stall_started_at: None,
             failed_attempts: 0,
@@ -783,9 +780,7 @@ impl ReconnectState {
 
     /// Delay before reconnecting, without recording a failure.
     fn next_delay(&mut self) -> Duration {
-        self.backoff
-            .next_backoff()
-            .unwrap_or(Duration::from_secs(60))
+        self.backoff.next_delay()
     }
 }
 
@@ -1751,6 +1746,35 @@ mod tests {
         assert!(state
             .record_failure(t0 + Duration::from_secs(1900), &"down")
             .is_err());
+    }
+
+    /// #633: each failure waits by the schedule `backoff` 0.4 gave (1 s,
+    /// times 1.5 per attempt up to 60 s, each delay ±50 %), a message resets
+    /// it, and an idle or clean reconnect (`next_delay`) advances it without
+    /// counting a failure.
+    #[test]
+    fn test_reconnect_delays_follow_the_backoff_schedule_and_reset_on_progress() {
+        let within = |wait: Duration, interval: f64| {
+            let wait = wait.as_secs_f64();
+            wait >= interval * 0.5 - 1e-9 && wait <= interval * 1.5 + 1e-9
+        };
+        let t0 = Instant::now();
+        let mut state = ReconnectState::new(None);
+        let mut interval = 1.0_f64;
+        for attempt in 1..MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS {
+            let wait = state.record_failure(t0, &"down").unwrap();
+            assert!(within(wait, interval), "attempt {attempt}: {wait:?}");
+            interval = (interval * 1.5).min(60.0);
+        }
+        assert_eq!(interval, 60.0);
+
+        state.record_progress();
+        assert!(within(state.next_delay(), 1.0));
+        assert!(within(state.next_delay(), 1.5));
+        assert_eq!(state.failed_attempts, 0);
+        assert!(within(state.record_failure(t0, &"down").unwrap(), 2.25));
+        state.record_progress();
+        assert!(within(state.record_failure(t0, &"down").unwrap(), 1.0));
     }
 
     #[test]
