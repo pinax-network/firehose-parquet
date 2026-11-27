@@ -41,6 +41,30 @@ empty when the release is cut.
 
 ## Fixes
 
+- **A malformed `./.env` no longer breaks `--help`, `--version` or
+  `completions` (#637).** The env file is loaded before the arguments are
+  parsed, so before this fix a malformed `./.env`, or a missing
+  `--env-file` / `FIREPARQ_ENV_FILE` path, failed `fireparq --help`, `-h`,
+  `--version`, `-V`, `fireparq help`, a subcommand's `--help` and
+  `fireparq completions <shell>` with `invalid env file …`. They now run as
+  usual: help and the version print a stderr warning naming the file,
+  `completions` stays silent. Every other command still fails on such a file
+  before it reads or writes anything, as before.
+
+- **The unmaintained `backoff` and `bincode` crates are replaced (#633).**
+  Nothing changes for operators or data consumers; both advisories,
+  RUSTSEC-2025-0012 and RUSTSEC-2025-0141, are no longer ignored in
+  `deny.toml`.
+  - The gRPC reconnect back-off is in-tree code with `backoff` 0.4's
+    schedule as fireparq used it: 1 s, times 1.5 per attempt up to 60 s,
+    each delay drawn from ±50 % of the interval, reset by a stream message.
+  - The Solana vote filter decodes the Vote-program instruction itself, so
+    `bincode` and `solana-vote-interface` leave the dependency tree (with
+    `backoff`, 31 packages leave `Cargo.lock`). Before the switch, the new
+    decoder agreed with the old one on 93 million generated and mutated
+    payloads; `vote_transactions` and the other Solana tables are unchanged
+    ([record](../audit/501-solana-vote-classification.md#decoder-without-bincode-633-2026-11-27)).
+
 - **Two maintenance runs that compact the same day no longer both commit it
   (#717).** delta-rs's conflict checker ignores `remove` actions with
   `dataChange: false`, which every OPTIMIZE writes. So up to v1.7.0, when two
