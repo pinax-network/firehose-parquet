@@ -531,12 +531,17 @@ fn all_encodings() -> [EncodeBytes; 5] {
 }
 
 /// Every mapper option combination, as `(options, legacy positional args)`.
+/// `opt_in_tables` always selects every group (`--with-gas-changes`,
+/// `--with-account-creations`, `--with-system-nonce-changes`): the inventory
+/// every EVM dataset had before the settings existed, so the pinned digests
+/// below still hold it byte for byte.
 fn option_matrix() -> Vec<MapperOptions> {
     let mut options = Vec::new();
     for encode_bytes in all_encodings() {
         for bits in 0..32_u8 {
             options.push(MapperOptions {
                 extended: bits & 1 != 0,
+                opt_in_tables: OptInTables::ALL,
                 with_votes: bits & 2 != 0,
                 include_fork_step: bits & 4 != 0,
                 encode_bytes: encode_bytes.clone(),
@@ -799,6 +804,7 @@ async fn a_hypercore_derivation_version_change_alone_is_refused_on_resume() {
     let delta_types = kind.profile().delta_types();
     let mut mapper = kind.create_mapper(MapperOptions {
         extended: false,
+        opt_in_tables: OptInTables::default(),
         with_votes: false,
         include_fork_step: false,
         encode_bytes: EncodeBytes::Hex,
@@ -890,6 +896,7 @@ fn decimal_columns_name_unsigned_columns_of_their_family() {
     for kind in ChainKind::ALL {
         let mut mapper = kind.create_mapper(MapperOptions {
             extended: true,
+            opt_in_tables: OptInTables::ALL,
             with_votes: true,
             include_fork_step: true,
             encode_bytes: EncodeBytes::Hex,
@@ -1026,6 +1033,67 @@ fn each_later_family_reproduces_its_own_pinned_digests() {
             delta_digest,
             "the {family} Delta data schema changed"
         );
+    }
+}
+
+/// With every opt-in group, every inventory is the pinned one
+/// (`option_matrix`). Without a group, an EVM mapper with extended output
+/// declares exactly that inventory minus the group's tables, every other
+/// table with the same digest; every other mapper is unchanged.
+#[test]
+fn without_opt_in_tables_only_their_evm_tables_leave_the_inventory() {
+    use firehose_parquet::ingest::declare_inventory;
+    let selections = [
+        OptInTables {
+            gas_changes: false,
+            ..OptInTables::ALL
+        },
+        OptInTables {
+            account_creations: false,
+            ..OptInTables::ALL
+        },
+        OptInTables {
+            system_nonce_changes: false,
+            ..OptInTables::ALL
+        },
+        OptInTables::default(),
+    ];
+    for kind in ChainKind::ALL {
+        let types = kind.profile().delta_types();
+        for options in option_matrix() {
+            let inventory = |opt_in_tables: OptInTables| {
+                let mut mapper = kind.create_mapper(MapperOptions {
+                    opt_in_tables,
+                    ..options.clone()
+                });
+                let names: Vec<String> = mapper
+                    .table_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let declared: Vec<&str> = names.iter().map(String::as_str).collect();
+                let tables =
+                    declare_inventory(&mapper.flush().unwrap(), &declared, &types).unwrap();
+                (names, tables)
+            };
+            let all = inventory(OptInTables::ALL);
+            for selection in selections {
+                let (mut names, mut tables) = all.clone();
+                if kind == ChainKind::Evm && options.extended {
+                    for (group, selected) in selection.groups() {
+                        for table in group.tables.iter().filter(|_| !selected) {
+                            assert!(tables.remove(*table).is_some(), "{options:?}: {table}");
+                        }
+                    }
+                    names.retain(|name| selection.declares(name));
+                }
+                assert_eq!(
+                    inventory(selection),
+                    (names, tables),
+                    "{kind} {options:?} {selection:?}"
+                );
+            }
+        }
     }
 }
 

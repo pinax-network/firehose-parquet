@@ -27,7 +27,7 @@ fireparq build --network base --output s3://base
 
 | Step | Rule |
 |---|---|
-| `open` | The root must be empty, as for any new dataset. It takes the options of `build` and binds them: every lane must run with the same chain, block type, encoding, feature flags and storage. Opening the same backfill again changes nothing; a different range or lane size is refused |
+| `open` | The root must be empty, as for any new dataset. It takes the options of `build` and binds them: every lane must run with the same chain, block type, encoding, feature flags (the [opt-in table](chains/evm.md#opt-in-tables) flags included) and storage. Opening the same backfill again changes nothing; a different range or lane size is refused |
 | Lanes | `[start, start + lane-blocks)` from `--start-block`; the last one ends at `--stop-block`. A `build` whose range is not exactly one lane is refused |
 | Before the seal | Only lanes write. A `build` without a lane's range (a live writer included) fails with `this dataset is being backfilled in parallel and is not sealed`, before any Blocks request |
 | One lane | One worker at a time: a second fails with `backfill lane <start>-<stop> is owned by another worker` |

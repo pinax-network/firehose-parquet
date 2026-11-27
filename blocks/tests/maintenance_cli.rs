@@ -109,6 +109,14 @@ fn configuration_errors_exit_2_before_any_request() {
             vec![("OPTIMIZE_REPAIR_WINDOW_BYTES", "1000")],
         ),
         (
+            "no date at a time",
+            vec![("OPTIMIZE_CONCURRENT_DATES", "0")],
+        ),
+        (
+            "too many dates at once",
+            vec![("OPTIMIZE_CONCURRENT_DATES", "65")],
+        ),
+        (
             "S3 without credentials",
             on_s3(&[("AWS_SECRET_ACCESS_KEY", "")]),
         ),

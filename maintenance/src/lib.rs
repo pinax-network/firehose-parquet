@@ -85,15 +85,20 @@
 //!   sorted, only concatenated.
 //! - `OPTIMIZE_REPAIR_WINDOW_BYTES`: uncompressed bytes a repair sorts at once
 //!   (default 256 MiB); memory peaks at about three times as much.
+//! - `OPTIMIZE_CONCURRENT_DATES`: dates of a table compacted at once, each its
+//!   own commit (default 1, at most [`MAX_CONCURRENT_DATES`]); memory grows
+//!   with it ([`dates`]).
 //! - `DRY_RUN`: `1` reports the plan and the files VACUUM would delete, and
 //!   changes nothing.
 //!
-//! Output ([`run`]): one JSON object per line on stdout (`start`, one `table`
-//! or `skipped` line per table, `done`). Exit status: 0 when every table was
+//! Output ([`run`]): one JSON object per line on stdout (`start`, a `date` or
+//! `date_error` line as each date commits or fails, one `table` or `skipped`
+//! line per table, `done`). Exit status: 0 when every table was
 //! maintained or skipped (a lost commit race is reported as a conflict and
 //! left to the next run), 1 when a table failed, 2 for a configuration error.
 
 pub mod compact;
+mod dates;
 pub mod row_order;
 
 use std::collections::{BTreeMap, HashMap};
@@ -118,6 +123,7 @@ use deltalake_core::parquet::file::FOOTER_SIZE;
 use deltalake_core::table::config::TablePropertiesExt as _;
 use deltalake_core::{DeltaResult, DeltaTable, DeltaTableError};
 use futures::stream::{self, StreamExt};
+use futures::FutureExt as _;
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
@@ -142,6 +148,10 @@ pub const ICEBERG_METADATA_DIR: &str = "metadata";
 /// per-part `fireparq.ingest.*` provenance (ordinals, transaction, stream)
 /// describes the parts being merged, not the compacted file, and is not.
 pub const CARRIED_METADATA_PREFIX: &str = "firehose-parquet.";
+
+/// The most dates of a table that `OPTIMIZE_CONCURRENT_DATES` compacts at
+/// once.
+pub const MAX_CONCURRENT_DATES: u64 = 64;
 
 /// Footers read at once while planning a compaction.
 const FOOTER_READS: usize = 16;
@@ -370,6 +380,8 @@ pub struct Settings {
     pub zstd_level: i32,
     pub repair_dates: u64,
     pub repair_window_bytes: u64,
+    /// `OPTIMIZE_CONCURRENT_DATES`: dates of a table compacted at once.
+    pub concurrent_dates: u64,
     s3: Option<S3Options>,
     secrets: Vec<String>,
 }
@@ -432,6 +444,13 @@ impl Settings {
         let repair_dates = integer(env, "OPTIMIZE_REPAIR_DATES", 0, None)?.unwrap_or(1);
         let repair_window_bytes =
             integer(env, "OPTIMIZE_REPAIR_WINDOW_BYTES", 1 << 20, None)?.unwrap_or(256 << 20);
+        let concurrent_dates = integer(
+            env,
+            "OPTIMIZE_CONCURRENT_DATES",
+            1,
+            Some(MAX_CONCURRENT_DATES),
+        )?
+        .unwrap_or(1);
         let mut settings = Self {
             root,
             tables,
@@ -445,6 +464,7 @@ impl Settings {
             zstd_level: zstd_level as i32,
             repair_dates,
             repair_window_bytes,
+            concurrent_dates,
             s3: None,
             secrets: Vec::new(),
         };
@@ -761,6 +781,8 @@ fn seconds(started: Instant) -> f64 {
 /// One table's report while it is maintained.
 struct Report<'a> {
     settings: &'a Settings,
+    /// The table's name.
+    name: &'a str,
     fields: Map<String, Value>,
     compacted: Vec<Value>,
     conflicts: Vec<String>,
@@ -770,11 +792,41 @@ struct Report<'a> {
 impl Report<'_> {
     fn failed(&mut self, step: &str, error: &DeltaTableError) {
         let text = self.settings.redact(&format!("{step}: {error}"));
-        if is_conflict(error) {
+        self.record(text, is_conflict(error));
+    }
+
+    fn record(&mut self, text: String, conflict: bool) {
+        if conflict {
             self.conflicts.push(text);
         } else {
             self.errors.push(text);
         }
+    }
+
+    /// A date left for the next run: in the table's `conflicts` or `errors`,
+    /// and at once on its own `date_error` line.
+    fn date_failed(
+        &mut self,
+        out: &mut dyn Write,
+        date: &str,
+        step: &str,
+        error: &DeltaTableError,
+        started: Instant,
+    ) {
+        let text = self.settings.redact(&format!("{step}: {error}"));
+        let conflict = is_conflict(error);
+        emit(
+            out,
+            "date_error",
+            object(json!({
+                "table": self.name,
+                "date": date,
+                "conflict": conflict,
+                "error": text,
+                "seconds": seconds(started),
+            })),
+        );
+        self.record(text, conflict);
     }
 
     fn refused(&mut self, step: &str, reason: &str) {
@@ -801,16 +853,64 @@ enum Outcome {
     Skipped(String),
 }
 
+/// What every date's compaction of a table shares.
+struct DateJob {
+    name: String,
+    target: NonZeroU64,
+    level: ZstdLevel,
+    window_bytes: u64,
+}
+
+impl DateJob {
+    /// One date, from `table` as it was when the date started.
+    async fn compact(
+        &self,
+        table: &DeltaTable,
+        date: &str,
+        bins: &[compact::Bin],
+    ) -> dates::DateResult {
+        // A footer that can't be read leaves the date for the next run rather
+        // than compacting it without its metadata.
+        let mut metadata = carried_metadata(table, date)
+            .await
+            .map_err(|error| (Some("footer metadata"), error))?;
+        metadata.push(KeyValue::new(
+            compact::ROW_ORDER_KEY.to_string(),
+            compact::WRITER_ORDER.to_string(),
+        ));
+        let footer_keys = metadata.len();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(self.level))
+            .set_key_value_metadata(Some(metadata))
+            .build();
+        let compaction = compact::Compaction {
+            table,
+            name: &self.name,
+            date,
+            target: self.target,
+            properties,
+            window_bytes: self.window_bytes,
+            commit: no_post_commit_hooks(),
+        };
+        match compaction.run(bins).await {
+            Ok(done) => Ok((done, footer_keys)),
+            Err(error) => Err((None, error)),
+        }
+    }
+}
+
 /// One table. Never fails: every error is in the report.
 async fn maintain(
     settings: &Settings,
     lake: &Lake,
     name: &str,
     open_date: Option<&str>,
+    out: &mut dyn Write,
 ) -> Outcome {
     let started = Instant::now();
     let mut report = Report {
         settings,
+        name,
         fields: Map::new(),
         compacted: Vec::new(),
         conflicts: Vec::new(),
@@ -841,8 +941,9 @@ async fn maintain(
         BTreeMap::new()
     };
 
-    // 1. OPTIMIZE closed dates (or all, OPTIMIZE_DATES=all): concatenate
-    // writer parts, and repair up to OPTIMIZE_REPAIR_DATES dates out of order.
+    // 1. OPTIMIZE closed dates (or all, OPTIMIZE_DATES=all), up to
+    // OPTIMIZE_CONCURRENT_DATES at once: concatenate writer parts, and repair
+    // up to OPTIMIZE_REPAIR_DATES dates out of order.
     let target = match settings.target_size.and_then(NonZeroU64::new) {
         Some(size) => size,
         None => match table.snapshot() {
@@ -860,89 +961,52 @@ async fn maintain(
         if !(settings.optimize_all_dates || closed) {
             continue;
         }
+        let planning = Instant::now();
         match compact::date_files(&table, date) {
             Ok(date_files) => plans.push((date.clone(), compact::plan(date_files, target.get()))),
-            Err(error) => report.failed(&format!("optimize {date}"), &error),
-        }
-    }
-    // A repair counts against OPTIMIZE_REPAIR_DATES once it is committed, so a
-    // date that keeps failing (reported every run) holds back no other. A
-    // table with no known row order keeps its files out of order: nothing to
-    // fail for, and nothing to repair them with.
-    let known_order = row_order::row_order_key(name).is_some();
-    let mut repairs_left = settings.repair_dates;
-    let (mut deferred, mut unrepairable) = (0, 0);
-    let mut attempted = Vec::new();
-    let level = ZstdLevel::try_new(settings.zstd_level).expect("checked to be 1..=22");
-    for (date, mut bins) in plans {
-        let repairs = bins.iter().any(|bin| bin.repair);
-        if repairs && (!known_order || repairs_left == 0) {
-            if known_order {
-                deferred += 1;
-            } else {
-                unrepairable += 1;
-            }
-            bins.retain(|bin| !bin.repair);
-        }
-        if bins.is_empty() {
-            continue;
-        }
-        let repairing = bins.iter().any(|bin| bin.repair);
-        attempted.push(date.clone());
-        if settings.dry_run {
-            repairs_left -= u64::from(repairing);
-            continue;
-        }
-        // A footer that can't be read leaves the date for the next run rather
-        // than compacting it without its metadata.
-        let mut metadata = match carried_metadata(&table, &date).await {
-            Ok(metadata) => metadata,
             Err(error) => {
-                report.failed(&format!("optimize {date}: footer metadata"), &error);
-                continue;
+                report.date_failed(out, date, &format!("optimize {date}"), &error, planning)
             }
-        };
-        metadata.push(KeyValue::new(
-            compact::ROW_ORDER_KEY.to_string(),
-            compact::WRITER_ORDER.to_string(),
-        ));
-        let footer_keys = metadata.len();
-        let properties = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(level))
-            .set_key_value_metadata(Some(metadata))
-            .build();
-        let compaction = compact::Compaction {
-            table: &table,
-            name,
-            date: &date,
-            target,
-            properties,
-            window_bytes: settings.repair_window_bytes,
-            commit: no_post_commit_hooks(),
-        };
-        match compaction.run(&bins).await {
-            Ok(done) => {
-                repairs_left -= u64::from(repairing);
-                report.compacted.push(json!({
-                    "date": date,
-                    "files_removed": done.files_removed,
-                    "files_added": done.files_added,
-                    "footer_keys": footer_keys,
-                    "rows": done.rows,
-                    "repaired_bins": done.repaired_bins,
-                }));
-                if let Err(error) = table.update_state().await {
-                    report.failed(&format!("optimize {date}: reload"), &error);
-                    break;
-                }
-            }
-            Err(error) => report.failed(&format!("optimize {date}"), &error),
         }
     }
-    attempted.reverse();
-    report.set("dates_to_compact", json!(attempted));
-    report.set("repairs_deferred", json!(deferred));
-    report.set("repairs_unsupported", json!(unrepairable));
+    // A repair takes one of the OPTIMIZE_REPAIR_DATES turns when it starts and
+    // gives it back if it fails: no more repairs run or commit than that, and
+    // a date that keeps failing (reported every run) holds back no other
+    // ([`dates`]). A table with no known row order keeps its files out of
+    // order: nothing to fail for, and nothing to repair them with.
+    let known_order = row_order::row_order_key(name).is_some();
+    let mut planner = dates::Planner::new(plans, known_order, settings.repair_dates);
+    if settings.dry_run {
+        while let Some(plan) = planner.next() {
+            planner.finished(plan.repairing, true);
+        }
+    } else {
+        let job = Arc::new(DateJob {
+            name: name.to_string(),
+            target,
+            level: ZstdLevel::try_new(settings.zstd_level).expect("checked to be 1..=22"),
+            window_bytes: settings.repair_window_bytes,
+        });
+        // Each date gets the table as it is when the date starts.
+        let start = |table: &DeltaTable, date: &str, bins: Vec<compact::Bin>| {
+            let (job, table, date) = (Arc::clone(&job), table.clone(), date.to_string());
+            async move { job.compact(&table, &date, &bins).await }.boxed()
+        };
+        let concurrent = usize::try_from(settings.concurrent_dates).unwrap_or(1);
+        dates::compact_dates(
+            &mut table,
+            &mut planner,
+            concurrent,
+            &mut report,
+            out,
+            start,
+            dates::reload,
+        )
+        .await;
+    }
+    report.set("dates_to_compact", json!(planner.handed_out()));
+    report.set("repairs_deferred", json!(planner.deferred));
+    report.set("repairs_unsupported", json!(planner.unrepairable));
 
     // 2. VACUUM, lite unless FULL_VACUUM=1 (weekly, >= 168 h enforced), and
     // none with VACUUM=0 (#702).
@@ -1098,6 +1162,7 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
             "full_vacuum": settings.full_vacuum,
             "retention_hours": settings.retention_hours,
             "optimize_dates": if settings.optimize_all_dates { "all" } else { "closed" },
+            "optimize_concurrent_dates": settings.concurrent_dates,
             "dry_run": settings.dry_run,
             "deltalake": deltalake_core::crate_version(),
             "version": env!("CARGO_PKG_VERSION"),
@@ -1127,7 +1192,7 @@ pub async fn run(env: Env<'_>, out: &mut dyn Write) -> i32 {
         }
     };
     for name in &settings.tables {
-        match maintain(&settings, &lake, name, open_date.as_deref()).await {
+        match maintain(&settings, &lake, name, open_date.as_deref(), out).await {
             Outcome::Skipped(reason) => {
                 emit(
                     out,
@@ -1271,6 +1336,26 @@ mod tests {
         assert!(optimize(Some("")).unwrap());
         assert!(!optimize(Some("0")).unwrap());
         assert!(optimize(Some("never")).is_err());
+    }
+
+    #[test]
+    fn concurrent_dates_default_to_one_and_are_bounded() {
+        let concurrent = |value: Option<&str>| {
+            let mut env = BTreeMap::from([("LAKE_ROOT", "/lake"), ("LAKE_TABLES", "blocks")]);
+            if let Some(value) = value {
+                env.insert("OPTIMIZE_CONCURRENT_DATES", value);
+            }
+            let lookup = |name: &str| env.get(name).map(|value| value.to_string());
+            Settings::from_env(&lookup).map(|settings| settings.concurrent_dates)
+        };
+        assert_eq!(concurrent(None).unwrap(), 1);
+        assert_eq!(concurrent(Some("")).unwrap(), 1);
+        assert_eq!(concurrent(Some(" 8 ")).unwrap(), 8);
+        assert_eq!(concurrent(Some("64")).unwrap(), MAX_CONCURRENT_DATES);
+        for refused in ["0", "65", "-1", "many", "1.5"] {
+            let error = concurrent(Some(refused)).unwrap_err();
+            assert!(error.0.contains("OPTIMIZE_CONCURRENT_DATES"), "{error}");
+        }
     }
 
     #[test]

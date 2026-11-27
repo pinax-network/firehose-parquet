@@ -16,6 +16,46 @@ pub const FORMAT_VERSION: u32 = 1;
 /// both are refused.
 pub const MAPPER_EPOCH: &str = "fireparq-mapping-v3";
 pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
+/// EVM extended tables that `build` declares only with their flag, because
+/// current EVM Firehose blocks never fill them. A stream's `tables` say
+/// whether it has them, so no descriptor field does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvmOptInGroup {
+    /// The `build` flag that selects the tables.
+    pub flag: &'static str,
+    /// The flag's environment variable.
+    pub env: &'static str,
+    pub tables: &'static [&'static str],
+}
+
+/// `gas_changes` and `system_gas_changes` (`--with-gas-changes`): block
+/// version 5 of the EVM Firehose tracer records no gas changes.
+pub const EVM_GAS_CHANGE_TABLES: EvmOptInGroup = EvmOptInGroup {
+    flag: "--with-gas-changes",
+    env: "WITH_GAS_CHANGES",
+    tables: &["gas_changes", "system_gas_changes"],
+};
+/// `account_creations` and `system_account_creations`
+/// (`--with-account-creations`): block version 4 and later record no account
+/// creations, and `Call.account_creations` is deprecated.
+pub const EVM_ACCOUNT_CREATION_TABLES: EvmOptInGroup = EvmOptInGroup {
+    flag: "--with-account-creations",
+    env: "WITH_ACCOUNT_CREATIONS",
+    tables: &["account_creations", "system_account_creations"],
+};
+/// `system_nonce_changes` (`--with-system-nonce-changes`): system calls run
+/// from the system address without changing a nonce.
+pub const EVM_SYSTEM_NONCE_CHANGE_TABLES: EvmOptInGroup = EvmOptInGroup {
+    flag: "--with-system-nonce-changes",
+    env: "WITH_SYSTEM_NONCE_CHANGES",
+    tables: &["system_nonce_changes"],
+};
+/// Every opt-in group of EVM extended tables, in refusal order.
+pub const EVM_OPT_IN_TABLES: [EvmOptInGroup; 3] = [
+    EVM_GAS_CHANGE_TABLES,
+    EVM_ACCOUNT_CREATION_TABLES,
+    EVM_SYSTEM_NONCE_CHANGE_TABLES,
+];
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
 /// Flushes a backfill lane may hold before it commits them to the Delta logs
