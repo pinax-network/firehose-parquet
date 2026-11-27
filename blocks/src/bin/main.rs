@@ -1571,10 +1571,58 @@ fn env_file_notice_on_stderr(command: Option<&Commands>) -> bool {
     )
 }
 
+/// An invocation that reads no setting: it only shows help or the version, or
+/// prints a completion script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayOnly {
+    HelpOrVersion,
+    Completions,
+}
+
+/// Whether clap, given these arguments alone, would only show help or the
+/// version (`-h`, `--help`, `help`, `-V`, `--version`, or no arguments) or run
+/// `completions`. Such a run needs no env file, so a file that cannot be loaded
+/// does not stop it (#637); every other command still fails on it.
+fn display_only<I, T>(args: I) -> Option<DisplayOnly>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::error::ErrorKind;
+    match Cli::try_parse_from(args) {
+        Ok(Cli {
+            command: Some(Commands::Completions { .. }),
+            ..
+        }) => Some(DisplayOnly::Completions),
+        Ok(_) => None,
+        Err(error) => matches!(
+            error.kind(),
+            ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        )
+        .then_some(DisplayOnly::HelpOrVersion),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Only ./.env or an explicit --env-file / FIREPARQ_ENV_FILE; never parents (#617).
-    let env_file = load_env_file(std::env::args_os())?;
+    // Only ./.env or an explicit --env-file / FIREPARQ_ENV_FILE; never parents
+    // (#617). It is loaded before clap parses, so that env-backed arguments see
+    // its values. A file that cannot be loaded fails every command except help,
+    // the version and completions, which read no setting (#637).
+    let env_file = match load_env_file(std::env::args_os()) {
+        Ok(loaded) => loaded,
+        Err(error) => match display_only(std::env::args_os()) {
+            Some(DisplayOnly::HelpOrVersion) => {
+                eprintln!("warning: {error:#}; ignored, since this only shows help or the version");
+                None
+            }
+            // Silent: the output is a script.
+            Some(DisplayOnly::Completions) => None,
+            None => return Err(error),
+        },
+    };
     let cli = Cli::parse();
     if env_file_notice_on_stderr(cli.command.as_ref()) {
         // Commands without a log subscriber still say which file supplied settings.
@@ -2651,6 +2699,60 @@ mod tests {
             .unwrap()
             .is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #637: only help, the version and completions run without the env
+    /// file; every other invocation, a mistyped one included, still needs it.
+    #[test]
+    fn only_help_version_and_completions_run_without_the_env_file() {
+        let help_or_version: &[&[&str]] = &[
+            &["fireparq"],
+            &["fireparq", "--help"],
+            &["fireparq", "-h"],
+            &["fireparq", "--version"],
+            &["fireparq", "-V"],
+            &["fireparq", "help"],
+            &["fireparq", "help", "build"],
+            &["fireparq", "build", "--help"],
+            &["fireparq", "build", "-h"],
+            &["fireparq", "build", "--network", "mainnet", "--help"],
+            &["fireparq", "recovery"],
+            &["fireparq", "recovery", "status", "--help"],
+            &["fireparq", "backfill", "open", "--help"],
+            &["fireparq", "--env-file", "missing.env", "--version"],
+        ];
+        for argv in help_or_version {
+            assert_eq!(
+                display_only(*argv),
+                Some(DisplayOnly::HelpOrVersion),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(
+            display_only(["fireparq", "completions", "zsh"]),
+            Some(DisplayOnly::Completions)
+        );
+        assert_eq!(
+            display_only([
+                "fireparq",
+                "--env-file",
+                "missing.env",
+                "completions",
+                "bash"
+            ]),
+            Some(DisplayOnly::Completions)
+        );
+        let real: &[&[&str]] = &[
+            &["fireparq", "build", "--network", "mainnet"],
+            &["fireparq", "maintenance"],
+            &["fireparq", "recovery", "status", "out"],
+            &["fireparq", "completions"],
+            &["fireparq", "no-such-command"],
+            &["fireparq", "build", "--no-such-flag", "--help"],
+        ];
+        for argv in real {
+            assert_eq!(display_only(*argv), None, "{argv:?}");
+        }
     }
 
     #[test]
