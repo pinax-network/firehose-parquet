@@ -1,6 +1,5 @@
 use arrow::array::{Array, ArrayBuilder, BinaryBuilder, ListBuilder, StringBuilder};
 use arrow::datatypes::DataType;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 mod fixed_base58;
@@ -20,8 +19,6 @@ pub enum EncodeBytes {
     HexNoPrefix,
     /// Base58-encoded strings.
     Base58,
-    /// Tron Base58Check-encoded strings (addresses only; falls back to hex for non-address sizes).
-    TronBase58,
 }
 
 impl Default for EncodeBytes {
@@ -39,7 +36,6 @@ pub fn parse_encode_bytes(s: &str) -> Option<EncodeBytes> {
         "hex" => Some(EncodeBytes::Hex),
         "hex_no_prefix" => Some(EncodeBytes::HexNoPrefix),
         "base58" => Some(EncodeBytes::Base58),
-        "tron_base58" => Some(EncodeBytes::TronBase58),
         _ => None, // "auto" or unknown → caller resolves
     }
 }
@@ -68,25 +64,6 @@ pub fn decode_base58(value: &str) -> Result<Vec<u8>, bs58::decode::Error> {
     bs58::decode(value).into_vec()
 }
 
-const TRON_VERSION_BYTE: u8 = 0x41;
-
-/// Double-SHA256 then take first 4 bytes.
-fn checksum4(data: &[u8]) -> [u8; 4] {
-    let hash1 = Sha256::digest(data);
-    let hash2 = Sha256::digest(hash1);
-    let mut out = [0u8; 4];
-    out.copy_from_slice(&hash2[..4]);
-    out
-}
-
-/// Encode bytes as a Tron Base58Check address.
-/// - 20 bytes → prepend version byte (0x41), append checksum, base58 encode.
-/// - 21 bytes → assume version byte already present, append checksum, base58 encode.
-/// - Other lengths → fall back to hex encoding without `0x`.
-pub fn encode_tron_base58(bytes: &[u8]) -> String {
-    encode_bytes(bytes, &EncodeBytes::TronBase58)
-}
-
 /// Encode bytes according to the given strategy.
 pub fn encode_bytes(bytes: &[u8], encoding: &EncodeBytes) -> String {
     let mut out = Vec::new();
@@ -113,7 +90,6 @@ fn encode_text_into(bytes: &[u8], encoding: &EncodeBytes, out: &mut Vec<u8>) {
         }
         EncodeBytes::HexNoPrefix => push_hex(bytes, out),
         EncodeBytes::Base58 => push_base58(bytes, out),
-        EncodeBytes::TronBase58 => push_tron_base58(bytes, out),
     }
 }
 
@@ -135,26 +111,6 @@ fn push_base58(bytes: &[u8], out: &mut Vec<u8>) {
                 .expect("a Vec target always has room");
         }
     }
-}
-
-/// Append a Tron Base58Check address to `out` (see [`encode_tron_base58`]).
-fn push_tron_base58(bytes: &[u8], out: &mut Vec<u8>) {
-    let mut data = [0u8; 25];
-    let payload = match bytes.len() {
-        20 => {
-            data[0] = TRON_VERSION_BYTE;
-            data[1..21].copy_from_slice(bytes);
-            21
-        }
-        21 => {
-            data[..21].copy_from_slice(bytes);
-            21
-        }
-        _ => return push_hex(bytes, out),
-    };
-    let checksum = checksum4(&data[..payload]);
-    data[payload..].copy_from_slice(&checksum);
-    push_base58(&data, out);
 }
 
 /// Encode into `scratch` and return the text, for appending to a string builder.
@@ -434,45 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_tron_base58_20_bytes() {
-        // 20-byte address
-        let addr = [0x41u8; 20];
-        let encoded = encode_tron_base58(&addr);
-        // Should produce a valid Tron address (starts with T typically for main addresses)
-        assert!(!encoded.is_empty());
-        // The result should be a valid base58 string
-        assert!(bs58::decode(&encoded).into_vec().is_ok());
-    }
-
-    #[test]
-    fn test_encode_tron_base58_21_bytes() {
-        // 21 bytes: version byte + 20-byte body
-        let mut addr = vec![TRON_VERSION_BYTE];
-        addr.extend_from_slice(&[0x42u8; 20]);
-        let encoded = encode_tron_base58(&addr);
-        assert!(!encoded.is_empty());
-        assert!(bs58::decode(&encoded).into_vec().is_ok());
-    }
-
-    #[test]
-    fn test_encode_tron_base58_falls_back_to_hex() {
-        // Non-address size (e.g., 32-byte hash) → falls back to hex
-        let hash = [0xab; 32];
-        let encoded = encode_tron_base58(&hash);
-        assert!(!encoded.starts_with("0x"));
-        assert_eq!(encoded, encode_hex_no_prefix(&hash));
-    }
-
-    #[test]
-    fn test_encode_id_tron_base58_falls_back_to_hex_no_prefix() {
-        assert_eq!(
-            encode_id("0xdeadbeef", &EncodeBytes::TronBase58),
-            "deadbeef"
-        );
-        assert_eq!(encode_id("deadbeef", &EncodeBytes::TronBase58), "deadbeef");
-    }
-
-    #[test]
     fn test_encode_hex_no_prefix() {
         assert_eq!(encode_hex_no_prefix(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
         assert_eq!(encode_hex_no_prefix(&[]), "");
@@ -525,7 +442,6 @@ mod tests {
         assert_eq!(bytes_data_type(&EncodeBytes::Hex), DataType::Utf8);
         assert_eq!(bytes_data_type(&EncodeBytes::HexNoPrefix), DataType::Utf8);
         assert_eq!(bytes_data_type(&EncodeBytes::Base58), DataType::Utf8);
-        assert_eq!(bytes_data_type(&EncodeBytes::TronBase58), DataType::Utf8);
     }
 
     #[test]
@@ -533,10 +449,8 @@ mod tests {
         assert_eq!(parse_encode_bytes("binary"), Some(EncodeBytes::Binary));
         assert_eq!(parse_encode_bytes("hex"), Some(EncodeBytes::Hex));
         assert_eq!(parse_encode_bytes("base58"), Some(EncodeBytes::Base58));
-        assert_eq!(
-            parse_encode_bytes("tron_base58"),
-            Some(EncodeBytes::TronBase58)
-        );
+        // Tron's retired encoding (#747) is not a label any more.
+        assert_eq!(parse_encode_bytes("tron_base58"), None);
         assert_eq!(parse_encode_bytes("auto"), None);
         assert_eq!(parse_encode_bytes("BINARY"), Some(EncodeBytes::Binary));
         assert_eq!(parse_encode_bytes("HEX"), Some(EncodeBytes::Hex));
@@ -609,19 +523,6 @@ mod tests {
             EncodeBytes::Hex => format!("0x{}", hex::encode(bytes)),
             EncodeBytes::HexNoPrefix => hex::encode(bytes),
             EncodeBytes::Base58 => bs58::encode(bytes).into_string(),
-            EncodeBytes::TronBase58 => match bytes.len() {
-                20 | 21 => {
-                    let mut data = Vec::with_capacity(25);
-                    if bytes.len() == 20 {
-                        data.push(TRON_VERSION_BYTE);
-                    }
-                    data.extend_from_slice(bytes);
-                    let checksum = checksum4(&data);
-                    data.extend_from_slice(&checksum);
-                    bs58::encode(data).into_string()
-                }
-                _ => hex::encode(bytes),
-            },
         }
     }
 
@@ -648,11 +549,10 @@ mod tests {
         values
     }
 
-    const TEXT_ENCODINGS: [EncodeBytes; 4] = [
+    const TEXT_ENCODINGS: [EncodeBytes; 3] = [
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ];
 
     fn assert_base58_reference(bytes: &[u8]) {
@@ -766,16 +666,6 @@ mod tests {
             assert_eq!(&out[..7], b"prefix:");
             assert_eq!(&out[7..], bs58::encode(&bytes).into_vec());
         }
-        // Tron Base58Check is always a 25-byte payload and stays on bs58.
-        for len in [20, 21] {
-            for value in [0, 1, 0x41, 0xff] {
-                let bytes = vec![value; len];
-                assert_eq!(
-                    encode_tron_base58(&bytes),
-                    reference_encode(&bytes, &EncodeBytes::TronBase58)
-                );
-            }
-        }
     }
 
     /// Actual production dispatcher versus the previous bs58 implementation;
@@ -871,10 +761,6 @@ mod tests {
             encode_base58(&[0, 0, 1]),
             bs58::encode([0, 0, 1]).into_string()
         );
-        assert_eq!(
-            encode_tron_base58(&[0x11; 20]),
-            reference_encode(&[0x11; 20], &EncodeBytes::TronBase58)
-        );
     }
 
     #[test]
@@ -933,18 +819,11 @@ mod tests {
         const VALUES: usize = 2_000_000;
         const FLUSH_EVERY: usize = 10_000;
         let hash = [0xab_u8; 32];
-        let address = [0x41_u8; 20];
-        let cases: [(&str, EncodeBytes, &[u8]); 6] = [
+        let cases: [(&str, EncodeBytes, &[u8]); 4] = [
             ("binary, 32 B", EncodeBytes::Binary, &hash),
             ("hex, 32 B", EncodeBytes::Hex, &hash),
             ("hex_no_prefix, 32 B", EncodeBytes::HexNoPrefix, &hash),
             ("base58, 32 B", EncodeBytes::Base58, &hash),
-            (
-                "tron_base58, 20 B address",
-                EncodeBytes::TronBase58,
-                &address,
-            ),
-            ("tron_base58, 32 B hash", EncodeBytes::TronBase58, &hash),
         ];
         for (label, encoding, value) in cases {
             let mut column = BytesColumn::new(&encoding);

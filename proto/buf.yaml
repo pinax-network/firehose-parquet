@@ -8,7 +8,6 @@ deps:
   - buf.build/streamingfast/firehose-solana
   - buf.build/streamingfast/firehose-near
   - buf.build/streamingfast/firehose-cosmos
-  - buf.build/streamingfast/firehose-tron
   - buf.build/pinax/firehose-antelope
   - buf.build/pinax/firehose-beacon
   - buf.build/pinax/firehose-sec

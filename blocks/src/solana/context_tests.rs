@@ -143,7 +143,6 @@ fn context_preserves_filtering_votes_plans_snapshots_and_flushes_in_every_encodi
         EncodeBytes::Base58,
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
-        EncodeBytes::TronBase58,
     ] {
         for fork in [false, true] {
             for include_failed in [false, true] {

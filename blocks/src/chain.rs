@@ -32,7 +32,6 @@ use crate::hypercore::mapper::HypercoreBlockMapper;
 use crate::near::mapper::NearBlockMapper;
 use crate::sec::mapper::SecBlockMapper;
 use crate::solana::mapper::SolanaBlockMapper;
-use crate::tron::mapper::TronBlockMapper;
 
 /// A supported Firehose block family (`--block-type` other than `auto`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,7 +42,6 @@ pub enum ChainKind {
     Near,
     Antelope,
     Cosmos,
-    Tron,
     Beacon,
     Sec,
     Hypercore,
@@ -73,8 +71,6 @@ pub struct ChainProfile {
     pub family: BlockFamily,
     /// Output bytes encoding contract for `bytes_encoding=auto`.
     pub bytes_encoding: EncodeBytes,
-    /// Encoding contract override on Tron-style endpoints (`tron`, `tron-evm`).
-    pub tron_style_bytes_encoding: Option<EncodeBytes>,
     /// Blocks may lack timestamps: canonical `timestamp`/`date` are nullable
     /// and time partitions route by the last known timestamp.
     pub nullable_timestamps: bool,
@@ -278,7 +274,6 @@ const EVM: ChainProfile = ChainProfile {
     type_url_marker: "ethereum",
     family: BlockFamily::Evm,
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: Some(EncodeBytes::TronBase58),
     nullable_timestamps: false,
     block_number_gaps: false,
     extended: ExtendedOutput::Supported,
@@ -296,7 +291,6 @@ const BITCOIN: ChainProfile = ChainProfile {
     type_url_marker: "bitcoin",
     family: BlockFamily::Bitcoin,
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     block_number_gaps: false,
     extended: ExtendedOutput::NotMapped,
@@ -314,7 +308,6 @@ const SOLANA: ChainProfile = ChainProfile {
     type_url_marker: "solana",
     family: BlockFamily::Solana,
     bytes_encoding: EncodeBytes::Base58,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: true,
     block_number_gaps: true,
     extended: ExtendedOutput::Unsupported,
@@ -332,7 +325,6 @@ const NEAR: ChainProfile = ChainProfile {
     type_url_marker: "near",
     family: BlockFamily::Near,
     bytes_encoding: EncodeBytes::Base58,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     block_number_gaps: true,
     extended: ExtendedOutput::NotMapped,
@@ -350,7 +342,6 @@ const ANTELOPE: ChainProfile = ChainProfile {
     type_url_marker: "antelope",
     family: BlockFamily::Antelope,
     bytes_encoding: EncodeBytes::HexNoPrefix,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     block_number_gaps: false,
     extended: ExtendedOutput::Unsupported,
@@ -368,7 +359,6 @@ const COSMOS: ChainProfile = ChainProfile {
     type_url_marker: "cosmos",
     family: BlockFamily::Cosmos,
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     block_number_gaps: false,
     extended: ExtendedOutput::NotMapped,
@@ -381,30 +371,11 @@ const COSMOS: ChainProfile = ChainProfile {
     build_defaults: BuildDefaults::GENERIC,
 };
 
-const TRON: ChainProfile = ChainProfile {
-    label: "tron",
-    type_url_marker: "tron",
-    family: BlockFamily::Tron,
-    bytes_encoding: EncodeBytes::TronBase58,
-    tron_style_bytes_encoding: None,
-    nullable_timestamps: false,
-    block_number_gaps: false,
-    extended: ExtendedOutput::NotMapped,
-    vote_transactions: false,
-    failed_transactions_by_default: false,
-    strict_chain_names: &[],
-    strict_chain_name_prefixes: &[],
-    decimal_columns: &[],
-    block_id_text: false,
-    build_defaults: BuildDefaults::GENERIC,
-};
-
 const BEACON: ChainProfile = ChainProfile {
     label: "beacon",
     type_url_marker: "beacon",
     family: BlockFamily::Beacon,
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     block_number_gaps: true,
     extended: ExtendedOutput::NotMapped,
@@ -426,7 +397,6 @@ const SEC: ChainProfile = ChainProfile {
     // No SEC field is hash or address bytes: the encoding only makes
     // `block_id`/`parent_id` text, written verbatim (decimal window numbers).
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     // firesec emits every 10-minute window, empty ones included.
     block_number_gaps: false,
@@ -448,7 +418,6 @@ const HYPERCORE: ChainProfile = ChainProfile {
     type_url_marker: "hypercore",
     family: BlockFamily::Hypercore,
     bytes_encoding: EncodeBytes::Hex,
-    tron_style_bytes_encoding: None,
     nullable_timestamps: false,
     // The endpoint lacks blocks 846903300–846903312, a hole in the source data
     // rather than a chain property (`docs/chains/hypercore.md`).
@@ -485,10 +454,9 @@ impl NameRule {
 }
 
 /// Substring inference from endpoint/network chain names. The first matching
-/// rule wins, so the order is part of the contract: for example `tron-evm`
-/// resolves to EVM before the `tron` rule is tried.
+/// rule wins, so the order is part of the contract: for example
+/// `ethereum-beacon` resolves to Beacon before the `ethereum` rule is tried.
 pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
-    (NameRule::Exact("tron-evm"), ChainKind::Evm),
     // `Contains("sec")` would also catch names such as `secret-*`.
     (NameRule::Exact("sec"), ChainKind::Sec),
     (NameRule::Contains("beacon"), ChainKind::Beacon),
@@ -498,7 +466,6 @@ pub const CHAIN_NAME_RULES: &[(NameRule, ChainKind)] = &[
     (NameRule::Contains("antelope"), ChainKind::Antelope),
     (NameRule::Contains("eos"), ChainKind::Antelope),
     (NameRule::Contains("cosmos"), ChainKind::Cosmos),
-    (NameRule::Contains("tron"), ChainKind::Tron),
     // Not `hyper`: `hyper-evm` (HyperEVM) stays EVM through the `evm` rule.
     (NameRule::Contains("hypercore"), ChainKind::Hypercore),
     (NameRule::Contains("ethereum"), ChainKind::Evm),
@@ -527,14 +494,13 @@ pub struct MapperOptions {
 
 impl ChainKind {
     /// Every family, in `type_url` detection and `--block-type` help order.
-    pub const ALL: [ChainKind; 10] = [
+    pub const ALL: [ChainKind; 9] = [
         ChainKind::Evm,
         ChainKind::Bitcoin,
         ChainKind::Solana,
         ChainKind::Near,
         ChainKind::Antelope,
         ChainKind::Cosmos,
-        ChainKind::Tron,
         ChainKind::Beacon,
         ChainKind::Sec,
         ChainKind::Hypercore,
@@ -548,7 +514,6 @@ impl ChainKind {
             ChainKind::Near => &NEAR,
             ChainKind::Antelope => &ANTELOPE,
             ChainKind::Cosmos => &COSMOS,
-            ChainKind::Tron => &TRON,
             ChainKind::Beacon => &BEACON,
             ChainKind::Sec => &SEC,
             ChainKind::Hypercore => &HYPERCORE,
@@ -600,12 +565,8 @@ impl ChainKind {
     }
 
     /// Output bytes encoding contract for `bytes_encoding=auto`.
-    pub fn default_bytes_encoding(self, tron_style_evm_profile: bool) -> EncodeBytes {
-        let profile = self.profile();
-        match (&profile.tron_style_bytes_encoding, tron_style_evm_profile) {
-            (Some(encoding), true) => encoding.clone(),
-            _ => profile.bytes_encoding.clone(),
-        }
+    pub fn default_bytes_encoding(self) -> EncodeBytes {
+        self.profile().bytes_encoding.clone()
     }
 
     /// Construct this family's mapper.
@@ -650,11 +611,6 @@ impl ChainKind {
                 include_failed_transactions,
             )),
             ChainKind::Cosmos => Box::new(CosmosBlockMapper::new(
-                include_fork_step,
-                encode_bytes,
-                include_failed_transactions,
-            )),
-            ChainKind::Tron => Box::new(TronBlockMapper::new(
                 include_fork_step,
                 encode_bytes,
                 include_failed_transactions,

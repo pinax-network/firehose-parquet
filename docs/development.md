@@ -44,8 +44,8 @@ firehose-parquet/
 ├── Dockerfile                              # multi-stage Docker build of `fireparq`
 ├── .env.example                            # environment variables template (drift-tested against the CLI)
 ├── .github/workflows/                      # ci, advisories, docker-publish, release, network-endpoints
-├── proto/                                  # chain and Firehose .proto files, proto/core/ dependencies,
-│                                           #   and the SEC and HyperCore proto/pinax/ packages
+├── proto/                                  # chain and Firehose .proto files, and the SEC and
+│                                           #   HyperCore proto/pinax/ packages
 ├── firehose-protos/                        # compiles the .proto files (build.rs) and exposes the modules
 ├── scripts/                                # generate_networks.rs, check_network_endpoints.sh
 ├── maintenance/                            # `fireparq maintenance`: the Delta maintenance job (row-order
@@ -80,7 +80,7 @@ firehose-parquet/
 │   │   ├── bin/ingestion/                  # `build`: mod.rs, setup.rs (endpoint/resume), runtime.rs
 │   │   ├── chain.rs                        # ChainKind / ChainProfile per chain family
 │   │   ├── schema_docs.rs                  # renders docs/schemas/ (examples/dump_schemas.rs writes it)
-│   │   └── evm/, solana/, bitcoin/, beacon/, tron/, cosmos/, antelope/, near/, sec/, hypercore/
+│   │   └── evm/, solana/, bitcoin/, beacon/, cosmos/, antelope/, near/, sec/, hypercore/
 │   │                                       # per chain: proto.rs, schema.rs, mapper.rs
 │   ├── examples/                           # replay, benchmark and golden-refresh tools
 │   └── tests/                              # integration tests, including `fireparq` runs against a mock Firehose

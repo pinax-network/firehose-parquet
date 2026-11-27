@@ -50,7 +50,6 @@ const BLOCK_TYPES: &[&str] = &[
     "near",
     "antelope",
     "cosmos",
-    "tron",
     "beacon",
     "sec",
     "hypercore",
@@ -164,7 +163,6 @@ fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
         EncodeBytes::Hex => "hex",
         EncodeBytes::HexNoPrefix => "hex_no_prefix",
         EncodeBytes::Base58 => "base58",
-        EncodeBytes::TronBase58 => "tron_base58",
     }
 }
 
@@ -392,22 +390,7 @@ fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str
         EncodeBytes::Hex => Some("hex_0x"),
         EncodeBytes::HexNoPrefix => Some("hex_no_prefix"),
         EncodeBytes::Base58 => Some("base58"),
-        EncodeBytes::TronBase58 => Some("hex_no_prefix"),
     }
-}
-
-fn is_tron_style_chain_name(chain_name: &str) -> bool {
-    chain_name.eq_ignore_ascii_case("tron") || chain_name.eq_ignore_ascii_case("tron-evm")
-}
-
-fn endpoint_uses_tron_style_evm_profile(endpoint_info: &Option<EndpointInfo>) -> bool {
-    endpoint_info.as_ref().map_or(false, |ei| {
-        is_tron_style_chain_name(&ei.chain_name)
-            || ei
-                .chain_name_aliases
-                .iter()
-                .any(|alias| is_tron_style_chain_name(alias))
-    })
 }
 
 /// A known family's output encoding contract wins over the endpoint's
@@ -415,10 +398,9 @@ fn endpoint_uses_tron_style_evm_profile(endpoint_info: &Option<EndpointInfo>) ->
 fn resolve_auto_encode_bytes(
     block_type: Option<ChainKind>,
     endpoint_info: &Option<EndpointInfo>,
-    tron_style_evm_profile: bool,
 ) -> EncodeBytes {
     if let Some(kind) = block_type {
-        return kind.default_bytes_encoding(tron_style_evm_profile);
+        return kind.default_bytes_encoding();
     }
 
     endpoint_info
@@ -1689,7 +1671,6 @@ mod tests {
                 EncodeBytes::Hex,
                 EncodeBytes::HexNoPrefix,
                 EncodeBytes::Base58,
-                EncodeBytes::TronBase58,
             ] {
                 for fork_steps in [false, true] {
                     for feature in [false, true] {
@@ -2780,7 +2761,6 @@ mod tests {
     fn test_resolve_include_failed_transactions_non_evm_unchanged() {
         for block_type in [
             Some(ChainKind::Solana),
-            Some(ChainKind::Tron),
             Some(ChainKind::Near),
             Some(ChainKind::Antelope),
             Some(ChainKind::Cosmos),
@@ -2967,7 +2947,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_help_mentions_tron_encoding_behavior() {
+    fn test_build_help_has_no_bytes_encoding_flag() {
         let help = subcommand_help("build");
         assert!(!help.contains("--bytes-encoding"));
     }
@@ -3905,11 +3885,9 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_block_type_tron() {
-        assert_eq!(
-            detect_block_type("type.googleapis.com/sf.tron.type.v1.Block").unwrap(),
-            ChainKind::Tron
-        );
+    fn test_detect_block_type_tron_is_unsupported() {
+        // Tron support was removed (#747).
+        assert!(detect_block_type("type.googleapis.com/sf.tron.type.v1.Block").is_err());
     }
 
     #[test]
@@ -3944,39 +3922,31 @@ mod tests {
     #[test]
     fn test_output_encoding_policy_defaults() {
         assert_eq!(
-            Some(ChainKind::Evm.default_bytes_encoding(false)),
+            Some(ChainKind::Evm.default_bytes_encoding()),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            Some(ChainKind::Evm.default_bytes_encoding(true)),
-            Some(EncodeBytes::TronBase58)
-        );
-        assert_eq!(
-            Some(ChainKind::Bitcoin.default_bytes_encoding(false)),
+            Some(ChainKind::Bitcoin.default_bytes_encoding()),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            Some(ChainKind::Solana.default_bytes_encoding(false)),
+            Some(ChainKind::Solana.default_bytes_encoding()),
             Some(EncodeBytes::Base58)
         );
         assert_eq!(
-            Some(ChainKind::Tron.default_bytes_encoding(false)),
-            Some(EncodeBytes::TronBase58)
-        );
-        assert_eq!(
-            Some(ChainKind::Near.default_bytes_encoding(false)),
+            Some(ChainKind::Near.default_bytes_encoding()),
             Some(EncodeBytes::Base58)
         );
         assert_eq!(
-            Some(ChainKind::Antelope.default_bytes_encoding(false)),
+            Some(ChainKind::Antelope.default_bytes_encoding()),
             Some(EncodeBytes::HexNoPrefix)
         );
         assert_eq!(
-            Some(ChainKind::Cosmos.default_bytes_encoding(false)),
+            Some(ChainKind::Cosmos.default_bytes_encoding()),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            Some(ChainKind::Beacon.default_bytes_encoding(false)),
+            Some(ChainKind::Beacon.default_bytes_encoding()),
             Some(EncodeBytes::Hex)
         );
     }
@@ -3984,39 +3954,31 @@ mod tests {
     #[test]
     fn test_default_block_id_encoding_contract() {
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Evm.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Evm.default_bytes_encoding()),
             Some("hex_0x")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Evm.default_bytes_encoding(true)),
-            Some("hex_no_prefix")
-        );
-        assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Bitcoin.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Bitcoin.default_bytes_encoding()),
             Some("hex_0x")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Solana.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Solana.default_bytes_encoding()),
             Some("base58")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Tron.default_bytes_encoding(false)),
-            Some("hex_no_prefix")
-        );
-        assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Near.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Near.default_bytes_encoding()),
             Some("base58")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Antelope.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Antelope.default_bytes_encoding()),
             Some("hex_no_prefix")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Cosmos.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Cosmos.default_bytes_encoding()),
             Some("hex_0x")
         );
         assert_eq!(
-            output_block_id_encoding_label(&ChainKind::Beacon.default_bytes_encoding(false)),
+            output_block_id_encoding_label(&ChainKind::Beacon.default_bytes_encoding()),
             Some("hex_0x")
         );
         // HyperCore block numbers and SEC window numbers are decimal text ids
@@ -4029,13 +3991,12 @@ mod tests {
             );
         }
         for kind in [ChainKind::Sec, ChainKind::Hypercore] {
-            assert_eq!(kind.default_bytes_encoding(false), EncodeBytes::Hex);
+            assert_eq!(kind.default_bytes_encoding(), EncodeBytes::Hex);
             for encoding in [
                 EncodeBytes::Binary,
                 EncodeBytes::Hex,
                 EncodeBytes::HexNoPrefix,
                 EncodeBytes::Base58,
-                EncodeBytes::TronBase58,
             ] {
                 let meta = build_file_metadata(
                     kind,
@@ -4061,29 +4022,6 @@ mod tests {
     }
 
     #[test]
-    fn test_endpoint_uses_tron_style_evm_profile() {
-        let ei = Some(EndpointInfo {
-            chain_name: "tron-evm".to_string(),
-            chain_name_aliases: vec!["tron-mainnet".to_string()],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-        assert!(endpoint_uses_tron_style_evm_profile(&ei));
-
-        let tron = Some(EndpointInfo {
-            chain_name: "tron".to_string(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-        assert!(endpoint_uses_tron_style_evm_profile(&tron));
-    }
-
-    #[test]
     fn test_create_mapper_all_types() {
         for kind in ChainKind::ALL {
             let mut mapper = kind.create_mapper(MapperOptions {
@@ -4091,7 +4029,7 @@ mod tests {
                 opt_in_tables: OptInTables::default(),
                 with_votes: false,
                 include_fork_step: false,
-                encode_bytes: kind.default_bytes_encoding(false),
+                encode_bytes: kind.default_bytes_encoding(),
                 synthetic_partition_routing: false,
                 include_failed_transactions: false,
             });
@@ -4113,7 +4051,7 @@ mod tests {
             .to_string();
         assert_eq!(
             error,
-            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon, sec, hypercore"
+            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, beacon, sec, hypercore"
         );
     }
 
@@ -4126,11 +4064,11 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"near"));
         assert!(BLOCK_TYPES.contains(&"antelope"));
         assert!(BLOCK_TYPES.contains(&"cosmos"));
-        assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
         assert!(BLOCK_TYPES.contains(&"sec"));
         assert!(BLOCK_TYPES.contains(&"hypercore"));
-        assert_eq!(BLOCK_TYPES.len(), 11); // auto + 10 chains
+        assert_eq!(BLOCK_TYPES.len(), 10); // auto + 9 chains
+        assert!(!BLOCK_TYPES.contains(&"tron"));
 
         // `--block-type` help and errors list every profile, in profile order.
         assert_eq!(BLOCK_TYPES[0], "auto");
@@ -4175,22 +4113,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_auto_encode_bytes_uses_tron_style_profile_for_tron_chain_name() {
-        let endpoint_info = Some(EndpointInfo {
-            chain_name: "tron".to_string(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-
-        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Evm), &endpoint_info, true);
-
-        assert_eq!(resolved, EncodeBytes::TronBase58);
-    }
-
-    #[test]
     fn test_resolve_auto_encode_bytes_near_prefers_output_contract_over_endpoint_hint() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "near-mainnet".to_string(),
@@ -4201,7 +4123,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Near), &endpoint_info, false);
+        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Near), &endpoint_info);
 
         assert_eq!(resolved, EncodeBytes::Base58);
     }
@@ -4209,20 +4131,18 @@ mod tests {
     #[test]
     fn test_resolve_auto_encode_bytes_supported_contracts_override_endpoint_hints() {
         let cases = [
-            (ChainKind::Evm, false, 3, EncodeBytes::Hex),
-            (ChainKind::Bitcoin, false, 3, EncodeBytes::Hex),
-            (ChainKind::Solana, false, 2, EncodeBytes::Base58),
-            (ChainKind::Near, false, 2, EncodeBytes::Base58),
-            (ChainKind::Antelope, false, 3, EncodeBytes::HexNoPrefix),
-            (ChainKind::Cosmos, false, 3, EncodeBytes::Hex),
-            (ChainKind::Tron, false, 2, EncodeBytes::TronBase58),
-            (ChainKind::Beacon, false, 3, EncodeBytes::Hex),
-            (ChainKind::Sec, false, 1, EncodeBytes::Hex),
-            (ChainKind::Hypercore, false, 3, EncodeBytes::Hex),
-            (ChainKind::Evm, true, 2, EncodeBytes::TronBase58),
+            (ChainKind::Evm, 3, EncodeBytes::Hex),
+            (ChainKind::Bitcoin, 3, EncodeBytes::Hex),
+            (ChainKind::Solana, 2, EncodeBytes::Base58),
+            (ChainKind::Near, 2, EncodeBytes::Base58),
+            (ChainKind::Antelope, 3, EncodeBytes::HexNoPrefix),
+            (ChainKind::Cosmos, 3, EncodeBytes::Hex),
+            (ChainKind::Beacon, 3, EncodeBytes::Hex),
+            (ChainKind::Sec, 1, EncodeBytes::Hex),
+            (ChainKind::Hypercore, 3, EncodeBytes::Hex),
         ];
 
-        for (block_type, tron_style_evm_profile, endpoint_block_id_encoding, expected) in cases {
+        for (block_type, endpoint_block_id_encoding, expected) in cases {
             let endpoint_info = Some(EndpointInfo {
                 chain_name: format!("{block_type}-mainnet"),
                 chain_name_aliases: vec![],
@@ -4232,18 +4152,20 @@ mod tests {
                 block_features: vec![],
             });
 
-            let resolved =
-                resolve_auto_encode_bytes(Some(block_type), &endpoint_info, tron_style_evm_profile);
+            let resolved = resolve_auto_encode_bytes(Some(block_type), &endpoint_info);
 
             assert_eq!(
                 resolved, expected,
-                "expected explicit output contract for block_type={block_type} tron_style_evm_profile={tron_style_evm_profile}"
+                "expected explicit output contract for block_type={block_type}"
             );
         }
     }
 
     #[test]
-    fn test_resolve_auto_encode_bytes_tron_style_contract_overrides_endpoint_hint() {
+    fn test_resolve_auto_encode_bytes_tron_evm_endpoint_is_plain_evm() {
+        // Tron support was removed (#747): a `tron-evm` endpoint gets EVM's hex
+        // contract, not Tron's Base58Check addresses, and the chain name alone
+        // still infers EVM.
         let endpoint_info = Some(EndpointInfo {
             chain_name: "tron-evm".to_string(),
             chain_name_aliases: vec!["tron".to_string()],
@@ -4253,9 +4175,14 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Evm), &endpoint_info, true);
+        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Evm), &endpoint_info);
 
-        assert_eq!(resolved, EncodeBytes::TronBase58);
+        assert_eq!(resolved, EncodeBytes::Hex);
+        assert_eq!(
+            ChainKind::infer_from_chain_name("tron-evm"),
+            Some(ChainKind::Evm)
+        );
+        assert_eq!(ChainKind::infer_from_chain_name("tron"), None);
     }
 
     #[test]
@@ -4270,13 +4197,10 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_auto_encode_bytes(None, &base58_endpoint, false),
+            resolve_auto_encode_bytes(None, &base58_endpoint),
             EncodeBytes::Base58
         );
-        assert_eq!(
-            resolve_auto_encode_bytes(None, &None, false),
-            EncodeBytes::Hex
-        );
+        assert_eq!(resolve_auto_encode_bytes(None, &None), EncodeBytes::Hex);
     }
 
     fn endpoint_info_named(chain_name: &str) -> Option<EndpointInfo> {
@@ -5028,34 +4952,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_file_metadata_tron_contract_overrides_endpoint_block_id_encoding() {
-        let ei = Some(EndpointInfo {
-            chain_name: "tron-evm".to_string(),
-            chain_name_aliases: vec!["tron-mainnet".to_string()],
-            first_streamable_block_num: 100,
-            first_streamable_block_id: "0xabc".to_string(),
-            block_id_encoding: 2,
-            block_features: vec!["base".to_string()],
-        });
-        let meta = build_file_metadata(
-            ChainKind::Evm,
-            &EncodeBytes::TronBase58,
-            "https://example.com",
-            Compression::Zstd,
-            &ei,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.bytes_encoding"),
-            Some("tron_base58")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("hex_no_prefix")
-        );
-    }
-
-    #[test]
     fn test_build_file_metadata_near_base58_overrides_endpoint_block_id_encoding() {
         let ei = Some(EndpointInfo {
             chain_name: "near-mainnet".to_string(),
@@ -5258,55 +5154,6 @@ mod tests {
         assert_eq!(
             find_meta(&meta, "firehose-parquet.compression"),
             Some("snappy")
-        );
-    }
-
-    #[test]
-    fn test_build_cursor_file_metadata_tron_contract() {
-        let ei = Some(EndpointInfo {
-            chain_name: "tron-evm".to_string(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: "0xabc".to_string(),
-            block_id_encoding: 2,
-            block_features: vec!["base".to_string()],
-        });
-        let meta = build_cursor_file_metadata(
-            Some(ChainKind::Evm),
-            Some(&EncodeBytes::TronBase58),
-            "https://example.com",
-            Compression::Zstd,
-            &ei,
-            true,
-            false,
-            true,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.bytes_encoding"),
-            Some("tron_base58")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("hex_no_prefix")
-        );
-        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("date"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.extended"), Some("true"));
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.final_blocks_only"),
-            Some("false")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.include_failed_transactions"),
-            Some("true")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.synthetic_timestamps"),
-            None
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.synthetic_timestamp_policy"),
-            None
         );
     }
 

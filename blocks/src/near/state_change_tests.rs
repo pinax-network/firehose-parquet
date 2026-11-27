@@ -252,7 +252,6 @@ fn state_change_bytes_follow_every_table_encoding() {
         (EncodeBytes::Hex, DataType::Utf8),
         (EncodeBytes::HexNoPrefix, DataType::Utf8),
         (EncodeBytes::Base58, DataType::Utf8),
-        (EncodeBytes::TronBase58, DataType::Utf8),
     ] {
         let batches = map(&block(), encoding.clone());
         let changes = &batches["state_changes"];

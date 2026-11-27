@@ -161,7 +161,7 @@ maintenance job compacted and vacuumed them beside a running `build`.
 | Delta type written | DuckDB | Polars | Notes |
 |---|---|---|---|
 | `long` | `BIGINT` | `Int64` | The mapper's `UInt64` (checked: a value above `i64::MAX` refuses the flush), `UInt32` and `UInt16` |
-| `integer` | `INTEGER` | `Int32` | The mapper's `Int32`, for example Tron's `contract_type_id` and SEC years, counts and sequence numbers |
+| `integer` | `INTEGER` | `Int32` | The mapper's `Int32`, for example SEC years, counts and sequence numbers |
 | `short` | `SMALLINT` | `Int16` | The mapper's `UInt8` |
 | `boolean` | `BOOLEAN` | `Boolean` | |
 | `decimal(20,0)` | `DECIMAL(20,0)` | `Decimal(precision=20, scale=0)` | Currency amounts and unchecked 64-bit values, exact up to `u64::MAX` |

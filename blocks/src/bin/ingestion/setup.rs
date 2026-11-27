@@ -167,7 +167,6 @@ pub(super) struct IngestionSetup {
     pub initial_bytes_encoding: EncodeBytes,
     pub initial_bytes_encoding_label: String,
     pub chain_features: PreStreamChainFeatures,
-    pub tron_style_evm_profile: bool,
     /// `--metrics-stale-after-secs`, else the family's or the generic default.
     pub metrics_stale_after_secs: u64,
 }
@@ -292,7 +291,6 @@ impl IngestionSetup {
             warn!("{warning}");
         }
 
-        let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
         // Failed-transaction handling depends on the chain, so resolve it from the
         // best block type known before streaming; auto-detection re-resolves it.
         let (initial_block_type, failed_transactions_block_type) =
@@ -317,8 +315,7 @@ impl IngestionSetup {
                 "applied the block family's build defaults to settings left unset"
             );
         }
-        let initial_bytes_encoding =
-            resolve_auto_encode_bytes(initial_block_type, &endpoint_info, tron_style_evm_profile);
+        let initial_bytes_encoding = resolve_auto_encode_bytes(initial_block_type, &endpoint_info);
         let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
 
         info!(
@@ -373,7 +370,6 @@ impl IngestionSetup {
             initial_bytes_encoding,
             initial_bytes_encoding_label,
             chain_features,
-            tron_style_evm_profile,
             metrics_stale_after_secs,
         })
     }

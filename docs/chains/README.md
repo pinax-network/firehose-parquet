@@ -9,7 +9,6 @@ Per-chain semantics of the output tables: failed-transaction rules, join keys, o
 | Solana | [Solana notes](solana.md): vote filtering, transaction outcome context, payloads and account indices, instruction order, reward indices | [Solana](../schemas/solana.md) |
 | Bitcoin | [Bitcoin notes](bitcoin.md): amounts, join keys and missing fields | [Bitcoin](../schemas/bitcoin.md) |
 | Beacon | [Beacon notes](beacon.md): each table's source and first fork | [Beacon](../schemas/beacon.md) |
-| Tron | [Tron notes](tron.md): failed smart-contract calls, contracts, receipts and internal values | [Tron](../schemas/tron.md) |
 | Cosmos | [Cosmos notes](cosmos.md): unknown results, ordered events and transaction metadata | [Cosmos](../schemas/cosmos.md) |
 | Antelope | [Antelope notes](antelope.md): deferred transactions and `onerror`, database-operation joins | [Antelope](../schemas/antelope.md) |
 | NEAR | [NEAR notes](near.md): failed receipts, transactions, receipts, actions and logs, final transaction outcome, state changes | [NEAR](../schemas/near.md) |
@@ -24,8 +23,8 @@ The queries read each table through its Delta log with DuckDB's
 covers Polars and S3. `DESCRIBE SELECT * FROM delta_scan('<root>/<table>')`
 prints a table's schema, and `fireparq inspect <file> --schema-only` the schema
 of one data file. Select columns by name: on non-final streams, `fork_step` and
-`stream_ordinal` are followed by later columns on several Solana, Antelope,
-NEAR and Tron tables.
+`stream_ordinal` are followed by later columns on several Solana, Antelope
+and NEAR tables.
 
 The notes describe the output of v1.0.0 and later. Earlier output has other
 schemas and row selection, and `build` does not resume it: see the

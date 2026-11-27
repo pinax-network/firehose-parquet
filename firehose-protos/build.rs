@@ -29,9 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Cosmos
                 proto_root.join("cosmos.proto"),
                 proto_root.join("cosmos_tx.proto"),
-                // Tron
-                proto_root.join("tron.proto"),
-                proto_root.join("tron_contract.proto"),
                 // Beacon
                 proto_root.join("beacon.proto"),
                 // SEC (EDGAR): package pinax.sec.v1, imports by path under proto/

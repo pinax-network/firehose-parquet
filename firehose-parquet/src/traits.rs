@@ -1054,22 +1054,20 @@ mod tests {
         parent_ids.append_value(&decode_id_bytes(&id.parent_id));
     }
 
-    fn all_encodings() -> [EncodeBytes; 5] {
+    fn all_encodings() -> [EncodeBytes; 4] {
         [
             EncodeBytes::Binary,
             EncodeBytes::Hex,
             EncodeBytes::HexNoPrefix,
             EncodeBytes::Base58,
-            EncodeBytes::TronBase58,
         ]
     }
 
     #[test]
     fn test_prepared_identity_ids_match_the_per_row_decode_and_encode_path() {
         let identities = [
-            // 0x-prefixed hex (EVM-style metadata), plain hex (Antelope/Tron-style),
-            // a non-hex id (kept as its UTF-8 bytes), a 21-byte Tron address-sized
-            // id, and empty ids.
+            // 0x-prefixed hex (EVM-style metadata), plain hex (Antelope-style),
+            // a non-hex id (kept as its UTF-8 bytes), a 21-byte id, and empty ids.
             (
                 "0x".to_string() + &"ab".repeat(32),
                 "0x".to_string() + &"cd".repeat(32),

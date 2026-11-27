@@ -158,6 +158,38 @@ fn semantic_epoch_and_encoding_fail_closed() {
     assert!(d.id().is_ok());
 }
 
+/// Tron support was removed (#747). A stored Tron descriptor still decodes,
+/// so it is refused by name, before any stream or maintenance mutation,
+/// rather than as an unreadable control record.
+#[test]
+fn tron_dataset_is_refused_by_name() {
+    let evm = descriptor(RoutingPolicy::GenesisLookaheadV1);
+    let mut value = serde_json::to_value(&evm).unwrap();
+    value["family"] = serde_json::json!("tron");
+    value["bytes_encoding"] = serde_json::json!("tron_base58");
+    let native: StreamDescriptor = serde_json::from_value(value).unwrap();
+    assert_eq!(native.family, BlockFamily::Tron);
+    // A `tron-evm` dataset was EVM with Tron's Base58Check addresses.
+    let tron_evm = StreamDescriptor {
+        bytes_encoding: "tron_base58".into(),
+        ..evm.clone()
+    };
+    let native_hex = StreamDescriptor {
+        family: BlockFamily::Tron,
+        bytes_encoding: "hex_no_prefix".into(),
+        ..evm
+    };
+    for stored in [native, tron_evm, native_hex] {
+        let error = stored.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("written from Tron, which fireparq no longer supports")
+                && error.contains("readable by any Delta reader"),
+            "{error}"
+        );
+        assert!(stored.id().is_err());
+    }
+}
+
 /// Epoch `v1` datasets wrote other partition layouts (`year=/month=/day=/`,
 /// `block_range=`, `hour=`, ...): their authority is refused with the reason,
 /// before any stream or maintenance mutation (#652).

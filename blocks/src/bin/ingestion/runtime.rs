@@ -504,11 +504,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.state.include_failed_transactions = resolved;
                 self.cursor_state_template.include_failed_transactions = resolved;
             }
-            let encode_bytes = resolve_auto_encode_bytes(
-                Some(detected),
-                &self.setup.endpoint_info,
-                self.setup.tron_style_evm_profile,
-            );
+            let encode_bytes = resolve_auto_encode_bytes(Some(detected), &self.setup.endpoint_info);
             let meta = build_file_metadata(
                 detected,
                 &encode_bytes,

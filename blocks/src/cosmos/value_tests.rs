@@ -81,7 +81,6 @@ fn transaction_metadata_preserves_native_values_in_all_encodings_and_flushes() {
         EncodeBytes::Hex,
         EncodeBytes::HexNoPrefix,
         EncodeBytes::Base58,
-        EncodeBytes::TronBase58,
     ] {
         for fork in [false, true] {
             let tx = fixture_tx();
