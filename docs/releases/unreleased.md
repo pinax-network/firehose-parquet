@@ -32,6 +32,15 @@ empty when the release is cut.
 
 ## New features
 
+- **Writer process RSS and thread count on Linux (#736, #723).** The
+  metrics endpoint exports `process_resident_memory_bytes` and
+  `process_threads`, read from `/proc/self/status` at each scrape, so memory
+  outside the tracked buffers shows up beside the buffer estimates. At 64
+  or more threads the writer also logs a `writer thread snapshot`, the
+  thread names grouped by count, at most once every five minutes and over
+  at most 256 threads ([Prometheus metrics](../metrics.md)). Nothing to
+  configure; other platforms export neither.
+
 ## Fixes
 
 ## Performance
