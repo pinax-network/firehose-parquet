@@ -17,6 +17,12 @@
 //!   tables hold every block once, read by delta-rs and, when available,
 //!   DuckDB's `delta_scan`;
 //! - the root it was copied from is unchanged, and still resumes on its own.
+//!
+//! A dataset renamed in place instead (`mv chain chain-v1`, or the loopback
+//! bucket renamed, as `radosgw-admin bucket link --bucket-new-name` does) is
+//! refused by `build` and by a rebind without `--renamed`, both naming the
+//! flag; `recovery rebind --renamed` rebinds it, and it resumes, recovers and
+//! is maintained the same way, while nothing is written at the old name.
 use firehose_protos::{eth, firehose};
 use prost::Message;
 use serde_json::Value;
@@ -205,7 +211,24 @@ impl Lake {
     fn output(&self, root: &str) -> String {
         match self {
             Lake::Local(lake) => lake.join(root).to_str().unwrap().to_string(),
-            Lake::S3(_) => format!("s3://{BUCKET}/{root}"),
+            Lake::S3(server) => format!("s3://{}/{root}", server.bucket()),
+        }
+    }
+
+    /// Renames the dataset at `root` in place, and returns the root it is
+    /// at now: `mv <root> <root>-v1`, or the bucket renamed `<bucket>-v1`,
+    /// which keeps the prefix.
+    fn rename(&self, root: &str) -> String {
+        match self {
+            Lake::Local(lake) => {
+                let renamed = format!("{root}-v1");
+                std::fs::rename(lake.join(root), lake.join(&renamed)).unwrap();
+                renamed
+            }
+            Lake::S3(server) => {
+                server.rename_bucket(&format!("{}-v1", server.bucket()));
+                root.to_string()
+            }
         }
     }
 
@@ -363,6 +386,15 @@ async fn recovery(lake: &Lake, cwd: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&result.stdout).unwrap_or_else(|_| panic!("{}", text(&result)))
 }
 
+/// `fireparq recovery <args>`, which must fail, and its output.
+async fn refused_recovery(lake: &Lake, cwd: &Path, args: &[&str]) -> String {
+    let mut command = lake.fireparq(cwd);
+    command.arg("recovery").args(args);
+    let result = output(command).await;
+    assert!(!result.status.success(), "{}", text(&result));
+    text(&result)
+}
+
 /// A control record's payload, unless it is absent or deleted.
 fn control(root: &Path, name: &str) -> Option<Value> {
     let bytes = std::fs::read(root.join(".fireparq-ingest").join(name)).ok()?;
@@ -395,6 +427,88 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     (dir, cwd)
 }
 
+/// The tables a first rebind reports, `blocks` last, sorted: every Delta
+/// table of the dataset at `root`.
+fn rebound_tables(lake: &Lake, cwd: &Path, root: &str, rebound: &Value) -> Vec<String> {
+    assert_eq!(rebound["rebound_now"], true, "{rebound}");
+    assert_eq!(rebound["ordinal"], 3, "{rebound}");
+    assert_eq!(rebound["mirror"], "repaired", "{rebound}");
+    let tables: Vec<String> = rebound["tables_updated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|table| table.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(tables.last().map(String::as_str), Some("blocks"));
+    let mut sorted = tables;
+    sorted.sort();
+    assert_eq!(sorted, common::delta_tables(&lake.local(root, cwd)));
+    sorted
+}
+
+/// A rerun of a complete rebind changes nothing.
+fn unchanged(again: &Value) {
+    assert_eq!(again["rebound_now"], false, "{again}");
+    assert_eq!(again["tables_updated"], serde_json::json!([]), "{again}");
+    assert_eq!(again["mirror"], "unchanged", "{again}");
+}
+
+/// The dataset rebound at `root` (blocks 100..=102, three transactions)
+/// resumes from its stored cursor, recovers and is maintained: `build` adds
+/// blocks 103..=104 with continuous ordinals, and every Delta table holds
+/// each block once under the stream `rebound` names.
+async fn resumes_after_the_rebind(
+    lake: &Lake,
+    cwd: &Path,
+    root: &str,
+    rebound: &Value,
+    tables: &[String],
+) {
+    build(lake, cwd, root, 105).await;
+    recovery(lake, cwd, &["recover", &lake.output(root)]).await;
+    let run = common::maintenance_job(
+        &common::maintenance_bin(),
+        &lake.maintenance_env(root, tables),
+    )
+    .await;
+    run.assert_clean();
+
+    let local = lake.local(root, cwd);
+    let state = control(&local, "state.json").unwrap();
+    assert_eq!(state["checkpoint"]["ordinal"], 5);
+    assert_eq!(state["checkpoint"]["event"]["block_num"], 104);
+    assert!(control(&local, "pending.json").is_none());
+    let stream = rebound["stream_id"].as_str().unwrap();
+    let app_id = format!("fireparq:{stream}");
+    for table in tables {
+        let (metadata, txns) = log_summary(&local, table, &app_id);
+        assert_eq!(
+            metadata["configuration"]["fireparq.descriptor"], stream,
+            "{table}"
+        );
+        // The rebind's baseline, then one commit per transaction with rows.
+        assert_eq!(txns.first(), Some(&3), "{table}");
+        if ROW_TABLES.iter().any(|(name, _)| name == table) {
+            assert_eq!(txns, [3, 4, 5], "{table}");
+        }
+    }
+    let counts = common::delta_counts(&local, tables).await;
+    for (table, per_block) in ROW_TABLES {
+        assert_eq!(counts[table], 5 * per_block, "{table}");
+    }
+    let blocks = common::delta_read(&common::open_local(&local, "blocks").await).await;
+    let mut numbers = common::delta_block_nums(&local.join("blocks"), &blocks);
+    numbers.sort_unstable();
+    assert_eq!(numbers, [100, 101, 102, 103, 104]);
+    match common::DuckDb::open(cwd) {
+        Some(duckdb) => assert_eq!(common::duckdb_counts(&duckdb, &local, tables), counts),
+        None => assert!(
+            std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
+            "DuckDB is required"
+        ),
+    }
+}
+
 async fn a_copied_dataset_resumes_at_its_new_root_after_a_rebind(s3: bool) {
     let (_dir, cwd) = scratch();
     let lake = Lake::new(s3, &cwd).await;
@@ -409,75 +523,86 @@ async fn a_copied_dataset_resumes_at_its_new_root_after_a_rebind(s3: bool) {
     let hint = format!("fireparq recovery rebind {copy} --from {source}");
     assert!(text(&refused).contains(&hint), "{}", text(&refused));
 
-    let rebound = recovery(&lake, &cwd, &["rebind", &copy, "--from", &source]).await;
-    assert_eq!(rebound["rebound_now"], true, "{rebound}");
-    assert_eq!(rebound["ordinal"], 3, "{rebound}");
-    assert_eq!(rebound["mirror"], "repaired", "{rebound}");
-    let tables: Vec<String> = rebound["tables_updated"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|table| table.as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(tables.last().map(String::as_str), Some("blocks"));
-    let mut sorted = tables.clone();
-    sorted.sort();
-    assert_eq!(sorted, common::delta_tables(&lake.local("chain-v1", &cwd)));
-    let again = recovery(&lake, &cwd, &["rebind", &copy, "--from", &source]).await;
-    assert_eq!(again["rebound_now"], false, "{again}");
-    assert_eq!(again["tables_updated"], serde_json::json!([]), "{again}");
-    assert_eq!(again["mirror"], "unchanged", "{again}");
-
-    // The copy resumes from its stored cursor, recovers and is maintained.
-    build(&lake, &cwd, "chain-v1", 105).await;
-    recovery(&lake, &cwd, &["recover", &copy]).await;
-    let run = common::maintenance_job(
-        &common::maintenance_bin(),
-        &lake.maintenance_env("chain-v1", &sorted),
+    // A copy is not a rename: `chain` still holds the dataset (on S3, the
+    // copy is also in the same bucket, which no bucket rename reaches).
+    let refused = refused_recovery(
+        &lake,
+        &cwd,
+        &["rebind", &copy, "--from", &source, "--renamed"],
     )
     .await;
-    run.assert_clean();
+    let reason = match &lake {
+        Lake::Local(_) => "was not renamed",
+        Lake::S3(_) => "with its bucket renamed",
+    };
+    assert!(refused.contains(reason), "{refused}");
 
-    let root = lake.local("chain-v1", &cwd);
-    let state = control(&root, "state.json").unwrap();
-    assert_eq!(state["checkpoint"]["ordinal"], 5);
-    assert_eq!(state["checkpoint"]["event"]["block_num"], 104);
-    assert!(control(&root, "pending.json").is_none());
-    let stream = rebound["stream_id"].as_str().unwrap();
-    let app_id = format!("fireparq:{stream}");
-    for table in &sorted {
-        let (metadata, txns) = log_summary(&root, table, &app_id);
-        assert_eq!(
-            metadata["configuration"]["fireparq.descriptor"], stream,
-            "{table}"
-        );
-        // The rebind's baseline, then one commit per transaction with rows.
-        assert_eq!(txns.first(), Some(&3), "{table}");
-        if ROW_TABLES.iter().any(|(name, _)| name == table) {
-            assert_eq!(txns, [3, 4, 5], "{table}");
-        }
-    }
-    let counts = common::delta_counts(&root, &sorted).await;
-    for (table, per_block) in ROW_TABLES {
-        assert_eq!(counts[table], 5 * per_block, "{table}");
-    }
-    let blocks = common::delta_read(&common::open_local(&root, "blocks").await).await;
-    let mut numbers = common::delta_block_nums(&root.join("blocks"), &blocks);
-    numbers.sort_unstable();
-    assert_eq!(numbers, [100, 101, 102, 103, 104]);
-    match common::DuckDb::open(&cwd) {
-        Some(duckdb) => assert_eq!(common::duckdb_counts(&duckdb, &root, &sorted), counts),
-        None => assert!(
-            std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
-            "DuckDB is required"
-        ),
-    }
+    let rebound = recovery(&lake, &cwd, &["rebind", &copy, "--from", &source]).await;
+    let tables = rebound_tables(&lake, &cwd, "chain-v1", &rebound);
+    unchanged(&recovery(&lake, &cwd, &["rebind", &copy, "--from", &source]).await);
+    resumes_after_the_rebind(&lake, &cwd, "chain-v1", &rebound, &tables).await;
 
     // The source was only read, and resumes at its own root.
     assert_eq!(lake.files("chain"), original);
     build(&lake, &cwd, "chain", 104).await;
     let state = control(&lake.local("chain", &cwd), "state.json").unwrap();
     assert_eq!(state["checkpoint"]["ordinal"], 4);
+}
+
+async fn a_renamed_dataset_resumes_under_its_new_name_after_a_rebind(s3: bool) {
+    let (_dir, cwd) = scratch();
+    let lake = Lake::new(s3, &cwd).await;
+    build(&lake, &cwd, "chain", 103).await;
+    let original = lake.files("chain");
+    let source = lake.output("chain");
+
+    // Renamed in place: the same files under the new name.
+    let root = lake.rename("chain");
+    let renamed = lake.output(&root);
+    assert_ne!(renamed, source);
+    assert_eq!(lake.files(&root), original);
+    let since = match &lake {
+        Lake::S3(server) => server.log().len(),
+        Lake::Local(_) => 0,
+    };
+
+    // `build` refuses it, naming the rebind and --renamed.
+    let refused = run(&lake, &cwd, &root, 105).await;
+    assert!(!refused.status.success());
+    let hint = format!("fireparq recovery rebind {renamed} --from {source}");
+    assert!(
+        text(&refused).contains(&hint) && text(&refused).contains("--renamed"),
+        "{}",
+        text(&refused)
+    );
+
+    // Without --renamed there is nothing at --from to compare with.
+    let refused = refused_recovery(&lake, &cwd, &["rebind", &renamed, "--from", &source]).await;
+    assert!(
+        refused.contains("holds no ingestion state") && refused.contains("--renamed"),
+        "{refused}"
+    );
+
+    let rebind = ["rebind", &renamed, "--from", &source, "--renamed"];
+    let rebound = recovery(&lake, &cwd, &rebind).await;
+    let tables = rebound_tables(&lake, &cwd, &root, &rebound);
+    unchanged(&recovery(&lake, &cwd, &rebind).await);
+    resumes_after_the_rebind(&lake, &cwd, &root, &rebound, &tables).await;
+
+    // Nothing was written at the old name: no local root, and no write to
+    // the old bucket, where every request answers `NoSuchBucket` (404).
+    match &lake {
+        Lake::Local(lake) => assert!(!lake.join("chain").exists()),
+        Lake::S3(server) => {
+            let writes: Vec<_> = server.log()[since..]
+                .iter()
+                .filter(|entry| entry.method != "GET" && entry.method != "HEAD")
+                .filter(|entry| entry.status == 404)
+                .map(|entry| format!("{} {}", entry.method, entry.key))
+                .collect();
+            assert!(writes.is_empty(), "{writes:?}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -488,4 +613,14 @@ async fn a_copied_local_dataset_resumes_at_its_new_root_after_a_rebind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dataset_copied_to_a_new_s3_prefix_resumes_there_after_a_rebind() {
     a_copied_dataset_resumes_at_its_new_root_after_a_rebind(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_dataset_moved_with_mv_resumes_there_after_a_rebind_with_renamed() {
+    a_renamed_dataset_resumes_under_its_new_name_after_a_rebind(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dataset_whose_bucket_was_renamed_resumes_there_after_a_rebind_with_renamed() {
+    a_renamed_dataset_resumes_under_its_new_name_after_a_rebind(true).await;
 }

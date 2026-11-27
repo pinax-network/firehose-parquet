@@ -149,7 +149,7 @@ impl IfMatch {
 }
 
 struct State {
-    bucket: String,
+    bucket: Mutex<String>,
     latency: Latency,
     if_match: Mutex<IfMatch>,
     arrivals: AtomicU64,
@@ -269,7 +269,7 @@ impl Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("https://{}", listener.local_addr()?);
         let state = Arc::new(State {
-            bucket: bucket.into(),
+            bucket: Mutex::new(bucket.into()),
             latency,
             if_match: Mutex::new(IfMatch::default()),
             arrivals: AtomicU64::new(0),
@@ -319,6 +319,20 @@ impl Server {
 
     pub fn log(&self) -> Vec<Entry> {
         self.state.log.lock().unwrap().clone()
+    }
+
+    /// The bucket the endpoint serves.
+    #[allow(dead_code)]
+    pub fn bucket(&self) -> String {
+        self.state.bucket.lock().unwrap().clone()
+    }
+
+    /// Renames the bucket in place, as `radosgw-admin bucket link
+    /// --bucket-new-name` does: the same objects under `name`, and the old
+    /// name answers `NoSuchBucket` (`blocks/tests/dataset_rebind.rs`).
+    #[allow(dead_code)]
+    pub fn rename_bucket(&self, name: &str) {
+        *self.state.bucket.lock().unwrap() = name.into();
     }
 
     /// Makes the next `times` `method` requests for exactly `key` meet
@@ -620,7 +634,7 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Option<Respons
     } else if fault == Some(Fault::Reset) {
         // Logged as 599: no status was sent.
         (StatusCode::from_u16(599).unwrap(), Vec::new(), Bytes::new())
-    } else if bucket != state.bucket {
+    } else if bucket != *state.bucket.lock().unwrap() {
         error(StatusCode::NOT_FOUND, "NoSuchBucket")
     } else if key.is_empty() {
         if method == "GET" && query.get("list-type").map(String::as_str) == Some("2") {
@@ -745,7 +759,7 @@ fn list(
     }
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>{}</Name><Prefix>{}</Prefix><KeyCount>{}</KeyCount><MaxKeys>{max_keys}</MaxKeys><IsTruncated>{truncated}</IsTruncated>",
-        xml_escape(&state.bucket),
+        xml_escape(&state.bucket.lock().unwrap()),
         xml_escape(&prefix),
         contents.len() + prefixes.len(),
     );

@@ -32,6 +32,21 @@ empty when the release is cut.
 
 ## New features
 
+- **`fireparq recovery rebind --renamed` rebinds a dataset whose root was
+  renamed in place (#635).** A bucket rename (Ceph RGW's `radosgw-admin
+  bucket link --bucket-new-name`) or a local `mv` moves no data. It leaves
+  nothing at the old root, so a rebind without `--renamed` has no copy to
+  compare with and refuses ("holds no ingestion state", now naming the
+  flag). With `--renamed` the rebind refuses unless nothing of the dataset is
+  left at the old root: no local directory; on S3, no owner record in the
+  old bucket, and no `state.json` or pending journal at the old root. On S3
+  the new root must be the same prefix in another bucket. Every other check,
+  the writes and the report are unchanged. A dataset can now change its
+  bucket's name without a copy of the bucket. The bucket's policies and the
+  readers' paths, Iceberg metadata included, still name the old bucket and
+  are the operator's to move
+  ([Renamed in place](../cursor-and-resume.md#renamed-in-place)).
+
 ## Fixes
 
 ## Performance

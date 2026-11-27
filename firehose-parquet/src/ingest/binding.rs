@@ -166,8 +166,9 @@ pub(crate) fn validate_runtime_bindings(
 
 /// The refusal of a dataset found at another root than the one it is bound
 /// to: a copy or a move (#635). It names both roots and the command that
-/// binds the copy to its new root, or, when only the S3 service differs
-/// (another endpoint or region for the same bucket and prefix), says so.
+/// binds the copy to its new root, with `--renamed` for a root renamed in
+/// place, or, when only the S3 service differs (another endpoint or region
+/// for the same bucket and prefix), says so.
 pub(crate) fn rebind_hint(bound: &StorageIdentity, selected: &StorageIdentity) -> String {
     let (bound, selected) = (output_path(bound), output_path(selected));
     if bound == selected {
@@ -181,7 +182,8 @@ pub(crate) fn rebind_hint(bound: &StorageIdentity, selected: &StorageIdentity) -
     format!(
         "authoritative output binding differs from the selected storage destination: this \
          dataset is bound to {bound}, not to {selected}. A dataset copied or moved from \
-         {bound} resumes here only after `fireparq recovery rebind {selected} --from {bound}` \
+         {bound} resumes here only after `fireparq recovery rebind {selected} --from {bound}`, \
+         with --renamed if {bound} was renamed to it in place by a bucket rename or `mv` \
          (docs/cursor-and-resume.md, \"Relocating a dataset\")"
     )
 }

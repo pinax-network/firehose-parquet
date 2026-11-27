@@ -37,6 +37,15 @@
 //!
 //! This version relocates within one storage service: two local roots, or
 //! two S3 roots on the same endpoint and region.
+//!
+//! A dataset renamed in place by its storage service ([`Relocation::Renamed`],
+//! `--renamed`: a bucket rename, a local `mv`) leaves no source to compare
+//! with. The dataset at the new root is the one that was at the old root, so
+//! it can be neither torn nor stale. Its rebind replaces that comparison with
+//! a check that nothing of the dataset is left at the old root
+//! ([`require_renamed`]). A renamed S3 root is a renamed bucket: the same
+//! prefix in another bucket. Every check of the dataset at the new root, and
+//! every write, is the same as after a copy.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -65,6 +74,19 @@ use crate::recovery::{control_directory, remote_control_slot};
 
 /// The `commitInfo` key of a rebind's Delta commits.
 pub const AUDIT_KEY: &str = "fireparq.rebind";
+
+/// How the dataset reached its new root, which decides what the rebind
+/// checks at the old root before its first write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relocation {
+    /// Copied (`cp -R`, `aws s3 sync`). The old root still holds the dataset,
+    /// and the copy must match it ([`require_copy`]).
+    Copied,
+    /// Renamed in place by the storage service (`--renamed`: a bucket rename,
+    /// a local `mv`). Nothing of the dataset may be left at the old root
+    /// ([`require_renamed`]).
+    Renamed,
+}
 
 /// What `fireparq recovery rebind` did, printed as JSON. It names no path:
 /// the operator gave both.
@@ -121,11 +143,17 @@ pub(crate) enum SourceReader {
     },
 }
 
-/// `fireparq recovery rebind <path> --from <from>`.
-pub async fn rebind(path: &str, from: &str, aws: &AwsConfig) -> Result<Rebound> {
+/// `fireparq recovery rebind <path> --from <from>`, with `--renamed` when
+/// `relocation` is [`Relocation::Renamed`].
+pub async fn rebind(
+    path: &str,
+    from: &str,
+    relocation: Relocation,
+    aws: &AwsConfig,
+) -> Result<Rebound> {
     let target = Root::resolve(path, aws)?;
     let source = Root::resolve(from, aws)?;
-    check_roots(&target, &source)?;
+    check_roots(&target, &source, relocation)?;
     let mut scopes = vec![MutationScope::directory(path.to_owned())];
     let reader = match &source.identity {
         StorageIdentity::Local { canonical_root } => {
@@ -138,7 +166,7 @@ pub async fn rebind(path: &str, from: &str, aws: &AwsConfig) -> Result<Rebound> 
             // Ownership would create a missing root.
             ensure!(
                 Path::new(copy).is_dir(),
-                "{} does not exist: copy the dataset at {} there first",
+                "{} does not exist: copy or rename the dataset at {} there first",
                 target.name(),
                 source.name()
             );
@@ -164,13 +192,14 @@ pub async fn rebind(path: &str, from: &str, aws: &AwsConfig) -> Result<Rebound> 
         root: source,
         reader,
     };
-    let result = rebind_owned(&target, &source, &ownership, aws).await;
+    let result = rebind_owned(&target, &source, relocation, &ownership, aws).await;
     ownership.finish(result).await
 }
 
 /// Both roots on one kind of storage (and one S3 service), neither inside the
-/// other.
-fn check_roots(target: &Root, source: &Root) -> Result<()> {
+/// other. A renamed S3 root is a renamed bucket, which keeps every key: the
+/// same prefix in another bucket.
+fn check_roots(target: &Root, source: &Root, relocation: Relocation) -> Result<()> {
     let (to, from) = (target.name(), source.name());
     let overlap = || format!("{to} and {from} overlap: a dataset is rebound to a separate root");
     match (&target.identity, &source.identity) {
@@ -209,6 +238,13 @@ fn check_roots(target: &Root, source: &Root) -> Result<()> {
                 bucket != original_bucket || !nested(prefix, original_prefix),
                 overlap()
             );
+            ensure!(
+                relocation == Relocation::Copied
+                    || (bucket != original_bucket && prefix == original_prefix),
+                "{to} is not {from} with its bucket renamed: --renamed rebinds a dataset whose \
+                 bucket was renamed, which keeps every key (the same prefix in another bucket). \
+                 A dataset copied to another prefix is rebound without --renamed"
+            );
         }
         _ => bail!(
             "{to} and {from} are on different kinds of storage: a dataset is rebound between \
@@ -227,11 +263,13 @@ fn nested(a: &str, b: &str) -> bool {
         || b.starts_with(&format!("{a}/"))
 }
 
-/// The rebind of the dataset at `target`, copied from `source`, under the
-/// ownership of `target` (and, on local disk, of `source`).
+/// The rebind of the dataset at `target`, copied or renamed from `source`
+/// as `relocation` says, under the ownership of `target` (and, on local
+/// disk, of a `source` that still exists).
 pub(crate) async fn rebind_owned(
     target: &Root,
     source: &Source,
+    relocation: Relocation,
     ownership: &DatasetOwnership,
     aws: &AwsConfig,
 ) -> Result<Rebound> {
@@ -306,7 +344,12 @@ pub(crate) async fn rebind_owned(
              changed"
         );
         tables.check(ordinal).await?;
-        require_copy(source, target, ownership, &tables.versions()?).await?;
+        match relocation {
+            Relocation::Copied => {
+                require_copy(source, target, ownership, &tables.versions()?).await?
+            }
+            Relocation::Renamed => require_renamed(source, target).await?,
+        }
         let next_authority = current.rebound(next.clone())?;
         mirror.check_rebound(&next_authority, &previous).await?;
         states.rebind(&authority, next_authority).await?.payload
@@ -474,17 +517,15 @@ async fn require_copy(
 ) -> Result<()> {
     let (to, from) = (target.name(), source.root.name());
     let names = copied.keys().map(String::as_str);
-    let (state, pending, versions) = match (&source.reader, &source.root.identity) {
+    let (state, pending) = match (&source.reader, &source.root.identity) {
         (SourceReader::Local, StorageIdentity::Local { canonical_root }) => {
             let root = Path::new(canonical_root);
-            let versions = latest_versions(&DeltaStore::local(root)?, names).await?;
             (
                 local_slot(root, ControlKey::State)?,
                 local_slot(root, ControlKey::Pending)?,
-                versions,
             )
         }
-        (SourceReader::S3 { control, delta }, StorageIdentity::S3 { bucket, prefix, .. }) => {
+        (SourceReader::S3 { control, .. }, StorageIdentity::S3 { bucket, prefix, .. }) => {
             // The copy's bucket owner, which this rebind holds, is the
             // source's when both are in one bucket.
             let shared = matches!(&target.identity, StorageIdentity::S3 { bucket: copy, .. } if copy == bucket);
@@ -502,16 +543,18 @@ async fn require_copy(
             (
                 remote_control_slot(control, &directory, ControlKey::State).await?,
                 remote_control_slot(control, &directory, ControlKey::Pending).await?,
-                latest_versions(delta, names).await?,
             )
         }
         _ => bail!("the reader of {from} is not for its kind of storage"),
     };
-    let copy = target_slot(target, ownership, ControlKey::State).await?;
+    // Before the source's Delta tables are opened: a source that is gone
+    // holds none.
     ensure!(
         live(&state).is_some(),
-        "{from} holds no ingestion state: pass the root {to} was copied from as --from"
+        "{from} holds no ingestion state: pass the root {to} was copied from as --from, or, if \
+         {from} was renamed to {to} in place (a bucket rename, `mv`), rerun with --renamed"
     );
+    let copy = target_slot(target, ownership, ControlKey::State).await?;
     let changed = || {
         format!(
             "{from} has changed since it was copied to {to} (its writer or its maintenance ran): \
@@ -524,7 +567,68 @@ async fn require_copy(
         "{from} holds a pending ingestion transaction: run `fireparq recovery recover {from}`, \
          then copy the dataset again. Nothing was changed"
     );
+    let versions = match (&source.reader, &source.root.identity) {
+        (SourceReader::Local, StorageIdentity::Local { canonical_root }) => {
+            latest_versions(&DeltaStore::local(Path::new(canonical_root))?, names).await?
+        }
+        (SourceReader::S3 { delta, .. }, StorageIdentity::S3 { .. }) => {
+            latest_versions(delta, names).await?
+        }
+        _ => bail!("the reader of {from} is not for its kind of storage"),
+    };
     ensure!(versions == *copied, changed());
+    Ok(())
+}
+
+/// Nothing of the dataset is left at `source`, which was renamed to `target`
+/// in place. A local root no longer exists. An S3 root holds no owner record,
+/// `state.json` or pending journal: a renamed bucket no longer exists, so
+/// every read there finds nothing. Anything left there means the dataset was
+/// copied, not renamed, and the copy must then match it ([`require_copy`],
+/// without `--renamed`).
+async fn require_renamed(source: &Source, target: &Root) -> Result<()> {
+    let (to, from) = (target.name(), source.root.name());
+    let left = match (&source.reader, &source.root.identity) {
+        (SourceReader::Local, StorageIdentity::Local { canonical_root }) => {
+            let mut left = None;
+            // As given and as resolved: either may be a link.
+            for path in [Path::new(&source.root.path), Path::new(canonical_root)] {
+                match std::fs::symlink_metadata(path) {
+                    Ok(_) => left = Some("it still exists"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).with_context(|| format!("reading {from}")),
+                }
+            }
+            left
+        }
+        (SourceReader::S3 { control, .. }, StorageIdentity::S3 { prefix, .. }) => {
+            let directory = control_directory(prefix);
+            if S3Ownership::status(control).await?.is_some() {
+                Some("its bucket holds an owner record")
+            } else if remote_control_slot(control, &directory, ControlKey::State)
+                .await?
+                .is_some()
+            {
+                Some("it holds a `state.json`")
+            } else if remote_control_slot(control, &directory, ControlKey::Pending)
+                .await?
+                .is_some()
+            {
+                Some("it holds a pending ingestion journal")
+            } else {
+                None
+            }
+        }
+        _ => bail!("the reader of {from} is not for its kind of storage"),
+    };
+    if let Some(left) = left {
+        bail!(
+            "{from} was not renamed to {to} in place: {left}. --renamed rebinds a root that its \
+             storage service renamed (a bucket rename, `mv`), which leaves nothing behind. A \
+             copy is rebound without --renamed, while the root it was copied from still holds \
+             the dataset. Nothing was changed"
+        );
+    }
     Ok(())
 }
 
