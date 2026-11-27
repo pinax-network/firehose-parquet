@@ -130,3 +130,44 @@ then run the checked-in script with `uv run --with protobuf python`, supplying
 `--descriptor`, `--raw-dir`, `--with-votes`, `--without-votes`, `--baseline` and
 `--summary`. The first comparison attempt used a reserved DuckDB alias; the
 corrected script passed against the same saved outputs without more live calls.
+
+## Decoder without bincode (#633, 2026-11-27)
+
+bincode 1.3 is unmaintained (RUSTSEC-2025-0141), and the vote filter was its
+only user. `blocks/src/solana/vote.rs` now decodes the instruction data itself
+(`simple_vote_last_slot`), so bincode, `solana-vote-interface` and the 24
+packages only that crate pulled in left the lockfile. The envelope checks
+above are unchanged.
+
+The decoder reads exactly what the filter needs: the `u32` little-endian
+variant index, which must be one of the eight simple votes (2, 6, 8, 9, 12,
+13, 14, 15), then that variant's whole payload in the encoding bincode 1.3
+gave `solana-vote-interface` 7.1.0: `u64` lengths, `Option` tags 0 or 1 only,
+32-byte hashes, and for the compact variants a `u64` root (`u64::MAX` for
+none), a `short_vec` count and LEB128 slot offsets, both minimal as
+`solana-short-vec` and `solana-serde-varint` require, with no slot overflow. It
+refuses bytes after the payload and payloads over 1,232 bytes, and returns the
+last voted slot, which must exist. Because every one of these encodings is
+canonical, a strict decode already implies the old check that the value
+re-encodes to identical bytes.
+
+The objection above, that a partial parser could accept malformed compact
+payloads, was answered by testing the decoder against the old classifier
+(bincode decode, `is_simple_vote`, a last voted slot, identical re-encoding)
+before removing it. A temporary differential test generated 30,035 random
+`VoteInstruction`s (all eight simple votes with empty to 150-slot towers, roots
+and timestamps from 0 to `u64::MAX`, plus administrative variants), serialized
+them with bincode, and compared both classifiers, including the last slot, on
+each payload, every truncation, every one-byte replacement, insertion, deletion
+and bit flip, trailing bytes, every variant index from 0 to 22, and random bytes
+after each simple-vote index: 93.2 million payloads, 27.2 million of them
+votes, with no disagreement. A second run checked that the test encoder
+(`vote/payloads.rs`) reproduces bincode's bytes for 160,000 random towers.
+
+What stays in the repository: `vote/tests.rs` pins the bytes bincode recorded
+for the #501 fixtures (the eight simple votes for slots 98 and 99, the six
+administrative instructions, an empty vote, rooted towers with multi-byte
+offsets and a 130-lockout `TowerSync`) and their classification, and checks
+every truncation, every trailing byte, non-canonical and invalid varints,
+`Option` tags, overflowing slots and arbitrary bytes. The mapper tests above
+build their payloads with the same encoder.

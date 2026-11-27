@@ -6,3 +6,5 @@ mod payload_tests;
 pub mod proto;
 pub mod schema;
 mod vote;
+#[cfg(test)]
+pub(crate) use vote::payloads as vote_payloads;

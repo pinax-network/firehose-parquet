@@ -166,19 +166,13 @@ fn payloads_are_binary_and_indices_are_lists_under_every_identity_encoding() {
 
 #[test]
 fn vote_table_uses_identical_payload_types_and_retains_filtering() {
-    use solana_vote_interface::{instruction::VoteInstruction, state::Vote};
     let mut block = make_test_block(100);
     let transaction = block.transactions[0].transaction.as_mut().unwrap();
     let msg = transaction.message.as_mut().unwrap();
     msg.versioned = false;
     msg.address_table_lookups.clear();
     msg.account_keys[1] = VOTE_PROGRAM_ID.to_vec().into();
-    msg.instructions[0].data = bincode::serialize(&VoteInstruction::Vote(Vote {
-        slots: vec![98, 99],
-        ..Default::default()
-    }))
-    .unwrap()
-    .into();
+    msg.instructions[0].data = super::vote_payloads::vote(&[98, 99]).into();
     let meta = block.transactions[0].meta.as_mut().unwrap();
     meta.err = Some(solana::TransactionError {
         err: vec![255, 128, 0].into(),

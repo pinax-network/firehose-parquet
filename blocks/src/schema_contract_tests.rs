@@ -178,15 +178,7 @@ fn solana_block_with_vote() -> Vec<u8> {
     message.account_keys[1] = vote_program.into();
     message.versioned = false;
     message.address_table_lookups.clear();
-    message.instructions[0].data =
-        bincode::serialize(&solana_vote_interface::instruction::VoteInstruction::Vote(
-            solana_vote_interface::state::Vote {
-                slots: vec![BLOCK_NUM],
-                ..Default::default()
-            },
-        ))
-        .expect("serialize canonical vote fixture")
-        .into();
+    message.instructions[0].data = solana::vote_payloads::vote(&[BLOCK_NUM]).into();
     block.transactions.push(vote);
     block.encode_to_vec()
 }
