@@ -84,6 +84,12 @@ Since #617:
   values: an INFO `loaded env file` log line for `build`, and one stderr line
   for the other commands except `completions`. A malformed file is an error
   that never echoes the offending line.
+- A file that cannot be loaded (malformed, or a missing `--env-file` /
+  `FIREPARQ_ENV_FILE` path) stops every command before it reads or writes
+  anything, except the ones that read no setting: help (`-h`, `--help`,
+  `fireparq help`, a subcommand's `--help`), the version (`-V`, `--version`)
+  and `completions`. Those run as usual; help and the version print a stderr
+  warning naming the file, and `completions` stays silent (#637).
 
 ## Advanced recovery / override behavior
 
