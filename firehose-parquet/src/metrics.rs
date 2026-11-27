@@ -11,6 +11,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
+#[cfg(any(target_os = "linux", test))]
+mod process;
+
 /// Labels for metrics that are grouped by table name.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, prometheus_client::encoding::EncodeLabelSet)]
 pub struct TableLabels {
@@ -469,6 +472,8 @@ pub fn register_info_metric(registry: &mut Registry, labels: Vec<(String, String
 /// Initialize a Prometheus metrics registry and pipeline metrics.
 pub fn init() -> (Registry, PipelineMetrics) {
     let mut registry = Registry::default();
+    #[cfg(target_os = "linux")]
+    registry.register_collector(Box::new(process::ProcessCollector::default()));
     let metrics = PipelineMetrics::new(&mut registry);
     (registry, metrics)
 }

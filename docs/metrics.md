@@ -37,6 +37,8 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_flushes_total` | Counter | `trigger`, `pace` | Committed flushes by trigger (`bytes`, `memory`, `rows`, `blocks`, `interval`, `idle` ([quiet stream](cli.md#flush-when-the-stream-goes-quiet)), `partition_boundary`, `stream_end`) and by the stream pace at the flush (`catching_up` or `caught_up`) |
 | `firehose_parquet_catching_up` | Gauge | — | 1 while the stream replays history faster than real time, which suspends `--flush-interval-secs`; 0 at the head or when the pace is unknown ([details](cli.md#flush-interval-and-catch-up)) |
 | `firehose_parquet_buffer_estimated_bytes` | Gauge | — | Writer-owned buffers, estimated compressed bytes |
+| `process_resident_memory_bytes` | Gauge | — | Linux writer process RSS, including memory outside the tracked buffers |
+| `process_threads` | Gauge | — | Linux writer process thread count |
 | `firehose_parquet_buffer_rows` | Gauge | `table` | Writer-owned rows, including failed/unattempted tables |
 | `firehose_parquet_mapper_buffer_rows` | Gauge | — | Mapper-owned rows summed across tables |
 | `firehose_parquet_mapper_largest_table_estimated_bytes` | Gauge | — | Largest mapper table estimate, used to predict compressed file size |
@@ -62,6 +64,22 @@ Use `rate(firehose_parquet_blocks_processed_total[5m])` and
 measures age against the local clock; it is not a measured remote chain-head
 lag. Buffer estimates are not process RSS. v1.0.0 renamed and removed metrics
 and labels ([release notes](releases/v1.0.0.md)).
+
+On Linux each metrics scrape reads the writer's RSS and thread count from
+`/proc/self/status`. An unreadable field is omitted. RSS includes resident
+anonymous, file-backed and shared-memory pages. Compare it with the mapper
+and writer buffer estimates when investigating memory growth. cAdvisor's
+`container_memory_rss` on cgroup v2 measures anonymous memory for the cgroup.
+
+At 64 or more threads, the writer also logs a `writer thread snapshot` at
+most once every five minutes while scrapes continue. It groups up to 256
+Linux tasks by their kernel thread name and includes the sampled count and
+the number of configured Tokio runtime workers. Linux reports up to 15 bytes
+of each name. A thread can exit during sampling, and different pools may use
+the same name. In the
+[Ethereum writer incident](https://github.com/pinax-network/firehose-parquet/issues/723)
+the affected process had 102–105 threads and its comparison processes had
+11–28.
 
 ```bash
 # Enable metrics on port 9090
