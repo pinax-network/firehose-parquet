@@ -36,7 +36,8 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
   example, a dataset created at `s3://b` cannot be resumed as `s3://b/{chain}`,
   and one created at `s3://b/{chain}` cannot be resumed as `s3://b`. Any other
   root is a different dataset and must start empty, unless it is a copy of a
-  stopped dataset, which `fireparq recovery rebind` binds to its new root
+  stopped dataset, or a stopped dataset renamed in place (`mv`, a bucket
+  rename), which `fireparq recovery rebind` binds to its new root
   ([Relocating a dataset](cursor-and-resume.md#relocating-a-dataset)).
 - v0.7.x appended `<chain_name>` to `--output`. To keep that layout, add
   `/{chain}`: `--output ./output` becomes `--output './output/{chain}'`.
