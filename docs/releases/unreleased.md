@@ -13,7 +13,7 @@ empty when the release is cut.
 ## Breaking changes
 
 - **New EVM datasets no longer have `account_creations`,
-  `system_account_creations` or `system_nonce_changes` (#PR).** Current EVM
+  `system_account_creations` or `system_nonce_changes` (#743).** Current EVM
   Firehose blocks never fill them. Block version 4 and later record no account
   creations, and system calls change no nonce. On the public lake,
   `account_creations` has no rows after Pectra on Ethereum mainnet or after
