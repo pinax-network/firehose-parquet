@@ -41,6 +41,16 @@ empty when the release is cut.
 
 ## Fixes
 
+- **A malformed `./.env` no longer breaks `--help`, `--version` or
+  `completions` (#637).** The env file is loaded before the arguments are
+  parsed, so before this fix a malformed `./.env`, or a missing
+  `--env-file` / `FIREPARQ_ENV_FILE` path, failed `fireparq --help`, `-h`,
+  `--version`, `-V`, `fireparq help`, a subcommand's `--help` and
+  `fireparq completions <shell>` with `invalid env file …`. They now run as
+  usual: help and the version print a stderr warning naming the file,
+  `completions` stays silent. Every other command still fails on such a file
+  before it reads or writes anything, as before.
+
 ## Performance
 
 ## Internal
