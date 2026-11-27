@@ -988,8 +988,11 @@ additions ([Delta maintenance](../delta-maintenance.md) lists every setting):
   writer has stopped;
 - `OPTIMIZE_CONCURRENT_DATES` (default 1) compacts several dates of a table
   at once, one commit each, handing each date out once within the run
-  (#737); a backlog is never split over several jobs, which would compact a
-  date twice and duplicate its rows (#717);
+  (#737); a backlog is not split over several jobs, which would compact a
+  date twice and waste one of the two: the second to commit is a conflict
+  that keeps nothing, since the job checks a lost race against the commits
+  that won it rather than with delta-rs's checker, which ignores
+  `dataChange: false` removes (#717);
 - a full VACUUM never deletes a table's top-level `metadata/` directory, the
   Iceberg metadata of an Apache XTable sync, which delta-rs's full VACUUM
   takes for orphans: delta-rs plans it (a dry run), and the job deletes the

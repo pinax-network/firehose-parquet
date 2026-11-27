@@ -2,25 +2,33 @@
 //! a file an older compaction left out of order is sorted back into it, a
 //! file whose order can't be recovered is left alone, and repairs are spread
 //! over runs. Several dates at once (`OPTIMIZE_CONCURRENT_DATES`) compact each
-//! date once, as one at a time does. The concatenation of real writer parts is
-//! checked beside a real `fireparq build` in `blocks/tests/delta_maintenance.rs`.
+//! date once, as one at a time does. Two compactions of one date commit once
+//! (#717), and one commits on top of the writer's appends. The concatenation of
+//! real writer parts is checked beside a real `fireparq build` in
+//! `blocks/tests/delta_maintenance.rs`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
 
 use deltalake_core::arrow::array::{AsArray, Date32Array, Int64Array, RecordBatch, StringArray};
 use deltalake_core::arrow::datatypes::{DataType as ArrowType, Field, Int64Type, Schema};
 use deltalake_core::datafile::writer::{PartitionWriter, PartitionWriterConfig};
-use deltalake_core::kernel::transaction::CommitBuilder;
+use deltalake_core::kernel::transaction::{
+    CommitBuilder, CommitConflictError, CommitProperties, TransactionError,
+};
 use deltalake_core::kernel::{Action, DataType, PrimitiveType, StructField};
 use deltalake_core::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use deltalake_core::parquet::file::properties::WriterProperties;
 use deltalake_core::parquet::file::reader::{FileReader, SerializedFileReader};
 use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::table::config::TablePropertiesExt as _;
-use deltalake_core::{DeltaTable, Path as ObjectPath, TableProperty};
-use fireparq_maintenance::compact::{date_files, ROW_ORDER_KEY, ROW_ORDER_TAG, WRITER_ORDER};
-use fireparq_maintenance::Lake;
+use deltalake_core::{DeltaTable, DeltaTableError, Path as ObjectPath, TableProperty};
+use fireparq_maintenance::compact::{
+    date_files, plan, Compaction, ROW_ORDER_KEY, ROW_ORDER_TAG, WRITER_ORDER,
+};
+use fireparq_maintenance::{is_conflict, Lake};
 use serde_json::Value;
 
 /// 2026-09-20 to 2026-09-25, as days since the epoch.
@@ -766,4 +774,118 @@ async fn a_failed_date_stops_no_other_and_repairs_keep_their_budget() {
         runs.push((line, compacted));
     }
     assert_eq!(runs[0], runs[1], "the same outcome one date at a time");
+}
+
+/// The Parquet files in a date's directory of `logs`, named in the log or not.
+fn files_on_disk(root: &Path, date: &str) -> usize {
+    std::fs::read_dir(root.join("logs").join(format!("date={date}")))
+        .unwrap()
+        .filter(|entry| {
+            let path = entry.as_ref().unwrap().path();
+            path.extension()
+                .is_some_and(|extension| extension == "parquet")
+        })
+        .count()
+}
+
+async fn version(root: &Path) -> i64 {
+    let mut table = DeltaTable::new(Lake::local(root).unwrap().log_store("logs").unwrap());
+    table.load().await.unwrap();
+    i64::try_from(table.version().unwrap()).unwrap()
+}
+
+/// A compaction of `date` of `logs`, from `table` as it is, as the job runs it.
+fn compaction<'a>(table: &'a DeltaTable, date: &'a str) -> Compaction<'a> {
+    Compaction {
+        table,
+        name: "logs",
+        date,
+        target: NonZeroU64::new(1 << 30).unwrap(),
+        properties: WriterProperties::default(),
+        window_bytes: 256 << 20,
+        commit: CommitProperties::default(),
+    }
+}
+
+/// Two jobs that compact the same date from the same snapshot (#717): delta-rs
+/// would rebase the second over the first, whose `remove` actions it ignores
+/// (`dataChange: false`), and commit the date's rows twice.
+#[tokio::test]
+async fn two_compactions_of_a_date_from_one_snapshot_commit_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (date, day) = DAYS[0];
+    let rows = writer_order(26_000_000, 90, 10);
+    let mut table = create_logs(root).await;
+    for part in rows.chunks(300) {
+        table = write_file(table, part, day, true).await;
+    }
+    let before = version(root).await;
+    let (first, second) = (table.clone(), table.clone());
+    let bins = plan(date_files(&first, date).unwrap(), 1 << 30);
+    assert_eq!(bins.len(), 1);
+    assert_eq!(bins[0].files.len(), 3);
+
+    let done = compaction(&first, date).run(&bins).await.unwrap();
+    assert_eq!(
+        (done.files_removed, done.files_added, done.rows),
+        (3, 1, 900)
+    );
+    let lost = compaction(&second, date).run(&bins).await.unwrap_err();
+    assert!(is_conflict(&lost), "reported as a conflict: {lost}");
+    assert!(
+        matches!(
+            lost,
+            DeltaTableError::Transaction {
+                source: TransactionError::CommitConflict(
+                    CommitConflictError::ConcurrentDeleteDelete
+                )
+            }
+        ),
+        "{lost:?}"
+    );
+
+    let (after, files, ordered) = date_rows(root, date).await;
+    assert_eq!(
+        after,
+        expected(&rows),
+        "each row once, in the writer's order"
+    );
+    assert_eq!((files, ordered), (1, true));
+    assert_eq!(version(root).await, before + 1, "one commit");
+    // The three parts and the first compaction's file: the second deleted its
+    // own, which nothing names.
+    assert_eq!(files_on_disk(root, date), 4);
+}
+
+/// The writer appends to the date, and to the next one, after the date was
+/// planned: the compaction commits on top of both and keeps the late part.
+#[tokio::test]
+async fn a_compaction_commits_on_top_of_appends_to_its_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (date, day) = DAYS[0];
+    let rows = writer_order(26_000_000, 60, 10);
+    let late = writer_order(26_000_060, 30, 10);
+    let mut table = create_logs(root).await;
+    for part in rows.chunks(300) {
+        table = write_file(table, part, day, true).await;
+    }
+    let planned = table.clone();
+    let bins = plan(date_files(&planned, date).unwrap(), 1 << 30);
+    let table = write_file(table, &late, day, true).await;
+    write_file(table, &writer_order(26_000_090, 10, 10), DAYS[1].1, true).await;
+    let before = version(root).await;
+
+    let done = compaction(&planned, date).run(&bins).await.unwrap();
+    assert_eq!((done.files_removed, done.files_added), (2, 1));
+    let (after, files, ordered) = date_rows(root, date).await;
+    let all: Vec<Row> = rows.iter().chain(&late).copied().collect();
+    assert_eq!(after, expected(&all));
+    assert_eq!(
+        (files, ordered),
+        (2, true),
+        "the compacted file and the late part"
+    );
+    assert_eq!(version(root).await, before + 1);
 }

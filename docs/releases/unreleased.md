@@ -84,6 +84,36 @@ empty when the release is cut.
     payloads; `vote_transactions` and the other Solana tables are unchanged
     ([record](../audit/501-solana-vote-classification.md#decoder-without-bincode-633-2026-11-27)).
 
+- **Two maintenance runs that compact the same day no longer both commit it
+  (#717).** delta-rs's conflict checker ignores `remove` actions with
+  `dataChange: false`, which every OPTIMIZE writes. So up to v1.7.0, when two
+  runs (the hourly job and the weekly full VACUUM, a run started by hand, or
+  one job per group of tables) compacted a day from the same snapshot, both
+  committed and the day's rows were in the table twice.
+  - A compaction now commits with no delta-rs retry. When it loses the version
+    race it reads the commits that won it:
+    - one that removes a file of the day, or changes the table's metadata or
+      protocol, is a conflict: the day commits nothing and the files it wrote
+      are deleted;
+    - one that adds a file it wrote is its own commit, sent again by the S3
+      client after a lost response: committed;
+    - anything else (the writer's appends, another day's compaction): the
+      commit is tried again on top of it, up to 16 attempts in all.
+  - The conflict is reported as before (`conflict: true` on its `date_error`
+    line, the table's `conflicts`), and the run exits 0.
+  - Overlapping runs are now safe, only wasteful (docs/delta-maintenance.md,
+    "Overlapping runs"), once **every** job that compacts a lake runs this
+    release. An older job that loses the race to a newer one still commits
+    the day again, so upgrade or retire the old jobs first.
+  - On 2026-10-12, riv-dev1's eth, base and bsc showed no duplicate: no two
+    active files of a day had overlapping `block_num` ranges, in any table,
+    and `blocks` had no block twice. To check a lake whose runs may have
+    overlapped, look for a `block_num` that appears twice in `blocks`
+    (`SELECT block_num FROM delta_scan('…/blocks') GROUP BY 1 HAVING
+    count(*) > 1`), and in each other table for two active files of one day
+    whose `block_num` ranges share more than one block (two files that split
+    a block share only that one).
+
 ## Performance
 
 ## Internal

@@ -2,17 +2,19 @@
 //! at once (#737).
 //!
 //! - One [`Planner`] per table hands out each planned date once, newest first,
-//!   so no two compactions ever touch the same date. Two would both commit
-//!   and duplicate its rows (#717): delta-rs's conflict checker ignores
-//!   `remove` actions with `dataChange: false`. That is also why a table's
-//!   dates are spread over the tasks of one run, never over two jobs.
+//!   so no two compactions of a run touch the same date. Two would not
+//!   duplicate its rows (#717): the first to commit wins, and the other is a
+//!   conflict that deletes the files it wrote ([`crate::compact`]). But its
+//!   work would be wasted, which is why a table's dates are spread over the
+//!   tasks of one run rather than over two jobs.
 //! - Each date is one task on the runtime's threads, with a clone of the table
 //!   as it was when the date started, and is one commit. Only that task
-//!   removes the date's files, so they are all in that snapshot, and delta-rs
-//!   checks its commit against every commit since, as with one date at a
+//!   removes the date's files, so they are all in that snapshot, and its
+//!   commit is checked against every commit since, as with one date at a
 //!   time. A file belongs to one date, so the commits of two dates never touch
-//!   the same file: one that loses the version race is rebased like any
-//!   other, and one still losing after delta-rs's retries is a conflict, left
+//!   the same file: one that loses the version race commits again on top of
+//!   the other, and one still losing after
+//!   [`COMMIT_ATTEMPTS`](crate::compact::COMMIT_ATTEMPTS) is a conflict, left
 //!   to the next run. A failed date stops no other. Each running date keeps
 //!   its snapshot's file list in memory (about 40 MB per 100,000 files).
 //! - After each commit the table is reloaded, as one date at a time does, and
