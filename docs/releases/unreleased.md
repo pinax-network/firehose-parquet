@@ -39,6 +39,15 @@ empty when the release is cut.
   its credential ([Authentication](../authentication.md)).
   Existing Parquet files and datasets still read by path (`fireparq
   inspect`), and NEAR blocks still decode.
+- **`--network tron` and `tron-evm` are removed, and `STREAMINGFAST_API_KEY`
+  and `STREAMINGFAST_API_TOKEN` are no longer read without a selector
+  (#735).** Pinax does not serve or support Tron. The two aliases were the
+  last built-in StreamingFast endpoints, so every built-in alias is now a
+  Pinax host, and only Pinax hosts receive credentials automatically. To
+  reach a StreamingFast Firehose, pass its URL with `--endpoint` and select
+  its credential, for example `--api-token-envvar STREAMINGFAST_API_TOKEN`
+  ([Authentication](../authentication.md)). Tron blocks still decode from a
+  Tron Firehose given with `--endpoint`.
 
 ## New features
 

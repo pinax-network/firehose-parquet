@@ -1358,17 +1358,14 @@ mod tests {
             (
                 "https://eth.firehose.pinax.network",
                 Some("pinax-key"),
-                None,
+                Some("Bearer pinax-token"),
             ),
-            (
-                "https://mainnet.tron.streamingfast.io",
-                None,
-                Some("Bearer sf-token"),
-            ),
+            ("https://mainnet.injective.streamingfast.io", None, None),
             ("https://custom.example", None, None),
         ] {
             let credentials = crate::auth::resolve_with(endpoint, None, None, |name| match name {
                 "PINAX_API_KEY" => Some("pinax-key".into()),
+                "PINAX_API_TOKEN" => Some("pinax-token".into()),
                 "SUBSTREAMS_API_KEY" => Some("legacy-pinax-key".into()),
                 "STREAMINGFAST_API_TOKEN" => Some("sf-token".into()),
                 _ => None,

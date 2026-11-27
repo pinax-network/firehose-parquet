@@ -6,8 +6,7 @@ Credentials are selected from the **resolved endpoint host**, including any
 | Destination | API key environment variables, in priority order | Bearer token environment variables, in priority order |
 |---|---|---|
 | Built-in Pinax host over HTTPS on port 443 | `PINAX_API_KEY`, then `SUBSTREAMS_API_KEY` | `PINAX_API_TOKEN`, then `SUBSTREAMS_API_TOKEN` |
-| Built-in StreamingFast host over HTTPS on port 443 | `STREAMINGFAST_API_KEY` | `STREAMINGFAST_API_TOKEN` |
-| Other host, port, or plaintext connection | No automatic credentials | No automatic credentials |
+| Other host, port, or plaintext connection, another provider's (such as StreamingFast) included | No automatic credentials | No automatic credentials |
 
 A built-in host is the endpoint host of a built-in `--network` alias: the
 registry's aliases and the reviewed Pinax networks the registry does not list
@@ -18,14 +17,13 @@ through `--endpoint https://hypercore.firehose.pinax.network:443`.
 
 ```bash
 export PINAX_API_KEY=your-pinax-api-key
-# For tron or tron-evm:
-export STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token
 ```
 
 `SUBSTREAMS_API_KEY` and `SUBSTREAMS_API_TOKEN` are legacy **Pinax-only**
-fallbacks. If you previously used `SUBSTREAMS_API_TOKEN` with StreamingFast,
-move that token to `STREAMINGFAST_API_TOKEN` or explicitly select it with
-`--api-token-envvar SUBSTREAMS_API_TOKEN` for that endpoint.
+fallbacks. Every built-in alias is a Pinax host. Another provider's endpoint,
+StreamingFast's included, receives a credential only through an
+[explicit selector](#explicit-selectors), for example
+`--api-token-envvar STREAMINGFAST_API_TOKEN` on the command for that endpoint.
 
 Startup logs identify the destination host, provider, and names of credential
 variables selected for transmission (`none` when absent), never their values.
@@ -58,11 +56,10 @@ An explicit selector is **not provider-scoped**. If `API_KEY_ENVVAR` or
 `API_TOKEN_ENVVAR` is set globally, for example to the legacy
 `SUBSTREAMS_API_KEY` in a shared `.env` or container environment, that
 credential is sent to every endpoint the process connects to, including
-StreamingFast and custom hosts. Startup logs a `WARN` line naming the variable
-(never its value) and the host whenever an explicitly selected credential is
-sent to a non-Pinax host, with a stronger message for Pinax and legacy
-`SUBSTREAMS_*` names. A `STREAMINGFAST_*` variable sent to a built-in
-StreamingFast host is its normal destination and is not warned about. When
+other providers' and custom hosts. Startup logs a `WARN` line naming the
+variable (never its value) and the host whenever an explicitly selected
+credential is sent to a non-Pinax host, with a stronger message for Pinax and
+legacy `SUBSTREAMS_*` names. When
 migrating, unset global selectors and rely on the provider-scoped variables
 above, or pass `--api-key-envvar` / `--api-token-envvar` only on the command
 for the intended endpoint.

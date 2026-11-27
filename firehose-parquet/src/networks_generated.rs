@@ -152,14 +152,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
         default_endpoint: "https://tempo.firehose.pinax.network:443",
     },
     BuiltinNetwork {
-        chain_name: "tron",
-        default_endpoint: "https://mainnet.tron.streamingfast.io:443",
-    },
-    BuiltinNetwork {
-        chain_name: "tron-evm",
-        default_endpoint: "https://mainnet-evm.tron.streamingfast.io:443",
-    },
-    BuiltinNetwork {
         chain_name: "unichain",
         default_endpoint: "https://unichain.firehose.pinax.network:443",
     },
@@ -222,8 +214,6 @@ pub const GENERATED_NETWORK_NAMES: &[&str] = &[
     "soneium",
     "soneium-testnet",
     "tempo",
-    "tron",
-    "tron-evm",
     "unichain",
     "unichain-testnet",
     "wax",
