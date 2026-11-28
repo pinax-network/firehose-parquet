@@ -146,7 +146,7 @@ Every Parquet file `build` writes embeds key-value metadata in the file footer u
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `1.7.0` |
+| `firehose-parquet.version` | `1.8.0` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
